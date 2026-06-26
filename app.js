@@ -282,6 +282,7 @@ try {
         openrouterApiKeyInput: document.getElementById('openrouter-api-key'),
         openrouterApiKeyContainer: document.getElementById('openrouter-api-key-container'),
         openrouterModelInput: document.getElementById('openrouter-model-input'),
+        openrouterModelSuggestions: document.getElementById('openrouter-model-suggestions'),
         openrouterModelInputContainer: document.getElementById('openrouter-model-input-container'),
         bedrockAccessKeyInput: document.getElementById('bedrock-access-key'),
         bedrockSecretKeyInput: document.getElementById('bedrock-secret-key'),
@@ -307,6 +308,7 @@ try {
         reverseDummyOrderCheckbox: document.getElementById('reverse-dummy-order'),
         concatDummyModelCheckbox: document.getElementById('concat-dummy-model'),
         additionalModelsTextarea: document.getElementById('additional-models'),
+        additionalOpenRouterModelsTextarea: document.getElementById('additional-openrouter-models'),
         enterToSendCheckbox: document.getElementById('enter-to-send'),
         historySortOrderSelect: document.getElementById('history-sort-order'),
         darkModeToggle: document.getElementById('dark-mode-toggle'),
@@ -535,6 +537,7 @@ const state = {
         reverseDummyOrder: false,
         concatDummyModel: false,
         additionalModels: '',
+        additionalOpenRouterModels: '',
         enterToSend: true,
         historySortOrder: 'updatedAt',
         darkMode: false,
@@ -898,7 +901,7 @@ const dbUtils = {
                                 'presencePenalty', 'frequencyPenalty', 'thinkingBudget', 'includeThoughts',
                                 'enableThoughtTranslation', 'thoughtTranslationModel', 'dummyUser',
                                 'applyDummyToProofread', 'applyDummyToTranslate', 'dummyModel', 'reverseDummyOrder', 'concatDummyModel',
-                                'additionalModels', 'enterToSend', 'historySortOrder', 'darkMode', 'fontFamily',
+                                'additionalModels', 'additionalOpenRouterModels', 'enterToSend', 'historySortOrder', 'darkMode', 'fontFamily',
                                 'hideSystemPromptInChat', 'enableSwipeNavigation', 'enableAutoRetry', 'maxRetries',
                                 'useFixedRetryDelay', 'fixedRetryDelaySeconds', 'maxBackoffDelaySeconds',
                                 'enableProofreading', 'proofreadingModelName', 'proofreadingSystemInstruction',
@@ -2583,6 +2586,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.reverseDummyOrderCheckbox.checked = state.settings.reverseDummyOrder;
         elements.concatDummyModelCheckbox.checked = state.settings.concatDummyModel;
         elements.additionalModelsTextarea.value = state.settings.additionalModels || '';
+        elements.additionalOpenRouterModelsTextarea.value = state.settings.additionalOpenRouterModels || '';
         elements.enterToSendCheckbox.checked = state.settings.enterToSend;
         elements.historySortOrderSelect.value = state.settings.historySortOrder || 'updatedAt';
         elements.darkModeToggle.checked = state.settings.darkMode;
@@ -2637,6 +2641,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.headerColorInput.value = state.settings.headerColor || defaultHeaderColor;
 
         this.updateUserModelOptions();
+        this.updateOpenRouterModelSuggestions();
         this.updateBackgroundSettingsUI();
         this.applyDarkMode();
         this.applyFontFamily();
@@ -2725,6 +2730,22 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         } else {
             group.disabled = true; // モデルがなければoptgroupを無効化
         }
+        });
+    },
+
+    updateOpenRouterModelSuggestions() {
+        if (!elements.openrouterModelSuggestions) return;
+
+        const models = (state.settings.additionalOpenRouterModels || '')
+            .split(',')
+            .map(m => m.trim())
+            .filter(m => m !== '');
+
+        elements.openrouterModelSuggestions.innerHTML = '';
+        [...new Set(models)].forEach(modelId => {
+            const option = document.createElement('option');
+            option.value = modelId;
+            elements.openrouterModelSuggestions.appendChild(option);
         });
     },
 
@@ -5140,7 +5161,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt'];
+        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -5621,6 +5642,7 @@ const appLogic = {
                 const currentModel = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
                 elements.openrouterModelInput.value = currentModel;
             }
+            uiUtils.updateOpenRouterModelSuggestions();
             // モデル警告メッセージとAPI使用状況の更新
             uiUtils.updateModelWarningMessage();
             this.updateApiUsageUI();
@@ -5632,7 +5654,7 @@ const appLogic = {
         
         // 既存のオプションをクリア（ユーザー指定モデルグループを除く）
         const userDefinedGroup = elements.userDefinedModelsGroup;
-        const currentValue = modelSelect.value;
+        const currentValue = state.settings.modelName || modelSelect.value;
         
         // すべてのoptgroupとoptionを削除（ユーザー指定グループを除く）
         const optgroups = Array.from(modelSelect.querySelectorAll('optgroup'));
@@ -5685,7 +5707,10 @@ const appLogic = {
         }
         
         // 現在の値が新しいリストに含まれているか確認
-        const availableValues = models.map(m => m.value);
+        const userDefinedValues = userDefinedGroup
+            ? Array.from(userDefinedGroup.querySelectorAll('option')).map(option => option.value)
+            : [];
+        const availableValues = [...models.map(m => m.value), ...userDefinedValues];
         if (availableValues.includes(currentValue)) {
             modelSelect.value = currentValue;
         } else {
@@ -5701,7 +5726,6 @@ const appLogic = {
                 defaultModel = DEFAULT_MODEL;
             }
             modelSelect.value = defaultModel;
-            state.settings.modelName = defaultModel;
         }
         
         // モデル警告メッセージを更新
@@ -6861,7 +6885,8 @@ const appLogic = {
             dummyModel: { element: elements.dummyModelInput, event: 'input' },
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
-            additionalModels: { element: elements.additionalModelsTextarea, event: 'input' },
+            additionalModels: { element: elements.additionalModelsTextarea, event: 'input', onUpdate: () => uiUtils.updateUserModelOptions() },
+            additionalOpenRouterModels: { element: elements.additionalOpenRouterModelsTextarea, event: 'input', onUpdate: () => uiUtils.updateOpenRouterModelSuggestions() },
             enterToSend: { element: elements.enterToSendCheckbox, event: 'change' },
             historySortOrder: { element: elements.historySortOrderSelect, event: 'change' },
             darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },

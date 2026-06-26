@@ -296,7 +296,8 @@
 
                     <div id="openrouter-model-input-container" class="hidden">
                         <label for="openrouter-model-input">OpenRouter モデル名:</label>
-                        <input type="text" id="openrouter-model-input" placeholder="例: openai/gpt-5.1" aria-label="OpenRouter モデル名">
+                        <input type="text" id="openrouter-model-input" list="openrouter-model-suggestions" placeholder="例: openai/gpt-5.1" aria-label="OpenRouter モデル名">
+                        <datalist id="openrouter-model-suggestions"></datalist>
                         <p style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">
                             ※ 利用可能なモデル一覧は <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">OpenRouter Models</a> で確認できます。<br>
                             ※ モデル名は "プロバイダー/モデル名" の形式で入力してください（例: openai/gpt-5.1）<br>
@@ -832,6 +833,8 @@
                    <!-- 追加モデル入力欄 -->
                    <label for="additional-models">追加モデル (カンマ区切り):</label>
                    <textarea id="additional-models" placeholder="例: gemini-2.0-pro,gemini-2.0-flash-lite" aria-label="追加モデル"></textarea>
+                   <label for="additional-openrouter-models">OpenRouter追加モデル (カンマ区切り):</label>
+                   <textarea id="additional-openrouter-models" placeholder="例: deepseek/deepseek-v4-pro, anthropic/claude-sonnet-4.5, google/gemini-2.5-pro" aria-label="OpenRouter追加モデル"></textarea>
 
                    <label class="checkbox-label" style="margin-top: 15px;">
                     <input type="checkbox" id="debug-mode-toggle">
