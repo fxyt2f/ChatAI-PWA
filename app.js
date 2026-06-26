@@ -3396,6 +3396,53 @@ const apiUtils = {
         return openAIMessages;
     },
 
+    _extractOpenAIReasoningText(message) {
+        const reasoningTexts = [];
+        const addText = (value) => {
+            if (typeof value === 'string' && value.trim()) {
+                reasoningTexts.push(value.trim());
+            }
+        };
+
+        addText(message?.reasoning);
+        addText(message?.reasoning_content);
+
+        const reasoningDetails = message?.reasoning_details;
+        if (Array.isArray(reasoningDetails)) {
+            reasoningDetails.forEach(detail => addText(this._extractReasoningDetailText(detail)));
+        } else if (reasoningDetails && typeof reasoningDetails === 'object') {
+            addText(this._extractReasoningDetailText(reasoningDetails));
+        }
+
+        return reasoningTexts.join('\n\n');
+    },
+
+    _extractReasoningDetailText(detail) {
+        if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
+            return '';
+        }
+
+        if (detail.type === 'reasoning.encrypted') {
+            return '';
+        }
+
+        if (detail.type === 'reasoning.summary' && typeof detail.summary === 'string') {
+            return detail.summary.trim();
+        }
+
+        if (detail.type === 'reasoning.text' && typeof detail.text === 'string') {
+            return detail.text.trim();
+        }
+
+        for (const key of ['summary', 'text', 'content']) {
+            if (typeof detail[key] === 'string' && detail[key].trim()) {
+                return detail[key].trim();
+            }
+        }
+
+        return '';
+    },
+
     // OpenAI形式からGemini形式への変換（レスポンス用）
     convertOpenAIToGeminiFormat(openAIResponse) {
         // OpenAI形式のレスポンスをGemini形式に変換
@@ -3404,7 +3451,8 @@ const apiUtils = {
         if (openAIResponse.choices && openAIResponse.choices.length > 0) {
             for (const choice of openAIResponse.choices) {
                 const parts = [];
-                const message = choice.message;
+                const message = choice.message || {};
+                const reasoningText = this._extractOpenAIReasoningText(message);
                 
                 if (message.content) {
                     if (typeof message.content === 'string') {
@@ -3419,6 +3467,10 @@ const apiUtils = {
                             }
                         }
                     }
+                }
+
+                if (reasoningText) {
+                    parts.push({ text: reasoningText, thought: true });
                 }
                 
                 if (message.tool_calls && message.tool_calls.length > 0) {
@@ -4246,6 +4298,13 @@ const apiUtils = {
             model: model,
             messages: openAIMessages
         };
+
+        if (state.settings.includeThoughts) {
+            requestBody.reasoning = {
+                effort: "high",
+                exclude: false
+            };
+        }
 
         // 生成パラメータの変換
         if (generationConfig) {
