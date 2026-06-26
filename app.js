@@ -3396,15 +3396,77 @@ const apiUtils = {
         return openAIMessages;
     },
 
+    _extractOpenRouterReasoningValue(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+
+        if (typeof value === 'string') {
+            return value.trim();
+        }
+
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            return String(value);
+        }
+
+        if (Array.isArray(value)) {
+            return value
+                .map(item => this._extractOpenRouterReasoningValue(item))
+                .filter(Boolean)
+                .join('\n\n');
+        }
+
+        if (typeof value === 'object') {
+            return ['summary', 'text', 'content', 'reasoning', 'data']
+                .map(key => this._extractOpenRouterReasoningValue(value[key]))
+                .filter(Boolean)
+                .join('\n\n');
+        }
+
+        return '';
+    },
+
+    _extractOpenRouterReasoningText(message) {
+        if (!message || typeof message !== 'object') {
+            return '';
+        }
+
+        const reasoningCandidates = [
+            this._extractOpenRouterReasoningValue(message.reasoning),
+            this._extractOpenRouterReasoningValue(message.reasoning_content),
+            this._extractOpenRouterReasoningValue(message.reasoning_details)
+        ];
+
+        const uniqueReasoning = [];
+        const seenReasoning = new Set();
+        reasoningCandidates.forEach(text => {
+            const normalizedText = text.trim();
+            if (normalizedText && !seenReasoning.has(normalizedText)) {
+                seenReasoning.add(normalizedText);
+                uniqueReasoning.push(normalizedText);
+            }
+        });
+
+        return uniqueReasoning.join('\n\n');
+    },
+
     // OpenAI形式からGemini形式への変換（レスポンス用）
-    convertOpenAIToGeminiFormat(openAIResponse) {
+    convertOpenAIToGeminiFormat(openAIResponse, options = {}) {
         // OpenAI形式のレスポンスをGemini形式に変換
         const candidates = [];
+        const includeReasoning = options.includeReasoning === true;
         
         if (openAIResponse.choices && openAIResponse.choices.length > 0) {
             for (const choice of openAIResponse.choices) {
                 const parts = [];
                 const message = choice.message;
+
+                if (includeReasoning) {
+                    const reasoningText = this._extractOpenRouterReasoningText(message);
+                    if (reasoningText) {
+                        parts.push({ text: reasoningText, thought: true });
+                    }
+                }
                 
                 if (message.content) {
                     if (typeof message.content === 'string') {
@@ -4260,6 +4322,14 @@ const apiUtils = {
             }
         }
 
+        if (state.settings.includeThoughts) {
+            requestBody.reasoning = { enabled: true, exclude: false };
+            const reasoningBudget = Number(state.settings.thinkingBudget);
+            if (Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+                requestBody.reasoning.max_tokens = reasoningBudget;
+            }
+        }
+
         // Function Callingの処理
         if (state.settings.geminiEnableFunctionCalling && window.functionDeclarations) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
@@ -4410,7 +4480,7 @@ const apiUtils = {
                 }
             }
             
-            const geminiFormatResponse = this.convertOpenAIToGeminiFormat(openAIResponse);
+            const geminiFormatResponse = this.convertOpenAIToGeminiFormat(openAIResponse, { includeReasoning: state.settings.includeThoughts });
 
             // Responseオブジェクトのように扱えるようにラップ
             return {
@@ -8479,6 +8549,13 @@ const appLogic = {
         finalAggregatedMessage.imageIds = finalAggregatedMessage.imageIds || [];
         finalAggregatedMessage.executedFunctions = finalAggregatedMessage.executedFunctions || [];
         finalAggregatedMessage.generated_videos = finalAggregatedMessage.generated_videos || [];
+
+        if (state.settings.apiProvider === 'openrouter' && !finalAggregatedMessage.thoughtSummary) {
+            const firstThoughtSummary = messages.find(msg => msg.role === 'model' && msg.thoughtSummary)?.thoughtSummary;
+            if (firstThoughtSummary) {
+                finalAggregatedMessage.thoughtSummary = firstThoughtSummary;
+            }
+        }
 
         // 全てのメッセージを走査し、ツール関連の情報をマージする
         messages.forEach(msg => {
