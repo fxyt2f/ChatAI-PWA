@@ -3307,12 +3307,7 @@ const apiUtils = {
                     if (part.text) {
                         contentParts.push({ type: 'text', text: part.text });
                     } else if (part.inlineData) {
-                        // 画像データの変換
-                        const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                        contentParts.push({
-                            type: 'image_url',
-                            image_url: { url: imageUrl }
-                        });
+                        contentParts.push(...this._convertInlineDataToOpenAIContentParts(part.inlineData));
                     } else if (part.functionCall) {
                         // Function Callingの変換
                         // OpenAI互換APIの場合、保存されたtool_call_idを使用
@@ -3394,6 +3389,101 @@ const apiUtils = {
         }
         
         return openAIMessages;
+    },
+
+    _convertInlineDataToOpenAIContentParts(inlineData) {
+        const mimeType = inlineData?.mimeType || 'application/octet-stream';
+        const base64Data = inlineData?.data || '';
+        const lowerMimeType = mimeType.toLowerCase();
+        const currentModel = (state.settings.modelName || '').toLowerCase();
+        const isDeepSeekModel = currentModel.startsWith('deepseek/');
+
+        if (lowerMimeType.startsWith('image/')) {
+            if (isDeepSeekModel) {
+                return [{
+                    type: 'text',
+                    text: `[添付画像: ${mimeType}。現在のモデルでは画像を直接読めない可能性があります]`
+                }];
+            }
+
+            return [{
+                type: 'image_url',
+                image_url: { url: `data:${mimeType};base64,${base64Data}` }
+            }];
+        }
+
+        if (lowerMimeType === 'application/pdf') {
+            return [{
+                type: 'file',
+                file: {
+                    filename: 'attachment.pdf',
+                    file_data: `data:application/pdf;base64,${base64Data}`
+                }
+            }];
+        }
+
+        if (this._isTextLikeMimeType(lowerMimeType)) {
+            const decodedText = this._decodeBase64ToUtf8(base64Data);
+            if (decodedText !== null) {
+                return [{
+                    type: 'text',
+                    text: `[添付テキスト / MIME: ${mimeType}]\n${decodedText}`
+                }];
+            }
+        }
+
+        return [{
+            type: 'text',
+            text: `[未対応添付: filename不明 / MIME: ${mimeType}。OpenRouter送信では本文に変換されませんでした]`
+        }];
+    },
+
+    _isTextLikeMimeType(mimeType) {
+        if (mimeType.startsWith('text/')) {
+            return true;
+        }
+
+        const textMimeTypes = new Set([
+            'application/json',
+            'application/xml',
+            'application/javascript',
+            'application/typescript',
+            'application/x-javascript',
+            'application/ecmascript',
+            'application/sql',
+            'application/yaml',
+            'application/x-yaml',
+            'application/rtf'
+        ]);
+
+        return textMimeTypes.has(mimeType) || mimeType.endsWith('+json') || mimeType.endsWith('+xml');
+    },
+
+    _decodeBase64ToUtf8(base64Data) {
+        try {
+            if (!base64Data || typeof atob !== 'function') {
+                return null;
+            }
+
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            if (typeof TextDecoder === 'function') {
+                return new TextDecoder('utf-8').decode(bytes);
+            }
+
+            let percentEncoded = '';
+            for (let i = 0; i < bytes.length; i++) {
+                percentEncoded += `%${bytes[i].toString(16).padStart(2, '0')}`;
+            }
+            return decodeURIComponent(percentEncoded);
+        } catch (error) {
+            console.warn('Base64テキスト添付のUTF-8デコードに失敗しました。', error);
+            return null;
+        }
     },
 
     _extractOpenAIReasoningText(message) {
