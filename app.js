@@ -4050,6 +4050,10 @@ const apiUtils = {
             return textToTranslate;
         }
 
+        if (state.settings.apiProvider === 'openrouter') {
+            return await this.translateTextWithOpenRouter(textToTranslate);
+        }
+
         console.log("--- 思考プロセスの翻訳処理開始 ---");
         
         const modelToUse = translationModelName || 'gemini-2.5-flash-lite';
@@ -4169,6 +4173,78 @@ const apiUtils = {
 
         console.error("思考プロセスの翻訳中にエラーが発生しました。原文を返します。", lastError);
         return textToTranslate;
+    },
+
+    async translateTextWithOpenRouter(textToTranslate) {
+        console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
+
+        const apiKey = state.settings.openrouterApiKey;
+        if (!apiKey) {
+            console.warn("OpenRouter翻訳スキップ: OpenRouter APIキーが設定されていません。");
+            return textToTranslate;
+        }
+
+        const model = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const requestBody = {
+            model,
+            messages: [
+                {
+                    role: 'system',
+                    content: 'あなたはAIの思考プロセスを自然な日本語に翻訳する専門アシスタントです。余計な説明を足さず、翻訳結果のみを出力してください。'
+                },
+                {
+                    role: 'user',
+                    content: textToTranslate
+                }
+            ],
+            temperature: 0.1,
+            reasoning: { exclude: true }
+        };
+
+        try {
+            if (state.abortController?.signal.aborted) {
+                throw new Error("リクエストがキャンセルされました。");
+            }
+
+            uiUtils.setLoadingIndicatorText('思考プロセスをOpenRouterで翻訳中...');
+
+            const timeoutController = new AbortController();
+            const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
+
+            const response = await fetch(OPENROUTER_API_BASE_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                    'HTTP-Referer': window.location.origin,
+                    'X-Title': 'ChatAI PWA'
+                },
+                body: JSON.stringify(requestBody),
+                signal: timeoutController.signal
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                let errorBody = await response.text();
+                try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
+                console.error(`OpenRouter翻訳APIエラー (${response.status})`, errorBody);
+                return textToTranslate;
+            }
+
+            const responseData = await response.json();
+            const translatedText = responseData.choices?.[0]?.message?.content;
+            if (typeof translatedText === 'string' && translatedText.trim() !== '') {
+                console.log("--- OpenRouter 翻訳処理成功 ---");
+                return translatedText;
+            }
+
+            console.warn("OpenRouter翻訳APIの応答形式が不正、またはコンテンツが空です。", responseData);
+            return textToTranslate;
+        } catch (error) {
+            console.error("OpenRouterでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
+            return textToTranslate;
+        }
     },
 
     // Z.ai APIを呼び出す
