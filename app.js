@@ -3405,10 +3405,6 @@ const apiUtils = {
             return value.trim();
         }
 
-        if (typeof value === 'number' || typeof value === 'boolean') {
-            return String(value);
-        }
-
         if (Array.isArray(value)) {
             return value
                 .map(item => this._extractOpenRouterReasoningValue(item))
@@ -8551,9 +8547,18 @@ const appLogic = {
         finalAggregatedMessage.generated_videos = finalAggregatedMessage.generated_videos || [];
 
         if (state.settings.apiProvider === 'openrouter' && !finalAggregatedMessage.thoughtSummary) {
-            const firstThoughtSummary = messages.find(msg => msg.role === 'model' && msg.thoughtSummary)?.thoughtSummary;
-            if (firstThoughtSummary) {
-                finalAggregatedMessage.thoughtSummary = firstThoughtSummary;
+            const thoughtSummaries = [];
+            const seenThoughtSummaries = new Set();
+            messages.forEach(msg => {
+                if (msg.role !== 'model' || typeof msg.thoughtSummary !== 'string') return;
+                const thoughtSummary = msg.thoughtSummary.trim();
+                if (thoughtSummary && !seenThoughtSummaries.has(thoughtSummary)) {
+                    seenThoughtSummaries.add(thoughtSummary);
+                    thoughtSummaries.push(thoughtSummary);
+                }
+            });
+            if (thoughtSummaries.length > 0) {
+                finalAggregatedMessage.thoughtSummary = thoughtSummaries.join('\n\n');
             }
         }
 
