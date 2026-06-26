@@ -2719,3 +2719,173 @@ body.dark-mode #sd-test-connection-btn {
     /* 将来的なスタイリングのために定義 */
     display: inline;
 }
+
+/* --- ChatGPT-style Chat Layout (Phase 1) --- */
+#chat-screen .main-content {
+    scroll-padding-bottom: 168px;
+}
+
+#chat-screen .message-container {
+    width: 100%;
+    max-width: 760px;
+    margin-right: auto;
+    margin-left: auto;
+    box-sizing: border-box;
+    padding-bottom: 96px;
+}
+
+#chat-screen .message {
+    margin-bottom: 42px;
+}
+
+#chat-screen .message.model {
+    align-self: stretch;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    margin-top: 20px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#chat-screen .message.model .message-content {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    text-align: left;
+}
+
+#chat-screen .message.model .thought-summary-details {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#chat-screen .message.model:not(:has(.thought-summary-details)):has(.message-content:empty) {
+    min-height: 20px;
+    margin: 0;
+    padding: 0;
+    border: none;
+    box-shadow: none;
+}
+
+#chat-screen .message-actions {
+    bottom: -36px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    width: max-content;
+    min-height: 32px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    pointer-events: auto;
+    z-index: 3;
+}
+
+#chat-screen .message.user .message-actions {
+    right: 0;
+    left: auto;
+}
+
+#chat-screen .message.model .message-actions {
+    right: auto;
+    left: 0;
+}
+
+#chat-screen .message-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    margin: 0;
+    padding: 0;
+    gap: 0;
+    flex: 0 0 32px;
+    font-size: 0;
+    line-height: 1;
+    color: var(--text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    box-shadow: none;
+    overflow: visible;
+}
+
+#chat-screen .message-actions button:hover:not(:disabled),
+#chat-screen .message-actions button:focus-visible {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
+    box-shadow: none;
+}
+
+#chat-screen .message-actions button:active:not(:disabled) {
+    transform: scale(0.92);
+}
+
+#chat-screen .message-actions button:disabled {
+    color: var(--text-disabled);
+    background: transparent;
+    opacity: 0.55;
+}
+
+#chat-screen .message-actions button .material-symbols-outlined {
+    font-size: 20px;
+    line-height: 1;
+}
+
+#chat-screen .message-actions .token-count-display {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    margin-left: 4px;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    color: var(--text-secondary);
+}
+
+#chat-screen .message.editing .message-actions,
+#chat-screen .message.editing:hover .message-actions,
+#chat-screen .message:has([id^="streaming-content-"]) .message-actions,
+#chat-screen .message[id^="streaming-message-"] .message-actions {
+    display: none;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+@media screen and (max-width: 600px) {
+    #chat-screen .main-content {
+        padding-right: var(--spacing-unit);
+        padding-left: var(--spacing-unit);
+        scroll-padding-bottom: 144px;
+    }
+
+    #chat-screen .message-container {
+        max-width: 100%;
+        padding-bottom: 80px;
+    }
+
+    #chat-screen .message {
+        min-width: 0;
+    }
+
+    #chat-screen .message.model {
+        width: 100%;
+    }
+
+    #chat-screen .message-actions {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+}
