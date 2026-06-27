@@ -281,6 +281,7 @@ try {
         zaiApiKeyContainer: document.getElementById('zai-api-key-container'),
         openrouterApiKeyInput: document.getElementById('openrouter-api-key'),
         openrouterApiKeyContainer: document.getElementById('openrouter-api-key-container'),
+        openrouterModelSelect: document.getElementById('openrouter-model-select'),
         openrouterModelInput: document.getElementById('openrouter-model-input'),
         openrouterModelSuggestions: document.getElementById('openrouter-model-suggestions'),
         openrouterModelInputContainer: document.getElementById('openrouter-model-input-container'),
@@ -1035,6 +1036,7 @@ const dbUtils = {
                 content: msg.content,
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
+                thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
                 tool_calls: msg.tool_calls || null,
                 imageIds: msg.imageIds,
                 finishReason: msg.finishReason,
@@ -1699,6 +1701,11 @@ const uiUtils = {
         console.log(`オーバーレイ透明度適用: ${opacityValue}`);
     },
 
+    formatModelMetaLabel(meta, label) {
+        if (!meta || !meta.provider || !meta.model) return '';
+        return `${label}: ${meta.provider} / ${meta.model}`;
+    },
+
     // 新しいメッセージ要素をコンテナの末尾に追加する（ちらつき防止用）
     appendMessage(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
         const messageElement = this.createMessageElement(role, content, index, isStreamingPlaceholder, cascadeInfo, attachments);
@@ -1753,7 +1760,8 @@ renderChatMessages() {
             const markerText = document.createElement('span');
             markerText.className = 'summary-marker-text';
             const summarizedDate = new Date(state.currentSummarizedContext.summarizedAt).toLocaleString('ja-JP');
-            markerText.textContent = `ここまで要約済み (${summarizedDate})`;
+            const summaryMetaLabel = uiUtils.formatModelMetaLabel(state.currentSummarizedContext.summaryMeta, '履歴要約');
+            markerText.textContent = `ここまで要約済み (${summarizedDate})${summaryMetaLabel ? ` / ${summaryMetaLabel}` : ''}`;
             markerDiv.appendChild(markerText);
             fragment.appendChild(markerDiv);
             markerInserted = true;
@@ -1783,7 +1791,8 @@ renderChatMessages() {
         const markerText = document.createElement('span');
         markerText.className = 'summary-marker-text';
         const summarizedDate = new Date(state.currentSummarizedContext.summarizedAt).toLocaleString('ja-JP');
-        markerText.textContent = `ここまで要約済み (${summarizedDate})`;
+        const summaryMetaLabel = uiUtils.formatModelMetaLabel(state.currentSummarizedContext.summaryMeta, '履歴要約');
+        markerText.textContent = `ここまで要約済み (${summarizedDate})${summaryMetaLabel ? ` / ${summaryMetaLabel}` : ''}`;
         markerDiv.appendChild(markerText);
         fragment.appendChild(markerDiv);
         markerInserted = true;
@@ -1820,7 +1829,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const thoughtDetails = document.createElement('details');
         thoughtDetails.classList.add('thought-summary-details');
         const thoughtSummaryElem = document.createElement('summary');
-        thoughtSummaryElem.textContent = '思考プロセス';
+        const thoughtMetaLabel = this.formatModelMetaLabel(messageData.thoughtTranslationMeta, '思考翻訳');
+        thoughtSummaryElem.textContent = thoughtMetaLabel ? `思考プロセス（${thoughtMetaLabel}）` : '思考プロセス';
         thoughtDetails.appendChild(thoughtSummaryElem);
         const thoughtContentDiv = document.createElement('div');
         thoughtContentDiv.classList.add('thought-summary-content');
@@ -2647,7 +2657,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.headerColorInput.value = state.settings.headerColor || defaultHeaderColor;
 
         this.updateUserModelOptions();
-        this.updateOpenRouterModelSuggestions();
+        this.updateOpenRouterModelChoices();
         this.updateBackgroundSettingsUI();
         this.applyDarkMode();
         this.applyFontFamily();
@@ -2675,84 +2685,175 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // ユーザー指定モデルをコンボボックスに反映
     updateUserModelOptions() {
-        const models = (state.settings.additionalModels || '')
+        const geminiModels = (state.settings.additionalModels || '')
             .split(',')
             .map(m => m.trim())
             .filter(m => m !== ''); // カンマ区切りで分割し、空要素を除去
+        const provider = state.settings.apiProvider || 'gemini';
+        const useOpenRouterModels = provider === 'openrouter';
+        const auxiliaryModels = useOpenRouterModels ? this.getOpenRouterSelectableModels() : [...new Set(geminiModels)];
+        const auxiliaryLabel = useOpenRouterModels ? 'OpenRouter ユーザー指定' : 'ユーザー指定';
+        const auxiliaryFallback = useOpenRouterModels ? (state.settings.modelName || DEFAULT_OPENROUTER_MODEL) : null;
 
         // 更新対象のグループとそれに対応するセレクターの設定値
         const targetGroups = [
             { 
                 groupId: 'user-defined-models-group', 
                 selectElement: elements.modelNameSelect, 
-                currentValue: state.settings.modelName 
+                currentValue: state.settings.modelName,
+                models: [...new Set(geminiModels)],
+                label: 'ユーザー指定'
             },
             { 
                 groupId: 'thought-translation-user-models', 
                 selectElement: elements.thoughtTranslationModelSelect, 
-                currentValue: state.settings.thoughtTranslationModel 
+                currentValue: state.settings.thoughtTranslationModel,
+                models: auxiliaryModels,
+                label: auxiliaryLabel,
+                fallbackValue: auxiliaryFallback
             },
             { 
                 groupId: 'proofreading-user-models', 
                 selectElement: elements.proofreadingModelNameSelect, 
-                currentValue: state.settings.proofreadingModelName 
+                currentValue: state.settings.proofreadingModelName,
+                models: auxiliaryModels,
+                label: auxiliaryLabel,
+                fallbackValue: auxiliaryFallback
             },
             { 
                 groupId: 'sd-qc-user-models', 
                 selectElement: elements.sdQcModelSelect, 
-                currentValue: state.settings.sdQcModel 
+                currentValue: state.settings.sdQcModel,
+                models: auxiliaryModels,
+                label: auxiliaryLabel,
+                fallbackValue: auxiliaryFallback
             },
             { 
                 groupId: 'sd-prompt-improve-user-models', 
                 selectElement: elements.sdPromptImproveModelSelect, 
-                currentValue: state.settings.sdPromptImproveModel 
+                currentValue: state.settings.sdPromptImproveModel,
+                models: auxiliaryModels,
+                label: auxiliaryLabel,
+                fallbackValue: auxiliaryFallback
             },
             { 
                 groupId: 'summary-user-models', 
                 selectElement: elements.summaryModelNameSelect, 
-                currentValue: state.settings.summaryModelName || state.settings.modelName 
+                currentValue: state.settings.summaryModelName || state.settings.modelName,
+                models: auxiliaryModels,
+                label: auxiliaryLabel,
+                fallbackValue: auxiliaryFallback
             }
         ];
 
         // 各グループに対してユーザー定義モデルを追加
-        targetGroups.forEach(({ groupId, selectElement, currentValue }) => {
+        targetGroups.forEach(({ groupId, selectElement, currentValue, models, label, fallbackValue }) => {
             const group = document.getElementById(groupId);
             if (!group) return; // グループが存在しない場合はスキップ
             
             group.innerHTML = ''; // 一旦クリア
+            group.label = label;
 
-        if (models.length > 0) {
-            group.disabled = false; // optgroupを有効化
-            models.forEach(modelId => {
-                const option = document.createElement('option');
-                option.value = modelId;
-                option.textContent = modelId;
-                group.appendChild(option);
-            });
-            // 現在選択中のモデルがユーザー指定モデルに含まれていれば、それを選択状態にする
-                if (models.includes(currentValue) && selectElement) {
-                    selectElement.value = currentValue;
+            if (models.length > 0) {
+                group.disabled = false; // optgroupを有効化
+                models.forEach(modelId => {
+                    const option = document.createElement('option');
+                    option.value = modelId;
+                    option.textContent = modelId;
+                    group.appendChild(option);
+                });
+                // 現在選択中のモデル、またはOpenRouter時のフォールバックモデルを選択状態にする
+                if (selectElement) {
+                    if (models.includes(currentValue)) {
+                        selectElement.value = currentValue;
+                    } else if (fallbackValue && models.includes(fallbackValue)) {
+                        selectElement.value = fallbackValue;
+                    }
+                }
+            } else {
+                group.disabled = true; // モデルがなければoptgroupを無効化
             }
-        } else {
-            group.disabled = true; // モデルがなければoptgroupを無効化
-        }
         });
+    },
+
+    getAdditionalOpenRouterModels() {
+        return [...new Set((state.settings.additionalOpenRouterModels || '')
+            .split(',')
+            .map(m => m.trim())
+            .filter(m => m !== ''))];
+    },
+
+    getOpenRouterSelectableModels() {
+        const currentModel = (state.settings.modelName || '').trim();
+        return [...new Set([
+            DEFAULT_OPENROUTER_MODEL,
+            currentModel,
+            ...this.getAdditionalOpenRouterModels()
+        ].filter(Boolean))];
     },
 
     updateOpenRouterModelSuggestions() {
         if (!elements.openrouterModelSuggestions) return;
 
-        const models = (state.settings.additionalOpenRouterModels || '')
-            .split(',')
-            .map(m => m.trim())
-            .filter(m => m !== '');
-
+        const models = this.getAdditionalOpenRouterModels();
         elements.openrouterModelSuggestions.innerHTML = '';
-        [...new Set(models)].forEach(modelId => {
+        models.forEach(modelId => {
             const option = document.createElement('option');
             option.value = modelId;
             elements.openrouterModelSuggestions.appendChild(option);
         });
+    },
+
+    updateOpenRouterModelOptions() {
+        if (!elements.openrouterModelSelect) return;
+
+        const models = this.getAdditionalOpenRouterModels();
+        const currentModel = elements.openrouterModelInput?.value.trim() || state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const optionValues = this.getOpenRouterSelectableModels();
+
+        elements.openrouterModelSelect.innerHTML = '';
+
+        const placeholderOption = document.createElement('option');
+        placeholderOption.value = '';
+        placeholderOption.textContent = '候補から選択...';
+        elements.openrouterModelSelect.appendChild(placeholderOption);
+
+        const standardGroup = document.createElement('optgroup');
+        standardGroup.label = '標準';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = DEFAULT_OPENROUTER_MODEL;
+        defaultOption.textContent = DEFAULT_OPENROUTER_MODEL;
+        standardGroup.appendChild(defaultOption);
+        elements.openrouterModelSelect.appendChild(standardGroup);
+
+        if (currentModel && currentModel !== DEFAULT_OPENROUTER_MODEL && !models.includes(currentModel)) {
+            const currentGroup = document.createElement('optgroup');
+            currentGroup.label = '現在の保存値';
+            const currentOption = document.createElement('option');
+            currentOption.value = currentModel;
+            currentOption.textContent = currentModel;
+            currentGroup.appendChild(currentOption);
+            elements.openrouterModelSelect.appendChild(currentGroup);
+        }
+
+        if (models.length > 0) {
+            const userGroup = document.createElement('optgroup');
+            userGroup.label = 'ユーザー指定';
+            models.forEach(modelId => {
+                const option = document.createElement('option');
+                option.value = modelId;
+                option.textContent = modelId;
+                userGroup.appendChild(option);
+            });
+            elements.openrouterModelSelect.appendChild(userGroup);
+        }
+
+        elements.openrouterModelSelect.value = optionValues.includes(currentModel) ? currentModel : '';
+    },
+
+    updateOpenRouterModelChoices() {
+        this.updateOpenRouterModelSuggestions();
+        this.updateOpenRouterModelOptions();
     },
 
     // ダークモードを適用
@@ -4038,6 +4139,19 @@ const apiUtils = {
 
 
     /**
+     * OpenRouterの補助処理（翻訳/要約など）で使うモデルを決定する。
+     * Gemini用の既定値が残っている場合は、現在のOpenRouterモデルへフォールバックする。
+     */
+    getOpenRouterAuxiliaryModel(preferredModelName) {
+        const preferredModel = (preferredModelName || '').trim();
+        const selectableModels = uiUtils.getOpenRouterSelectableModels ? uiUtils.getOpenRouterSelectableModels() : [];
+        if (preferredModel && (preferredModel.includes('/') || selectableModels.includes(preferredModel))) {
+            return preferredModel;
+        }
+        return state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+    },
+
+    /**
      * テキストを日本語に翻訳する関数
      * @param {string} textToTranslate - 翻訳対象の英語テキスト
      * @param {string} translationModelName - 翻訳に使用するモデル名
@@ -4057,7 +4171,7 @@ const apiUtils = {
         }
 
         if (state.settings.apiProvider === 'openrouter') {
-            return await this.translateTextWithOpenRouter(textToTranslate);
+            return await this.translateTextWithOpenRouter(textToTranslate, translationModelName);
         }
 
         console.log("--- 思考プロセスの翻訳処理開始 ---");
@@ -4181,7 +4295,7 @@ const apiUtils = {
         return textToTranslate;
     },
 
-    async translateTextWithOpenRouter(textToTranslate) {
+    async translateTextWithOpenRouter(textToTranslate, translationModelName = '') {
         console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
 
         const apiKey = state.settings.openrouterApiKey;
@@ -4190,7 +4304,7 @@ const apiUtils = {
             return textToTranslate;
         }
 
-        const model = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const model = this.getOpenRouterAuxiliaryModel(translationModelName);
         const requestBody = {
             model,
             messages: [
@@ -5724,7 +5838,8 @@ const appLogic = {
                 const currentModel = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
                 elements.openrouterModelInput.value = currentModel;
             }
-            uiUtils.updateOpenRouterModelSuggestions();
+            uiUtils.updateOpenRouterModelChoices();
+            uiUtils.updateUserModelOptions();
             // モデル警告メッセージとAPI使用状況の更新
             uiUtils.updateModelWarningMessage();
             this.updateApiUsageUI();
@@ -5811,6 +5926,7 @@ const appLogic = {
         }
         
         // モデル警告メッセージを更新
+        uiUtils.updateUserModelOptions();
         uiUtils.updateModelWarningMessage();
         this.updateApiUsageUI();
     },
@@ -6968,7 +7084,10 @@ const appLogic = {
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
             additionalModels: { element: elements.additionalModelsTextarea, event: 'input', onUpdate: () => uiUtils.updateUserModelOptions() },
-            additionalOpenRouterModels: { element: elements.additionalOpenRouterModelsTextarea, event: 'input', onUpdate: () => uiUtils.updateOpenRouterModelSuggestions() },
+            additionalOpenRouterModels: { element: elements.additionalOpenRouterModelsTextarea, event: 'input', onUpdate: () => {
+                uiUtils.updateOpenRouterModelChoices();
+                uiUtils.updateUserModelOptions();
+            } },
             enterToSend: { element: elements.enterToSendCheckbox, event: 'change' },
             historySortOrder: { element: elements.historySortOrderSelect, event: 'change' },
             darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },
@@ -7065,6 +7184,28 @@ const appLogic = {
                 state.activeProfile.settings.modelName = value;
                 await dbUtils.updateProfile(state.activeProfile);
                 appLogic.markAsDirtyAndSchedulePush('structural');
+                uiUtils.updateOpenRouterModelOptions();
+                uiUtils.updateUserModelOptions();
+            });
+        }
+
+        if (elements.openrouterModelSelect) {
+            elements.openrouterModelSelect.addEventListener('change', async () => {
+                const value = elements.openrouterModelSelect.value.trim();
+                if (!value) return;
+                if (elements.openrouterModelInput) {
+                    elements.openrouterModelInput.value = value;
+                }
+                state.settings.modelName = value;
+                if (state.activeProfile && state.activeProfile.settings) {
+                    state.activeProfile.settings.modelName = value;
+                    await dbUtils.updateProfile(state.activeProfile);
+                    appLogic.markAsDirtyAndSchedulePush('structural');
+                }
+                uiUtils.updateOpenRouterModelOptions();
+                uiUtils.updateUserModelOptions();
+                uiUtils.updateModelWarningMessage();
+                this.updateApiUsageUI();
             });
         }
     
@@ -8698,7 +8839,16 @@ const appLogic = {
                     if (msg.thoughtSummary) {
                         try {
                             uiUtils.setLoadingIndicatorText('思考プロセスを翻訳中...');
-                            msg.thoughtSummary = await apiUtils.translateText(msg.thoughtSummary, state.settings.thoughtTranslationModel);
+                            const originalThoughtSummary = msg.thoughtSummary;
+                            const translationModel = apiUtils.getOpenRouterAuxiliaryModel(state.settings.thoughtTranslationModel);
+                            const translationMeta = state.settings.apiProvider === 'openrouter'
+                                ? { provider: 'OpenRouter', model: translationModel }
+                                : null;
+                            const translatedThoughtSummary = await apiUtils.translateText(msg.thoughtSummary, state.settings.thoughtTranslationModel);
+                            msg.thoughtSummary = translatedThoughtSummary;
+                            if (translationMeta && translatedThoughtSummary !== originalThoughtSummary) {
+                                msg.thoughtTranslationMeta = translationMeta;
+                            }
                         } catch (translateError) {
                             console.error("思考プロセスの翻訳中にエラーが発生しました。原文を使用します。", translateError);
                         }
@@ -11641,8 +11791,10 @@ const appLogic = {
     async _callSummaryApi(originalText) {
         try {
             if (state.settings.apiProvider === 'openrouter') {
-                const summaryText = await this._callOpenRouterSummaryApi(originalText);
-                this._showSummaryDialog(summaryText, originalText.length);
+                const summaryModel = apiUtils.getOpenRouterAuxiliaryModel(state.settings.summaryModelName);
+                const summaryMeta = { provider: 'OpenRouter', model: summaryModel };
+                const summaryText = await this._callOpenRouterSummaryApi(originalText, summaryModel);
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
                 return;
             }
 
@@ -11721,13 +11873,13 @@ const appLogic = {
         }
     },
 
-    async _callOpenRouterSummaryApi(originalText) {
+    async _callOpenRouterSummaryApi(originalText, summaryModelName = '') {
         const apiKey = state.settings.openrouterApiKey;
         if (!apiKey) {
             throw new Error("OpenRouter APIキーが設定されていません。");
         }
 
-        const model = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const model = apiUtils.getOpenRouterAuxiliaryModel(summaryModelName);
         const systemPrompt = state.settings.summarySystemPrompt || 'あなたは会話履歴を簡潔に要約するアシスタントです。';
         const userContent = `【要約対象の会話履歴】\n${originalText}`;
         const requestBody = {
@@ -11800,10 +11952,18 @@ const appLogic = {
     },
 
 
-    _showSummaryDialog(summaryText, originalLength) {
+    _showSummaryDialog(summaryText, originalLength, summaryMeta = null) {
         // 統計情報を更新
         const reductionRate = (100 - (summaryText.length / originalLength * 100)).toFixed(1);
-        elements.summaryStats.textContent = `原文: ${originalLength.toLocaleString()}文字 → 要約: ${summaryText.length.toLocaleString()}文字 (${reductionRate} %削減)`;
+        const summaryMetaLabel = uiUtils.formatModelMetaLabel(summaryMeta, '履歴要約');
+        elements.summaryStats.textContent = `原文: ${originalLength.toLocaleString()}文字 → 要約: ${summaryText.length.toLocaleString()}文字 (${reductionRate} %削減)${summaryMetaLabel ? ` / ${summaryMetaLabel}` : ''}`;
+        if (summaryMeta) {
+            elements.summaryDialog.dataset.summaryProvider = summaryMeta.provider;
+            elements.summaryDialog.dataset.summaryModel = summaryMeta.model;
+        } else {
+            delete elements.summaryDialog.dataset.summaryProvider;
+            delete elements.summaryDialog.dataset.summaryModel;
+        }
         // テキストエリアに結果を表示し、編集可能にする
         elements.summaryEditor.value = summaryText;
         elements.summaryEditor.disabled = false;
@@ -11848,6 +12008,11 @@ const appLogic = {
             // 既存の要約と新しい要約を結合する
             const existingSummary = state.currentSummarizedContext ? state.currentSummarizedContext.summaryText : "";
             const newSummaryText = existingSummary ? `${existingSummary}\n\n${summaryText}` : summaryText;
+            const summaryProvider = elements.summaryDialog.dataset.summaryProvider;
+            const summaryModel = elements.summaryDialog.dataset.summaryModel;
+            const summaryMeta = summaryProvider && summaryModel
+                ? { provider: summaryProvider, model: summaryModel }
+                : null;
 
             // state.currentMessagesを上書きせず、summarizedContextオブジェクトを更新する
             state.currentSummarizedContext = {
@@ -11855,6 +12020,9 @@ const appLogic = {
                 summaryRange: { start: 0, end: end }, // startは常に0、endを更新
                 summarizedAt: Date.now()
             };
+            if (summaryMeta) {
+                state.currentSummarizedContext.summaryMeta = summaryMeta;
+            }
 
             // 変更されたsummarizedContextを含むチャット全体を保存する
             await dbUtils.saveChat();

@@ -30,7 +30,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="app.js?v=1.13" defer></script>
+    <script src="app.js?v=1.15" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -295,8 +295,11 @@
                     </select>
 
                     <div id="openrouter-model-input-container" class="hidden">
-                        <label for="openrouter-model-input">OpenRouter モデル名:</label>
-                        <input type="text" id="openrouter-model-input" list="openrouter-model-suggestions" placeholder="例: openai/gpt-5.1" aria-label="OpenRouter モデル名">
+                        <label for="openrouter-model-select">OpenRouter モデル名:</label>
+                        <select id="openrouter-model-select" aria-label="OpenRouter モデル候補">
+                            <option value="">候補から選択...</option>
+                        </select>
+                        <input type="hidden" id="openrouter-model-input" aria-hidden="true">
                         <datalist id="openrouter-model-suggestions"></datalist>
                         <p style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">
                             ※ 利用可能なモデル一覧は <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">OpenRouter Models</a> で確認できます。<br>
