@@ -1,6 +1,6 @@
 # ChatAI PWA
 
-ChatAI PWA は、Gemini-PWA-Mk-II をベースにした私用 AI PWA クライアントです。Gemini API に加えて OpenRouter API を利用できるようにし、DeepSeek V4 Pro などの reasoning / thinking 対応モデルを日常的に使いやすくすることを目的にしています。
+ChatAI PWA は、MIT ライセンスの既存 PWA クライアントをベースにした私用 AI PWA クライアントです。Gemini API に加えて OpenRouter API を利用できるようにし、DeepSeek V4 Pro などの reasoning / thinking 対応モデルを日常的に使いやすくすることを目的にしています。
 
 ブラウザだけで動作し、チャット履歴、プロファイル、設定、Dropbox 同期などをローカルブラウザ内に保存します。
 
@@ -223,6 +223,6 @@ Dropbox App Key は秘密情報ではありませんが、README やサンプル
 
 ## ライセンス
 
-このリポジトリは Gemini-PWA-Mk-II をベースにした私用フォークです。
+このリポジトリは、MIT ライセンスの既存 PWA クライアントをベースにした私用改造版です。
 
-元プロジェクトの LICENSE を尊重し、MIT License を維持します。詳細は `LICENSE` を確認してください。
+元プロジェクトの MIT License を維持します。詳細は `LICENSE` を確認してください。

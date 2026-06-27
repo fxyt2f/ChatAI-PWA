@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+    <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet">
     <title>ChatAI PWA</title>
     <link rel="manifest" href="./manifest.json">
     <meta name="theme-color" id="theme-color-meta" content="#4a90e2">
@@ -12,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.20">
+    <link rel="stylesheet" href="./style.css?v=1.21">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.20" defer></script>
+    <script src="./dropbox.js?v=1.21" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -30,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.20" defer></script>
+    <script src="./app.js?v=1.21" defer></script>
 </head>
 <body>
     <div class="app-container">
