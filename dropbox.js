@@ -1,10 +1,14 @@
 /**
  * Dropbox APIと通信するためのヘルパーオブジェクト (V2 - アセット分離対応版)
  */
- window.dropboxApi = {
-    APP_KEY: 'tzq2d3onnfa630w',
+window.dropboxApi = {
+    APP_KEY: '',
     METADATA_PATH: '/gemini_pwa_data.json',
     ASSETS_DIR_PATH: '/Gemini_PWA_Assets',
+    MAX_RETRY_COUNT: 3,
+    BASE_RETRY_DELAY_MS: 1000,
+    MAX_RETRY_DELAY_MS: 30000,
+    _refreshPromise: null,
 
     /**
      * IndexedDBからトークン情報を取得する
@@ -25,41 +29,133 @@
         await dbUtils.saveSetting('dropboxTokens', tokens);
     },
 
+    setAppKey(appKey) {
+        this.APP_KEY = (appKey || '').trim();
+    },
+
+    getAppKey(explicitAppKey = '') {
+        const appKey = (
+            explicitAppKey ||
+            window.state?.settings?.dropboxAppKey ||
+            sessionStorage.getItem('dropboxOAuthAppKey') ||
+            this.APP_KEY ||
+            ''
+        ).trim();
+        if (!appKey) {
+            throw new Error('Dropbox App Keyが設定されていません。設定画面でDropbox App Keyを入力してください。');
+        }
+        return appKey;
+    },
+
     /**
      * リフレッシュトークンを使って新しいアクセストークンを取得する
      * @param {string} refreshToken - リフレッシュトークン
      * @returns {Promise<object>} 新しいトークン情報
      */
     async _refreshAccessToken(refreshToken) {
-        console.log('[Dropbox API] Access token expired. Refreshing...');
-        const url = 'https://api.dropboxapi.com/oauth2/token';
-        const params = new URLSearchParams();
-        params.append('grant_type', 'refresh_token');
-        params.append('refresh_token', refreshToken);
-        params.append('client_id', this.APP_KEY);
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: params,
-        });
-
-        if (!response.ok) {
-            const errorJson = await response.json();
-            throw new Error(errorJson.error_description || 'Failed to refresh token');
+        if (this._refreshPromise) {
+            console.log('[Dropbox API] Token refresh already in progress. Waiting for shared refresh.');
+            return this._refreshPromise;
         }
 
-        const newAccessTokenData = await response.json();
-        const tokens = await this._getTokens() || {};
-        const newTokens = {
-            ...tokens,
-            ...newAccessTokenData,
-            expires_at: Date.now() + (newAccessTokenData.expires_in - 300) * 1000,
-        };
+        this._refreshPromise = (async () => {
+            console.log('[Dropbox API] Access token expired. Refreshing...');
+            const url = 'https://api.dropboxapi.com/oauth2/token';
+            const params = new URLSearchParams();
+            params.append('grant_type', 'refresh_token');
+            params.append('refresh_token', refreshToken);
+            params.append('client_id', this.getAppKey());
 
-        await this._saveTokens(newTokens);
-        console.log('[Dropbox API] Token refreshed and saved successfully.');
-        return newTokens;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: params,
+            });
+
+            if (!response.ok) {
+                const errorText = await this._readDropboxErrorText(response);
+                const error = this._createDropboxError({
+                    response,
+                    domain: 'api',
+                    endpoint: '/oauth2/token',
+                    errorText
+                });
+                throw error;
+            }
+
+            const newAccessTokenData = await response.json();
+            const tokens = await this._getTokens() || {};
+            const newTokens = {
+                ...tokens,
+                ...newAccessTokenData,
+                expires_at: Date.now() + (newAccessTokenData.expires_in - 300) * 1000,
+            };
+
+            await this._saveTokens(newTokens);
+            console.log('[Dropbox API] Token refreshed and saved successfully.');
+            return newTokens;
+        })();
+
+        try {
+            return await this._refreshPromise;
+        } finally {
+            this._refreshPromise = null;
+        }
+    },
+
+    _sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    },
+
+    _isRetryableStatus(status) {
+        return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+    },
+
+    _getRetryDelayMs(response, retryCount) {
+        const retryAfter = response?.headers?.get('Retry-After');
+        if (retryAfter) {
+            const retryAfterSeconds = Number(retryAfter);
+            if (!Number.isNaN(retryAfterSeconds)) {
+                return Math.min(retryAfterSeconds * 1000, this.MAX_RETRY_DELAY_MS);
+            }
+            const retryAfterDate = Date.parse(retryAfter);
+            if (!Number.isNaN(retryAfterDate)) {
+                return Math.min(Math.max(retryAfterDate - Date.now(), 0), this.MAX_RETRY_DELAY_MS);
+            }
+        }
+
+        const exponentialDelay = this.BASE_RETRY_DELAY_MS * Math.pow(2, retryCount);
+        const jitter = Math.floor(Math.random() * 250);
+        return Math.min(exponentialDelay + jitter, this.MAX_RETRY_DELAY_MS);
+    },
+
+    async _readDropboxErrorText(response) {
+        let errorText = `Dropbox API Error (${response.status}): ${response.statusText}`;
+        try {
+            const bodyText = await response.text();
+            if (!bodyText) return errorText;
+            try {
+                const errorJson = JSON.parse(bodyText);
+                return errorJson.error_summary || errorJson.error_description || JSON.stringify(errorJson.error || errorJson);
+            } catch (parseError) {
+                return bodyText;
+            }
+        } catch (readError) {
+            return errorText;
+        }
+    },
+
+    _createDropboxError({ response, domain, endpoint, errorText }) {
+        const status = response?.status;
+        const statusText = response?.statusText || '';
+        const message = `[Dropbox ${domain}${endpoint}] ${errorText || `API Error (${status}): ${statusText}`}`;
+        const error = new Error(message);
+        error.status = status;
+        error.statusText = statusText;
+        error.endpoint = endpoint;
+        error.domain = domain;
+        error.retryAfter = response?.headers?.get('Retry-After') || null;
+        return error;
     },
 
     /**
@@ -70,7 +166,7 @@
      * @param {number} retryCount - リトライ回数
      * @returns {Promise<any>} APIからのレスポンス
      */
-    async _request(domain, endpoint, options = {}, retryCount = 0) {
+    async _request(domain, endpoint, options = {}, retryCount = 0, hasRefreshedToken = false) {
         let tokens = await this._getTokens();
         if (!tokens || !tokens.access_token) {
             throw new Error("Dropbox is not connected.");
@@ -78,7 +174,7 @@
 
         if (Date.now() >= tokens.expires_at) {
             if (!tokens.refresh_token) {
-                await this.disconnect();
+                await this._saveTokens(null);
                 throw new Error("Session expired. Please reconnect to Dropbox.");
             }
             tokens = await this._refreshAccessToken(tokens.refresh_token);
@@ -94,18 +190,27 @@
             const response = await fetch(url, { ...options, headers });
 
             if (!response.ok) {
-                if (response.status === 401 && retryCount === 0) {
+                if (response.status === 401 && !hasRefreshedToken) {
+                    if (!tokens.refresh_token) {
+                        await this._saveTokens(null);
+                        throw new Error("Session expired. Please reconnect to Dropbox.");
+                    }
                     console.log('[Dropbox API] Received 401, forcing token refresh and retrying...');
                     tokens = await this._refreshAccessToken(tokens.refresh_token);
-                    return this._request(domain, endpoint, options, 1);
+                    return this._request(domain, endpoint, options, retryCount, true);
                 }
-                
-                let errorText = `Dropbox API Error (${response.status}): ${response.statusText}`;
-                try {
-                    const errorJson = await response.json();
-                    errorText = errorJson.error_summary || JSON.stringify(errorJson.error) || errorText;
-                } catch (e) { /* ignore */ }
-                throw new Error(errorText);
+
+                const errorText = await this._readDropboxErrorText(response);
+                const error = this._createDropboxError({ response, domain, endpoint, errorText });
+
+                if (this._isRetryableStatus(response.status) && retryCount < this.MAX_RETRY_COUNT) {
+                    const delayMs = this._getRetryDelayMs(response, retryCount);
+                    console.warn(`[Dropbox API] Retryable error for ${domain}${endpoint} (status: ${response.status}). Retrying ${retryCount + 1}/${this.MAX_RETRY_COUNT} in ${delayMs}ms.`, error.message);
+                    await this._sleep(delayMs);
+                    return this._request(domain, endpoint, options, retryCount + 1, hasRefreshedToken);
+                }
+
+                throw error;
             }
 
             if (endpoint === '/files/download') {
@@ -116,9 +221,22 @@
             return responseText ? JSON.parse(responseText) : {};
 
         } catch (error) {
+            if (!error.status && retryCount < this.MAX_RETRY_COUNT) {
+                const delayMs = this._getRetryDelayMs(null, retryCount);
+                console.warn(`[Dropbox API] Network error for ${domain}${endpoint}. Retrying ${retryCount + 1}/${this.MAX_RETRY_COUNT} in ${delayMs}ms.`, error);
+                await this._sleep(delayMs);
+                return this._request(domain, endpoint, options, retryCount + 1, hasRefreshedToken);
+            }
+
             // "not found"エラーは呼び出し元で正常ケースとして処理するため、コンソールへのエラー出力を抑制する
             if (!error.message.includes('not_found')) {
-                console.error(`[Dropbox API] Request error for ${endpoint}:`, error);
+                console.error(`[Dropbox API] Request error for ${domain}${endpoint}:`, {
+                    status: error.status,
+                    statusText: error.statusText,
+                    endpoint: error.endpoint || endpoint,
+                    retryAfter: error.retryAfter,
+                    message: error.message
+                });
             }
             throw error;
         }
@@ -313,14 +431,15 @@
     },
 
 
-    async getAccessToken(code, redirectUri, codeVerifier) {
+    async getAccessToken(code, redirectUri, codeVerifier, appKey = '') {
         console.log('[Dropbox API] Requesting access token...');
         const url = 'https://api.dropboxapi.com/oauth2/token';
+        const clientId = this.getAppKey(appKey);
         const params = new URLSearchParams();
         params.append('grant_type', 'authorization_code');
         params.append('code', code);
         params.append('redirect_uri', redirectUri);
-        params.append('client_id', this.APP_KEY);
+        params.append('client_id', clientId);
         params.append('code_verifier', codeVerifier);
 
         const response = await fetch(url, {
