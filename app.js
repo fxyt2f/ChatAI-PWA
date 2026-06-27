@@ -11634,6 +11634,12 @@ const appLogic = {
 
     async _callSummaryApi(originalText) {
         try {
+            if (state.settings.apiProvider === 'openrouter') {
+                const summaryText = await this._callOpenRouterSummaryApi(originalText);
+                this._showSummaryDialog(summaryText, originalText.length);
+                return;
+            }
+
             const systemInstruction = {
                 parts: [{ text: state.settings.summarySystemPrompt }]
             };
@@ -11707,6 +11713,84 @@ const appLogic = {
             elements.summaryDialog.close();
             uiUtils.showCustomAlert(`要約の生成に失敗しました: ${error.message}`);
         }
+    },
+
+    async _callOpenRouterSummaryApi(originalText) {
+        const apiKey = state.settings.openrouterApiKey;
+        if (!apiKey) {
+            throw new Error("OpenRouter APIキーが設定されていません。");
+        }
+
+        const model = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const systemPrompt = state.settings.summarySystemPrompt || 'あなたは会話履歴を簡潔に要約するアシスタントです。';
+        const userContent = `【要約対象の会話履歴】\n${originalText}`;
+        const requestBody = {
+            model,
+            messages: [
+                {
+                    role: 'system',
+                    content: systemPrompt
+                },
+                {
+                    role: 'user',
+                    content: userContent
+                }
+            ],
+            temperature: 0.3,
+            reasoning: { exclude: true }
+        };
+
+        console.log("--- [OpenRouter要約API] リクエスト開始 ---");
+        console.log("使用モデル:", model);
+        console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
+
+        const response = await fetch(OPENROUTER_API_BASE_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+                'HTTP-Referer': window.location.origin,
+                'X-Title': 'ChatAI PWA'
+            },
+            body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+            let errorBody = await response.text();
+            try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
+            console.error("--- [OpenRouter要約API] APIエラーレスポンス ---");
+            console.error("ステータス:", response.status, response.statusText);
+            console.error("エラーレスポンスボディ:", errorBody);
+            throw new Error(errorBody?.error?.message || `OpenRouter APIエラー: ${response.status}`);
+        }
+
+        const responseData = await response.json();
+
+        console.log("--- [OpenRouter要約API] 正常レスポンス ---");
+        console.log("レスポンスボディ全体:", JSON.stringify(responseData, null, 2));
+
+        const messageContent = responseData.choices?.[0]?.message?.content;
+        let summaryText = '';
+        if (typeof messageContent === 'string') {
+            summaryText = messageContent;
+        } else if (Array.isArray(messageContent)) {
+            summaryText = messageContent
+                .map(part => {
+                    if (typeof part?.text === 'string') return part.text;
+                    if (typeof part?.content === 'string') return part.content;
+                    return '';
+                })
+                .filter(Boolean)
+                .join('\n');
+        }
+
+        summaryText = summaryText.trim();
+        if (!summaryText) {
+            console.error("[OpenRouter要約API] 応答形式が不正です。テキスト部分が見つかりませんでした。");
+            throw new Error("OpenRouter APIから有効な要約結果が得られませんでした。");
+        }
+
+        return summaryText;
     },
 
 
