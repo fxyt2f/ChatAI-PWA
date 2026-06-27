@@ -2585,8 +2585,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.dummyModelInput.value = state.settings.dummyModel || '';
         elements.reverseDummyOrderCheckbox.checked = state.settings.reverseDummyOrder;
         elements.concatDummyModelCheckbox.checked = state.settings.concatDummyModel;
-        elements.additionalModelsTextarea.value = state.settings.additionalModels || '';
-        elements.additionalOpenRouterModelsTextarea.value = state.settings.additionalOpenRouterModels || '';
+        if (elements.additionalModelsTextarea) {
+            elements.additionalModelsTextarea.value = state.settings.additionalModels || '';
+        }
+        if (elements.additionalOpenRouterModelsTextarea) {
+            elements.additionalOpenRouterModelsTextarea.value = state.settings.additionalOpenRouterModels || '';
+        } else {
+            console.warn("[Settings] OpenRouter追加モデル欄が見つかりません: #additional-openrouter-models");
+        }
         elements.enterToSendCheckbox.checked = state.settings.enterToSend;
         elements.historySortOrderSelect.value = state.settings.historySortOrder || 'updatedAt';
         elements.darkModeToggle.checked = state.settings.darkMode;
