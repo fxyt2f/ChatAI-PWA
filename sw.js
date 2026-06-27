@@ -1,9 +1,10 @@
 // sw.js
 
-const CACHE_NAME = 'gemini-pwa-cache-v1.12'; // 更新後はここも変更
+const CACHE_NAME = 'chatai-pwa-cache-v1.13'; // 更新後はここも変更
 const urlsToCache = [
   './',
   './index.html',
+  './app.js',
   './manifest.json',
   './marked.js',
   // アイコンファイルもキャッシュする場合 (manifest.json で指定したもの)
