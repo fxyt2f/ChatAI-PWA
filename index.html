@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="prism.css" />
     <script src="marked.js" defer></script>
     <script src="function-calling.js?v=1.12" defer></script>
-    <script src="dropbox.js" defer></script>
+    <script src="dropbox.js?v=1.18" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -30,7 +30,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="app.js?v=1.15" defer></script>
+    <script src="app.js?v=1.19" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -476,6 +476,15 @@
                         <h3>
                             データ同期
                         </h3>
+                    </div>
+
+                    <div class="sync-setting-row">
+                        <label for="dropbox-app-key-input">Dropbox App Key:</label>
+                        <input type="text" id="dropbox-app-key-input" autocomplete="off" placeholder="例: g94pzz9r7kv4akt" aria-label="Dropbox App Key">
+                        <p style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">
+                            Dropbox App Consoleで作成したアプリのApp keyを入力してください。Redirect URIには認証開始時に表示されるURLをDropbox側に完全一致で登録してください。<br>
+                            App Keyを変更した場合、Dropbox連携を一度解除して再認証が必要になることがあります。
+                        </p>
                     </div>
                 
                     <!-- 連携前の表示 -->

@@ -1,10 +1,11 @@
 // sw.js
 
-const CACHE_NAME = 'chatai-pwa-cache-v1.15'; // 更新後はここも変更
+const CACHE_NAME = 'chatai-pwa-cache-v1.19'; // 更新後はここも変更
 const urlsToCache = [
   './',
   './index.html',
   './app.js',
+  './dropbox.js',
   './manifest.json',
   './marked.js',
   // アイコンファイルもキャッシュする場合 (manifest.json で指定したもの)
@@ -32,14 +33,15 @@ self.addEventListener('install', (event) => {
 self.addEventListener('fetch', (event) => {
   const requestUrl = new URL(event.request.url);
 
-  // APIリクエスト (Google API, Stable Diffusion API) はService Workerの処理から完全に除外する
+  // APIリクエスト (Google API, Dropbox API, Stable Diffusion API) はService Workerの処理から完全に除外する
   const isGoogleApiPost = requestUrl.hostname === 'generativelanguage.googleapis.com' && event.request.method === 'POST';
+  const isDropboxRequest = requestUrl.hostname.endsWith('dropboxapi.com') || requestUrl.hostname === 'www.dropbox.com';
   // ポート番号(ローカル接続)またはトンネルサービス経由のホスト名でSD APIへのリクエストかを判定
   const tunnelDomains = ['ngrok-free.dev', 'trycloudflare.com'];
   const isTunnelService = tunnelDomains.some(domain => requestUrl.hostname.endsWith(domain));
   const isStableDiffusionApi = (requestUrl.port === '7860' || isTunnelService) && event.request.method === 'POST';
 
-  if (isGoogleApiPost || isStableDiffusionApi) {
+  if (isGoogleApiPost || isDropboxRequest || isStableDiffusionApi) {
     // console.log('[SW] Ignoring API request:', event.request.url);
     return; 
   }

@@ -459,6 +459,7 @@ try {
         dropboxDisconnectBtn: document.getElementById('dropbox-disconnect-btn'),
         syncStatusHeaderIcon: document.getElementById('sync-status-header-icon'),
         syncStatusSettingsIcon: document.getElementById('sync-status-settings-icon'),
+        dropboxAppKeyInput: document.getElementById('dropbox-app-key-input'),
         dropboxSyncFrequencySelect: document.getElementById('dropbox-sync-frequency'),
         syncProgressText: document.getElementById('sync-progress-text'),
         lastSyncTimeDisplay: document.getElementById('last-sync-time-display'),
@@ -583,6 +584,7 @@ const state = {
 最終的な出力は、このあらすじを初めて読む人でも、これまでの物語の流れを正確に理解できるような形式にしてください。`,
         enableSummaryButton: true,
         floatingPanelBehavior: 'on-click',
+        dropboxAppKey: '',
         dropboxSyncFrequency: 'instant',
         sdApiUrl: '',
         sdApiUser: '',
@@ -634,7 +636,8 @@ Reason: [NGの場合の理由]`,
         lastSyncId: null, // 最後に同期したクラウドのID
         isSyncing: false, // 同期処理中か
         pushTimeoutId: null, // Push処理のデバウンス用タイマーID
-        lastError: null
+        lastError: null,
+        pendingPush: false
     }
 };
 
@@ -2651,6 +2654,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.enableSummaryButtonToggle.checked = state.settings.enableSummaryButton;
         document.body.classList.toggle('header-auto-hide', state.settings.headerAutoHide);
         elements.floatingPanelBehaviorSelect.value = state.settings.floatingPanelBehavior || 'on-click';
+        if (elements.dropboxAppKeyInput) {
+            elements.dropboxAppKeyInput.value = state.settings.dropboxAppKey || '';
+        }
+        if (window.dropboxApi?.setAppKey) {
+            window.dropboxApi.setAppKey(state.settings.dropboxAppKey || '');
+        }
         elements.dropboxSyncFrequencySelect.value = state.settings.dropboxSyncFrequency || 'instant';
 
         const defaultHeaderColor = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
@@ -3632,7 +3641,60 @@ const apiUtils = {
             addText(this._extractReasoningDetailText(reasoningDetails));
         }
 
-        return reasoningTexts.join('\n\n');
+        return this._dedupeReasoningTextParts(reasoningTexts).join('\n\n');
+    },
+
+    _normalizeReasoningTextForDedupe(text) {
+        return String(text || '')
+            .replace(/\r\n?/g, '\n')
+            .split('\n')
+            .map(line => line.trim())
+            .join('\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    },
+
+    _dedupeConsecutiveReasoningParagraphs(text) {
+        const paragraphs = String(text || '').split(/\n{2,}/);
+        const deduped = [];
+        let previousKey = '';
+
+        for (const paragraph of paragraphs) {
+            const trimmed = paragraph.trim();
+            const key = this._normalizeReasoningTextForDedupe(trimmed);
+
+            if (!key || key === previousKey) {
+                continue;
+            }
+
+            deduped.push(trimmed);
+            previousKey = key;
+        }
+
+        return deduped.join('\n\n');
+    },
+
+    _dedupeReasoningTextParts(parts) {
+        const seen = new Set();
+        const deduped = [];
+
+        for (const part of parts) {
+            if (typeof part !== 'string') {
+                continue;
+            }
+
+            const text = this._dedupeConsecutiveReasoningParagraphs(part);
+            const key = this._normalizeReasoningTextForDedupe(text);
+
+            if (!key || seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
+            deduped.push(text);
+        }
+
+        return deduped;
     },
 
     _extractReasoningDetailText(detail) {
@@ -5357,7 +5419,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt'];
+        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -6170,7 +6232,17 @@ const appLogic = {
                         throw new Error("認証セッションが見つかりません。もう一度お試しください。");
                     }
     
-                    await window.dropboxApi.getAccessToken(authCode, REDIRECT_URI, codeVerifier);
+                    const dropboxOAuthAppKey = (sessionStorage.getItem('dropboxOAuthAppKey') || state.settings.dropboxAppKey || '').trim();
+
+                    if (!dropboxOAuthAppKey) {
+                        throw new Error("Dropbox App Keyが見つかりません。設定画面でDropbox App Keyを入力してから再認証してください。");
+                    }
+
+                    if (window.dropboxApi?.setAppKey) {
+                        window.dropboxApi.setAppKey(dropboxOAuthAppKey);
+                    }
+
+                    await window.dropboxApi.getAccessToken(authCode, REDIRECT_URI, codeVerifier, dropboxOAuthAppKey);
                     
                     console.log("Dropbox連携に成功し、トークンを保存しました。");
     
@@ -6187,6 +6259,7 @@ const appLogic = {
                     await uiUtils.showCustomAlert(`連携に失敗しました: ${error.message}`);
                 } finally {
                     sessionStorage.removeItem('dropboxCodeVerifier');
+                    sessionStorage.removeItem('dropboxOAuthAppKey');
                 }
             }
         };
@@ -6466,17 +6539,18 @@ const appLogic = {
             return;
         }
 
-        if (state.sync.isSyncing) {
-            console.log(`[SYNC_DEBUG ${timestamp}] -> SKIPPED: Already syncing.`);
-            return;
-        }
-
         if (!state.sync.isDirty) {
             state.sync.isDirty = true;
             dbUtils.saveSetting('syncIsDirty', true);
             console.log(`[SYNC_DEBUG ${timestamp}] -> State set to DIRTY.`);
         }
         this.updateSyncStatusUI('dirty');
+
+        if (state.sync.isSyncing) {
+            state.sync.pendingPush = true;
+            console.log(`[SYNC_DEBUG ${timestamp}] -> QUEUED: Sync already running. Pending push will run after current sync.`);
+            return;
+        }
 
         if (normalizedType === 'message' && state.isSending) {
             console.log(`[SYNC_DEBUG ${timestamp}] -> SKIPPED: AI is responding (isSending=true).`);
@@ -6551,6 +6625,8 @@ const appLogic = {
             return;
         }
         state.sync.isSyncing = true;
+        state.sync.pendingPush = false;
+        let pushCompleted = false;
         const updateProgress = (message) => {
             console.log(`[SYNC_DEBUG] updateProgress: isManual=${isManual}, message="${message}"`);
             this.updateSyncStatusUI('syncing', message);
@@ -6638,11 +6714,12 @@ const appLogic = {
             // --- Step 6: 状態の更新 ---
             const syncTimestamp = new Date(parsedMetadata.exportedAt).getTime();
             state.sync.lastSyncId = parsedMetadata.syncId;
-            state.sync.isDirty = false;
+            const hasQueuedChanges = state.sync.pendingPush;
+            state.sync.isDirty = hasQueuedChanges;
             state.sync.lastError = null;
             await Promise.all([
                 dbUtils.saveSetting('lastSyncId', parsedMetadata.syncId),
-                dbUtils.saveSetting('syncIsDirty', false),
+                dbUtils.saveSetting('syncIsDirty', hasQueuedChanges),
                 dbUtils.saveSetting('syncLastError', null),
                 dbUtils.saveSetting('lastSyncTimestamp', syncTimestamp)
             ]);
@@ -6655,9 +6732,10 @@ const appLogic = {
                 });
             }
             
-            this.updateSyncStatusUI('idle');
+            this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
             await this.updateDropboxUIState();
             console.log(`[Sync Core Push V2] Push成功。新しいsyncId: ${parsedMetadata.syncId}`);
+            pushCompleted = true;
             if (isManual) {
                 uiUtils.hideProgressDialog();
             }
@@ -6671,8 +6749,18 @@ const appLogic = {
                 uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
             }
         } finally {
+            const shouldRunPendingPush = pushCompleted && state.sync.pendingPush && state.sync.isDirty;
             state.sync.isSyncing = false;
-            await window.dropboxApi.deleteLockFile();
+            try {
+                await window.dropboxApi.deleteLockFile();
+            } catch (lockError) {
+                console.warn("[Sync Core Push V2] ロックファイル削除に失敗しました。次回起動時に復旧処理が走る可能性があります。", lockError);
+            }
+            if (shouldRunPendingPush) {
+                console.log("[Sync Core Push V2] 同期中の追加変更を検出したため、追加Pushを開始します。");
+                state.sync.pendingPush = false;
+                setTimeout(() => this.handlePush(false), 0);
+            }
             console.log(`[SYNC_DEBUG] _doPush: 終了。`);
         }
     },
@@ -6721,6 +6809,7 @@ const appLogic = {
 
         console.log("[Sync Pull V2] Pull処理を開始します。");
         state.sync.isSyncing = true;
+        let pullCompleted = false;
         this.updateSyncStatusUI('syncing', 'クラウドと通信中...');
         if (isManual) {
             console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、showProgressDialogを呼び出します。");
@@ -6787,13 +6876,14 @@ const appLogic = {
                 const removedAssetInfo = importResult.removedAssetInfo;
 
                 state.sync.lastSyncId = importResult.syncId;
-                state.sync.isDirty = false;
+                const hasQueuedChanges = state.sync.pendingPush;
+                state.sync.isDirty = hasQueuedChanges;
                 state.sync.lastError = null;
                 
                 const syncTimestamp = new Date(importResult.exportedAt).getTime();
                 await Promise.all([
                     dbUtils.saveSetting('lastSyncId', importResult.syncId),
-                    dbUtils.saveSetting('syncIsDirty', false),
+                    dbUtils.saveSetting('syncIsDirty', hasQueuedChanges),
                     dbUtils.saveSetting('syncLastError', null),
                     dbUtils.saveSetting('lastSyncTimestamp', syncTimestamp)
                 ]);
@@ -6806,8 +6896,9 @@ const appLogic = {
                     });
                 }
 
-                this.updateSyncStatusUI('idle');
+                this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
                 if (isManual) uiUtils.hideProgressDialog();
+                pullCompleted = true;
 
                 let finalMessage = "クラウドからデータを同期しました。アプリを再起動します。";
                 if (removedAssetInfo && Object.keys(removedAssetInfo).length > 0) {
@@ -6824,9 +6915,13 @@ const appLogic = {
 
             } else {
                 console.log("[Sync Pull V2] ローカルは既に最新です。同期は不要です。");
+                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty;
+                state.sync.isDirty = hasQueuedChanges;
                 await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
-                this.updateSyncStatusUI('idle');
+                await dbUtils.saveSetting('syncIsDirty', hasQueuedChanges);
+                this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
                 await this.updateDropboxUIState();
+                pullCompleted = true;
                 if (isManual) {
                     uiUtils.hideProgressDialog();
                 }
@@ -6841,8 +6936,18 @@ const appLogic = {
                 await uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
             }
         } finally {
+            const shouldRunPendingPush = pullCompleted && state.sync.pendingPush && state.sync.isDirty;
             state.sync.isSyncing = false;
-            await window.dropboxApi.deleteLockFile();
+            try {
+                await window.dropboxApi.deleteLockFile();
+            } catch (lockError) {
+                console.warn("[Sync Pull V2] ロックファイル削除に失敗しました。次回起動時に復旧処理が走る可能性があります。", lockError);
+            }
+            if (shouldRunPendingPush) {
+                console.log("[Sync Pull V2] 同期中の追加変更を検出したため、追加Pushを開始します。");
+                state.sync.pendingPush = false;
+                setTimeout(() => this.handlePush(false), 0);
+            }
             console.log(`[SYNC_DEBUG] handlePull: 終了。`);
         }
     },
@@ -7153,6 +7258,18 @@ const appLogic = {
             summarySystemPrompt: { element: elements.summarySystemPromptTextarea, event: 'input' },
             enableSummaryButton: { element: elements.enableSummaryButtonToggle, event: 'change', onUpdate: () => this.toggleSummaryButtonVisibility() },
             floatingPanelBehavior: { element: elements.floatingPanelBehaviorSelect, event: 'change', onUpdate: () => this.applyFloatingPanelBehavior() },
+            dropboxAppKey: { element: elements.dropboxAppKeyInput, event: 'change', onUpdate: (value) => {
+                if (window.dropboxApi?.setAppKey) {
+                    window.dropboxApi.setAppKey(value);
+                }
+                dbUtils.getSetting('dropboxTokens')
+                    .then(tokenData => {
+                        if (tokenData?.value) {
+                            uiUtils.showCustomAlert("Dropbox App Keyを変更した場合、Dropbox連携を一度解除して再認証が必要になることがあります。");
+                        }
+                    })
+                    .catch(error => console.error("[Dropbox] App Key変更時の連携状態確認に失敗しました:", error));
+            } },
             sdApiUrl: { element: elements.sdApiUrlInput, event: 'input' },
             sdApiUser: { element: elements.sdApiUserInput, event: 'input' },
             sdApiPassword: { element: elements.sdApiPasswordInput, event: 'input' },
@@ -7517,7 +7634,16 @@ const appLogic = {
         // --- データ同期 (OAuth) ---
         elements.dropboxAuthBtn.addEventListener('click', async () => {
             try {
-                const APP_KEY = 'tzq2d3onnfa630w';
+                const APP_KEY = (state.settings.dropboxAppKey || '').trim();
+                if (!APP_KEY) {
+                    await uiUtils.showCustomAlert("Dropbox App Keyを設定してください。");
+                    return;
+                }
+
+                if (window.dropboxApi?.setAppKey) {
+                    window.dropboxApi.setAppKey(APP_KEY);
+                }
+
                 // 重要: このURIはDropbox App Consoleで設定したものと完全に一致させる必要があります
                 const REDIRECT_URI = window.location.origin + window.location.pathname;
 
@@ -7526,8 +7652,15 @@ const appLogic = {
 
                 // 次のステップでトークンを取得するためにverifierを保存
                 sessionStorage.setItem('dropboxCodeVerifier', codeVerifier);
+                sessionStorage.setItem('dropboxOAuthAppKey', APP_KEY);
 
                 const authUrl = `https://www.dropbox.com/oauth2/authorize?client_id=${APP_KEY}&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+
+                console.log('[Dropbox OAuth] client_id / App key:', APP_KEY);
+                console.log('[Dropbox OAuth] redirect_uri:', REDIRECT_URI);
+                console.log('[Dropbox OAuth] authorize URL:', authUrl);
+
+                await uiUtils.showCustomAlert(`Dropbox Redirect URI:\n${REDIRECT_URI}`);
 
                 // Dropboxの認証ページにリダイレクト
                 window.location.href = authUrl;
@@ -12523,6 +12656,8 @@ const appLogic = {
                 message: message,
                 timestamp: new Date().toISOString()
             };
+            dbUtils.saveSetting('syncLastError', state.sync.lastError)
+                .catch(error => console.error("[Sync UI] 同期エラー状態の保存に失敗しました:", error));
         }
 
         const errorDisplay = document.getElementById('sync-error-display');
