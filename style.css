@@ -4,6 +4,10 @@
     --font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     --chat-font-size: 14px;
     --chat-line-height: 1.5;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
 
     /* Spacing Unit */
     --spacing-unit: 8px;
@@ -140,6 +144,8 @@ body.dark-mode {
 }
 html, body {
     height: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
     font-family: var(--font-family);
     background-color: var(--bg-secondary);
     color: var(--text-primary);
@@ -214,6 +220,9 @@ label {
     display: flex;
     position: relative;
     height: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    width: 100%;
     max-width: 800px;
     margin: 0 auto;
     background-color: var(--bg-primary);
@@ -367,10 +376,12 @@ body.dark-mode #chat-overlay {
     overflow-y: auto;
     overflow-x: hidden; /* 横方向のスクロールを常に禁止する */
     padding: calc(var(--spacing-unit) * 2);
+    padding-left: max(calc(var(--spacing-unit) * 2), var(--safe-left));
+    padding-right: max(calc(var(--spacing-unit) * 2), var(--safe-right));
     position: relative;
     z-index: 1;
     touch-action: pan-y;
-    padding-bottom: 40px;
+    padding-bottom: calc(40px + var(--safe-bottom));
 }
 
 
@@ -443,7 +454,7 @@ body.dark-mode #chat-overlay {
 /* --- Chat Input Area --- */
 .chat-input-area {
     display: flex;
-    padding: var(--spacing-unit) calc(var(--spacing-unit) * 2);
+    padding: var(--spacing-unit) max(calc(var(--spacing-unit) * 2), var(--safe-right)) calc(var(--spacing-unit) + var(--safe-bottom)) max(calc(var(--spacing-unit) * 2), var(--safe-left));
     border-top: 1px solid var(--border-primary);
     background-color: var(--bg-primary);
     flex-shrink: 0;
@@ -1056,7 +1067,7 @@ body.dark-mode #chat-screen.drag-over::after {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px;
+    padding: calc(8px + var(--safe-top)) max(8px, var(--safe-right)) 8px max(8px, var(--safe-left));
 }
 .app-header h1#chat-title {
     margin: 0;
@@ -1711,7 +1722,7 @@ body.header-auto-hide #chat-screen .main-content {
         top: 0;
         left: 0;
         width: 100%;
-        height: 40px;
+        height: calc(40px + var(--safe-top));
         z-index: 11;
         /* background: rgba(255,0,0,0.2); */ /* デバッグ用 */
     }
@@ -1829,8 +1840,8 @@ body.header-auto-hide.header-force-show #chat-screen .app-header {
 /* --- Floating Action Panel --- */
 .floating-action-panel {
     position: absolute;
-    top: 60px; /* ヘッダー表示時のデフォルト位置 */
-    left: 16px;
+    top: calc(60px + var(--safe-top)); /* ヘッダー表示時のデフォルト位置 */
+    left: max(16px, var(--safe-left));
     display: flex;
     gap: 8px;
     z-index: 5;
@@ -1846,12 +1857,12 @@ body.header-auto-hide.header-force-show #chat-screen .app-header {
 
 /* ヘッダー自動非表示が有効な場合、ボタンの初期位置を上に設定 */
 body.header-auto-hide .floating-action-panel {
-    top: 16px;
+    top: calc(16px + var(--safe-top));
 }
 
 /* ヘッダー自動非表示が有効で、かつヘッダーが表示されている場合の位置 */
 body.header-auto-hide.header-force-show .floating-action-panel {
-    top: 60px;
+    top: calc(60px + var(--safe-top));
 }
 
 .floating-action-panel .floating-action-button {
