@@ -59,7 +59,9 @@
     --bg-button-update: #1976d2;
     --bg-button-update-hover: #1565c0;
     --header-color-default: #1976d2;
-    --bg-header: var(--header-color-custom, var(--header-color-default));
+    --app-header-bg: var(--header-color-custom, var(--header-color-default));
+    --app-header-fg: #ffffff;
+    --bg-header: var(--app-header-bg);
     --bg-message-actions: rgba(255, 255, 255, 0.9);
     --message-bubble-opacity: 1;
     --overlay-opacity-value: 0.75;
@@ -116,7 +118,9 @@ body.dark-mode {
     --bg-button-update: #90caf9;
     --bg-button-update-hover: #e3f2fd;
     --header-color-default: #007aff;
-    --bg-header: var(--header-color-custom, var(--header-color-default));
+    --app-header-bg: var(--header-color-custom, var(--header-color-default));
+    --app-header-fg: #ffffff;
+    --bg-header: var(--app-header-bg);
     --bg-message-actions: rgba(40, 40, 40, 0.9);
     --bg-overlay-dark: rgba(18, 18, 18, var(--overlay-opacity-value));
 
@@ -237,8 +241,8 @@ body:not(.dark-mode) .app-container {
     display: flex;
     align-items: center;
     padding: var(--spacing-unit) calc(var(--spacing-unit) * 2);
-    background-color: var(--bg-header);
-    color: var(--text-light);
+    background-color: var(--app-header-bg);
+    color: var(--app-header-fg);
     flex-shrink: 0;
     position: sticky;
     top: 0;
@@ -265,7 +269,7 @@ body:not(.dark-mode) .app-container {
 .header-button {
     background: none;
     border: none;
-    color: var(--text-light);
+    color: var(--app-header-fg);
     padding: var(--spacing-unit);
     line-height: 1;
     min-width: auto;
@@ -290,7 +294,7 @@ body:not(.dark-mode) .app-container {
     padding: 6px 12px;
     font-size: 0.8rem;
     background-color: transparent;
-    border: 1px solid var(--text-light);
+    border: 1px solid var(--app-header-fg);
 }
 .header-save-button:hover {
     background-color: rgba(255, 255, 255, 0.1);
@@ -302,7 +306,7 @@ body:not(.dark-mode) .app-container {
     color: var(--text-primary);
 }
 body.dark-mode .new-chat-button {
-    color: var(--text-light);
+    color: var(--app-header-fg);
 }
 
 
@@ -590,6 +594,14 @@ body.dark-mode #settings-screen a:hover {
     border-top: 2px solid var(--border-danger);
 }
 .danger-zone button { width: 100%; }
+#release-notes-btn {
+    margin-bottom: 10px;
+    background-color: var(--bg-button-action);
+    color: #ffffff;
+}
+#release-notes-btn:hover {
+    background-color: var(--bg-button-action-hover);
+}
 #update-app-btn { background-color: var(--bg-button-update); }
 #update-app-btn:hover { background-color: var(--bg-button-update-hover); }
 #clear-data-btn { background-color: var(--bg-button-delete); }
@@ -1118,12 +1130,12 @@ body.dark-mode #chat-screen.drag-over::after {
 }
 .profile-icon-container .material-symbols-outlined {
     font-size: 24px;
-    color: var(--text-light);
+    color: var(--app-header-fg);
 }
 .profile-card-name {
     font-size: 0.875rem;
     font-weight: 500;
-    color: var(--text-light);
+    color: var(--app-header-fg);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1131,11 +1143,19 @@ body.dark-mode #chat-screen.drag-over::after {
 }
 .profile-card-arrow {
     font-size: 20px;
-    color: var(--text-light);
+    color: var(--app-header-fg);
 }
 .app-header .header-button,
 .app-header .new-chat-button {
+    color: var(--app-header-fg);
     flex-shrink: 0;
+}
+
+.app-header button,
+.app-header .material-symbols-outlined,
+.app-header svg {
+    color: var(--app-header-fg);
+    fill: currentColor;
 }
 
 /* --- Profile Menu (Dropdown) --- */
@@ -2711,7 +2731,7 @@ body.dark-mode #sd-test-connection-btn {
 /* テキストの可読性を向上 */
 #settings-screen .app-header .profile-card .profile-card-name,
 #settings-screen .app-header .profile-card .profile-card-arrow {
-    color: #ffffff;
+    color: var(--app-header-fg);
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 

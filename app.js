@@ -31,7 +31,8 @@ const DEFAULT_LOCAL_UI_SETTINGS = {
     chatFontSize: DEFAULT_CHAT_FONT_SIZE,
     chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
     hideSystemPromptInChat: false,
-    floatingPanelBehavior: 'on-click'
+    floatingPanelBehavior: 'on-click',
+    lastSeenReleaseVersion: ''
 };
 const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
@@ -44,12 +45,27 @@ const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
 const LIGHT_THEME_COLOR = '#1976d2';
 const DARK_THEME_COLOR = '#007aff';
-const APP_VERSION = "1.12";
+const APP_VERSION = "1.27.0";
+const APP_CACHE_VERSION = "v1.27";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
+const RELEASE_NOTES = {
+    "1.27.0": [
+        "PWAの見た目、テーマ色、バージョン表示を整理しました。",
+        "ヘッダー色に合わせて文字色とtheme-colorが追従するよう改善しました。",
+        "リリースノート表示ボタンと端末ごとの既読管理を追加しました。",
+        "PWAキャッシュを v1.27 に更新しました。"
+    ],
+    "1.26.0": [
+        "PWAのedge-to-edge表示を改善しました。",
+        "viewport-fit=cover と safe area 対応を追加しました。",
+        "ヘッダーと下部入力欄のステータスバー/ホームバー被りを軽減しました。",
+        "GitHub Pages / PWAキャッシュを v1.26 に更新しました。"
+    ]
+};
 
 // プロバイダーごとのモデルリスト
 const GEMINI_MODELS = [
@@ -334,6 +350,7 @@ try {
         geminiEnableFunctionCallingToggle: document.getElementById('gemini-enable-function-calling-toggle'),
         forceFunctionCallingToggle: document.getElementById('force-function-calling-toggle'),
         appVersionSpan: document.getElementById('app-version'),
+        releaseNotesBtn: document.getElementById('release-notes-btn'),
         backgroundImageInput: document.getElementById('background-image-input'),
         uploadBackgroundBtn: document.getElementById('upload-background-btn'),
         backgroundThumbnail: document.getElementById('background-thumbnail'),
@@ -2503,6 +2520,56 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
+    parseColorToRgb(color) {
+        if (typeof color !== 'string') return null;
+        const trimmedColor = color.trim();
+        const hexMatch = trimmedColor.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+        if (hexMatch) {
+            let hexValue = hexMatch[1];
+            if (hexValue.length === 3) {
+                hexValue = hexValue.split('').map(char => char + char).join('');
+            }
+            const intValue = parseInt(hexValue, 16);
+            return {
+                r: (intValue >> 16) & 255,
+                g: (intValue >> 8) & 255,
+                b: intValue & 255
+            };
+        }
+
+        const rgbMatch = trimmedColor.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
+        if (rgbMatch) {
+            return {
+                r: Number(rgbMatch[1]),
+                g: Number(rgbMatch[2]),
+                b: Number(rgbMatch[3])
+            };
+        }
+
+        return null;
+    },
+
+    getReadableTextColor(backgroundColor) {
+        const rgb = this.parseColorToRgb(backgroundColor);
+        if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
+            return '#ffffff';
+        }
+
+        const toLinear = (value) => {
+            const normalized = Math.max(0, Math.min(255, value)) / 255;
+            return normalized <= 0.03928
+                ? normalized / 12.92
+                : Math.pow((normalized + 0.055) / 1.055, 2.4);
+        };
+
+        const luminance =
+            0.2126 * toLinear(rgb.r) +
+            0.7152 * toLinear(rgb.g) +
+            0.0722 * toLinear(rgb.b);
+
+        return luminance > 0.45 ? '#111827' : '#ffffff';
+    },
+
     applyHeaderColor() {
         const customColor = state.settings.headerColor;
         if (customColor) {
@@ -2512,11 +2579,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             // 設定がなければ、--header-color-custom 変数を削除してデフォルトに戻す
             document.documentElement.style.removeProperty('--header-color-custom');
         }
-        // ヘッダーの色が確定した後に、ブラウザのテーマカラーを更新
-        // getComputedStyleで実際に適用されている色を取得
-        const finalHeaderColor = getComputedStyle(elements.appHeader).backgroundColor;
-        elements.themeColorMeta.content = finalHeaderColor;
-        console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}`);
+        const finalHeaderColor = customColor || (state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR);
+        const readableTextColor = this.getReadableTextColor(finalHeaderColor);
+        document.documentElement.style.setProperty('--app-header-bg', finalHeaderColor);
+        document.documentElement.style.setProperty('--app-header-fg', readableTextColor);
+        if (elements.themeColorMeta) {
+            elements.themeColorMeta.setAttribute('content', finalHeaderColor);
+        }
+        console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}, 文字色: ${readableTextColor}`);
     },
 
     applyBackgroundImage() {
@@ -2902,8 +2972,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         document.body.classList.toggle('dark-mode', isDark);
         // OS設定の上書き用クラス (ダークモードでない場合)
         document.body.classList.toggle('light-mode-forced', !isDark);
-        elements.themeColorMeta.content = isDark ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
-        console.log(`ダークモード ${isDark ? '有効' : '無効'}. テーマカラー: ${elements.themeColorMeta.content}`);
+        if (elements.themeColorMeta) {
+            elements.themeColorMeta.content = isDark ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+        }
+        console.log(`ダークモード ${isDark ? '有効' : '無効'}. テーマカラー: ${elements.themeColorMeta?.content || '未設定'}`);
         this.applyOverlayOpacity();
         this.applyHeaderColor();
     },
@@ -5265,6 +5337,9 @@ const appLogic = {
         localUiSettings.floatingPanelBehavior = FLOATING_PANEL_BEHAVIOR_OPTIONS.includes(settings.floatingPanelBehavior)
             ? settings.floatingPanelBehavior
             : DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior;
+        localUiSettings.lastSeenReleaseVersion = typeof settings.lastSeenReleaseVersion === 'string'
+            ? settings.lastSeenReleaseVersion
+            : DEFAULT_LOCAL_UI_SETTINGS.lastSeenReleaseVersion;
         return localUiSettings;
     },
 
@@ -5290,6 +5365,21 @@ const appLogic = {
             [key]: value
         });
         await this.saveLocalUiSettings();
+    },
+
+    formatReleaseNotes(version = APP_VERSION) {
+        const notes = RELEASE_NOTES[version] || [];
+        const lines = [`ChatAI PWA v${version}`];
+        if (notes.length > 0) {
+            lines.push('', ...notes.map(note => `・${note}`));
+        } else {
+            lines.push('', 'このバージョンのリリースノートは未登録です。');
+        }
+        return lines.join('\n');
+    },
+
+    async showReleaseNotes(version = APP_VERSION) {
+        await uiUtils.showCustomAlert(this.formatReleaseNotes(version));
     },
 
     async loadGlobalSettings() {
@@ -6235,33 +6325,7 @@ const appLogic = {
             }
 
             if (!versionNoticeData) {
-                const acknowledgedVersion = localStorage.getItem(VERSION_ACK_STORAGE_KEY);
-                const legacyVersion = localStorage.getItem(VERSION_LEGACY_STORAGE_KEY);
-                const currentVersion = APP_VERSION;
-                console.log(`[VersionNotice] バージョンチェック開始。ack=${acknowledgedVersion ?? 'none'}, legacy=${legacyVersion ?? 'none'}, current=${currentVersion}`);
-
-                const shouldShowNotice =
-                    !acknowledgedVersion ||
-                    acknowledgedVersion !== currentVersion ||
-                    (legacyVersion && legacyVersion !== currentVersion);
-
-                if (shouldShowNotice) {
-                    const newFeatures = VERSION_HISTORY[currentVersion];
-                    let message = `アプリがバージョン ${currentVersion} にアップデートされました。`;
-    
-                    if (newFeatures && newFeatures.length > 0) {
-                        message += "\n\n主な更新内容:\n- " + newFeatures.join("\n- ");
-                    }
-                    versionNoticeData = {
-                        version: currentVersion,
-                        message,
-                        shouldPersist: true
-                    };
-                    sessionStorage.setItem(VERSION_NOTICE_SESSION_KEY, JSON.stringify(versionNoticeData));
-                    console.log(`[VersionNotice] 新しいバージョン通知を作成しました。(ack=${acknowledgedVersion ?? 'none'}, legacy=${legacyVersion ?? 'none'})`);
-                } else {
-                    console.log("[VersionNotice] 既に最新バージョンが確認済みのため通知をスキップします。");
-                }
+                console.log("[VersionNotice] DB読み込み後に端末ごとの既読バージョンを確認します。");
             }
         } catch (e) {
             console.error("バージョンチェック処理中にエラー:", e);
@@ -6412,7 +6476,7 @@ const appLogic = {
         } else {
             console.error("Marked.jsライブラリが読み込まれていません！");
         }
-        elements.appVersionSpan.textContent = APP_VERSION;
+        elements.appVersionSpan.textContent = `ChatAI PWA v${APP_VERSION} / cache ${APP_CACHE_VERSION}`;
         window.addEventListener('beforeinstallprompt', (e) => e.preventDefault());
         
         // デバッグ用ヘルパー
@@ -6473,6 +6537,15 @@ const appLogic = {
             // --- ステップ4: データ読み込みとUI更新 ---
             if (isSyncReload) uiUtils.updateProgressMessage('各種設定を読み込み中...');
             await this.loadGlobalSettings();
+            if (!versionNoticeData && state.localUiSettings.lastSeenReleaseVersion !== APP_VERSION) {
+                versionNoticeData = {
+                    version: APP_VERSION,
+                    promptMessage: `ChatAI PWA v${APP_VERSION} に更新されました。\nリリースノートを表示しますか？`,
+                    shouldPersist: true
+                };
+                sessionStorage.setItem(VERSION_NOTICE_SESSION_KEY, JSON.stringify(versionNoticeData));
+                console.log(`[VersionNotice] 端末ごとの既読バージョンを更新対象として検出しました。lastSeen=${state.localUiSettings.lastSeenReleaseVersion || 'none'}, current=${APP_VERSION}`);
+            }
             if (isSyncReload) uiUtils.updateProgressMessage('プロファイル情報を読み込み中...');
             await this.loadProfiles();
 
@@ -6603,15 +6676,21 @@ const appLogic = {
             uiUtils.hideProgressDialog();
             sessionStorage.removeItem('isSyncReload');
 
-            if (versionNoticeData && versionNoticeData.message) {
+            if (versionNoticeData && (versionNoticeData.promptMessage || versionNoticeData.message)) {
                 try {
                     console.log(`[VersionNotice] 通知を表示します。version=${versionNoticeData.version}`);
-                    await uiUtils.showCustomAlert(versionNoticeData.message);
+                    if (versionNoticeData.promptMessage) {
+                        const shouldShowReleaseNotes = await uiUtils.showCustomConfirm(versionNoticeData.promptMessage);
+                        if (shouldShowReleaseNotes) {
+                            await this.showReleaseNotes(versionNoticeData.version || APP_VERSION);
+                        }
+                    } else {
+                        await uiUtils.showCustomAlert(versionNoticeData.message);
+                    }
                     console.log("[VersionNotice] 通知がユーザーによって確認されました。");
                     if (versionNoticeData.shouldPersist) {
-                        localStorage.setItem(VERSION_ACK_STORAGE_KEY, versionNoticeData.version);
-                        localStorage.setItem(VERSION_LEGACY_STORAGE_KEY, versionNoticeData.version);
-                        console.log(`[VersionNotice] バージョン ${versionNoticeData.version} をACK/LEGACYキーに保存しました。`);
+                        await this.updateLocalUiSetting('lastSeenReleaseVersion', versionNoticeData.version || APP_VERSION);
+                        console.log(`[VersionNotice] バージョン ${versionNoticeData.version || APP_VERSION} をlocalUiSettingsに保存しました。`);
                     }
                 } catch (versionAlertError) {
                     console.error("[VersionNotice] 通知の表示に失敗しました:", versionAlertError);
@@ -7528,6 +7607,9 @@ const appLogic = {
         });
         
         elements.updateAppBtn.addEventListener('click', () => this.updateApp());
+        if (elements.releaseNotesBtn) {
+            elements.releaseNotesBtn.addEventListener('click', () => this.showReleaseNotes());
+        }
         elements.clearDataBtn.addEventListener('click', () => this.confirmClearAllData());
     
         elements.enableProofreadingCheckbox.addEventListener('change', () => {
