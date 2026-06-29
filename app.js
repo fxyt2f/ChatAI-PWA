@@ -23,6 +23,8 @@ const DEFAULT_MAX_TOKENS = 4000;
 const DEFAULT_TOP_K = 40;
 const DEFAULT_TOP_P = 0.95;
 const DEFAULT_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'; // デフォルトフォント
+const DEFAULT_CHAT_FONT_SIZE = 14;
+const DEFAULT_CHAT_LINE_HEIGHT = 1.5;
 const CHAT_TITLE_LENGTH = 15;
 const TEXTAREA_MAX_HEIGHT = 120;
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
@@ -315,6 +317,8 @@ try {
         darkModeToggle: document.getElementById('dark-mode-toggle'),
         debugModeToggle: document.getElementById('debug-mode-toggle'),
         fontFamilyInput: document.getElementById('font-family-input'),
+        chatFontSizeInput: document.getElementById('chat-font-size-input'),
+        chatLineHeightInput: document.getElementById('chat-line-height-input'),
         hideSystemPromptToggle: document.getElementById('hide-system-prompt-toggle'),
         geminiEnableGroundingToggle: document.getElementById('gemini-enable-grounding-toggle'),
         geminiEnableFunctionCallingToggle: document.getElementById('gemini-enable-function-calling-toggle'),
@@ -545,6 +549,8 @@ const state = {
         darkMode: false,
         backgroundImageBlob: null,
         fontFamily: '',
+        chatFontSize: DEFAULT_CHAT_FONT_SIZE,
+        chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
         hideSystemPromptInChat: false,
         enableSwipeNavigation: false,
         enableAutoRetry: true,
@@ -906,7 +912,7 @@ const dbUtils = {
                                 'enableThoughtTranslation', 'thoughtTranslationModel', 'dummyUser',
                                 'applyDummyToProofread', 'applyDummyToTranslate', 'dummyModel', 'reverseDummyOrder', 'concatDummyModel',
                                 'additionalModels', 'additionalOpenRouterModels', 'enterToSend', 'historySortOrder', 'darkMode', 'fontFamily',
-                                'hideSystemPromptInChat', 'enableSwipeNavigation', 'enableAutoRetry', 'maxRetries',
+                                'chatFontSize', 'chatLineHeight', 'hideSystemPromptInChat', 'enableSwipeNavigation', 'enableAutoRetry', 'maxRetries',
                                 'useFixedRetryDelay', 'fixedRetryDelaySeconds', 'maxBackoffDelaySeconds',
                                 'enableProofreading', 'proofreadingModelName', 'proofreadingSystemInstruction',
                                 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'googleSearchApiKey',
@@ -2611,6 +2617,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.darkModeToggle.checked = state.settings.darkMode;
         elements.debugModeToggle.checked = state.settings.debugMode;
         elements.fontFamilyInput.value = state.settings.fontFamily || '';
+        if (elements.chatFontSizeInput) {
+            elements.chatFontSizeInput.value = uiUtils.getValidChatFontSize(state.settings.chatFontSize);
+        }
+        if (elements.chatLineHeightInput) {
+            elements.chatLineHeightInput.value = uiUtils.getValidChatLineHeight(state.settings.chatLineHeight);
+        }
         elements.hideSystemPromptToggle.checked = state.settings.hideSystemPromptInChat;
         elements.geminiEnableGroundingToggle.checked = state.settings.geminiEnableGrounding;
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
@@ -2670,6 +2682,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.updateBackgroundSettingsUI();
         this.applyDarkMode();
         this.applyFontFamily();
+        this.applyChatTypography();
         this.toggleSystemPromptVisibility();
         this.applyOverlayOpacity();
         this.applyHeaderColor();
@@ -2883,6 +2896,41 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const fontFamilyToApply = customFont ? customFont : DEFAULT_FONT_FAMILY;
         document.documentElement.style.setProperty('--font-family', fontFamilyToApply);
         console.log(`フォント適用: ${fontFamilyToApply}`);
+    },
+
+    getValidChatFontSize(value) {
+        const parsed = Number.parseFloat(value);
+        if (!Number.isFinite(parsed) || parsed < 10 || parsed > 24) {
+            return DEFAULT_CHAT_FONT_SIZE;
+        }
+        return Math.round(parsed);
+    },
+
+    getValidChatLineHeight(value) {
+        const parsed = Number.parseFloat(value);
+        if (!Number.isFinite(parsed) || parsed < 1 || parsed > 2.5) {
+            return DEFAULT_CHAT_LINE_HEIGHT;
+        }
+        return Math.round(parsed * 10) / 10;
+    },
+
+    applyChatTypography() {
+        const fontSize = this.getValidChatFontSize(state.settings.chatFontSize);
+        const lineHeight = this.getValidChatLineHeight(state.settings.chatLineHeight);
+
+        state.settings.chatFontSize = fontSize;
+        state.settings.chatLineHeight = lineHeight;
+
+        if (elements.chatFontSizeInput) {
+            elements.chatFontSizeInput.value = String(fontSize);
+        }
+        if (elements.chatLineHeightInput) {
+            elements.chatLineHeightInput.value = String(lineHeight);
+        }
+
+        document.documentElement.style.setProperty('--chat-font-size', `${fontSize}px`);
+        document.documentElement.style.setProperty('--chat-line-height', String(lineHeight));
+        console.log(`チャット本文表示設定適用: font-size=${fontSize}px, line-height=${lineHeight}`);
     },
 
     // --- システムプロンプトUI更新 ---
@@ -5420,7 +5468,7 @@ const appLogic = {
     getCurrentUiSettings() {
         const settings = {};
         const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
-        const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
+        const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity', 'chatFontSize', 'chatLineHeight'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
         settings.systemPrompt = elements.systemPromptDefaultTextarea.value.trim();
@@ -5456,6 +5504,14 @@ const appLogic = {
             }
             
             if (element) {
+                if (key === 'chatFontSize') {
+                    settings[key] = uiUtils.getValidChatFontSize(element.value);
+                    return;
+                }
+                if (key === 'chatLineHeight') {
+                    settings[key] = uiUtils.getValidChatLineHeight(element.value);
+                    return;
+                }
                 const value = (key === 'overlayOpacity' || key === 'messageOpacity') ? parseFloat(element.value) / 100 : parseFloat(element.value);
                 settings[key] = isNaN(value) ? null : value;
             }
@@ -7227,6 +7283,8 @@ const appLogic = {
                 }
             }},
             fontFamily: { element: elements.fontFamilyInput, event: 'input', onUpdate: () => uiUtils.applyFontFamily() },
+            chatFontSize: { element: elements.chatFontSizeInput, event: 'input', getValue: () => uiUtils.getValidChatFontSize(elements.chatFontSizeInput?.value), onUpdate: () => uiUtils.applyChatTypography() },
+            chatLineHeight: { element: elements.chatLineHeightInput, event: 'input', getValue: () => uiUtils.getValidChatLineHeight(elements.chatLineHeightInput?.value), onUpdate: () => uiUtils.applyChatTypography() },
             hideSystemPromptInChat: { element: elements.hideSystemPromptToggle, event: 'change', onUpdate: () => uiUtils.toggleSystemPromptVisibility() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },

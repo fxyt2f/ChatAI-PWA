@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.21">
+    <link rel="stylesheet" href="./style.css?v=1.22">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.21" defer></script>
+    <script src="./dropbox.js?v=1.22" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.21" defer></script>
+    <script src="./app.js?v=1.22" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -820,6 +820,19 @@
                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
                        ※ 没入感を高めたい場合に。非表示でも機能は有効。
                    </p>
+                   <div class="chat-typography-settings" aria-label="チャット本文の表示設定">
+                       <div class="chat-typography-field">
+                           <label for="chat-font-size-input">文字サイズ:</label>
+                           <div class="number-input-with-unit">
+                               <input type="number" id="chat-font-size-input" min="10" max="24" step="1" value="14" aria-label="チャット本文の文字サイズ">
+                               <span>px</span>
+                           </div>
+                       </div>
+                       <div class="chat-typography-field">
+                           <label for="chat-line-height-input">行間:</label>
+                           <input type="number" id="chat-line-height-input" min="1" max="2.5" step="0.1" value="1.5" aria-label="チャット本文の行間">
+                       </div>
+                   </div>
                    <!-- フローティングボタン -->
                    <label for="floating-panel-behavior">フローティングボタンの表示:</label>
                    <select id="floating-panel-behavior" aria-label="フローティングボタンの表示">

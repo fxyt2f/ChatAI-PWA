@@ -2,6 +2,8 @@
 :root {
     /* Font */
     --font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --chat-font-size: 14px;
+    --chat-line-height: 1.5;
 
     /* Spacing Unit */
     --spacing-unit: 8px;
@@ -591,6 +593,10 @@ body.dark-mode #settings-screen a:hover {
     border-radius: var(--border-radius-md);
     cursor: pointer;
 }
+.message-content {
+    font-size: var(--chat-font-size);
+    line-height: var(--chat-line-height);
+}
 #image-modal-overlay { background-color: rgba(0, 0, 0, 0.85); }
 .citation-details, .function-call-details { margin-top: var(--spacing-unit); font-size: 0.8rem; border-top: 1px dashed var(--border-secondary); padding-top: var(--spacing-unit); }
 .message-edit-area { margin-top: 5px; }
@@ -627,6 +633,38 @@ input[type="color"]::-webkit-color-swatch { border: 1px solid var(--border-prima
 input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary); border-radius: 4px; }
 .settings-reset-button { background-color: var(--bg-button-action); color: var(--text-light); padding: 4px 10px; font-size: 12px; border-radius: 4px; margin-left: auto; }
 .settings-reset-button:hover { background-color: var(--bg-button-action-hover); }
+.chat-typography-settings {
+    display: flex;
+    gap: 16px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin: 12px 0 16px;
+}
+.chat-typography-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 160px;
+}
+.chat-typography-field label {
+    margin-bottom: 0;
+}
+.chat-typography-field input {
+    margin-bottom: 0;
+}
+.number-input-with-unit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.number-input-with-unit input {
+    flex: 1;
+    margin-bottom: 0;
+}
+.number-input-with-unit span {
+    color: var(--text-secondary);
+    font-size: 0.9em;
+}
 .message-content > *:first-child { margin-top: 0; }
 .message-content > *:last-child { margin-bottom: 0; }
 .message-content h1, .message-content h2, .message-content h3, .message-content h4, .message-content h5, .message-content h6 { margin-top: 1.2em; margin-bottom: 0.6em; font-weight: bold; line-height: 1.3; color: inherit; }
