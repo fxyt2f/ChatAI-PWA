@@ -27,6 +27,14 @@ const DEFAULT_CHAT_FONT_SIZE = 14;
 const DEFAULT_CHAT_LINE_HEIGHT = 1.5;
 const CHAT_FONT_SIZE_OPTIONS = [12, 13, 14, 15, 16, 18, 20, 22, 24];
 const CHAT_LINE_HEIGHT_OPTIONS = [1.2, 1.4, 1.5, 1.6, 1.8, 2.0, 2.2];
+const DEFAULT_LOCAL_UI_SETTINGS = {
+    chatFontSize: DEFAULT_CHAT_FONT_SIZE,
+    chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
+    hideSystemPromptInChat: false,
+    floatingPanelBehavior: 'on-click'
+};
+const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
+const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
 const CHAT_TITLE_LENGTH = 15;
 const TEXTAREA_MAX_HEIGHT = 120;
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
@@ -618,6 +626,8 @@ Reason: [NGの場合の理由]`,
         sdPromptImproveSystemPrompt: `あなたはプロのプロンプトエンジニアです。提示された「元のプロンプト」と「失敗理由」に基づき、失敗理由を解決するための改善された英語の画像生成プロンプトを生成してください。余計な解説や前置きは一切含めず、改善されたプロンプト本体のみを出力してください。`,
         debugMode: false,
     },
+    localUiSettings: { ...DEFAULT_LOCAL_UI_SETTINGS },
+    hasSavedLocalUiSettings: false,
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
@@ -914,7 +924,7 @@ const dbUtils = {
                                 'enableThoughtTranslation', 'thoughtTranslationModel', 'dummyUser',
                                 'applyDummyToProofread', 'applyDummyToTranslate', 'dummyModel', 'reverseDummyOrder', 'concatDummyModel',
                                 'additionalModels', 'additionalOpenRouterModels', 'enterToSend', 'historySortOrder', 'darkMode', 'fontFamily',
-                                'chatFontSize', 'chatLineHeight', 'hideSystemPromptInChat', 'enableSwipeNavigation', 'enableAutoRetry', 'maxRetries',
+                                'enableSwipeNavigation', 'enableAutoRetry', 'maxRetries',
                                 'useFixedRetryDelay', 'fixedRetryDelaySeconds', 'maxBackoffDelaySeconds',
                                 'enableProofreading', 'proofreadingModelName', 'proofreadingSystemInstruction',
                                 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'googleSearchApiKey',
@@ -1598,6 +1608,9 @@ const dbUtils = {
         ];
 
         const currentTokens = await dbUtils.getSetting('dropboxTokens');
+        const currentLocalUiSettings = await dbUtils.getSetting('localUiSettings');
+        const localUiSettingKeysForImport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
+        const settingsForImport = (settings || []).filter(setting => !localUiSettingKeysForImport.has(setting.key));
 
         try {
             uiUtils.updateProgressMessage('データを一時領域にインポート中...');
@@ -1608,7 +1621,7 @@ const dbUtils = {
                 'memory_store_temp': memories || [],
                 'image_assets_temp': assetsWithBlobs,
                 'image_store_temp': imagesWithBlobs,
-                'settings_temp': settings || []
+                'settings_temp': settingsForImport
             };
 
             const tempClearPromises = tempStoreNames.map(name => {
@@ -1663,6 +1676,9 @@ const dbUtils = {
 
             if (currentTokens) {
                 mainTx.objectStore(SETTINGS_STORE).put(currentTokens);
+            }
+            if (currentLocalUiSettings) {
+                mainTx.objectStore(SETTINGS_STORE).put(currentLocalUiSettings);
             }
 
             await new Promise((resolve, reject) => {
@@ -5232,6 +5248,50 @@ const appLogic = {
         await this.handleSend(false, -1, true);
     },
 
+    getSharedProfileSettings(settings = {}) {
+        const sharedSettings = { ...settings };
+        delete sharedSettings.localUiSettings;
+        LOCAL_UI_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
+        return sharedSettings;
+    },
+
+    normalizeLocalUiSettings(settings = {}) {
+        const localUiSettings = { ...DEFAULT_LOCAL_UI_SETTINGS };
+        localUiSettings.chatFontSize = uiUtils.getValidChatFontSize(settings.chatFontSize);
+        localUiSettings.chatLineHeight = uiUtils.getValidChatLineHeight(settings.chatLineHeight);
+        localUiSettings.hideSystemPromptInChat = typeof settings.hideSystemPromptInChat === 'boolean'
+            ? settings.hideSystemPromptInChat
+            : DEFAULT_LOCAL_UI_SETTINGS.hideSystemPromptInChat;
+        localUiSettings.floatingPanelBehavior = FLOATING_PANEL_BEHAVIOR_OPTIONS.includes(settings.floatingPanelBehavior)
+            ? settings.floatingPanelBehavior
+            : DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior;
+        return localUiSettings;
+    },
+
+    applyLocalUiSettingsToEffectiveSettings() {
+        state.localUiSettings = this.normalizeLocalUiSettings(state.localUiSettings);
+        delete state.settings.localUiSettings;
+        LOCAL_UI_SETTING_KEYS.forEach(key => {
+            state.settings[key] = state.localUiSettings[key];
+        });
+    },
+
+    async saveLocalUiSettings() {
+        state.localUiSettings = this.normalizeLocalUiSettings(state.localUiSettings);
+        this.applyLocalUiSettingsToEffectiveSettings();
+        state.hasSavedLocalUiSettings = true;
+        await dbUtils.saveSetting('localUiSettings', state.localUiSettings);
+    },
+
+    async updateLocalUiSetting(key, value) {
+        if (!LOCAL_UI_SETTING_KEYS.includes(key)) return;
+        state.localUiSettings = this.normalizeLocalUiSettings({
+            ...state.localUiSettings,
+            [key]: value
+        });
+        await this.saveLocalUiSettings();
+    },
+
     async loadGlobalSettings() {
         try {
             console.log("[GlobalSettings] 共通設定の読み込みを開始します。");
@@ -5240,6 +5300,12 @@ const appLogic = {
                 state.settings.backgroundImageBlob = storedBlob.value;
                 console.log("[GlobalSettings] 背景画像BlobをDBから読み込みました。");
             }
+
+            const storedLocalUiSettings = await dbUtils.getSetting('localUiSettings');
+            state.hasSavedLocalUiSettings = !!storedLocalUiSettings?.value;
+            state.localUiSettings = this.normalizeLocalUiSettings(storedLocalUiSettings?.value || {});
+            this.applyLocalUiSettingsToEffectiveSettings();
+            console.log("[GlobalSettings] 端末ごとのUI設定を読み込みました:", state.localUiSettings);
         } catch (error) {
             console.error("[GlobalSettings] 共通設定の読み込み中にエラーが発生しました:", error);
             // エラーが発生しても起動処理は続行する
@@ -5259,7 +5325,7 @@ const appLogic = {
                     name: "デフォルトプロファイル",
                     icon: null,
                     createdAt: Date.now(),
-                    settings: { ...state.settings }
+                    settings: this.getSharedProfileSettings(state.settings)
                 };
                 const newId = await dbUtils.addProfile(newProfile);
                 await dbUtils.saveSetting('activeProfileId', newId);
@@ -5295,8 +5361,26 @@ const appLogic = {
             const loadedProfileSettings = state.activeProfile.settings || {};
             Object.assign(newSettings, loadedProfileSettings);
 
+            if (!state.hasSavedLocalUiSettings) {
+                const migratedLocalUiSettings = {};
+                LOCAL_UI_SETTING_KEYS.forEach(key => {
+                    if (loadedProfileSettings[key] !== undefined) {
+                        migratedLocalUiSettings[key] = loadedProfileSettings[key];
+                    }
+                });
+                state.localUiSettings = this.normalizeLocalUiSettings({
+                    ...state.localUiSettings,
+                    ...migratedLocalUiSettings
+                });
+                state.hasSavedLocalUiSettings = true;
+                dbUtils.saveSetting('localUiSettings', state.localUiSettings)
+                    .catch(error => console.error("[LocalUI] 旧プロファイル設定からの移行保存に失敗しました:", error));
+            }
+            state.activeProfile.settings = this.getSharedProfileSettings(loadedProfileSettings);
+
             // 3. state.settings を更新する
             state.settings = newSettings;
+            this.applyLocalUiSettingsToEffectiveSettings();
 
             uiUtils.applySettingsToUI(); 
             uiUtils.updateProfileCardUI();
@@ -5470,13 +5554,11 @@ const appLogic = {
     getCurrentUiSettings() {
         const settings = {};
         const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
-        const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity', 'chatFontSize', 'chatLineHeight'];
+        const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
         settings.systemPrompt = elements.systemPromptDefaultTextarea.value.trim();
         settings.fixedRetryDelaySeconds = parseFloat(elements.fixedRetryDelayInput.value) || null;
-        settings.hideSystemPromptInChat = elements.hideSystemPromptToggle.checked;
-        settings.floatingPanelBehavior = elements.floatingPanelBehaviorSelect.value;
         const allowUiChangesEl = document.getElementById('allow-prompt-ui-changes');
         if (allowUiChangesEl) {
             settings.allowPromptUiChanges = allowUiChangesEl.checked;
@@ -5501,21 +5583,11 @@ const appLogic = {
             let element;
             if (key === 'overlayOpacity' || key === 'messageOpacity') {
                 element = elements[key + 'Slider'];
-            } else if (key === 'chatFontSize' || key === 'chatLineHeight') {
-                element = elements[key + 'Select'];
             } else {
                 element = elements[key + 'Input'];
             }
             
             if (element) {
-                if (key === 'chatFontSize') {
-                    settings[key] = uiUtils.getValidChatFontSize(element.value);
-                    return;
-                }
-                if (key === 'chatLineHeight') {
-                    settings[key] = uiUtils.getValidChatLineHeight(element.value);
-                    return;
-                }
                 const value = (key === 'overlayOpacity' || key === 'messageOpacity') ? parseFloat(element.value) / 100 : parseFloat(element.value);
                 settings[key] = isNaN(value) ? null : value;
             }
@@ -6464,7 +6536,16 @@ const appLogic = {
                     console.log("[Migration] プロファイルが存在せず、古い設定データが見つかったため移行処理を実行します。");
                     const oldSettingsObject = {};
                     oldSettingsArray.forEach(item => { oldSettingsObject[item.key] = item.value; });
-                    const initialProfileSettings = { ...state.settings, ...oldSettingsObject };
+                    if (!state.hasSavedLocalUiSettings) {
+                        state.localUiSettings = this.normalizeLocalUiSettings({
+                            ...state.localUiSettings,
+                            ...oldSettingsObject
+                        });
+                        state.hasSavedLocalUiSettings = true;
+                        await dbUtils.saveSetting('localUiSettings', state.localUiSettings);
+                        this.applyLocalUiSettingsToEffectiveSettings();
+                    }
+                    const initialProfileSettings = this.getSharedProfileSettings({ ...state.settings, ...oldSettingsObject });
                     delete initialProfileSettings.backgroundImageBlob;
                     const defaultProfile = { name: "デフォルトプロファイル", icon: null, createdAt: Date.now(), settings: initialProfileSettings };
                     const newId = await dbUtils.addProfile(defaultProfile);
@@ -7287,9 +7368,6 @@ const appLogic = {
                 }
             }},
             fontFamily: { element: elements.fontFamilyInput, event: 'input', onUpdate: () => uiUtils.applyFontFamily() },
-            chatFontSize: { element: elements.chatFontSizeSelect, event: 'change', getValue: () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), onUpdate: () => uiUtils.applyChatTypography() },
-            chatLineHeight: { element: elements.chatLineHeightSelect, event: 'change', getValue: () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), onUpdate: () => uiUtils.applyChatTypography() },
-            hideSystemPromptInChat: { element: elements.hideSystemPromptToggle, event: 'change', onUpdate: () => uiUtils.toggleSystemPromptVisibility() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
             enableSwipeNavigation: { element: elements.swipeNavigationToggle, event: 'change' },
@@ -7319,7 +7397,6 @@ const appLogic = {
             summaryModelName: { element: elements.summaryModelNameSelect, event: 'change' },
             summarySystemPrompt: { element: elements.summarySystemPromptTextarea, event: 'input' },
             enableSummaryButton: { element: elements.enableSummaryButtonToggle, event: 'change', onUpdate: () => this.toggleSummaryButtonVisibility() },
-            floatingPanelBehavior: { element: elements.floatingPanelBehaviorSelect, event: 'change', onUpdate: () => this.applyFloatingPanelBehavior() },
             dropboxAppKey: { element: elements.dropboxAppKeyInput, event: 'change', onUpdate: (value) => {
                 if (window.dropboxApi?.setAppKey) {
                     window.dropboxApi.setAppKey(value);
@@ -7353,6 +7430,23 @@ const appLogic = {
             const { element, event, onUpdate, getValue } = settingsMap[key];
             setupInstantSave(element, key, event, onUpdate, getValue);
         }
+
+        const setupLocalUiSettingSave = (element, key, eventType = 'change', getValue = null, onUpdate = null) => {
+            if (!element) {
+                console.warn(`❌ [Local UI Settings] '${key}' に対応するDOM要素が見つかりません。`);
+                return;
+            }
+            element.addEventListener(eventType, async () => {
+                const value = getValue ? getValue() : (element.type === 'checkbox' ? element.checked : element.value);
+                await this.updateLocalUiSetting(key, value);
+                if (onUpdate) onUpdate(value);
+            });
+        };
+
+        setupLocalUiSettingSave(elements.chatFontSizeSelect, 'chatFontSize', 'change', () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), () => uiUtils.applyChatTypography());
+        setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
+        setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !!elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
+        setupLocalUiSettingSave(elements.floatingPanelBehaviorSelect, 'floatingPanelBehavior', 'change', () => elements.floatingPanelBehaviorSelect?.value || DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior, () => this.applyFloatingPanelBehavior());
     
         // --- OpenRouterモデル名テキストボックスのイベントリスナー ---
         if (elements.openrouterModelInput) {
@@ -7630,13 +7724,6 @@ const appLogic = {
         elements.closeAssetDialogBtn.addEventListener('click', () => elements.assetManagementDialog.close());
 
         elements.deleteAllAssetsBtn.addEventListener('click', () => this.confirmDeleteAllAssets());
-
-        elements.floatingPanelBehaviorSelect.addEventListener('change', () => {
-            state.settings.floatingPanelBehavior = elements.floatingPanelBehaviorSelect.value;
-            this.updateCurrentProfile();
-            // 新しい挙動を即座に適用
-            this.applyFloatingPanelBehavior();
-        });
 
         // --- History Summary ---
         elements.summarizeHistoryBtn.addEventListener('click', () => this.startSummaryProcess());
@@ -8372,6 +8459,9 @@ const appLogic = {
         
         // stateのデータを汚染しないようにディープコピーする
         const profileToExport = JSON.parse(JSON.stringify(state.activeProfile));
+        if (profileToExport.settings) {
+            profileToExport.settings = this.getSharedProfileSettings(profileToExport.settings);
+        }
         
         // アイコンBlobがあればBase64に変換して埋め込む
         if (state.activeProfile.icon instanceof Blob) {
@@ -8417,6 +8507,7 @@ const appLogic = {
                 }
 
                 let newProfile = { ...importedData };
+                newProfile.settings = this.getSharedProfileSettings(newProfile.settings);
                 
                 if (newProfile.icon && newProfile.icon.data) {
                     try {
@@ -10889,6 +10980,9 @@ const appLogic = {
         
         // stateのデータを汚染しないようにディープコピーする
         const profileToExport = JSON.parse(JSON.stringify(state.activeProfile));
+        if (profileToExport.settings) {
+            profileToExport.settings = this.getSharedProfileSettings(profileToExport.settings);
+        }
         
         // アイコンBlobがあればBase64に変換して埋め込む
         if (state.activeProfile.icon instanceof Blob) {
@@ -10934,6 +11028,7 @@ const appLogic = {
                 }
 
                 let newProfile = { ...importedData };
+                newProfile.settings = this.getSharedProfileSettings(newProfile.settings);
                 
                 if (newProfile.icon && newProfile.icon.data) {
                     try {
@@ -12368,8 +12463,10 @@ const appLogic = {
                 request.onerror = (e) => rej(e.target.error);
             });
 
+            const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
             const settingsForExport = allSettings.filter(setting => 
                 !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId'].includes(setting.key)
+                && !localUiSettingKeysForExport.has(setting.key)
             );
 
             const localAssets = new Map();
@@ -12379,6 +12476,9 @@ const appLogic = {
             };
 
             for (const profile of profiles) {
+                if (profile.settings) {
+                    profile.settings = this.getSharedProfileSettings(profile.settings);
+                }
                 const originalProfile = await dbUtils.getProfile(profile.id);
                 if (originalProfile && originalProfile.icon instanceof Blob) {
                     const assetId = `profile_${profile.id}_icon.webp`;
