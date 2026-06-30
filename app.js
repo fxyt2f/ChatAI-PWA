@@ -48,14 +48,19 @@ const DARK_THEME_COLOR = '#007aff';
 const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
-const APP_VERSION = "1.27.1";
-const APP_CACHE_VERSION = "v1.27.1";
+const APP_VERSION = "1.27.2";
+const APP_CACHE_VERSION = "v1.27.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES = {
+    "1.27.2": [
+        "ヘッダー文字色と新規チャットボタン色が反映されない問題を修正しました。",
+        "ヘッダー文字色と新規チャットボタン色にリセットボタンを追加しました。",
+        "色設定エリアのUIを整理しました。"
+    ],
     "1.27.1": [
         "ヘッダー文字色を自動/手動で選べるようにしました。",
         "新規チャットボタン色を設定できるようにしました。",
@@ -416,6 +421,8 @@ try {
         headerTextColorInput: document.getElementById('header-text-color-input'),
         newChatButtonColorInput: document.getElementById('new-chat-button-color-input'),
         resetHeaderColorBtn: document.getElementById('reset-header-color-btn'),
+        resetHeaderTextColorBtn: document.getElementById('reset-header-text-color-btn'),
+        resetNewChatButtonColorBtn: document.getElementById('reset-new-chat-button-color-btn'),
         messageOpacitySlider: document.getElementById('message-opacity-slider'),
         messageOpacityValue:  document.getElementById('message-opacity-value'),
         modelWarningMessage: document.getElementById('model-warning-message'),
@@ -2585,6 +2592,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return mode === 'custom' ? 'custom' : DEFAULT_HEADER_TEXT_COLOR_MODE;
     },
 
+    setThemeCssVariable(name, value) {
+        document.documentElement.style.setProperty(name, value);
+        if (document.body) {
+            document.body.style.setProperty(name, value);
+        }
+    },
+
     getReadableTextColor(backgroundColor) {
         const rgb = this.parseColorToRgb(backgroundColor);
         if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
@@ -2620,8 +2634,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const readableTextColor = headerTextColorMode === 'custom'
             ? this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR)
             : this.getReadableTextColor(finalHeaderColor);
-        document.documentElement.style.setProperty('--app-header-bg', finalHeaderColor);
-        document.documentElement.style.setProperty('--app-header-fg', readableTextColor);
+        this.setThemeCssVariable('--app-header-bg', finalHeaderColor);
+        this.setThemeCssVariable('--app-header-fg', readableTextColor);
         if (elements.themeColorMeta) {
             elements.themeColorMeta.setAttribute('content', finalHeaderColor);
         }
@@ -2631,8 +2645,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     applyNewChatButtonColor() {
         const buttonColor = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
         const buttonTextColor = this.getReadableTextColor(buttonColor);
-        document.documentElement.style.setProperty('--new-chat-button-bg', buttonColor);
-        document.documentElement.style.setProperty('--new-chat-button-fg', buttonTextColor);
+        this.setThemeCssVariable('--new-chat-button-bg', buttonColor);
+        this.setThemeCssVariable('--new-chat-button-fg', buttonTextColor);
         console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}`);
     },
 
@@ -5447,6 +5461,45 @@ const appLogic = {
         await uiUtils.showCustomAlert(this.formatReleaseNotes(version));
     },
 
+    async saveProfileSettingValues(updates) {
+        Object.assign(state.settings, updates);
+        if (!state.activeProfile || !state.activeProfile.settings) return;
+        Object.assign(state.activeProfile.settings, updates);
+        await dbUtils.updateProfile(state.activeProfile);
+        this.markAsDirtyAndSchedulePush('structural');
+    },
+
+    async resetHeaderColorSetting() {
+        await this.saveProfileSettingValues({ headerColor: '' });
+        if (elements.headerColorInput) {
+            elements.headerColorInput.value = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+        }
+        uiUtils.applyHeaderColor();
+    },
+
+    async resetHeaderTextColorSetting() {
+        await this.saveProfileSettingValues({
+            headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
+            headerTextColor: DEFAULT_HEADER_TEXT_COLOR
+        });
+        if (elements.headerTextColorModeSelect) {
+            elements.headerTextColorModeSelect.value = DEFAULT_HEADER_TEXT_COLOR_MODE;
+        }
+        if (elements.headerTextColorInput) {
+            elements.headerTextColorInput.value = DEFAULT_HEADER_TEXT_COLOR;
+        }
+        uiUtils.updateHeaderTextColorInputState();
+        uiUtils.applyHeaderColor();
+    },
+
+    async resetNewChatButtonColorSetting() {
+        await this.saveProfileSettingValues({ newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR });
+        if (elements.newChatButtonColorInput) {
+            elements.newChatButtonColorInput.value = DEFAULT_NEW_CHAT_BUTTON_COLOR;
+        }
+        uiUtils.applyNewChatButtonColor();
+    },
+
     async loadGlobalSettings() {
         try {
             console.log("[GlobalSettings] 共通設定の読み込みを開始します。");
@@ -7696,12 +7749,15 @@ const appLogic = {
         });
         elements.deleteBackgroundBtn.addEventListener('click', () => this.confirmDeleteBackgroundImage());
         
-        elements.resetHeaderColorBtn.addEventListener('click', () => {
-            state.settings.headerColor = '';
-            elements.headerColorInput.value = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
-            const event = new Event('input', { bubbles: true });
-            elements.headerColorInput.dispatchEvent(event);
-        });
+        if (elements.resetHeaderColorBtn) {
+            elements.resetHeaderColorBtn.addEventListener('click', () => this.resetHeaderColorSetting());
+        }
+        if (elements.resetHeaderTextColorBtn) {
+            elements.resetHeaderTextColorBtn.addEventListener('click', () => this.resetHeaderTextColorSetting());
+        }
+        if (elements.resetNewChatButtonColorBtn) {
+            elements.resetNewChatButtonColorBtn.addEventListener('click', () => this.resetNewChatButtonColorSetting());
+        }
         
         elements.messageContainer.addEventListener('click', (event) => {
             if (event.target.tagName === 'IMG' && event.target.closest('.message-content')) {
