@@ -45,14 +45,22 @@ const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
 const LIGHT_THEME_COLOR = '#1976d2';
 const DARK_THEME_COLOR = '#007aff';
-const APP_VERSION = "1.27.0";
-const APP_CACHE_VERSION = "v1.27";
+const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
+const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
+const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
+const APP_VERSION = "1.27.1";
+const APP_CACHE_VERSION = "v1.27.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES = {
+    "1.27.1": [
+        "ヘッダー文字色を自動/手動で選べるようにしました。",
+        "新規チャットボタン色を設定できるようにしました。",
+        "ヘッダー内アイコンやボタンの文字色追従を改善しました。"
+    ],
     "1.27.0": [
         "PWAの見た目、テーマ色、バージョン表示を整理しました。",
         "ヘッダー色に合わせて文字色とtheme-colorが追従するよう改善しました。",
@@ -404,6 +412,9 @@ try {
         overlayOpacitySlider: document.getElementById('overlay-opacity-slider'),
         overlayOpacityValue: document.getElementById('overlay-opacity-value'),
         headerColorInput: document.getElementById('header-color-input'),
+        headerTextColorModeSelect: document.getElementById('header-text-color-mode-select'),
+        headerTextColorInput: document.getElementById('header-text-color-input'),
+        newChatButtonColorInput: document.getElementById('new-chat-button-color-input'),
         resetHeaderColorBtn: document.getElementById('reset-header-color-btn'),
         messageOpacitySlider: document.getElementById('message-opacity-slider'),
         messageOpacityValue:  document.getElementById('message-opacity-value'),
@@ -597,6 +608,9 @@ const state = {
         messageOpacity: 1,
         overlayOpacity: 0.65,
         headerColor: '',
+        headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
+        headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
+        newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
         allowPromptUiChanges: true,
         forceFunctionCalling: false,
         autoScroll: true,
@@ -2549,6 +2563,28 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return null;
     },
 
+    colorToHex(color, fallbackColor = '#ffffff') {
+        const rgb = this.parseColorToRgb(color);
+        if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
+            return fallbackColor;
+        }
+
+        const toHex = (value) => {
+            const clamped = Math.max(0, Math.min(255, Math.round(value)));
+            return clamped.toString(16).padStart(2, '0');
+        };
+
+        return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
+    },
+
+    getValidColor(color, fallbackColor) {
+        return this.parseColorToRgb(color) ? this.colorToHex(color, fallbackColor) : fallbackColor;
+    },
+
+    getValidHeaderTextColorMode(mode) {
+        return mode === 'custom' ? 'custom' : DEFAULT_HEADER_TEXT_COLOR_MODE;
+    },
+
     getReadableTextColor(backgroundColor) {
         const rgb = this.parseColorToRgb(backgroundColor);
         if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
@@ -2571,7 +2607,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     applyHeaderColor() {
-        const customColor = state.settings.headerColor;
+        const customColor = this.parseColorToRgb(state.settings.headerColor) ? this.colorToHex(state.settings.headerColor, LIGHT_THEME_COLOR) : '';
         if (customColor) {
             // カスタム色が設定されていれば、--header-color-custom 変数を設定
             document.documentElement.style.setProperty('--header-color-custom', customColor);
@@ -2580,13 +2616,29 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             document.documentElement.style.removeProperty('--header-color-custom');
         }
         const finalHeaderColor = customColor || (state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR);
-        const readableTextColor = this.getReadableTextColor(finalHeaderColor);
+        const headerTextColorMode = this.getValidHeaderTextColorMode(state.settings.headerTextColorMode);
+        const readableTextColor = headerTextColorMode === 'custom'
+            ? this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR)
+            : this.getReadableTextColor(finalHeaderColor);
         document.documentElement.style.setProperty('--app-header-bg', finalHeaderColor);
         document.documentElement.style.setProperty('--app-header-fg', readableTextColor);
         if (elements.themeColorMeta) {
             elements.themeColorMeta.setAttribute('content', finalHeaderColor);
         }
         console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}, 文字色: ${readableTextColor}`);
+    },
+
+    applyNewChatButtonColor() {
+        const buttonColor = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        document.documentElement.style.setProperty('--new-chat-button-bg', buttonColor);
+        document.documentElement.style.setProperty('--new-chat-button-fg', buttonTextColor);
+        console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}`);
+    },
+
+    updateHeaderTextColorInputState() {
+        if (!elements.headerTextColorInput) return;
+        elements.headerTextColorInput.disabled = this.getValidHeaderTextColorMode(state.settings.headerTextColorMode) !== 'custom';
     },
 
     applyBackgroundImage() {
@@ -2763,7 +2815,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.dropboxSyncFrequencySelect.value = state.settings.dropboxSyncFrequency || 'instant';
 
         const defaultHeaderColor = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
-        elements.headerColorInput.value = state.settings.headerColor || defaultHeaderColor;
+        elements.headerColorInput.value = state.settings.headerColor
+            ? this.getValidColor(state.settings.headerColor, defaultHeaderColor)
+            : defaultHeaderColor;
+        if (elements.headerTextColorModeSelect) {
+            elements.headerTextColorModeSelect.value = this.getValidHeaderTextColorMode(state.settings.headerTextColorMode);
+        }
+        if (elements.headerTextColorInput) {
+            elements.headerTextColorInput.value = this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR);
+        }
+        if (elements.newChatButtonColorInput) {
+            elements.newChatButtonColorInput.value = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        }
+        this.updateHeaderTextColorInputState();
 
         this.updateUserModelOptions();
         this.updateOpenRouterModelChoices();
@@ -2774,6 +2838,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.toggleSystemPromptVisibility();
         this.applyOverlayOpacity();
         this.applyHeaderColor();
+        this.applyNewChatButtonColor();
         this.updateModelWarningMessage();
         this.applyBackgroundImage();
         appLogic.applyWideMode();
@@ -5643,7 +5708,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -7465,6 +7530,12 @@ const appLogic = {
             overlayOpacity: { element: elements.overlayOpacitySlider, event: 'input', onUpdate: () => uiUtils.applyOverlayOpacity() },
             messageOpacity: { element: elements.messageOpacitySlider, event: 'input', onUpdate: (value) => document.documentElement.style.setProperty('--message-bubble-opacity', String(value)) },
             headerColor: { element: elements.headerColorInput, event: 'input', onUpdate: () => uiUtils.applyHeaderColor() },
+            headerTextColorMode: { element: elements.headerTextColorModeSelect, event: 'change', onUpdate: () => {
+                uiUtils.updateHeaderTextColorInputState();
+                uiUtils.applyHeaderColor();
+            } },
+            headerTextColor: { element: elements.headerTextColorInput, event: 'input', onUpdate: () => uiUtils.applyHeaderColor() },
+            newChatButtonColor: { element: elements.newChatButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyNewChatButtonColor() },
             allowPromptUiChanges: { element: document.getElementById('allow-prompt-ui-changes'), event: 'change' },
             forceFunctionCalling: { element: elements.forceFunctionCallingToggle, event: 'change' },
             autoScroll: { element: elements.autoScrollToggle, event: 'change' },
