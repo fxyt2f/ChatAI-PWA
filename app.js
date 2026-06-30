@@ -1032,6 +1032,8 @@ const dbUtils = {
                 content: msg.content,
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
+                apiProvider: msg.apiProvider || null,
+                modelName: msg.modelName || null,
                 tool_calls: msg.tool_calls || null,
                 imageIds: msg.imageIds,
                 finishReason: msg.finishReason,
@@ -1818,6 +1820,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         thoughtDetails.classList.add('thought-summary-details');
         const thoughtSummaryElem = document.createElement('summary');
         thoughtSummaryElem.textContent = '思考プロセス';
+        if (messageData.apiProvider === 'openrouter') {
+            thoughtSummaryElem.textContent = 'OpenRouter Reasoning';
+        }
         thoughtDetails.appendChild(thoughtSummaryElem);
         const thoughtContentDiv = document.createElement('div');
         thoughtContentDiv.classList.add('thought-summary-content');
@@ -8318,6 +8323,8 @@ const appLogic = {
                 role: 'model',
                 content: result.content || '',
                 thoughtSummary: (finalTurnResults.length === 0) ? result.thoughtSummary : null,
+                apiProvider: state.settings.apiProvider || 'gemini',
+                modelName: state.settings.modelName || null,
                 tool_calls: result.toolCalls,
                 timestamp: Date.now(),
                 finishReason: result.finishReason,
