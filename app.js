@@ -45,17 +45,25 @@ const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
 const LIGHT_THEME_COLOR = '#1976d2';
 const DARK_THEME_COLOR = '#007aff';
+const DEFAULT_ACCENT_COLOR = '#1976d2';
 const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
-const APP_VERSION = "1.27.2";
-const APP_CACHE_VERSION = "v1.27.2";
+const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
+const APP_VERSION = "1.27.3";
+const APP_CACHE_VERSION = "v1.27.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES = {
+    "1.27.3": [
+        "テーマ設定を独立したセクションに整理しました。",
+        "ダークテーマ設定をテーマ設定セクションへ移動しました。",
+        "アクセントカラーから主要なテーマ色を一括適用できるようにしました。",
+        "ユーザー質問欄の色設定を追加しました。"
+    ],
     "1.27.2": [
         "ヘッダー文字色と新規チャットボタン色が反映されない問題を修正しました。",
         "ヘッダー文字色と新規チャットボタン色にリセットボタンを追加しました。",
@@ -416,13 +424,18 @@ try {
         googleSearchEngineIdInput: document.getElementById('google-search-engine-id'),
         overlayOpacitySlider: document.getElementById('overlay-opacity-slider'),
         overlayOpacityValue: document.getElementById('overlay-opacity-value'),
+        accentColorInput: document.getElementById('accent-color-input'),
+        applyAccentColorBtn: document.getElementById('apply-accent-color-btn'),
+        resetAccentColorBtn: document.getElementById('reset-accent-color-btn'),
         headerColorInput: document.getElementById('header-color-input'),
         headerTextColorModeSelect: document.getElementById('header-text-color-mode-select'),
         headerTextColorInput: document.getElementById('header-text-color-input'),
         newChatButtonColorInput: document.getElementById('new-chat-button-color-input'),
+        userMessageColorInput: document.getElementById('user-message-color-input'),
         resetHeaderColorBtn: document.getElementById('reset-header-color-btn'),
         resetHeaderTextColorBtn: document.getElementById('reset-header-text-color-btn'),
         resetNewChatButtonColorBtn: document.getElementById('reset-new-chat-button-color-btn'),
+        resetUserMessageColorBtn: document.getElementById('reset-user-message-color-btn'),
         messageOpacitySlider: document.getElementById('message-opacity-slider'),
         messageOpacityValue:  document.getElementById('message-opacity-value'),
         modelWarningMessage: document.getElementById('model-warning-message'),
@@ -614,10 +627,12 @@ const state = {
         googleSearchEngineId: '',
         messageOpacity: 1,
         overlayOpacity: 0.65,
+        accentColor: DEFAULT_ACCENT_COLOR,
         headerColor: '',
         headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
         headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
         newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
+        userMessageColor: DEFAULT_USER_MESSAGE_COLOR,
         allowPromptUiChanges: true,
         forceFunctionCalling: false,
         autoScroll: true,
@@ -2599,6 +2614,26 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
+    mixColor(color, targetColor, ratio = 0.15) {
+        const rgb = this.parseColorToRgb(color);
+        const targetRgb = this.parseColorToRgb(targetColor);
+        if (!rgb || !targetRgb) return this.getValidColor(color, DEFAULT_ACCENT_COLOR);
+        const mixed = {
+            r: rgb.r + (targetRgb.r - rgb.r) * ratio,
+            g: rgb.g + (targetRgb.g - rgb.g) * ratio,
+            b: rgb.b + (targetRgb.b - rgb.b) * ratio
+        };
+        return this.colorToHex(`rgb(${mixed.r}, ${mixed.g}, ${mixed.b})`, this.getValidColor(color, DEFAULT_ACCENT_COLOR));
+    },
+
+    deriveButtonColorFromAccentColor(accentColor) {
+        const validAccentColor = this.getValidColor(accentColor, DEFAULT_ACCENT_COLOR);
+        const textColor = this.getReadableTextColor(validAccentColor);
+        return textColor === '#ffffff'
+            ? this.mixColor(validAccentColor, '#ffffff', 0.16)
+            : this.mixColor(validAccentColor, '#000000', 0.14);
+    },
+
     getReadableTextColor(backgroundColor) {
         const rgb = this.parseColorToRgb(backgroundColor);
         if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
@@ -2648,6 +2683,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.setThemeCssVariable('--new-chat-button-bg', buttonColor);
         this.setThemeCssVariable('--new-chat-button-fg', buttonTextColor);
         console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}`);
+    },
+
+    applyUserMessageColor() {
+        const messageColor = this.getValidColor(state.settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
+        const messageTextColor = this.getReadableTextColor(messageColor);
+        this.setThemeCssVariable('--user-message-bg', messageColor);
+        this.setThemeCssVariable('--user-message-fg', messageTextColor);
+        console.log(`ユーザー質問欄カラー適用。背景: ${messageColor}, 文字色: ${messageTextColor}`);
     },
 
     updateHeaderTextColorInputState() {
@@ -2829,6 +2872,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.dropboxSyncFrequencySelect.value = state.settings.dropboxSyncFrequency || 'instant';
 
         const defaultHeaderColor = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+        if (elements.accentColorInput) {
+            elements.accentColorInput.value = this.getValidColor(state.settings.accentColor, DEFAULT_ACCENT_COLOR);
+        }
         elements.headerColorInput.value = state.settings.headerColor
             ? this.getValidColor(state.settings.headerColor, defaultHeaderColor)
             : defaultHeaderColor;
@@ -2840,6 +2886,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (elements.newChatButtonColorInput) {
             elements.newChatButtonColorInput.value = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        }
+        if (elements.userMessageColorInput) {
+            elements.userMessageColorInput.value = this.getValidColor(state.settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
         }
         this.updateHeaderTextColorInputState();
 
@@ -2853,6 +2902,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.applyOverlayOpacity();
         this.applyHeaderColor();
         this.applyNewChatButtonColor();
+        this.applyUserMessageColor();
         this.updateModelWarningMessage();
         this.applyBackgroundImage();
         appLogic.applyWideMode();
@@ -5477,6 +5527,31 @@ const appLogic = {
         uiUtils.applyHeaderColor();
     },
 
+    async applyAccentColorToTheme() {
+        const accentColor = uiUtils.getValidColor(elements.accentColorInput?.value || state.settings.accentColor, DEFAULT_ACCENT_COLOR);
+        const derivedButtonColor = uiUtils.deriveButtonColorFromAccentColor(accentColor);
+        await this.saveProfileSettingValues({
+            accentColor,
+            headerColor: accentColor,
+            userMessageColor: accentColor,
+            newChatButtonColor: derivedButtonColor
+        });
+        if (elements.accentColorInput) elements.accentColorInput.value = accentColor;
+        if (elements.headerColorInput) elements.headerColorInput.value = accentColor;
+        if (elements.userMessageColorInput) elements.userMessageColorInput.value = accentColor;
+        if (elements.newChatButtonColorInput) elements.newChatButtonColorInput.value = derivedButtonColor;
+        uiUtils.applyHeaderColor();
+        uiUtils.applyUserMessageColor();
+        uiUtils.applyNewChatButtonColor();
+    },
+
+    async resetAccentColorSetting() {
+        await this.saveProfileSettingValues({ accentColor: DEFAULT_ACCENT_COLOR });
+        if (elements.accentColorInput) {
+            elements.accentColorInput.value = DEFAULT_ACCENT_COLOR;
+        }
+    },
+
     async resetHeaderTextColorSetting() {
         await this.saveProfileSettingValues({
             headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
@@ -5498,6 +5573,14 @@ const appLogic = {
             elements.newChatButtonColorInput.value = DEFAULT_NEW_CHAT_BUTTON_COLOR;
         }
         uiUtils.applyNewChatButtonColor();
+    },
+
+    async resetUserMessageColorSetting() {
+        await this.saveProfileSettingValues({ userMessageColor: DEFAULT_USER_MESSAGE_COLOR });
+        if (elements.userMessageColorInput) {
+            elements.userMessageColorInput.value = DEFAULT_USER_MESSAGE_COLOR;
+        }
+        uiUtils.applyUserMessageColor();
     },
 
     async loadGlobalSettings() {
@@ -5761,7 +5844,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -7582,6 +7665,7 @@ const appLogic = {
             googleSearchEngineId: { element: elements.googleSearchEngineIdInput, event: 'input' },
             overlayOpacity: { element: elements.overlayOpacitySlider, event: 'input', onUpdate: () => uiUtils.applyOverlayOpacity() },
             messageOpacity: { element: elements.messageOpacitySlider, event: 'input', onUpdate: (value) => document.documentElement.style.setProperty('--message-bubble-opacity', String(value)) },
+            accentColor: { element: elements.accentColorInput, event: 'input' },
             headerColor: { element: elements.headerColorInput, event: 'input', onUpdate: () => uiUtils.applyHeaderColor() },
             headerTextColorMode: { element: elements.headerTextColorModeSelect, event: 'change', onUpdate: () => {
                 uiUtils.updateHeaderTextColorInputState();
@@ -7589,6 +7673,7 @@ const appLogic = {
             } },
             headerTextColor: { element: elements.headerTextColorInput, event: 'input', onUpdate: () => uiUtils.applyHeaderColor() },
             newChatButtonColor: { element: elements.newChatButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyNewChatButtonColor() },
+            userMessageColor: { element: elements.userMessageColorInput, event: 'input', onUpdate: () => uiUtils.applyUserMessageColor() },
             allowPromptUiChanges: { element: document.getElementById('allow-prompt-ui-changes'), event: 'change' },
             forceFunctionCalling: { element: elements.forceFunctionCallingToggle, event: 'change' },
             autoScroll: { element: elements.autoScrollToggle, event: 'change' },
@@ -7752,11 +7837,20 @@ const appLogic = {
         if (elements.resetHeaderColorBtn) {
             elements.resetHeaderColorBtn.addEventListener('click', () => this.resetHeaderColorSetting());
         }
+        if (elements.applyAccentColorBtn) {
+            elements.applyAccentColorBtn.addEventListener('click', () => this.applyAccentColorToTheme());
+        }
+        if (elements.resetAccentColorBtn) {
+            elements.resetAccentColorBtn.addEventListener('click', () => this.resetAccentColorSetting());
+        }
         if (elements.resetHeaderTextColorBtn) {
             elements.resetHeaderTextColorBtn.addEventListener('click', () => this.resetHeaderTextColorSetting());
         }
         if (elements.resetNewChatButtonColorBtn) {
             elements.resetNewChatButtonColorBtn.addEventListener('click', () => this.resetNewChatButtonColorSetting());
+        }
+        if (elements.resetUserMessageColorBtn) {
+            elements.resetUserMessageColorBtn.addEventListener('click', () => this.resetUserMessageColorSetting());
         }
         
         elements.messageContainer.addEventListener('click', (event) => {

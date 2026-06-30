@@ -64,6 +64,8 @@
     --bg-header: var(--app-header-bg);
     --new-chat-button-bg: #1976d2;
     --new-chat-button-fg: #ffffff;
+    --user-message-bg: #1976d2;
+    --user-message-fg: #ffffff;
     --bg-message-actions: rgba(255, 255, 255, 0.9);
     --message-bubble-opacity: 1;
     --overlay-opacity-value: 0.75;
@@ -125,6 +127,8 @@ body.dark-mode {
     --bg-header: var(--app-header-bg);
     --new-chat-button-bg: #1976d2;
     --new-chat-button-fg: #ffffff;
+    --user-message-bg: #1976d2;
+    --user-message-fg: #ffffff;
     --bg-message-actions: rgba(40, 40, 40, 0.9);
     --bg-overlay-dark: rgba(18, 18, 18, var(--overlay-opacity-value));
 
@@ -444,7 +448,8 @@ body.dark-mode #chat-overlay {
 }
 .message:first-child { margin-top: 0; }
 .message.user {
-    background-color: color-mix(in srgb, var(--bg-user-message) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
+    background-color: color-mix(in srgb, var(--user-message-bg, var(--bg-user-message)) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
+    color: var(--user-message-fg, var(--text-primary));
     align-self: flex-end;
     border-bottom-right-radius: var(--border-radius-sm);
 }
@@ -701,6 +706,11 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
     width: auto;
     margin-left: 0;
     min-width: 64px;
+}
+.color-action-button {
+    width: auto;
+    margin-left: 0;
+    min-width: 72px;
 }
 @media (max-width: 480px) {
     .color-setting-row {

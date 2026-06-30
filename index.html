@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.27.2">
+    <link rel="stylesheet" href="./style.css?v=1.27.3">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.27.2" defer></script>
+    <script src="./dropbox.js?v=1.27.3" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.27.2" defer></script>
+    <script src="./app.js?v=1.27.3" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -774,6 +774,58 @@
 
 
                 <div class="settings-group">
+                   <h3>テーマ設定</h3>
+                   <label class="checkbox-label">
+                       <input type="checkbox" id="dark-mode-toggle">
+                       ダークモードを使用する
+                   </label>
+                   <div class="color-settings-section">
+                       <div class="color-settings-title">テーマ色</div>
+                       <div class="color-setting-row">
+                           <label class="color-setting-label" for="accent-color-input">アクセントカラー</label>
+                           <div class="color-setting-controls">
+                               <input type="color" id="accent-color-input">
+                               <button id="apply-accent-color-btn" class="settings-reset-button color-action-button" type="button">一括適用</button>
+                               <button id="reset-accent-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
+                           </div>
+                       </div>
+                       <div class="color-setting-row">
+                           <label class="color-setting-label" for="header-color-input">ヘッダー</label>
+                           <div class="color-setting-controls">
+                               <input type="color" id="header-color-input">
+                               <button id="reset-header-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
+                           </div>
+                       </div>
+                       <div class="color-setting-row">
+                           <label class="color-setting-label" for="header-text-color-mode-select">ヘッダー文字</label>
+                           <div class="color-setting-controls">
+                               <select id="header-text-color-mode-select" aria-label="ヘッダー文字色">
+                                   <option value="auto">自動</option>
+                                   <option value="custom">手動</option>
+                               </select>
+                               <input type="color" id="header-text-color-input" aria-label="ヘッダー文字色の手動指定">
+                               <button id="reset-header-text-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
+                           </div>
+                       </div>
+                       <div class="color-setting-row">
+                           <label class="color-setting-label" for="new-chat-button-color-input">新規チャットボタン</label>
+                           <div class="color-setting-controls">
+                               <input type="color" id="new-chat-button-color-input">
+                               <button id="reset-new-chat-button-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
+                           </div>
+                       </div>
+                       <div class="color-setting-row">
+                           <label class="color-setting-label" for="user-message-color-input">ユーザー質問欄</label>
+                           <div class="color-setting-controls">
+                               <input type="color" id="user-message-color-input">
+                               <button id="reset-user-message-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
+                           </div>
+                       </div>
+                   </div>
+                </div>
+
+
+                <div class="settings-group">
                    <h3>その他設定</h3>
                    <label class="checkbox-label">
                         <input type="checkbox" id="header-auto-hide-toggle">
@@ -804,12 +856,6 @@
                    <label class="checkbox-label">
                        <input type="checkbox" id="swipe-navigation-toggle">
                        チャット画面から左右スワイプで画面移動
-                   </label>
-                   <p style="height:10px"></p>
-                   <!-- ダークモード切り替え -->
-                   <label class="checkbox-label">
-                       <input type="checkbox" id="dark-mode-toggle">
-                       ダークモードを使用する
                    </label>
                    <p style="height:10px"></p>
                    <div class="local-ui-settings-section">
@@ -866,34 +912,6 @@
                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
                        ※ 端末またはPCにインストールされているフォント名を指定。
                    </p>
-                   <div class="color-settings-section">
-                       <div class="color-settings-title">テーマ色</div>
-                       <div class="color-setting-row">
-                           <label class="color-setting-label" for="header-color-input">ヘッダー</label>
-                           <div class="color-setting-controls">
-                               <input type="color" id="header-color-input">
-                               <button id="reset-header-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
-                           </div>
-                       </div>
-                       <div class="color-setting-row">
-                           <label class="color-setting-label" for="header-text-color-mode-select">ヘッダー文字</label>
-                           <div class="color-setting-controls">
-                               <select id="header-text-color-mode-select" aria-label="ヘッダー文字色">
-                                   <option value="auto">自動</option>
-                                   <option value="custom">手動</option>
-                               </select>
-                               <input type="color" id="header-text-color-input" aria-label="ヘッダー文字色の手動指定">
-                               <button id="reset-header-text-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
-                           </div>
-                       </div>
-                       <div class="color-setting-row">
-                           <label class="color-setting-label" for="new-chat-button-color-input">新規チャットボタン</label>
-                           <div class="color-setting-controls">
-                               <input type="color" id="new-chat-button-color-input">
-                               <button id="reset-new-chat-button-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
-                           </div>
-                       </div>
-                   </div>
                    <!-- 追加モデル入力欄 -->
                    <label for="additional-models">追加モデル (カンマ区切り):</label>
                    <textarea id="additional-models" placeholder="例: gemini-2.0-pro,gemini-2.0-flash-lite" aria-label="追加モデル"></textarea>
