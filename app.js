@@ -51,14 +51,18 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.27.5";
-const APP_CACHE_VERSION = "v1.27.5";
+const APP_VERSION = "1.27.6";
+const APP_CACHE_VERSION = "v1.27.6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES = {
+    "1.27.6": [
+        "スマホ表示時の色設定UIで、操作部が右寄せになるよう調整しました。",
+        "チャット左上部の同期ボタンを、設定画面への移動ではなく即時同期実行に変更しました。"
+    ],
     "1.27.5": [
         "ヘッダー内ボタンのマウスオーバー/タップ時の視認性を改善しました。",
         "暗いヘッダー色でもヘッダー内ボタンのhover/tap時に見やすくなるよう調整しました。",
@@ -7312,6 +7316,89 @@ const appLogic = {
         });
     },
 
+    async handleManualDropboxSync() {
+        console.log("手動同期が実行されました。");
+
+        if (state.sync.isSyncing) {
+            uiUtils.showCustomAlert("現在、別の同期処理が実行中です。");
+            return;
+        }
+
+        const tokenData = await dbUtils.getSetting('dropboxTokens');
+        if (!tokenData || !tokenData.value) {
+            await uiUtils.showCustomAlert("Dropboxと連携してから同期してください。");
+            return;
+        }
+
+        state.sync.isSyncing = true;
+        this.updateSyncStatusUI('syncing', 'クラウドの状態を確認中...');
+        uiUtils.showProgressDialog('クラウドの状態を確認中...');
+
+        try {
+            const cloudMetadataString = await window.dropboxApi.downloadMetadata();
+
+            if (!cloudMetadataString) {
+                console.log("[Manual Sync] クラウドにデータがありません。Push処理を実行します。");
+                uiUtils.updateProgressMessage('初回データをクラウドに保存中...');
+                state.sync.isSyncing = false;
+                await this._doPush(true);
+                return;
+            }
+
+            const cloudData = JSON.parse(cloudMetadataString);
+            const cloudSyncId = cloudData.syncId;
+            const localSyncId = state.sync.lastSyncId;
+
+            console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
+
+            if (cloudSyncId !== localSyncId) {
+                console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
+                uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
+                state.sync.isSyncing = false;
+                await this.handlePull(true);
+                return;
+            }
+
+            console.log("[Manual Sync] syncIdは一致しています。アセットの整合性を確認します。");
+            uiUtils.updateProgressMessage('アセットの整合性を確認中...');
+
+            const { localAssets } = await this._prepareExportData();
+            const cloudAssetsList = await window.dropboxApi.listAssets();
+
+            const localAssetCount = localAssets.size;
+            const cloudAssetCount = cloudAssetsList.length;
+
+            console.log(`[Manual Sync] Local asset count: ${localAssetCount}, Cloud asset count: ${cloudAssetCount}`);
+
+            if (localAssetCount !== cloudAssetCount || state.sync.isDirty) {
+                if (state.sync.isDirty) {
+                    console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
+                    uiUtils.updateProgressMessage('ローカルの変更を同期中...');
+                } else {
+                    console.log("[Manual Sync] アセット数が一致しないため、Push処理でクラウドの状態を調整します。");
+                    uiUtils.updateProgressMessage('クラウドの状態を調整中...');
+                }
+                state.sync.isSyncing = false;
+                await this._doPush(true);
+                return;
+            }
+
+            console.log("[Manual Sync] syncIdとアセット数が一致しており、差分はありません。");
+            this.updateSyncStatusUI('idle');
+            uiUtils.hideProgressDialog();
+            await uiUtils.showCustomAlert("データは既に最新の状態です。");
+
+        } catch (error) {
+            const errorMessage = error.message || '不明なエラーが発生しました。';
+            this.updateSyncStatusUI('error', errorMessage);
+            console.error("[Manual Sync] 手動同期処理中にエラーが発生しました:", error);
+            uiUtils.hideProgressDialog();
+            await uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
+        } finally {
+            state.sync.isSyncing = false;
+        }
+    },
+
     /**
      * [V2 Pull] Dropboxからデータをダウンロードして同期する
      */
@@ -8224,103 +8311,13 @@ const appLogic = {
 
         elements.dropboxSyncBtn.addEventListener('click', async () => {
             console.log("手動同期ボタンがクリックされました。");
-
-            if (state.sync.isSyncing) {
-                uiUtils.showCustomAlert("現在、別の同期処理が実行中です。");
-                return;
-            }
-        
-            const tokenData = await dbUtils.getSetting('dropboxTokens');
-            if (!tokenData || !tokenData.value) {
-                // このケースはUI上起こらないはずだが、念のため
-                return;
-            }
-            
-            // --- 新しい手動同期ロジック ---
-            state.sync.isSyncing = true;
-            this.updateSyncStatusUI('syncing', 'クラウドの状態を確認中...');
-            uiUtils.showProgressDialog('クラウドの状態を確認中...');
-        
-            try {
-                // Step 1: クラウドのメタデータを取得
-                const cloudMetadataString = await window.dropboxApi.downloadMetadata();
-        
-                // クラウドにデータがない場合 -> 初回Pushの可能性
-                if (!cloudMetadataString) {
-                    console.log("[Manual Sync] クラウドにデータがありません。Push処理を実行します。");
-                    uiUtils.updateProgressMessage('初回データをクラウドに保存中...');
-                    state.sync.isSyncing = false; // _doPushを呼ぶ前にリセット
-                    await this._doPush(true); // isManual=trueで実行
-                    return;
-                }
-        
-                const cloudData = JSON.parse(cloudMetadataString);
-                const cloudSyncId = cloudData.syncId;
-                const localSyncId = state.sync.lastSyncId;
-        
-                console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
-        
-                // Step 2: syncIdを比較
-                // syncIdが異なる -> 他のデバイスが更新した可能性 -> Pullを実行
-                if (cloudSyncId !== localSyncId) {
-                    console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
-                    uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
-                    state.sync.isSyncing = false; // handlePullを呼ぶ前にリセット
-                    await this.handlePull(true);
-                    return;
-                }
-        
-                // Step 3: syncIdが一致する場合 -> アセットの不整合やローカルの変更をチェック
-                console.log("[Manual Sync] syncIdは一致しています。アセットの整合性を確認します。");
-                uiUtils.updateProgressMessage('アセットの整合性を確認中...');
-        
-                const { localAssets } = await this._prepareExportData();
-                const cloudAssetsList = await window.dropboxApi.listAssets();
-                
-                const localAssetCount = localAssets.size;
-                const cloudAssetCount = cloudAssetsList.length;
-        
-                console.log(`[Manual Sync] Local asset count: ${localAssetCount}, Cloud asset count: ${cloudAssetCount}`);
-        
-                // アセット数が異なるか、ローカルに変更がある(isDirty)場合 -> Pushで調整
-                if (localAssetCount !== cloudAssetCount || state.sync.isDirty) {
-                     if (state.sync.isDirty) {
-                        console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
-                        uiUtils.updateProgressMessage('ローカルの変更を同期中...');
-                    } else {
-                        console.log("[Manual Sync] アセット数が一致しないため、Push処理でクラウドの状態を調整します。");
-                        uiUtils.updateProgressMessage('クラウドの状態を調整中...');
-                    }
-                    state.sync.isSyncing = false; // _doPushを呼ぶ前にリセット
-                    await this._doPush(true);
-                    return;
-                }
-        
-                // Step 4: syncIdもアセット数も一致 -> 本当に差分なし
-                console.log("[Manual Sync] syncIdとアセット数が一致しており、差分はありません。");
-                this.updateSyncStatusUI('idle');
-                uiUtils.hideProgressDialog();
-                await uiUtils.showCustomAlert("データは既に最新の状態です。");
-        
-            } catch (error) {
-                const errorMessage = error.message || '不明なエラーが発生しました。';
-                this.updateSyncStatusUI('error', errorMessage);
-                console.error("[Manual Sync] 手動同期処理中にエラーが発生しました:", error);
-                uiUtils.hideProgressDialog();
-                await uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
-            } finally {
-                state.sync.isSyncing = false;
-            }
+            await this.handleManualDropboxSync();
         });
 
 
-        elements.syncStatusHeaderIcon.addEventListener('click', () => {
-            uiUtils.showScreen('settings').then(() => {
-                const syncGroup = document.getElementById('data-sync-group');
-                if (syncGroup) {
-                    syncGroup.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            });
+        elements.syncStatusHeaderIcon.addEventListener('click', async () => {
+            console.log("ヘッダー同期ボタンがクリックされました。");
+            await this.handleManualDropboxSync();
         });
 
         elements.dropboxDisconnectBtn.addEventListener('click', async () => {

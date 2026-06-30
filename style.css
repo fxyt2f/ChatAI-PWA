@@ -750,11 +750,23 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
 }
 @media (max-width: 480px) {
     .color-setting-row {
+        grid-template-columns: minmax(7em, 1fr) minmax(0, auto);
+        align-items: center;
+    }
+    .color-setting-controls {
+        justify-content: flex-end;
+        justify-self: end;
+        min-width: 0;
+    }
+}
+@media (max-width: 360px) {
+    .color-setting-row {
         grid-template-columns: 1fr;
         align-items: start;
     }
     .color-setting-controls {
-        justify-content: flex-start;
+        justify-content: flex-end;
+        justify-self: end;
     }
 }
 .local-ui-settings-section {
