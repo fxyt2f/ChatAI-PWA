@@ -61,9 +61,13 @@
     --header-color-default: #1976d2;
     --app-header-bg: var(--header-color-custom, var(--header-color-default));
     --app-header-fg: #ffffff;
+    --app-header-hover-bg: rgba(0, 0, 0, 0.18);
+    --app-header-hover-fg: #ffffff;
     --bg-header: var(--app-header-bg);
     --new-chat-button-bg: #1976d2;
     --new-chat-button-fg: #ffffff;
+    --new-chat-button-hover-bg: #1259a0;
+    --new-chat-button-hover-fg: #ffffff;
     --user-message-bg: #1976d2;
     --user-message-fg: #ffffff;
     --bg-message-actions: rgba(255, 255, 255, 0.9);
@@ -124,9 +128,13 @@ body.dark-mode {
     --header-color-default: #007aff;
     --app-header-bg: var(--header-color-custom, var(--header-color-default));
     --app-header-fg: #ffffff;
+    --app-header-hover-bg: rgba(0, 0, 0, 0.22);
+    --app-header-hover-fg: #ffffff;
     --bg-header: var(--app-header-bg);
     --new-chat-button-bg: #1976d2;
     --new-chat-button-fg: #ffffff;
+    --new-chat-button-hover-bg: #1259a0;
+    --new-chat-button-hover-fg: #ffffff;
     --user-message-bg: #1976d2;
     --user-message-fg: #ffffff;
     --bg-message-actions: rgba(40, 40, 40, 0.9);
@@ -287,7 +295,8 @@ body:not(.dark-mode) .app-container {
 }
 
 .header-button:hover {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--app-header-hover-bg);
+    color: var(--app-header-hover-fg);
 }
 #history-screen .app-header {
     flex-direction: row-reverse;
@@ -305,7 +314,8 @@ body:not(.dark-mode) .app-container {
     border: 1px solid var(--app-header-fg);
 }
 .header-save-button:hover {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--app-header-hover-bg);
+    color: var(--app-header-hover-fg);
 }
 .new-chat-button {
     padding: 6px 12px;
@@ -1251,6 +1261,36 @@ body.dark-mode #chat-screen.drag-over::after {
 .app-header svg {
     color: var(--app-header-fg);
     fill: currentColor;
+}
+
+.app-header button:hover:not(:disabled),
+.app-header button:active:not(:disabled),
+.app-header button:focus-visible {
+    background-color: var(--app-header-hover-bg);
+    color: var(--app-header-hover-fg);
+}
+
+.app-header button:hover:not(:disabled) .material-symbols-outlined,
+.app-header button:active:not(:disabled) .material-symbols-outlined,
+.app-header button:focus-visible .material-symbols-outlined,
+.app-header button:hover:not(:disabled) svg,
+.app-header button:active:not(:disabled) svg,
+.app-header button:focus-visible svg {
+    color: inherit;
+    fill: currentColor;
+}
+
+.app-header .new-chat-button:hover:not(:disabled),
+.app-header .new-chat-button:active:not(:disabled),
+.app-header .new-chat-button:focus-visible {
+    background-color: var(--new-chat-button-hover-bg);
+    color: var(--new-chat-button-hover-fg);
+}
+
+.app-header .new-chat-button:hover:not(:disabled) .material-symbols-outlined,
+.app-header .new-chat-button:active:not(:disabled) .material-symbols-outlined,
+.app-header .new-chat-button:focus-visible .material-symbols-outlined {
+    color: var(--new-chat-button-hover-fg);
 }
 
 /* --- Profile Menu (Dropdown) --- */
@@ -2516,7 +2556,7 @@ body.dark-mode {
 }
 
 .sync-status-header-icon:hover {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--app-header-hover-bg);
 }
 
 /* Status Styles */

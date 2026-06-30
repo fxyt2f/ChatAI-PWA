@@ -51,14 +51,20 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.27.4";
-const APP_CACHE_VERSION = "v1.27.4";
+const APP_VERSION = "1.27.5";
+const APP_CACHE_VERSION = "v1.27.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES = {
+    "1.27.5": [
+        "ヘッダー内ボタンのマウスオーバー/タップ時の視認性を改善しました。",
+        "暗いヘッダー色でもヘッダー内ボタンのhover/tap時に見やすくなるよう調整しました。",
+        "テーマ設定内の「色」見出しを「色設定」に変更しました。",
+        "バージョン更新時の更新内容を、最初から表示してOKで閉じる形式に変更しました。"
+    ],
     "1.27.4": [
         "PC表示時ワイドモード設定をテーマ設定セクションへ移動しました。",
         "アクセントカラー方式と個別設定方式を切り替えられるようにしました。",
@@ -2648,6 +2654,26 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             : this.mixColor(validAccentColor, '#000000', 0.14);
     },
 
+    deriveInteractiveColor(backgroundColor, foregroundColor) {
+        const validBackgroundColor = this.getValidColor(backgroundColor, DEFAULT_ACCENT_COLOR);
+        const validForegroundColor = this.getValidColor(foregroundColor, this.getReadableTextColor(validBackgroundColor));
+        const foregroundIsLight = this.getReadableTextColor(validForegroundColor) === '#111827';
+        const hoverColor = foregroundIsLight
+            ? this.mixColor(validBackgroundColor, '#000000', 0.22)
+            : this.mixColor(validBackgroundColor, '#000000', 0.12);
+        return hoverColor.toLowerCase() === validBackgroundColor.toLowerCase()
+            ? this.mixColor(validBackgroundColor, '#ffffff', 0.16)
+            : hoverColor;
+    },
+
+    deriveHeaderButtonHoverColor(headerColor) {
+        const validHeaderColor = this.getValidColor(headerColor, LIGHT_THEME_COLOR);
+        const headerUsesLightText = this.getReadableTextColor(validHeaderColor) === '#ffffff';
+        return headerUsesLightText
+            ? this.mixColor(validHeaderColor, '#ffffff', 0.18)
+            : this.mixColor(validHeaderColor, '#000000', 0.14);
+    },
+
     getReadableTextColor(backgroundColor) {
         const rgb = this.parseColorToRgb(backgroundColor);
         if (!rgb || [rgb.r, rgb.g, rgb.b].some(value => Number.isNaN(value))) {
@@ -2712,20 +2738,28 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const readableTextColor = themeColorMode === 'individual' && headerTextColorMode === 'custom'
             ? this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR)
             : this.getReadableTextColor(finalHeaderColor);
+        const hoverBackgroundColor = this.deriveHeaderButtonHoverColor(finalHeaderColor);
+        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
         this.setThemeCssVariable('--app-header-bg', finalHeaderColor);
         this.setThemeCssVariable('--app-header-fg', readableTextColor);
+        this.setThemeCssVariable('--app-header-hover-bg', hoverBackgroundColor);
+        this.setThemeCssVariable('--app-header-hover-fg', hoverTextColor);
         if (elements.themeColorMeta) {
             elements.themeColorMeta.setAttribute('content', finalHeaderColor);
         }
-        console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}, 文字色: ${readableTextColor}`);
+        console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}, 文字色: ${readableTextColor}, hover背景: ${hoverBackgroundColor}`);
     },
 
     applyNewChatButtonColor() {
         const buttonColor = this.getEffectiveNewChatButtonColor();
         const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
+        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
         this.setThemeCssVariable('--new-chat-button-bg', buttonColor);
         this.setThemeCssVariable('--new-chat-button-fg', buttonTextColor);
-        console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}`);
+        this.setThemeCssVariable('--new-chat-button-hover-bg', hoverBackgroundColor);
+        this.setThemeCssVariable('--new-chat-button-hover-fg', hoverTextColor);
+        console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}, hover背景: ${hoverBackgroundColor}`);
     },
 
     applyUserMessageColor() {
@@ -5577,11 +5611,15 @@ const appLogic = {
         await this.saveLocalUiSettings();
     },
 
-    formatReleaseNotes(version = APP_VERSION) {
+    formatReleaseNotes(version = APP_VERSION, options = {}) {
         const notes = RELEASE_NOTES[version] || [];
-        const lines = [`ChatAI PWA v${version}`];
+        const lines = [
+            options.isUpdateNotice
+                ? `ChatAI PWA v${version} に更新されました`
+                : `ChatAI PWA v${version}`
+        ];
         if (notes.length > 0) {
-            lines.push('', ...notes.map(note => `・${note}`));
+            lines.push('', '更新内容:', ...notes.map(note => `- ${note}`));
         } else {
             lines.push('', 'このバージョンのリリースノートは未登録です。');
         }
@@ -6581,6 +6619,12 @@ const appLogic = {
             if (pendingNoticeRaw) {
                 try {
                     versionNoticeData = JSON.parse(pendingNoticeRaw);
+                    if (versionNoticeData && !versionNoticeData.message) {
+                        versionNoticeData.message = this.formatReleaseNotes(versionNoticeData.version || APP_VERSION, { isUpdateNotice: true });
+                    }
+                    if (versionNoticeData) {
+                        delete versionNoticeData.promptMessage;
+                    }
                     console.log(`[VersionNotice] ペンディング通知を検出しました。version=${versionNoticeData.version}`);
                 } catch (parseError) {
                     console.error("[VersionNotice] ペンディング通知の解析に失敗しました。削除して再生成します。", parseError);
@@ -6805,7 +6849,7 @@ const appLogic = {
             if (!versionNoticeData && state.localUiSettings.lastSeenReleaseVersion !== APP_VERSION) {
                 versionNoticeData = {
                     version: APP_VERSION,
-                    promptMessage: `ChatAI PWA v${APP_VERSION} に更新されました。\nリリースノートを表示しますか？`,
+                    message: this.formatReleaseNotes(APP_VERSION, { isUpdateNotice: true }),
                     shouldPersist: true
                 };
                 sessionStorage.setItem(VERSION_NOTICE_SESSION_KEY, JSON.stringify(versionNoticeData));
@@ -6941,17 +6985,10 @@ const appLogic = {
             uiUtils.hideProgressDialog();
             sessionStorage.removeItem('isSyncReload');
 
-            if (versionNoticeData && (versionNoticeData.promptMessage || versionNoticeData.message)) {
+            if (versionNoticeData && versionNoticeData.message) {
                 try {
                     console.log(`[VersionNotice] 通知を表示します。version=${versionNoticeData.version}`);
-                    if (versionNoticeData.promptMessage) {
-                        const shouldShowReleaseNotes = await uiUtils.showCustomConfirm(versionNoticeData.promptMessage);
-                        if (shouldShowReleaseNotes) {
-                            await this.showReleaseNotes(versionNoticeData.version || APP_VERSION);
-                        }
-                    } else {
-                        await uiUtils.showCustomAlert(versionNoticeData.message);
-                    }
+                    await uiUtils.showCustomAlert(versionNoticeData.message);
                     console.log("[VersionNotice] 通知がユーザーによって確認されました。");
                     if (versionNoticeData.shouldPersist) {
                         await this.updateLocalUiSetting('lastSeenReleaseVersion', versionNoticeData.version || APP_VERSION);
