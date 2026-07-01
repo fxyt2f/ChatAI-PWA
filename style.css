@@ -3041,7 +3041,7 @@ body.dark-mode #sd-test-connection-btn {
     display: inline;
 }
 
-/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5) --- */
+/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5 / v1.28.6) --- */
 #chat-screen .message-container {
     width: 100%;
     max-width: 760px;
@@ -3081,6 +3081,41 @@ body.dark-mode #sd-test-connection-btn {
     width: 100%;
     max-width: none;
     text-align: left;
+}
+
+#chat-screen .message.tm-collapsible {
+    --message-collapse-fade-height: 120px;
+}
+
+#chat-screen .message.tm-collapsible .message-content {
+    position: relative;
+}
+
+#chat-screen .message.tm-collapsible.tm-collapsed .message-content {
+    max-height: var(--message-collapse-height, 780px);
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        #000 0,
+        #000 calc(100% - var(--message-collapse-fade-height, 120px)),
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        #000 0,
+        #000 calc(100% - var(--message-collapse-fade-height, 120px)),
+        transparent 100%
+    );
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+}
+
+#chat-screen .message.tm-collapsible:not(.tm-collapsed) .message-content,
+#chat-screen .message:not(.tm-collapsible) .message-content {
+    -webkit-mask-image: none;
+    mask-image: none;
 }
 
 #chat-screen .message.editing {
@@ -3170,39 +3205,39 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
-    color: #256f8f;
-    background: rgba(125, 211, 252, 0.18);
-    border: 1px solid rgba(56, 189, 248, 0.38);
+    color: #123f50;
+    background-color: #a4c7d5;
+    border: 1px solid #a4c7d5;
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
-    color: #075985;
-    background: rgba(125, 211, 252, 0.28);
-    border-color: rgba(56, 189, 248, 0.52);
+    color: #0b3342;
+    background-color: #92b8c8;
+    border-color: #92b8c8;
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
-    color: #0369a1;
-    background: rgba(125, 211, 252, 0.32);
-    border-color: rgba(56, 189, 248, 0.62);
+    color: #0b3342;
+    background-color: #a4c7d5;
+    border-color: #a4c7d5;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
-    color: #bae6fd;
-    background: rgba(14, 165, 233, 0.18);
-    border-color: rgba(125, 211, 252, 0.34);
+    color: #0b3342;
+    background-color: #a4c7d5;
+    border-color: #a4c7d5;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
-    color: #e0f2fe;
-    background: rgba(14, 165, 233, 0.28);
-    border-color: rgba(125, 211, 252, 0.52);
+    color: #062635;
+    background-color: #92b8c8;
+    border-color: #92b8c8;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
-    color: #e0f2fe;
-    background: rgba(14, 165, 233, 0.34);
-    border-color: rgba(125, 211, 252, 0.62);
+    color: #062635;
+    background-color: #a4c7d5;
+    border-color: #a4c7d5;
 }
 
 #chat-screen .message-actions {
@@ -3358,6 +3393,10 @@ body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-
 #chat-screen .message.model .message-actions button {
     order: 2;
     flex: 0 0 32px;
+}
+
+#chat-screen .message-actions .tm-message-collapse-btn {
+    order: 2;
 }
 
 #chat-screen .message-cascade-controls {
