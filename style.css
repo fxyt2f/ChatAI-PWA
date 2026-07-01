@@ -3041,7 +3041,7 @@ body.dark-mode #sd-test-connection-btn {
     display: inline;
 }
 
-/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4) --- */
+/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5) --- */
 #chat-screen .message-container {
     width: 100%;
     max-width: 760px;
@@ -3170,19 +3170,39 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
-    margin-right: auto;
-    background-color: var(--bg-button-action);
-    color: var(--text-light);
+    color: #256f8f;
+    background: rgba(125, 211, 252, 0.18);
+    border: 1px solid rgba(56, 189, 248, 0.38);
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
-    background-color: var(--bg-button-action-hover);
+    color: #075985;
+    background: rgba(125, 211, 252, 0.28);
+    border-color: rgba(56, 189, 248, 0.52);
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
-    color: var(--bg-button-save, #34a853);
-    border-color: color-mix(in srgb, var(--bg-button-save, #34a853) 45%, var(--border-primary));
-    background: color-mix(in srgb, var(--bg-button-save, #34a853) 10%, var(--bg-secondary));
+    color: #0369a1;
+    background: rgba(125, 211, 252, 0.32);
+    border-color: rgba(56, 189, 248, 0.62);
+}
+
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
+    color: #bae6fd;
+    background: rgba(14, 165, 233, 0.18);
+    border-color: rgba(125, 211, 252, 0.34);
+}
+
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
+    color: #e0f2fe;
+    background: rgba(14, 165, 233, 0.28);
+    border-color: rgba(125, 211, 252, 0.52);
+}
+
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
+    color: #e0f2fe;
+    background: rgba(14, 165, 233, 0.34);
+    border-color: rgba(125, 211, 252, 0.62);
 }
 
 #chat-screen .message-actions {
@@ -3287,6 +3307,14 @@ body.dark-mode #sd-test-connection-btn {
 #chat-screen .message-cascade-controls button:focus-visible {
     background-color: var(--bg-tertiary);
     color: var(--text-primary);
+}
+
+#chat-screen .message-actions .tm-copy-message-btn.tm-copied {
+    color: var(--bg-button-save, #34a853);
+}
+
+#chat-screen .message-actions .tm-copy-message-btn.tm-copy-error {
+    color: var(--text-error);
 }
 
 #chat-screen .message-actions .token-count-display {

@@ -56,8 +56,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.4";
-const APP_CACHE_VERSION = "v1.28.4";
+const APP_VERSION = "1.28.5";
+const APP_CACHE_VERSION = "v1.28.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -69,6 +69,13 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.5": [
+        "ユーザー発言・モデル回答の操作ボタンに本文コピー機能を追加しました。",
+        "コピー時に本文以外の操作UI、生成時メタ情報、トークン表示などが混ざらないように調整しました。",
+        "コピー成功時に一時的な成功表示を出すようにしました。",
+        "編集中Markdownコピーボタンを保存ボタンの左に配置しました。",
+        "編集中Markdownコピーボタンを淡い水色の見た目に変更しました。"
+    ],
     "1.28.4": [
         "メッセージ編集時の表示幅と編集textareaの高さ調整を改善しました。",
         "編集開始時に本文が全選択される挙動を抑制し、カーソルを末尾へ移動するようにしました。",
@@ -2441,6 +2448,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     if (role !== 'error') {
         const actionsDiv = document.createElement('div');
         actionsDiv.classList.add('message-actions');
+
+        if (!isStreamingPlaceholder) {
+            const copyButton = document.createElement('button');
+            copyButton.innerHTML = '<span class="material-symbols-outlined">content_copy</span>';
+            copyButton.title = '本文をコピー';
+            copyButton.setAttribute('aria-label', '本文をコピー');
+            copyButton.classList.add('tm-copy-message-btn');
+            copyButton.onclick = () => appLogic.copyMessageText(messageDiv, copyButton);
+            actionsDiv.appendChild(copyButton);
+        }
 
         if (!isSummarized) {
             const editButton = document.createElement('button');
@@ -10792,13 +10809,143 @@ const appLogic = {
     // -----------------------------
 
     // --- メッセージアクション ---
+    getCopySourceElement(messageElement) {
+        if (!messageElement) return null;
+        const activeEditor = messageElement.querySelector('.message-edit-area .edit-textarea');
+        if (messageElement.classList.contains('editing') && activeEditor) {
+            return activeEditor;
+        }
+        return messageElement.querySelector('.message-content');
+    },
+
+    extractMessageText(messageElement) {
+        const source = this.getCopySourceElement(messageElement);
+        if (!source) return '';
+
+        if (source instanceof HTMLTextAreaElement) {
+            return source.value.trim();
+        }
+
+        const clone = source.cloneNode(true);
+        clone.querySelectorAll(`
+            .attachment-details,
+            .citation-details,
+            .function-call-details,
+            .search-results-details,
+            .message-actions,
+            .message-cascade-controls,
+            .token-count-display,
+            .tm-execution-meta,
+            .execution-meta,
+            button,
+            script,
+            style
+        `).forEach(element => element.remove());
+
+        const sandbox = document.createElement('div');
+        sandbox.setAttribute('aria-hidden', 'true');
+        sandbox.style.cssText = [
+            'position:fixed',
+            'left:-100000px',
+            'top:0',
+            'width:720px',
+            'max-height:none',
+            'overflow:visible',
+            'white-space:normal',
+            'pointer-events:none',
+            'opacity:0'
+        ].join(';');
+
+        sandbox.appendChild(clone);
+        document.body.appendChild(sandbox);
+
+        const text = (clone.innerText || clone.textContent || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+        sandbox.remove();
+        return text;
+    },
+
+    async writeTextToClipboard(text) {
+        if (!text) {
+            throw new Error('コピーできる本文がありません。');
+        }
+
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+
+        const fallback = document.createElement('textarea');
+        fallback.value = text;
+        fallback.setAttribute('readonly', '');
+        fallback.style.cssText = [
+            'position:fixed',
+            'left:-100000px',
+            'top:0',
+            'opacity:0'
+        ].join(';');
+
+        document.body.appendChild(fallback);
+        fallback.select();
+        const succeeded = document.execCommand('copy');
+        fallback.remove();
+
+        if (!succeeded) {
+            throw new Error('クリップボードへのコピーに失敗しました。');
+        }
+    },
+
+    showCopyResult(button, succeeded) {
+        if (!button) return;
+        const icon = button.querySelector('.material-symbols-outlined');
+        const originalIcon = button.dataset.originalIcon || icon?.textContent || '';
+        const originalTitle = button.dataset.originalTitle || button.title || '本文をコピー';
+        const originalAria = button.dataset.originalAria || button.getAttribute('aria-label') || originalTitle;
+        button.dataset.originalIcon = originalIcon;
+        button.dataset.originalTitle = originalTitle;
+        button.dataset.originalAria = originalAria;
+
+        if (icon) {
+            icon.textContent = succeeded ? 'check' : 'error';
+        }
+        button.title = succeeded ? 'コピーしました' : 'コピーできませんでした';
+        button.setAttribute('aria-label', button.title);
+        button.classList.toggle('tm-copied', succeeded);
+        button.classList.toggle('tm-copy-error', !succeeded);
+
+        window.setTimeout(() => {
+            if (!button.isConnected) return;
+            if (icon) {
+                icon.textContent = originalIcon;
+            }
+            button.title = originalTitle;
+            button.setAttribute('aria-label', originalAria);
+            button.classList.remove('tm-copied', 'tm-copy-error');
+        }, 1200);
+    },
+
+    async copyMessageText(messageElement, button) {
+        try {
+            const text = this.extractMessageText(messageElement);
+            await this.writeTextToClipboard(text);
+            this.showCopyResult(button, true);
+        } catch (error) {
+            console.warn('メッセージ本文のコピーに失敗しました:', error);
+            this.showCopyResult(button, false);
+        }
+    },
+
     async copyEditTextareaMarkdown(textarea, button) {
         if (!textarea || !button) return;
         const originalLabel = button.dataset.originalLabel || button.textContent || 'コピー';
         button.dataset.originalLabel = originalLabel;
 
         try {
-            await navigator.clipboard.writeText(textarea.value || '');
+            await this.writeTextToClipboard(textarea.value || '');
             button.textContent = 'コピー済み';
             button.classList.add('tm-copied');
             window.setTimeout(() => {
@@ -10875,9 +11022,9 @@ const appLogic = {
         cancelButton.type = 'button';
         cancelButton.onclick = () => this.cancelEditMessage(index, messageElement);
 
+        actionsDiv.appendChild(cancelButton);
         actionsDiv.appendChild(copyButton);
         actionsDiv.appendChild(saveButton);
-        actionsDiv.appendChild(cancelButton);
         editArea.appendChild(textarea);
         editArea.appendChild(actionsDiv);
 
