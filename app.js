@@ -2171,22 +2171,29 @@ const uiUtils = {
         }
 
         try {
-            const messageMap = getCurrentMessageMapForHistory();
+            const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
             const changes = [];
             let occurrenceCount = 0;
 
-            messageMap.forEach((message, index) => {
+            visibleMessages.forEach(message => {
                 if (!this.doesReplaceTargetIncludeRole(target, message.role)) return;
                 const before = String(message.content ?? '');
                 const result = this.applyChatReplacePatternToText(before, pattern, replacement, useRegex);
                 if (result.count <= 0 || before === result.after) return;
-                changes.push({
-                    index,
+                const change = {
+                    index: message.index,
                     role: message.role,
                     before,
                     after: result.after,
                     count: result.count
-                });
+                };
+                if (message.cascadeIndex !== null && message.cascadeIndex !== undefined) {
+                    change.cascadeIndex = message.cascadeIndex;
+                }
+                if (message.siblingGroupId) {
+                    change.siblingGroupId = message.siblingGroupId;
+                }
+                changes.push(change);
                 occurrenceCount += result.count;
             });
 
@@ -7169,6 +7176,56 @@ function getCurrentMessageMapForHistory() {
         });
     });
     return messageMap;
+}
+
+function getCurrentVisibleMessagesForReplacePreview() {
+    const visibleMessages = [];
+    const processedGroupIds = new Set();
+    if (!Array.isArray(state.currentMessages)) return visibleMessages;
+
+    state.currentMessages.forEach((message, index) => {
+        if (!message || message.isHidden) return;
+
+        if (message.isCascaded && message.siblingGroupId) {
+            if (processedGroupIds.has(message.siblingGroupId)) return;
+            const siblingsWithIndices = state.currentMessages
+                .map((siblingMessage, siblingIndex) => ({ message: siblingMessage, index: siblingIndex }))
+                .filter(item => (
+                    item.message &&
+                    !item.message.isHidden &&
+                    item.message.isCascaded &&
+                    item.message.siblingGroupId === message.siblingGroupId
+                ));
+            const selectedPosition = siblingsWithIndices.findIndex(item => item.message.isSelected);
+            const fallbackPosition = Math.max(0, siblingsWithIndices.length - 1);
+            const activePosition = selectedPosition >= 0
+                ? selectedPosition
+                : fallbackPosition;
+            const activeItem = siblingsWithIndices[activePosition];
+
+            if (activeItem && CHANGE_HISTORY_ROLES.has(activeItem.message.role)) {
+                visibleMessages.push({
+                    index: activeItem.index,
+                    role: activeItem.message.role,
+                    content: String(activeItem.message.content ?? ''),
+                    cascadeIndex: activePosition,
+                    siblingGroupId: activeItem.message.siblingGroupId
+                });
+            }
+            processedGroupIds.add(message.siblingGroupId);
+            return;
+        }
+
+        if (!CHANGE_HISTORY_ROLES.has(message.role)) return;
+        visibleMessages.push({
+            index,
+            role: message.role,
+            content: String(message.content ?? ''),
+            cascadeIndex: null
+        });
+    });
+
+    return visibleMessages;
 }
 
 function canApplyHistoryEntry(entry, messageMap, direction) {
@@ -13066,6 +13123,7 @@ const appLogic = {
 
             // UIを再描画し、その後で操作UIを強制的に再表示する
             uiUtils.renderChatMessages();
+            uiUtils.scheduleChatReplacePreviewUpdate(0);
             
             // requestAnimationFrameを使用して、DOMの更新が完了した後に実行
             requestAnimationFrame(() => {
