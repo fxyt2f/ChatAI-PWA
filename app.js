@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.1";
-const APP_CACHE_VERSION = "v1.29.1";
+const APP_VERSION = "1.29.2";
+const APP_CACHE_VERSION = "v1.29.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -73,10 +73,21 @@ const INPUT_DRAFT_CLIENT_ID_KEY = 'chatai-pwa-client-id';
 const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
+const CHANGE_HISTORY_STORAGE_PREFIX = 'chatai-pwa-change-history:v1:';
+const CHANGE_HISTORY_MAX_ENTRIES = 30;
+const CHANGE_HISTORY_MAX_SERIALIZED_LENGTH = 2_000_000;
 const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.29.2": [
+        "置換・整形・Undo/Redoに備えた変更履歴基盤を追加しました。",
+        "チャット単位で変更履歴をlocalStorageへ保存・読み込みできるようにしました。",
+        "履歴entryの正規化、最大件数・最大保存サイズの制限、redo履歴の無効化処理を追加しました。",
+        "手動メッセージ編集を変更履歴へ記録する最小フックを追加しました。",
+        "将来のUndo/Redo適用前検証に使う履歴検証関数を追加しました。",
+        "アプリバージョンとキャッシュバージョンを1.29.2に更新しました。"
+    ],
     "1.29.1": [
         "チャット内検索のハイライト解除と再描画時の安定性を改善しました。",
         "チャット切替・編集保存・再生成後に古い検索Rangeが残らないように調整しました。",
@@ -6670,6 +6681,256 @@ function updateCurrentSystemPrompt() {
     }
 }
 
+// --- 変更履歴基盤 ---
+const changeHistoryCache = new Map();
+const CHANGE_HISTORY_TYPES = new Set(['edit', 'replace', 'format']);
+const CHANGE_HISTORY_STATUSES = new Set(['applied', 'undone', 'discarded']);
+const CHANGE_HISTORY_ROLES = new Set(['user', 'model']);
+const CHANGE_HISTORY_TARGETS = new Set(['model', 'user', 'both']);
+
+function hasChangeHistoryChatId(chatId) {
+    return chatId !== null && chatId !== undefined && String(chatId) !== '';
+}
+
+function makeChangeHistoryStorageKey(chatId) {
+    return `${CHANGE_HISTORY_STORAGE_PREFIX}${encodeURIComponent(String(chatId ?? ''))}`;
+}
+
+function createChangeHistoryId() {
+    if (globalThis.crypto?.randomUUID) {
+        return globalThis.crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeChangeHistoryTimestamp(value, fallback = Date.now()) {
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function normalizeChangeHistoryNullableTimestamp(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
+function normalizeChangeHistoryNonNegativeNumber(value, fallback = 0) {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : fallback;
+}
+
+function normalizeChangeHistoryTarget(target, changes) {
+    if (CHANGE_HISTORY_TARGETS.has(target)) return target;
+    const roles = new Set(changes.map(change => change.role));
+    if (roles.size === 1 && roles.has('user')) return 'user';
+    if (roles.size === 1 && roles.has('model')) return 'model';
+    return 'both';
+}
+
+function normalizeChangeHistoryEntry(entry, chatId) {
+    if (!entry || typeof entry !== 'object') return null;
+    if (!hasChangeHistoryChatId(chatId)) return null;
+
+    const changes = Array.isArray(entry.changes)
+        ? entry.changes.map(change => {
+            if (!change || typeof change !== 'object') return null;
+            const index = Number(change.index);
+            const role = String(change.role || '');
+            if (!Number.isInteger(index) || index < 0) return null;
+            if (!CHANGE_HISTORY_ROLES.has(role)) return null;
+            return {
+                index,
+                role,
+                before: String(change.before ?? ''),
+                after: String(change.after ?? ''),
+                count: normalizeChangeHistoryNonNegativeNumber(change.count, 0)
+            };
+        }).filter(Boolean)
+        : [];
+
+    if (changes.length === 0) return null;
+
+    const type = CHANGE_HISTORY_TYPES.has(entry.type) ? entry.type : 'edit';
+    const status = CHANGE_HISTORY_STATUSES.has(entry.status) ? entry.status : 'applied';
+    const messageCount = normalizeChangeHistoryNonNegativeNumber(entry.messageCount, changes.length);
+    const occurrenceCount = normalizeChangeHistoryNonNegativeNumber(
+        entry.occurrenceCount,
+        changes.reduce((total, change) => total + change.count, 0)
+    );
+
+    return {
+        id: typeof entry.id === 'string' && entry.id ? entry.id : createChangeHistoryId(),
+        chatId: String(chatId),
+        type,
+        status,
+        timestamp: normalizeChangeHistoryTimestamp(entry.timestamp),
+        undoneAt: normalizeChangeHistoryNullableTimestamp(entry.undoneAt),
+        redoneAt: normalizeChangeHistoryNullableTimestamp(entry.redoneAt),
+        discardedAt: normalizeChangeHistoryNullableTimestamp(entry.discardedAt),
+        query: String(entry.query ?? ''),
+        replacement: String(entry.replacement ?? ''),
+        formatLabel: String(entry.formatLabel ?? ''),
+        target: normalizeChangeHistoryTarget(entry.target, changes),
+        useRegex: entry.useRegex === true,
+        caseSensitive: entry.caseSensitive === true,
+        messageCount,
+        occurrenceCount,
+        changes
+    };
+}
+
+function pruneChangeHistory(entries) {
+    const pruned = Array.isArray(entries)
+        ? entries.filter(Boolean).slice(0, CHANGE_HISTORY_MAX_ENTRIES)
+        : [];
+
+    try {
+        while (
+            pruned.length > 1 &&
+            JSON.stringify(pruned).length > CHANGE_HISTORY_MAX_SERIALIZED_LENGTH
+        ) {
+            pruned.pop();
+        }
+    } catch (error) {
+        console.warn('[ChangeHistory] 履歴の剪定に失敗しました:', error);
+    }
+
+    return pruned;
+}
+
+async function loadChangeHistory(chatId, forceReload = false) {
+    if (!hasChangeHistoryChatId(chatId)) return [];
+    const cacheKey = String(chatId);
+    if (!forceReload && changeHistoryCache.has(cacheKey)) {
+        return changeHistoryCache.get(cacheKey);
+    }
+
+    try {
+        const rawValue = localStorage.getItem(makeChangeHistoryStorageKey(chatId));
+        if (!rawValue) {
+            changeHistoryCache.set(cacheKey, []);
+            return [];
+        }
+        const parsed = JSON.parse(rawValue);
+        const normalizedHistory = pruneChangeHistory(
+            (Array.isArray(parsed) ? parsed : [])
+                .map(entry => normalizeChangeHistoryEntry(entry, chatId))
+                .filter(Boolean)
+        );
+        changeHistoryCache.set(cacheKey, normalizedHistory);
+        return normalizedHistory;
+    } catch (error) {
+        console.warn('[ChangeHistory] 履歴の読み込みに失敗しました:', error);
+        changeHistoryCache.set(cacheKey, []);
+        return [];
+    }
+}
+
+async function saveChangeHistory(chatId, history) {
+    if (!hasChangeHistoryChatId(chatId)) return false;
+    const cacheKey = String(chatId);
+    const normalizedHistory = pruneChangeHistory(
+        (Array.isArray(history) ? history : [])
+            .map(entry => normalizeChangeHistoryEntry(entry, chatId))
+            .filter(Boolean)
+    );
+
+    try {
+        const serialized = JSON.stringify(normalizedHistory);
+        localStorage.setItem(makeChangeHistoryStorageKey(chatId), serialized);
+        changeHistoryCache.set(cacheKey, normalizedHistory);
+        return true;
+    } catch (error) {
+        console.warn('[ChangeHistory] 履歴の保存に失敗しました:', error);
+        return false;
+    }
+}
+
+async function appendChangeHistory(chatId, entry) {
+    if (!hasChangeHistoryChatId(chatId)) {
+        return { saved: false, history: [] };
+    }
+
+    const normalizedEntry = normalizeChangeHistoryEntry(entry, chatId);
+    const history = await loadChangeHistory(chatId);
+    if (!normalizedEntry) {
+        return { saved: false, history };
+    }
+
+    const now = Date.now();
+    const invalidatedHistory = history.map(historyEntry => {
+        if (historyEntry.status !== 'undone') return historyEntry;
+        return {
+            ...historyEntry,
+            status: 'discarded',
+            discardedAt: now
+        };
+    });
+    const nextHistory = [normalizedEntry, ...invalidatedHistory];
+    const saved = await saveChangeHistory(chatId, nextHistory);
+    return {
+        saved,
+        history: changeHistoryCache.get(String(chatId)) || nextHistory
+    };
+}
+
+function getCurrentMessageMapForHistory() {
+    const messageMap = new Map();
+    if (!Array.isArray(state.currentMessages)) return messageMap;
+    state.currentMessages.forEach((message, index) => {
+        if (!message || !CHANGE_HISTORY_ROLES.has(message.role)) return;
+        messageMap.set(index, {
+            role: message.role,
+            content: String(message.content ?? '')
+        });
+    });
+    return messageMap;
+}
+
+function canApplyHistoryEntry(entry, messageMap, direction) {
+    if (!entry || !Array.isArray(entry.changes)) return false;
+    if (!(messageMap instanceof Map)) return false;
+    if (direction === 'undo' && entry.status !== 'applied') return false;
+    if (direction === 'redo' && entry.status !== 'undone') return false;
+    if (direction !== 'undo' && direction !== 'redo') return false;
+
+    return entry.changes.every(change => {
+        const index = Number(change.index);
+        const current = messageMap.get(index);
+        const expected = direction === 'undo'
+            ? String(change.after ?? '')
+            : String(change.before ?? '');
+
+        return Boolean(current) &&
+            current.role === change.role &&
+            current.content === expected;
+    });
+}
+
+function getLatestAppliedHistoryEntry(history) {
+    if (!Array.isArray(history)) return null;
+    return history
+        .filter(entry => entry?.status === 'applied')
+        .reduce((latest, entry) => {
+            if (!latest) return entry;
+            return normalizeChangeHistoryTimestamp(entry.timestamp, 0) > normalizeChangeHistoryTimestamp(latest.timestamp, 0)
+                ? entry
+                : latest;
+        }, null);
+}
+
+function getLatestUndoneHistoryEntry(history) {
+    if (!Array.isArray(history)) return null;
+    return history
+        .filter(entry => entry?.status === 'undone')
+        .reduce((latest, entry) => {
+            if (!latest) return entry;
+            const entryTime = normalizeChangeHistoryNullableTimestamp(entry.undoneAt) || normalizeChangeHistoryTimestamp(entry.timestamp, 0);
+            const latestTime = normalizeChangeHistoryNullableTimestamp(latest.undoneAt) || normalizeChangeHistoryTimestamp(latest.timestamp, 0);
+            return entryTime > latestTime ? entry : latest;
+        }, null);
+}
+
 // --- アプリケーションロジック (appLogic) ---
 const appLogic = {
     _setupEventListenersCallCount: 0,
@@ -11989,6 +12250,9 @@ const appLogic = {
         }
         const newRawContent = textarea.value; // trim() を削除し、空白のみの保存も許可
         const originalMessage = state.currentMessages[index];
+        const originalContentForHistory = String(originalMessage.content ?? '');
+        const originalRoleForHistory = originalMessage.role;
+        const chatIdForHistory = state.currentChatId;
 
         if (newRawContent === originalMessage.content) {
             this.cancelEditMessage(index, messageElement);
@@ -12133,6 +12397,40 @@ const appLogic = {
 
             if (requiresTitleUpdate) {
                 uiUtils.updateChatTitle(newTitleForSave);
+            }
+            if (
+                hasChangeHistoryChatId(chatIdForHistory) &&
+                CHANGE_HISTORY_ROLES.has(originalRoleForHistory) &&
+                originalContentForHistory !== newRawContent
+            ) {
+                try {
+                    await appendChangeHistory(chatIdForHistory, {
+                        id: createChangeHistoryId(),
+                        chatId: chatIdForHistory,
+                        type: 'edit',
+                        status: 'applied',
+                        timestamp: Date.now(),
+                        query: '',
+                        replacement: '',
+                        formatLabel: '',
+                        target: originalRoleForHistory,
+                        useRegex: false,
+                        caseSensitive: false,
+                        messageCount: 1,
+                        occurrenceCount: 1,
+                        changes: [
+                            {
+                                index,
+                                role: originalRoleForHistory,
+                                before: originalContentForHistory,
+                                after: newRawContent,
+                                count: 1
+                            }
+                        ]
+                    });
+                } catch (historyError) {
+                    console.warn('[ChangeHistory] 編集履歴の記録に失敗しました:', historyError);
+                }
             }
             console.log("メッセージ編集後にチャット保存:", index);
         } catch (error) {
