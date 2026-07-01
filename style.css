@@ -413,8 +413,8 @@ body.dark-mode #chat-overlay {
 #chat-screen .main-content {
     background-color: transparent;
     touch-action: pan-x pan-y pinch-zoom;
-    padding-bottom: calc(var(--composer-height, 150px) + 84px + var(--safe-bottom));
-    scroll-padding-bottom: calc(var(--composer-height, 150px) + 84px + var(--safe-bottom));
+    padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
+    scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
 }
 #chat-screen .app-header,
 #chat-screen .chat-input-area {
@@ -478,16 +478,6 @@ body.dark-mode #chat-overlay {
         opacity: 1;
         transform: scale(1);
     }
-}
-
-#chat-screen.is-response-generating .message-actions,
-#chat-screen.is-response-generating .message-cascade-controls,
-body.is-response-generating #chat-screen .message-actions,
-body.is-response-generating #chat-screen .message-cascade-controls {
-    display: none !important;
-    opacity: 0 !important;
-    visibility: hidden !important;
-    pointer-events: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -670,8 +660,8 @@ body.dark-mode #attach-file-btn {
     }
 
     #chat-screen .main-content {
-        padding-bottom: calc(var(--composer-height, 150px) + 76px + var(--safe-bottom));
-        scroll-padding-bottom: calc(var(--composer-height, 150px) + 76px + var(--safe-bottom));
+        padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
+        scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
     }
 }
 
@@ -3121,7 +3111,7 @@ body.dark-mode #sd-test-connection-btn {
     display: inline;
 }
 
-/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5 / v1.28.6 / v1.28.7 / v1.28.8) --- */
+/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5 / v1.28.6 / v1.28.7 / v1.28.8 / v1.28.9) --- */
 #chat-screen .message-container {
     width: 100%;
     max-width: 760px;
