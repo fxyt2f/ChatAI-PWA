@@ -53,8 +53,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.1";
-const APP_CACHE_VERSION = "v1.28.1";
+const APP_VERSION = "1.28.2";
+const APP_CACHE_VERSION = "v1.28.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -66,6 +66,13 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.2": [
+        "チャット本文の最大幅を調整し、中央寄せのChatGPT風レイアウトに変更しました。",
+        "モデル回答のカード背景・枠線・影を抑え、本文中心の透明な表示に変更しました。",
+        "既存メッセージ操作ボタンを常時表示に変更しました。",
+        "ユーザー発言の操作ボタンを右下、モデル回答の操作ボタンを左下に配置しました。",
+        "編集中・生成中は操作ボタンを非表示にし、誤操作や表示被りを抑制しました。"
+    ],
     "1.28.1": [
         "入力欄を画面下部中央のカード状UIに変更しました。",
         "入力内容に応じて入力欄の高さを52px〜520pxで自動調整するようにしました。",
