@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.2";
-const APP_CACHE_VERSION = "v1.29.2";
+const APP_VERSION = "1.29.3";
+const APP_CACHE_VERSION = "v1.29.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +80,14 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.29.3": [
+        "置換実行に備えた置換プレビュー機能を追加しました。",
+        "検索語・正規表現・大文字小文字区別設定を使って置換候補を抽出できるようにしました。",
+        "対象範囲をモデル回答・ユーザー発言・両方から選べるようにしました。",
+        "置換候補のメッセージ数・一致件数・before/afterプレビュー計画を作成する基盤を追加しました。",
+        "本文変更・変更履歴追加・Undo/Redo実行は行わない非破壊プレビューに限定しました。",
+        "アプリバージョンとキャッシュバージョンを1.29.3に更新しました。"
+    ],
     "1.29.2": [
         "置換・整形・Undo/Redoに備えた変更履歴基盤を追加しました。",
         "チャット単位で変更履歴をlocalStorageへ保存・読み込みできるようにしました。",
@@ -654,6 +662,12 @@ try {
         chatSearchNextBtn: document.getElementById('chat-search-next-btn'),
         chatSearchRegex: document.getElementById('chat-search-regex'),
         chatSearchCaseSensitive: document.getElementById('chat-search-case-sensitive'),
+        chatSearchReplaceToggleBtn: document.getElementById('chat-search-replace-toggle-btn'),
+        chatReplacePreviewPanel: document.getElementById('chat-replace-preview-panel'),
+        chatReplaceInput: document.getElementById('chat-replace-input'),
+        chatReplaceTarget: document.getElementById('chat-replace-target'),
+        chatReplaceSummary: document.getElementById('chat-replace-summary'),
+        chatReplacePreviewList: document.getElementById('chat-replace-preview-list'),
         chatSearchCloseBtn: document.getElementById('chat-search-close-btn'),
         chatSearchStatus: document.getElementById('chat-search-status'),
         summaryModelNameSelect: document.getElementById('summary-model-name'),
@@ -878,6 +892,14 @@ Reason: [NGの場合の理由]`,
         isComposing: false,
         searchRunId: 0,
         temporarilyExpandedMessages: new Set()
+    },
+    chatReplacePreview: {
+        isOpen: false,
+        replacement: '',
+        target: 'model',
+        plan: null,
+        timer: 0,
+        error: ''
     },
     sync: {
         isDirty: false, // ローカルに変更があったか
@@ -2036,6 +2058,262 @@ const uiUtils = {
         return new RegExp(source, caseSensitive ? 'g' : 'gi');
     },
 
+    createChatReplacePattern(query, { useRegex = false, caseSensitive = false } = {}) {
+        if (!query) return null;
+        const source = useRegex ? query : this.escapeChatSearchRegExp(query);
+        return new RegExp(source, caseSensitive ? 'g' : 'gi');
+    },
+
+    normalizeChatReplaceTarget(target) {
+        return ['model', 'user', 'both'].includes(target) ? target : 'model';
+    },
+
+    doesReplaceTargetIncludeRole(target, role) {
+        const normalizedTarget = this.normalizeChatReplaceTarget(target);
+        if (normalizedTarget === 'both') return role === 'user' || role === 'model';
+        return normalizedTarget === role;
+    },
+
+    expandChatRegexReplacement(replacement, match, sourceText) {
+        const replacementText = String(replacement ?? '');
+        return replacementText.replace(/\$(\$|&|`|'|<[^>]+>|[0-9]{1,2})/g, (token, reference) => {
+            if (reference === '$') return '$';
+            if (reference === '&') return match[0] ?? '';
+            if (reference === '`') return sourceText.slice(0, match.index);
+            if (reference === "'") return sourceText.slice(match.index + (match[0]?.length || 0));
+            if (reference.startsWith('<') && reference.endsWith('>')) {
+                const groupName = reference.slice(1, -1);
+                return String(match.groups?.[groupName] ?? '');
+            }
+            const groupIndex = Number(reference);
+            if (Number.isInteger(groupIndex) && groupIndex > 0 && groupIndex < match.length) {
+                return String(match[groupIndex] ?? '');
+            }
+            return token;
+        });
+    },
+
+    applyChatReplacePatternToText(text, pattern, replacement, useRegex) {
+        const sourceText = String(text ?? '');
+        const replacementText = String(replacement ?? '');
+        const clone = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+        let after = '';
+        let lastIndex = 0;
+        let count = 0;
+        let match;
+
+        while ((match = clone.exec(sourceText)) !== null) {
+            if (match[0] === '') {
+                clone.lastIndex = Math.max(clone.lastIndex + 1, match.index + 1);
+                continue;
+            }
+            after += sourceText.slice(lastIndex, match.index);
+            after += useRegex
+                ? this.expandChatRegexReplacement(replacementText, match, sourceText)
+                : replacementText;
+            lastIndex = match.index + match[0].length;
+            count += 1;
+        }
+
+        if (count === 0) {
+            return { after: sourceText, count: 0 };
+        }
+
+        after += sourceText.slice(lastIndex);
+        return { after, count };
+    },
+
+    countMatchesForPattern(text, pattern) {
+        const clone = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+        let count = 0;
+        let match;
+
+        while ((match = clone.exec(String(text ?? ''))) !== null) {
+            if (match[0] === '') {
+                clone.lastIndex = Math.max(clone.lastIndex + 1, match.index + 1);
+                continue;
+            }
+            count += 1;
+        }
+
+        return count;
+    },
+
+    buildChatReplacePreviewPlan(options = {}) {
+        const query = this.normalizeChatSearchQuery(options.query ?? elements.chatSearchQuery?.value);
+        const replacement = String(options.replacement ?? state.chatReplacePreview.replacement ?? '');
+        const target = this.normalizeChatReplaceTarget(options.target ?? state.chatReplacePreview.target);
+        const useRegex = Boolean(options.useRegex ?? elements.chatSearchRegex?.checked);
+        const caseSensitive = Boolean(options.caseSensitive ?? elements.chatSearchCaseSensitive?.checked);
+        const emptyPlan = {
+            query,
+            replacement,
+            target,
+            useRegex,
+            caseSensitive,
+            messageCount: 0,
+            occurrenceCount: 0,
+            changes: []
+        };
+
+        if (!this.hasChatSearchQuery(query)) {
+            return emptyPlan;
+        }
+
+        let pattern;
+        try {
+            pattern = this.createChatReplacePattern(query, { useRegex, caseSensitive });
+        } catch (error) {
+            return {
+                ...emptyPlan,
+                error: `正規表現エラー: ${error.message}`
+            };
+        }
+
+        try {
+            const messageMap = getCurrentMessageMapForHistory();
+            const changes = [];
+            let occurrenceCount = 0;
+
+            messageMap.forEach((message, index) => {
+                if (!this.doesReplaceTargetIncludeRole(target, message.role)) return;
+                const before = String(message.content ?? '');
+                const result = this.applyChatReplacePatternToText(before, pattern, replacement, useRegex);
+                if (result.count <= 0 || before === result.after) return;
+                changes.push({
+                    index,
+                    role: message.role,
+                    before,
+                    after: result.after,
+                    count: result.count
+                });
+                occurrenceCount += result.count;
+            });
+
+            return {
+                ...emptyPlan,
+                messageCount: changes.length,
+                occurrenceCount,
+                changes
+            };
+        } catch (error) {
+            return {
+                ...emptyPlan,
+                error: `プレビュー作成エラー: ${error.message}`
+            };
+        }
+    },
+
+    createReplacePreviewSnippet(value, maxLength = 120) {
+        const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
+        if (normalized.length <= maxLength) return normalized;
+        return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+    },
+
+    clearChatReplacePreviewTimer() {
+        if (!state.chatReplacePreview.timer) return;
+        clearTimeout(state.chatReplacePreview.timer);
+        state.chatReplacePreview.timer = 0;
+    },
+
+    renderChatReplacePreview(plan = state.chatReplacePreview.plan) {
+        if (!elements.chatReplaceSummary || !elements.chatReplacePreviewList) return;
+        elements.chatReplacePreviewList.textContent = '';
+
+        if (!plan || plan.error) {
+            elements.chatReplaceSummary.textContent = plan?.error || '0件';
+            elements.chatReplaceSummary.classList.toggle('is-error', Boolean(plan?.error));
+            return;
+        }
+
+        elements.chatReplaceSummary.classList.remove('is-error');
+        elements.chatReplaceSummary.textContent = plan.occurrenceCount > 0
+            ? `${plan.occurrenceCount}件をプレビュー / ${plan.messageCount}メッセージ`
+            : '0件';
+
+        const previewChanges = plan.changes.slice(0, 5);
+        previewChanges.forEach(change => {
+            const item = document.createElement('div');
+            item.className = 'chat-replace-preview-item';
+
+            const meta = document.createElement('div');
+            meta.className = 'chat-replace-preview-meta';
+            meta.textContent = `${change.role === 'model' ? 'モデル' : 'ユーザー'} #${change.index + 1} / ${change.count}件`;
+
+            const before = document.createElement('div');
+            before.className = 'chat-replace-preview-snippet';
+            before.textContent = `before: ${this.createReplacePreviewSnippet(change.before)}`;
+
+            const after = document.createElement('div');
+            after.className = 'chat-replace-preview-snippet';
+            after.textContent = `after: ${this.createReplacePreviewSnippet(change.after)}`;
+
+            item.append(meta, before, after);
+            elements.chatReplacePreviewList.appendChild(item);
+        });
+    },
+
+    updateChatReplacePreview() {
+        if (!state.chatReplacePreview.isOpen) return;
+        state.chatReplacePreview.replacement = String(elements.chatReplaceInput?.value ?? '');
+        state.chatReplacePreview.target = this.normalizeChatReplaceTarget(elements.chatReplaceTarget?.value);
+        const plan = this.buildChatReplacePreviewPlan();
+        state.chatReplacePreview.plan = plan;
+        state.chatReplacePreview.error = plan.error || '';
+        this.renderChatReplacePreview(plan);
+    },
+
+    scheduleChatReplacePreviewUpdate(delay = CHAT_SEARCH_DEBOUNCE_MS) {
+        if (!state.chatReplacePreview.isOpen) return;
+        this.clearChatReplacePreviewTimer();
+        state.chatReplacePreview.timer = window.setTimeout(() => {
+            state.chatReplacePreview.timer = 0;
+            this.updateChatReplacePreview();
+        }, delay);
+    },
+
+    clearChatReplacePreviewState({ clearInput = true, resetTarget = true } = {}) {
+        this.clearChatReplacePreviewTimer();
+        state.chatReplacePreview.plan = null;
+        state.chatReplacePreview.error = '';
+        if (clearInput) {
+            state.chatReplacePreview.replacement = '';
+            if (elements.chatReplaceInput) elements.chatReplaceInput.value = '';
+        }
+        if (resetTarget) {
+            state.chatReplacePreview.target = 'model';
+            if (elements.chatReplaceTarget) elements.chatReplaceTarget.value = 'model';
+        }
+        if (elements.chatReplaceSummary) {
+            elements.chatReplaceSummary.textContent = '0件';
+            elements.chatReplaceSummary.classList.remove('is-error');
+        }
+        if (elements.chatReplacePreviewList) {
+            elements.chatReplacePreviewList.textContent = '';
+        }
+    },
+
+    setChatReplacePreviewOpen(isOpen) {
+        state.chatReplacePreview.isOpen = Boolean(isOpen);
+        if (elements.chatReplacePreviewPanel) {
+            elements.chatReplacePreviewPanel.hidden = !state.chatReplacePreview.isOpen;
+        }
+        if (elements.chatSearchReplaceToggleBtn) {
+            elements.chatSearchReplaceToggleBtn.classList.toggle('active', state.chatReplacePreview.isOpen);
+            elements.chatSearchReplaceToggleBtn.setAttribute('aria-expanded', state.chatReplacePreview.isOpen ? 'true' : 'false');
+        }
+        if (state.chatReplacePreview.isOpen) {
+            this.updateChatReplacePreview();
+            elements.chatReplaceInput?.focus?.();
+            return;
+        }
+        this.clearChatReplacePreviewState({ clearInput: false, resetTarget: false });
+    },
+
+    toggleChatReplacePreview() {
+        this.setChatReplacePreviewOpen(!state.chatReplacePreview.isOpen);
+    },
+
     normalizeChatSearchQuery(value) {
         return String(value ?? '');
     },
@@ -2424,6 +2702,7 @@ const uiUtils = {
             state.chatSearch.inputTimer = 0;
             this.runChatSearch({ scrollToFirst: Boolean(options.scrollToFirst ?? scrollToFirst) });
         }, CHAT_SEARCH_DEBOUNCE_MS);
+        this.scheduleChatReplacePreviewUpdate();
     },
 
     moveChatSearchCurrent(delta) {
@@ -2462,6 +2741,8 @@ const uiUtils = {
         if (!elements.chatSearchDialog) return;
         this.invalidateChatSearchRun();
         state.chatSearch.isOpen = false;
+        this.setChatReplacePreviewOpen(false);
+        this.clearChatReplacePreviewState({ clearInput: true });
         elements.chatSearchDialog.hidden = true;
         elements.chatSearchOpenBtn?.classList.remove('active');
         this.setChatSearchOpenClass(false);
@@ -2481,6 +2762,9 @@ const uiUtils = {
 
     setupChatSearch() {
         elements.chatSearchOpenBtn?.addEventListener('click', () => this.openChatSearch());
+        elements.chatSearchReplaceToggleBtn?.addEventListener('click', () => this.toggleChatReplacePreview());
+        elements.chatReplaceInput?.addEventListener('input', () => this.scheduleChatReplacePreviewUpdate());
+        elements.chatReplaceTarget?.addEventListener('change', () => this.scheduleChatReplacePreviewUpdate(0));
         elements.chatSearchCloseBtn?.addEventListener('click', () => this.closeChatSearch());
         elements.chatSearchQuery?.addEventListener('compositionstart', () => {
             state.chatSearch.isComposing = true;
