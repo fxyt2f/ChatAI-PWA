@@ -8,6 +8,9 @@
     --safe-right: env(safe-area-inset-right, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-left: env(safe-area-inset-left, 0px);
+    --composer-height: 150px;
+    --composer-textarea-height: 52px;
+    --composer-overflow: hidden;
 
     /* Spacing Unit */
     --spacing-unit: 8px;
@@ -410,6 +413,8 @@ body.dark-mode #chat-overlay {
 #chat-screen .main-content {
     background-color: transparent;
     touch-action: pan-x pan-y pinch-zoom;
+    padding-bottom: calc(var(--composer-height, 150px) + 84px + var(--safe-bottom));
+    scroll-padding-bottom: calc(var(--composer-height, 150px) + 84px + var(--safe-bottom));
 }
 #chat-screen .app-header,
 #chat-screen .chat-input-area {
@@ -475,27 +480,85 @@ body.dark-mode #chat-overlay {
 }
 
 /* --- Chat Input Area --- */
-.chat-input-area {
-    display: flex;
-    padding: var(--spacing-unit) max(calc(var(--spacing-unit) * 2), var(--safe-right)) calc(var(--spacing-unit) + var(--safe-bottom)) max(calc(var(--spacing-unit) * 2), var(--safe-left));
-    border-top: 1px solid var(--border-primary);
+#chat-screen > footer.chat-input-area {
+    position: absolute;
+    left: 50%;
+    bottom: max(10px, var(--safe-bottom));
+    transform: translateX(-50%);
+    z-index: 50;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 42px 42px;
+    grid-template-areas:
+        "input input input"
+        "profile attach send";
+    align-items: center;
+    width: calc(100% - 24px);
+    max-width: 760px;
+    margin: 0;
+    padding: 8px 10px 10px;
+    column-gap: 8px;
+    row-gap: 4px;
+    box-sizing: border-box;
     background-color: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 24px;
+    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.18), 0 3px 10px rgba(0, 0, 0, 0.08);
+    overflow: visible;
     flex-shrink: 0;
-    gap: var(--spacing-unit);
 }
-.chat-input-area textarea {
-    flex-grow: 1;
-    min-height: 44px;
-    max-height: 150px;
-    height: 44px;
+#chat-screen #user-input {
+    grid-area: input;
+    display: block;
+    width: 100%;
+    min-width: 0;
+    min-height: 52px;
+    max-height: 520px;
+    height: var(--composer-textarea-height, 52px);
+    margin: 0;
+    padding: 12px 8px 10px;
+    box-sizing: border-box;
+    font: inherit;
+    line-height: 1.55;
+    color: var(--text-primary);
+    caret-color: currentColor;
+    background-color: var(--bg-primary);
+    border: none;
+    border-radius: 16px;
+    outline: 0;
+    box-shadow: none;
     resize: none;
-    margin-bottom: 0;
-    padding: 10px;
-    border-radius: var(--border-radius-lg);
+    overflow-x: hidden;
+    overflow-y: var(--composer-overflow, hidden);
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
 }
-.chat-input-area button {
-    height: 44px;
-    width: 44px;
+#chat-screen #user-input:focus,
+#chat-screen #user-input:focus-visible {
+    background-color: var(--bg-primary);
+    border: none;
+    outline: 0;
+    box-shadow: none;
+}
+#chat-screen #profile-card-header-wrapper {
+    grid-area: profile;
+    justify-self: start;
+    align-self: center;
+}
+#chat-screen #attach-file-btn {
+    grid-area: attach;
+}
+#chat-screen #send-button {
+    grid-area: send;
+}
+#chat-screen #attach-file-btn,
+#chat-screen #send-button {
+    justify-self: end;
+    align-self: center;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    margin: 0;
     padding: 0;
     font-size: 24px;
     flex-shrink: 0;
@@ -508,6 +571,28 @@ body.dark-mode #attach-file-btn {
 #send-button.sending {
     background-color: #ffc107;
     color: #333;
+}
+
+@media screen and (max-width: 600px) {
+    #chat-screen > footer.chat-input-area {
+        bottom: max(8px, var(--safe-bottom));
+        width: calc(100% - 16px);
+        padding: 7px 8px 9px;
+        column-gap: 6px;
+        row-gap: 2px;
+        border-radius: 22px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.20), 0 2px 8px rgba(0, 0, 0, 0.10);
+    }
+
+    #chat-screen #user-input {
+        min-height: 52px;
+        padding: 11px 8px 9px;
+    }
+
+    #chat-screen .main-content {
+        padding-bottom: calc(var(--composer-height, 150px) + 76px + var(--safe-bottom));
+        scroll-padding-bottom: calc(var(--composer-height, 150px) + 76px + var(--safe-bottom));
+    }
 }
 
 /* --- History Screen --- */
@@ -1508,7 +1593,9 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
 .chat-input-area .profile-card-wrapper {
     position: relative;
     flex-shrink: 0;
-    align-self: flex-end; 
+    align-self: center;
+    min-width: 0;
+    overflow: visible;
 }
 
 .chat-input-area .profile-card {
@@ -1521,8 +1608,8 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
     transition: background-color var(--transition-duration) var(--transition-timing);
     background-color: var(--bg-tertiary);
     border: 1px solid var(--border-primary);
-    height: 44px;
-    width: 44px;
+    height: 40px;
+    width: 40px;
 }
 
 .chat-input-area .profile-card:hover {
@@ -1554,14 +1641,17 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
 /* --- Footer Dropdown Menu Position --- */
 .chat-input-area .profile-menu {
     position: absolute;
-    bottom: calc(100% + 4px);
+    bottom: calc(100% + 8px);
     left: 0;
     background-color: var(--bg-primary);
     border-radius: var(--border-radius-md);
     box-shadow: var(--shadow-3);
-    z-index: 100;
-    overflow: hidden;
+    z-index: 1002;
+    overflow-x: hidden;
+    overflow-y: auto;
     min-width: 200px;
+    max-width: min(320px, calc(100vw - 24px));
+    max-height: min(52vh, 420px);
     border: 1px solid var(--border-primary);
 }
 

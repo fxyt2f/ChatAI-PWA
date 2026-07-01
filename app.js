@@ -38,6 +38,8 @@ const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
 const CHAT_TITLE_LENGTH = 15;
 const TEXTAREA_MAX_HEIGHT = 120;
+const COMPOSER_TEXTAREA_MIN_HEIGHT = 52;
+const COMPOSER_TEXTAREA_MAX_HEIGHT = 520;
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -51,8 +53,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.0";
-const APP_CACHE_VERSION = "v1.28.0";
+const APP_VERSION = "1.28.1";
+const APP_CACHE_VERSION = "v1.28.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -64,6 +66,13 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.1": [
+        "入力欄を画面下部中央のカード状UIに変更しました。",
+        "入力内容に応じて入力欄の高さを52px〜520pxで自動調整するようにしました。",
+        "入力欄の高さに合わせてチャット本文の最下部余白を自動調整するようにしました。",
+        "プロファイル、添付、送信ボタンを入力カード下段に配置しました。",
+        "プロファイルメニューが入力欄の上に開くように調整しました。"
+    ],
     "1.28.0": [
         "入力欄の下書きをチャット/プロファイル単位で自動保存するようにしました。",
         "Dropbox接続済みの場合、入力下書きをDropbox App Folderのdrafts配下へ共有保存するようにしました。",
@@ -122,6 +131,8 @@ let inputDraftRestoreSequence = 0;
 let inputDraftRestoring = false;
 let activeInputDraftContextKey = null;
 let pendingInputDraftDropboxRecord = null;
+let composerResizeFrame = 0;
+let composerResizeObserver = null;
 
 // プロバイダーごとのモデルリスト
 const GEMINI_MODELS = [
@@ -3391,6 +3402,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (finished) return;
             finished = true;
             state.currentScreen = screenName;
+            if (screenName === 'chat') {
+                this.scheduleComposerTextareaResize(true);
+            }
             const endTime = performance.now();
             resolve();
           };
@@ -3425,17 +3439,109 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.systemPromptDetails.style.pointerEvents = '';
             elements.systemPromptDetails.style.opacity = '';
         }
+        this.scheduleComposerTextareaResize(true);
+    },
+
+    getComposerTextarea() {
+        return elements.userInput || document.querySelector('#chat-screen #user-input');
+    },
+
+    getComposerElement() {
+        return document.querySelector('#chat-screen > footer.chat-input-area');
+    },
+
+    updateComposerHeight() {
+        const composer = this.getComposerElement();
+        if (!composer) return;
+        const height = Math.ceil(composer.getBoundingClientRect().height) || 0;
+        const heightValue = `${height}px`;
+        document.documentElement.style.setProperty('--composer-height', heightValue);
+        if (document.body) {
+            document.body.style.setProperty('--composer-height', heightValue);
+        }
+    },
+
+    applyComposerTextareaSize(force = false) {
+        const textarea = this.getComposerTextarea();
+        if (!textarea) return;
+        if (!force && textarea.dataset.composerComposing === 'true') {
+            this.updateComposerHeight();
+            return;
+        }
+
+        textarea.style.height = 'auto';
+        const contentHeight = Math.ceil(textarea.scrollHeight);
+        const nextHeight = Math.max(
+            COMPOSER_TEXTAREA_MIN_HEIGHT,
+            Math.min(contentHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)
+        );
+        const overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT + 1 ? 'auto' : 'hidden';
+
+        textarea.style.height = `${nextHeight}px`;
+        textarea.style.setProperty('--composer-textarea-height', `${nextHeight}px`);
+        textarea.style.setProperty('--composer-overflow', overflowY);
+        this.updateComposerHeight();
+    },
+
+    scheduleComposerTextareaResize(force = false) {
+        cancelAnimationFrame(composerResizeFrame);
+        composerResizeFrame = requestAnimationFrame(() => this.applyComposerTextareaSize(force));
+    },
+
+    installComposerResizeObserver() {
+        const composer = this.getComposerElement();
+        if (!composer || typeof ResizeObserver === 'undefined') {
+            this.updateComposerHeight();
+            return;
+        }
+        if (composerResizeObserver) {
+            composerResizeObserver.disconnect();
+        }
+        composerResizeObserver = new ResizeObserver(() => this.updateComposerHeight());
+        composerResizeObserver.observe(composer);
+    },
+
+    installComposerTextareaAutoResize() {
+        const textarea = this.getComposerTextarea();
+        if (!textarea || textarea.dataset.composerAutoResizeInstalled === 'true') {
+            this.scheduleComposerTextareaResize(true);
+            this.installComposerResizeObserver();
+            return;
+        }
+
+        textarea.dataset.composerAutoResizeInstalled = 'true';
+        textarea.addEventListener('compositionstart', () => {
+            textarea.dataset.composerComposing = 'true';
+        });
+        textarea.addEventListener('compositionend', () => {
+            textarea.dataset.composerComposing = 'false';
+            this.scheduleComposerTextareaResize(true);
+        });
+        textarea.addEventListener('focus', () => this.scheduleComposerTextareaResize(true));
+        textarea.addEventListener('change', () => this.scheduleComposerTextareaResize(true));
+        window.addEventListener('resize', () => this.scheduleComposerTextareaResize(true));
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => this.scheduleComposerTextareaResize(true));
+        }
+
+        this.installComposerResizeObserver();
+        this.scheduleComposerTextareaResize(true);
     },
 
     // テキストエリアの高さを自動調整
     adjustTextareaHeight(textarea = elements.userInput, maxHeight = TEXTAREA_MAX_HEIGHT) {
+        if (!textarea) return;
+        if (textarea === elements.userInput) {
+            if (!state.isSending) {
+                elements.sendButton.disabled = textarea.value.trim() === '' && state.pendingAttachments.length === 0;
+            }
+            this.scheduleComposerTextareaResize();
+            return;
+        }
+
         textarea.style.height = 'auto';
         const scrollHeight = textarea.scrollHeight;
         textarea.style.height = Math.min(scrollHeight, maxHeight) + 'px';
-        
-        if (textarea === elements.userInput && !state.isSending) {
-            elements.sendButton.disabled = textarea.value.trim() === '' && state.pendingAttachments.length === 0;
-        }
     },
 
 
@@ -7871,9 +7977,11 @@ const appLogic = {
                 this.flushInputDraft();
             } else {
                 this.scheduleInputDraftRestore(80);
+                uiUtils.scheduleComposerTextareaResize(true);
             }
         });
         window.addEventListener('pagehide', () => this.flushInputDraft(), { capture: true });
+        uiUtils.installComposerTextareaAutoResize();
     
         // --- システムプロンプト ---
         elements.systemPromptDetails.addEventListener('toggle', (event) => {
