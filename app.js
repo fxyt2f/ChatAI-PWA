@@ -53,8 +53,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.2";
-const APP_CACHE_VERSION = "v1.28.2";
+const APP_VERSION = "1.28.3";
+const APP_CACHE_VERSION = "v1.28.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -66,6 +66,12 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.3": [
+        "モデル回答下の情報表示を2段化し、トークン数と操作ボタンの視認性を改善しました。",
+        "モデル回答ごとに生成時のプロファイル名・プロバイダー・モデル名を記録するようにしました。",
+        "回答下にプロファイル名 / モデル名を表示し、過去回答の生成条件を確認しやすくしました。",
+        "長いモデル名は省略表示し、スマホ幅でも横はみ出ししにくいように調整しました。"
+    ],
     "1.28.2": [
         "チャット本文の最大幅を調整し、中央寄せのChatGPT風レイアウトに変更しました。",
         "モデル回答のカード背景・枠線・影を抑え、本文中心の透明な表示に変更しました。",
@@ -1842,6 +1848,50 @@ const uiUtils = {
         return `${label}: ${meta.provider} / ${meta.model}`;
     },
 
+    getExecutionProviderLabel(provider) {
+        const rawProvider = String(provider || '').trim();
+        const normalized = rawProvider.toLowerCase();
+        const labels = {
+            gemini: 'Gemini',
+            openrouter: 'OpenRouter',
+            zai: 'Z.ai',
+            bedrock: 'Amazon Bedrock'
+        };
+        return labels[normalized] || rawProvider;
+    },
+
+    formatExecutionMetadataLabel(metadata) {
+        if (!metadata || typeof metadata !== 'object') return '';
+        const profileName = String(metadata.profileName || '').trim();
+        const modelName = String(metadata.modelName || '').trim();
+        const providerLabel = this.getExecutionProviderLabel(metadata.provider);
+
+        if (profileName && modelName) return `${profileName} / ${modelName}`;
+        if (modelName) return modelName;
+        if (profileName && providerLabel) return `${profileName} / ${providerLabel}`;
+        return profileName || providerLabel;
+    },
+
+    formatExecutionMetadataTitle(metadata) {
+        if (!metadata || typeof metadata !== 'object') return '';
+        const lines = [];
+        const profileName = String(metadata.profileName || '').trim();
+        const modelName = String(metadata.modelName || '').trim();
+        const providerLabel = this.getExecutionProviderLabel(metadata.provider);
+
+        if (profileName) lines.push(`プロファイル: ${profileName}`);
+        if (modelName) lines.push(`モデル: ${modelName}`);
+        if (providerLabel) lines.push(`プロバイダー: ${providerLabel}`);
+        if (metadata.generatedAt) {
+            const generatedDate = new Date(metadata.generatedAt);
+            if (!Number.isNaN(generatedDate.getTime())) {
+                lines.push(`生成日時: ${generatedDate.toLocaleString('ja-JP')}`);
+            }
+        }
+
+        return lines.join('\n');
+    },
+
     // 新しいメッセージ要素をコンテナの末尾に追加する（ちらつき防止用）
     appendMessage(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
         const messageElement = this.createMessageElement(role, content, index, isStreamingPlaceholder, cascadeInfo, attachments);
@@ -2431,6 +2481,22 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 retrySpan.style.marginLeft = '8px';
             }
             actionsDiv.appendChild(retrySpan);
+        }
+
+        if (role === 'model' && !isStreamingPlaceholder) {
+            const executionMetadata = messageData?.usageMetadata?.tmExecution;
+            const executionLabel = this.formatExecutionMetadataLabel(executionMetadata);
+            if (executionLabel) {
+                const executionMetaSpan = document.createElement('span');
+                executionMetaSpan.classList.add('tm-execution-meta');
+                executionMetaSpan.textContent = executionLabel;
+                const executionTitle = this.formatExecutionMetadataTitle(executionMetadata);
+                if (executionTitle) {
+                    executionMetaSpan.title = executionTitle;
+                    executionMetaSpan.setAttribute('aria-label', executionTitle);
+                }
+                actionsDiv.appendChild(executionMetaSpan);
+            }
         }
         
         if (actionsDiv.hasChildNodes()) {
@@ -5601,6 +5667,57 @@ function updateCurrentSystemPrompt() {
 // --- アプリケーションロジック (appLogic) ---
 const appLogic = {
     _setupEventListenersCallCount: 0,
+
+    cleanExecutionMetaText(value, maxLength) {
+        if (value === null || value === undefined) return '';
+        return String(value)
+            .replace(/[\r\n\t]+/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim()
+            .slice(0, maxLength);
+    },
+
+    resolveExecutionModelName(provider) {
+        const modelName = state.settings.modelName || '';
+        const normalizedProvider = String(provider || '').toLowerCase();
+        switch (normalizedProvider) {
+            case 'openrouter':
+                return modelName || DEFAULT_OPENROUTER_MODEL;
+            case 'zai':
+                return modelName || DEFAULT_ZAI_MODEL;
+            case 'bedrock':
+                return modelName || DEFAULT_BEDROCK_MODEL;
+            case 'gemini':
+            default:
+                return modelName || DEFAULT_MODEL;
+        }
+    },
+
+    createExecutionMetadataSnapshot() {
+        const provider = this.cleanExecutionMetaText(state.settings.apiProvider || 'gemini', 40) || 'gemini';
+        const profile = state.activeProfile || {};
+
+        return {
+            schemaVersion: 1,
+            profileId: state.activeProfileId ?? profile.id ?? null,
+            profileName: this.cleanExecutionMetaText(profile.name || '', 120),
+            provider,
+            modelName: this.cleanExecutionMetaText(this.resolveExecutionModelName(provider), 240),
+            generatedAt: Date.now()
+        };
+    },
+
+    attachExecutionMetadataToModelMessage(message, metadata) {
+        if (!message || message.role !== 'model' || !metadata) return message;
+
+        const usageMetadata = (message.usageMetadata && typeof message.usageMetadata === 'object')
+            ? { ...message.usageMetadata }
+            : {};
+
+        usageMetadata.tmExecution = { ...metadata };
+        message.usageMetadata = usageMetadata;
+        return message;
+    },
 
     timerManager: {
         timers: {}, // { timer_name: { timerId: 123, endTime: 167... } }
@@ -10017,6 +10134,7 @@ const appLogic = {
         const attachmentsToSend = [...state.pendingAttachments];
         if (!text && attachmentsToSend.length === 0) return;
         const inputDraftContextKeyBeforeSend = this.getInputDraftContextKey();
+        const executionMetadata = this.createExecutionMetadataSnapshot();
 
         uiUtils.setSendingState(true);
         uiUtils.setLoadingIndicatorText('応答生成中...');
@@ -10077,6 +10195,7 @@ const appLogic = {
             const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
             
             const finalAggregatedMessage = this._aggregateMessages(newMessages);
+            this.attachExecutionMetadataToModelMessage(finalAggregatedMessage, executionMetadata);
             state.currentMessages[modelMessageIndex] = finalAggregatedMessage;
 
             uiUtils.renderChatMessages();
@@ -10980,6 +11099,7 @@ const appLogic = {
     
         if (confirmed) {
             uiUtils.setSendingState(true);
+            const executionMetadata = this.createExecutionMetadataSnapshot();
     
             let originalResponses = [];
             // 保留中のカスケード応答があれば、それを使用する
@@ -11032,6 +11152,7 @@ const appLogic = {
     
                 const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
                 const newAggregatedMessage = this._aggregateMessages(newMessages);
+                this.attachExecutionMetadataToModelMessage(newAggregatedMessage, executionMetadata);
     
                 // 成功したので、待避していたデータを取得し、待避領域をクリア
                 const finalOriginalResponses = state.pendingCascadeResponses || [];
