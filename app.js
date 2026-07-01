@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.6";
-const APP_CACHE_VERSION = "v1.28.6";
+const APP_VERSION = "1.28.8";
+const APP_CACHE_VERSION = "v1.28.8";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -74,6 +74,20 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.8": [
+        "送信中・応答生成中に画面下部中央へ応答生成中ステータスを表示するようにしました。",
+        "入力欄カードの上に小さな点滅ドット付きステータスを出すように調整しました。",
+        "ストリーミング中・送信中状態を監視し、応答完了・中断・エラー時に非表示化するようにしました。",
+        "生成中はメッセージ操作ボタンとcascade controlsを非表示にして誤操作を抑制しました。",
+        "アプリバージョンとキャッシュバージョンを1.28.8に更新しました。"
+    ],
+    "1.28.7": [
+        "v1.28系で追加したメッセージ周辺UIの表示安定性を改善しました。",
+        "長文折りたたみのフェード表示と展開/折りたたみ時の見え方を微調整しました。",
+        "回答下2段表示、コピー、折りたたみ、編集ボタンの並びと折り返しを調整しました。",
+        "編集中Markdownコピーボタンのコピー・保存・キャンセル並びと#a4c7d5単色表示を安定化しました。",
+        "スマホ幅での操作ボタン、編集UI、入力欄カードとの干渉を抑制しました。"
+    ],
     "1.28.6": [
         "長文メッセージを自動で折りたたむ機能を追加しました。",
         "1200pxを超える長文のみを対象にし、短めの回答は折りたたまないよう調整しました。",
@@ -178,6 +192,7 @@ let composerResizeFrame = 0;
 let composerResizeObserver = null;
 let messageCollapseFrame = 0;
 let messageCollapseResizeObserver = null;
+let generationStatusHideTimer = 0;
 
 // プロバイダーごとのモデルリスト
 const GEMINI_MODELS = [
@@ -403,6 +418,7 @@ try {
         userInput: document.getElementById('user-input'),
         sendButton: document.getElementById('send-button'),
         loadingIndicator: document.getElementById('loading-indicator'),
+        generationStatusIndicator: document.getElementById('generation-status-indicator'),
         historyList: document.getElementById('history-list'),
         historyTitle: document.getElementById('history-title'),
         noHistoryMessage: document.getElementById('no-history-message'),
@@ -1862,6 +1878,67 @@ const uiUtils = {
     setLoadingIndicatorText(text) {
         elements.loadingIndicator.textContent = text;
     },
+
+    ensureGenerationStatusIndicator() {
+        if (elements.generationStatusIndicator?.isConnected) {
+            return elements.generationStatusIndicator;
+        }
+
+        let indicator = document.getElementById('generation-status-indicator');
+        if (indicator) {
+            elements.generationStatusIndicator = indicator;
+            return indicator;
+        }
+
+        const chatScreen = elements.chatScreen || document.getElementById('chat-screen') || document.body;
+        indicator = document.createElement('div');
+        indicator.id = 'generation-status-indicator';
+        indicator.className = 'generation-status-indicator';
+        indicator.setAttribute('aria-live', 'polite');
+        indicator.hidden = true;
+        indicator.innerHTML = '<span class="generation-status-dot" aria-hidden="true"></span><span class="generation-status-text">応答生成中</span>';
+        chatScreen.appendChild(indicator);
+        elements.generationStatusIndicator = indicator;
+        return indicator;
+    },
+
+    isResponseGenerationActive() {
+        const stateGenerating = Boolean(state?.isSending || state?.isGenerating || state?.isStreaming);
+        const streamingDom = Boolean(
+            document.querySelector('[id^="streaming-message-"]') ||
+            document.querySelector('[id^="streaming-content-"]')
+        );
+        return stateGenerating || streamingDom;
+    },
+
+    updateGenerationStatusIndicator() {
+        const indicator = this.ensureGenerationStatusIndicator();
+        const isActive = this.isResponseGenerationActive();
+        const chatScreen = elements.chatScreen || document.getElementById('chat-screen');
+
+        window.clearTimeout(generationStatusHideTimer);
+        document.body?.classList.toggle('is-response-generating', isActive);
+        chatScreen?.classList.toggle('is-response-generating', isActive);
+        indicator.classList.toggle('is-generating', isActive);
+
+        if (isActive) {
+            indicator.hidden = false;
+            requestAnimationFrame(() => {
+                if (this.isResponseGenerationActive()) {
+                    indicator.classList.add('is-visible');
+                }
+            });
+            return;
+        }
+
+        indicator.classList.remove('is-visible');
+        generationStatusHideTimer = window.setTimeout(() => {
+            if (!this.isResponseGenerationActive()) {
+                indicator.hidden = true;
+            }
+        }, 180);
+    },
+
     // APIタイムアウトオプションの表示/非表示を制御
     updateApiTimeoutOptionsVisibility() {
         const isEnabled = elements.enableApiTimeoutCheckbox.checked;
@@ -1936,6 +2013,7 @@ const uiUtils = {
                 });
             }
         }
+        this.updateGenerationStatusIndicator();
     },
 
 renderChatMessages() {
@@ -2028,6 +2106,7 @@ renderChatMessages() {
     requestAnimationFrame(() => {
         container.style.minHeight = '';
         this.applyMessageCollapseToAll(container);
+        this.updateGenerationStatusIndicator();
     });
     
     appLogic.updateSummarizeButtonState();
@@ -3565,6 +3644,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.systemPromptDetails.style.opacity = '';
         }
         this.scheduleComposerTextareaResize(true);
+        this.updateGenerationStatusIndicator();
     },
 
     getComposerTextarea() {
@@ -3851,9 +3931,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     applyMessageCollapseToAll(root = elements.messageContainer) {
         const container = root || elements.messageContainer;
-        const messages = container?.querySelectorAll?.('#chat-screen .message.user, #chat-screen .message.model')
-            || container?.querySelectorAll?.('.message.user, .message.model')
-            || [];
+        if (!container) return;
+        const messages = [];
+
+        if (container.matches?.('.message.user, .message.model')) {
+            messages.push(container);
+        }
+
+        container.querySelectorAll?.('.message.user, .message.model')
+            .forEach(message => messages.push(message));
         messages.forEach(message => this.applyMessageCollapse(message));
     },
 
@@ -7650,8 +7736,10 @@ const appLogic = {
         }, { rootMargin: '200px' });
     
         const mutationObserver = new MutationObserver((mutationsList) => {
+            let shouldUpdateGenerationStatus = false;
             for (const mutation of mutationsList) {
                 if (mutation.type === 'childList') {
+                    shouldUpdateGenerationStatus = true;
                     mutation.removedNodes.forEach(node => {
                         const imagesToRevoke = [];
                         if (node.tagName === 'IMG' && node.src.startsWith('blob:')) {
@@ -7666,8 +7754,12 @@ const appLogic = {
                     });
                 }
             }
+            if (shouldUpdateGenerationStatus) {
+                uiUtils.updateGenerationStatusIndicator();
+            }
         });
         mutationObserver.observe(elements.messageContainer, { childList: true, subtree: true });
+        uiUtils.updateGenerationStatusIndicator();
     
         try {
             // --- ステップ4: データ読み込みとUI更新 ---
@@ -11462,7 +11554,7 @@ const appLogic = {
             console.log("編集終了:", index);
         }
 
-        elements.userInput.focus();
+        elements.userInput?.focus?.();
     },
 
     // メッセージを削除 (会話ターン全体)
