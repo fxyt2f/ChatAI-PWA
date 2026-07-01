@@ -3041,7 +3041,7 @@ body.dark-mode #sd-test-connection-btn {
     display: inline;
 }
 
-/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3) --- */
+/* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4) --- */
 #chat-screen .message-container {
     width: 100%;
     max-width: 760px;
@@ -3081,6 +3081,108 @@ body.dark-mode #sd-test-connection-btn {
     width: 100%;
     max-width: none;
     text-align: left;
+}
+
+#chat-screen .message.editing {
+    box-sizing: border-box;
+    overflow: visible;
+}
+
+#chat-screen .message.model.editing,
+#chat-screen .message.user.editing {
+    align-self: stretch;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    margin-left: 0;
+    margin-right: 0;
+    margin-bottom: 24px;
+    box-sizing: border-box;
+}
+
+#chat-screen .message.editing .message-content,
+#chat-screen .message.editing .message-edit-area {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+}
+
+#chat-screen .message-edit-area {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+#chat-screen .message-edit-area.hidden {
+    display: none;
+}
+
+#chat-screen .message-edit-area .edit-textarea {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    min-height: 140px;
+    max-height: min(680px, 72vh);
+    margin: 0;
+    padding: 12px 14px;
+    box-sizing: border-box;
+    font: inherit;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    outline: 0;
+    box-shadow: none;
+    resize: vertical;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+
+#chat-screen .message-edit-area .edit-textarea:focus {
+    border-color: var(--bg-button);
+    outline: 2px solid color-mix(in srgb, var(--bg-button) 28%, transparent);
+    outline-offset: 0;
+}
+
+#chat-screen .message-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 10px;
+}
+
+#chat-screen .message-edit-actions button {
+    width: auto;
+    min-width: 72px;
+    height: 36px;
+    padding: 0 14px;
+    font-size: 12px;
+    border-radius: 18px;
+    box-shadow: none;
+}
+
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
+    margin-right: auto;
+    background-color: var(--bg-button-action);
+    color: var(--text-light);
+}
+
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
+    background-color: var(--bg-button-action-hover);
+}
+
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
+    color: var(--bg-button-save, #34a853);
+    border-color: color-mix(in srgb, var(--bg-button-save, #34a853) 45%, var(--border-primary));
+    background: color-mix(in srgb, var(--bg-button-save, #34a853) 10%, var(--bg-secondary));
 }
 
 #chat-screen .message-actions {
@@ -3231,14 +3333,83 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 #chat-screen .message-cascade-controls {
+    position: absolute;
+    top: -34px;
+    left: 0;
+    right: auto;
+    display: flex;
+    align-items: center;
+    width: max-content;
+    max-width: 100%;
+    min-height: 30px;
+    margin: 0;
+    padding: 0;
+    gap: 2px;
     opacity: 1;
     visibility: visible;
     transform: none;
     pointer-events: auto;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    z-index: 3;
+    transition: none;
 }
 
-#chat-screen .message.model .message-cascade-controls {
-    left: 0;
+#chat-screen .message-cascade-controls button {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+    min-height: 30px;
+    margin: 0;
+    padding: 0;
+    font-size: 0;
+    color: var(--text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    box-shadow: none;
+    overflow: visible;
+}
+
+#chat-screen .message-cascade-controls button:hover:not(:disabled),
+#chat-screen .message-cascade-controls button:focus-visible:not(:disabled) {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
+    box-shadow: none;
+    outline: 0;
+}
+
+#chat-screen .message-cascade-controls button:disabled {
+    color: var(--text-disabled);
+    background: transparent;
+    opacity: 0.45;
+}
+
+#chat-screen .message-cascade-controls button .material-symbols-outlined {
+    font-size: 20px;
+    line-height: 1;
+}
+
+#chat-screen .message-cascade-controls .cascade-indicator {
+    padding: 0 3px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+#chat-screen .message-cascade-controls .cascade-delete-btn,
+body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
+    color: var(--text-secondary);
+    background: transparent;
+}
+
+#chat-screen .message-cascade-controls .cascade-delete-btn:hover:not(:disabled),
+#chat-screen .message-cascade-controls .cascade-delete-btn:focus-visible:not(:disabled) {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
 }
 
 #chat-screen .message.editing .message-actions,
@@ -3284,6 +3455,22 @@ body.dark-mode #sd-test-connection-btn {
     #chat-screen .message.user {
         max-width: min(92%, 100%);
         margin-bottom: 42px;
+    }
+
+    #chat-screen .message.model.editing,
+    #chat-screen .message.user.editing {
+        max-width: 100%;
+        margin-bottom: 24px;
+    }
+
+    #chat-screen .message-edit-area .edit-textarea {
+        min-height: 160px;
+        padding: 12px;
+    }
+
+    #chat-screen .message-edit-actions {
+        gap: 8px;
+        flex-wrap: wrap;
     }
 
     #chat-screen .message-actions {

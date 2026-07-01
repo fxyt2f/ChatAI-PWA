@@ -40,6 +40,9 @@ const CHAT_TITLE_LENGTH = 15;
 const TEXTAREA_MAX_HEIGHT = 120;
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 52;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 520;
+const EDIT_TEXTAREA_MIN_HEIGHT = 140;
+const EDIT_TEXTAREA_MAX_HEIGHT = 680;
+const EDIT_VIEWPORT_MAX_RATIO = 0.72;
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -53,8 +56,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.3";
-const APP_CACHE_VERSION = "v1.28.3";
+const APP_VERSION = "1.28.4";
+const APP_CACHE_VERSION = "v1.28.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -66,6 +69,13 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.4": [
+        "メッセージ編集時の表示幅と編集textareaの高さ調整を改善しました。",
+        "編集開始時に本文が全選択される挙動を抑制し、カーソルを末尾へ移動するようにしました。",
+        "編集アクションボタンの見た目を整理しました。",
+        "message-cascade-controlsをChatGPT風の丸アイコンボタン表示に調整しました。",
+        "編集中・生成中は通常アクションボタンとcascade controlsを非表示にし、表示被りを抑制しました。"
+    ],
     "1.28.3": [
         "モデル回答下の情報表示を2段化し、トークン数と操作ボタンの視認性を改善しました。",
         "モデル回答ごとに生成時のプロファイル名・プロバイダー・モデル名を記録するようにしました。",
@@ -3601,6 +3611,80 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.scheduleComposerTextareaResize(true);
     },
 
+    getViewportHeight() {
+        return window.visualViewport?.height ||
+            window.innerHeight ||
+            document.documentElement.clientHeight ||
+            800;
+    },
+
+    resizeEditTextarea(textarea) {
+        if (!textarea || !textarea.isConnected) return;
+
+        requestAnimationFrame(() => {
+            if (!textarea.isConnected) return;
+            const dynamicMaxHeight = Math.min(
+                EDIT_TEXTAREA_MAX_HEIGHT,
+                Math.max(
+                    EDIT_TEXTAREA_MIN_HEIGHT,
+                    Math.floor(this.getViewportHeight() * EDIT_VIEWPORT_MAX_RATIO)
+                )
+            );
+
+            textarea.style.setProperty('max-height', `${dynamicMaxHeight}px`);
+            textarea.style.height = 'auto';
+
+            const contentHeight = Math.ceil(textarea.scrollHeight);
+            const nextHeight = Math.max(
+                EDIT_TEXTAREA_MIN_HEIGHT,
+                Math.min(contentHeight, dynamicMaxHeight)
+            );
+
+            textarea.style.height = `${nextHeight}px`;
+            textarea.style.overflowY = contentHeight > dynamicMaxHeight ? 'auto' : 'hidden';
+        });
+    },
+
+    installEditTextareaEnhancements(root = document) {
+        const textareas = root.querySelectorAll?.('#chat-screen .message-edit-area .edit-textarea') || [];
+
+        textareas.forEach(textarea => {
+            if (textarea.dataset.editTextareaEnhanced === 'true') {
+                this.resizeEditTextarea(textarea);
+                return;
+            }
+            textarea.dataset.editTextareaEnhanced = 'true';
+            textarea.addEventListener('input', () => this.resizeEditTextarea(textarea));
+            textarea.addEventListener('paste', () => {
+                setTimeout(() => this.resizeEditTextarea(textarea), 0);
+            });
+            this.resizeEditTextarea(textarea);
+        });
+    },
+
+    clearInitialEditTextareaFullSelection(textarea) {
+        if (!textarea || !textarea.isConnected) return;
+        const length = textarea.value.length;
+        if (length <= 0) return;
+
+        const selectedAll = textarea.selectionStart === 0 && textarea.selectionEnd === length;
+        const noSelectionAtStart = textarea.selectionStart === 0 && textarea.selectionEnd === 0;
+        if (!selectedAll && !noSelectionAtStart) return;
+
+        textarea.setSelectionRange(length, length);
+    },
+
+    scheduleClearInitialEditTextareaFullSelection(textarea) {
+        const run = () => this.clearInitialEditTextareaFullSelection(textarea);
+        requestAnimationFrame(() => {
+            run();
+            requestAnimationFrame(run);
+        });
+        [0, 40, 120, 260].forEach(delay => {
+            window.setTimeout(run, delay);
+        });
+    },
+
     // テキストエリアの高さを自動調整
     adjustTextareaHeight(textarea = elements.userInput, maxHeight = TEXTAREA_MAX_HEIGHT) {
         if (!textarea) return;
@@ -3609,6 +3693,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 elements.sendButton.disabled = textarea.value.trim() === '' && state.pendingAttachments.length === 0;
             }
             this.scheduleComposerTextareaResize();
+            return;
+        }
+
+        if (textarea.classList?.contains('edit-textarea')) {
+            this.resizeEditTextarea(textarea);
             return;
         }
 
@@ -10703,6 +10792,30 @@ const appLogic = {
     // -----------------------------
 
     // --- メッセージアクション ---
+    async copyEditTextareaMarkdown(textarea, button) {
+        if (!textarea || !button) return;
+        const originalLabel = button.dataset.originalLabel || button.textContent || 'コピー';
+        button.dataset.originalLabel = originalLabel;
+
+        try {
+            await navigator.clipboard.writeText(textarea.value || '');
+            button.textContent = 'コピー済み';
+            button.classList.add('tm-copied');
+            window.setTimeout(() => {
+                if (!button.isConnected) return;
+                button.textContent = originalLabel;
+                button.classList.remove('tm-copied');
+            }, 1200);
+        } catch (error) {
+            console.warn('編集中Markdownのコピーに失敗しました:', error);
+            button.textContent = '失敗';
+            window.setTimeout(() => {
+                if (!button.isConnected) return;
+                button.textContent = originalLabel;
+            }, 1200);
+        }
+    },
+
     // メッセージ編集開始
     async startEditMessage(index, messageElement) {
         const startTime = performance.now();
@@ -10736,17 +10849,6 @@ const appLogic = {
         const cascadeControls = messageElement.querySelector('.message-cascade-controls');
         editArea.innerHTML = '';
 
-        let horizontalPadding = 0;
-        try {
-            const computedStyle = window.getComputedStyle(messageElement);
-            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
-            const paddingRight = parseFloat(computedStyle.paddingRight) || 0;
-            horizontalPadding = paddingLeft + paddingRight;
-        } catch (e) {
-            console.error("幅の動的計算中にエラー:", e);
-        }
-        messageElement.style.width = `calc(var(--message-max-width) + ${horizontalPadding}px + 17px)`;
-
         const textarea = document.createElement('textarea');
         textarea.value = rawContent;
         textarea.classList.add('edit-textarea');
@@ -10755,16 +10857,25 @@ const appLogic = {
         const actionsDiv = document.createElement('div');
         actionsDiv.classList.add('message-edit-actions');
 
+        const copyButton = document.createElement('button');
+        copyButton.textContent = 'コピー';
+        copyButton.classList.add('tm-edit-markdown-copy-btn');
+        copyButton.type = 'button';
+        copyButton.onclick = () => this.copyEditTextareaMarkdown(textarea, copyButton);
+
         const saveButton = document.createElement('button');
         saveButton.textContent = '保存';
         saveButton.classList.add('save-edit-btn');
+        saveButton.type = 'button';
         saveButton.onclick = () => this.saveEditMessage(index, messageElement);
 
         const cancelButton = document.createElement('button');
         cancelButton.textContent = 'キャンセル';
         cancelButton.classList.add('cancel-edit-btn');
+        cancelButton.type = 'button';
         cancelButton.onclick = () => this.cancelEditMessage(index, messageElement);
 
+        actionsDiv.appendChild(copyButton);
         actionsDiv.appendChild(saveButton);
         actionsDiv.appendChild(cancelButton);
         editArea.appendChild(textarea);
@@ -10775,9 +10886,9 @@ const appLogic = {
         if(cascadeControls) cascadeControls.classList.add('hidden');
         editArea.classList.remove('hidden');
 
-        uiUtils.adjustTextareaHeight(textarea, 400); // 編集開始時に一度だけ高さを調整
+        uiUtils.installEditTextareaEnhancements(editArea);
         textarea.focus();
-        textarea.select();
+        uiUtils.scheduleClearInitialEditTextareaFullSelection(textarea);
         const endTime = performance.now();
         console.log(`[PERF_DEBUG] startEditMessage 完了 (所要時間: ${endTime - startTime}ms)`);
     },
