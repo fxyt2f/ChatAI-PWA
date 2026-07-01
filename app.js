@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.0";
-const APP_CACHE_VERSION = "v1.29.0";
+const APP_VERSION = "1.29.1";
+const APP_CACHE_VERSION = "v1.29.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -76,6 +76,14 @@ const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const RELEASE_NOTES = {
+    "1.29.1": [
+        "チャット内検索のハイライト解除と再描画時の安定性を改善しました。",
+        "チャット切替・編集保存・再生成後に古い検索Rangeが残らないように調整しました。",
+        "不正な正規表現や空検索時の表示とハイライト解除を安定化しました。",
+        "長文折りたたみ中のメッセージ検索と現在一致への移動を改善しました。",
+        "検索UIの二段構成・角丸デザインを維持しつつ、スマホ幅での表示を微調整しました。",
+        "アプリバージョンとキャッシュバージョンを1.29.1に更新しました。"
+    ],
     "1.29.0": [
         "現在表示中のチャット内を検索できる検索UIを追加しました。",
         "ユーザー発言・モデル回答の本文に対して一致箇所をハイライト表示するようにしました。",
@@ -1985,6 +1993,12 @@ const uiUtils = {
         return Boolean(state.chatSearch?.isOpen && elements.chatSearchDialog && !elements.chatSearchDialog.hidden);
     },
 
+    setChatSearchOpenClass(isOpen) {
+        document.body?.classList.toggle('chat-search-open', Boolean(isOpen));
+        elements.chatScreen?.classList.toggle('chat-search-open', Boolean(isOpen));
+        elements.chatSearchOpenBtn?.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    },
+
     setChatSearchStatus(message = '', isError = false) {
         if (!elements.chatSearchStatus) return;
         elements.chatSearchStatus.textContent = message;
@@ -2013,6 +2027,7 @@ const uiUtils = {
             .tm-execution-meta,
             .execution-meta,
             .generation-status-indicator,
+            .chat-search-dialog,
             dialog,
             button,
             script,
@@ -2057,22 +2072,58 @@ const uiUtils = {
     },
 
     clearChatSearchHighlights() {
-        if (window.CSS?.highlights) {
-            CSS.highlights.delete(CHAT_SEARCH_MATCH_HIGHLIGHT);
-            CSS.highlights.delete(CHAT_SEARCH_CURRENT_HIGHLIGHT);
+        try {
+            window.CSS?.highlights?.delete(CHAT_SEARCH_MATCH_HIGHLIGHT);
+            window.CSS?.highlights?.delete(CHAT_SEARCH_CURRENT_HIGHLIGHT);
+        } catch (error) {
+            console.debug('[ChatAI PWA] 検索ハイライト解除:', error);
         }
     },
 
-    resetChatSearchResults() {
-        clearTimeout(state.chatSearch.inputTimer);
+    discardChatSearchRanges() {
         state.chatSearch.matches = [];
         state.chatSearch.currentIndex = -1;
         this.clearChatSearchHighlights();
         this.updateChatSearchNavigation();
     },
 
+    resetChatSearchResults({ clearStatus = false } = {}) {
+        clearTimeout(state.chatSearch.inputTimer);
+        this.discardChatSearchRanges();
+        if (clearStatus) {
+            this.setChatSearchStatus('');
+        }
+    },
+
+    isChatSearchRangeAlive(range) {
+        return Boolean(
+            range &&
+            range.startContainer?.isConnected &&
+            range.endContainer?.isConnected
+        );
+    },
+
+    pruneDeadChatSearchMatches() {
+        const liveMatches = state.chatSearch.matches.filter(match => this.isChatSearchRangeAlive(match?.range));
+        if (liveMatches.length !== state.chatSearch.matches.length) {
+            state.chatSearch.matches = liveMatches;
+            if (liveMatches.length === 0) {
+                state.chatSearch.currentIndex = -1;
+            } else if (state.chatSearch.currentIndex >= liveMatches.length) {
+                state.chatSearch.currentIndex = liveMatches.length - 1;
+            }
+            this.clearChatSearchHighlights();
+        }
+        return liveMatches.length;
+    },
+
     updateChatSearchNavigation() {
         const total = state.chatSearch.matches.length;
+        if (total === 0) {
+            state.chatSearch.currentIndex = -1;
+        } else if (state.chatSearch.currentIndex < 0 || state.chatSearch.currentIndex >= total) {
+            state.chatSearch.currentIndex = 0;
+        }
         const current = state.chatSearch.currentIndex >= 0 ? state.chatSearch.currentIndex + 1 : 0;
         if (elements.chatSearchCount) {
             elements.chatSearchCount.textContent = total > 0 ? `${current} / ${total}` : '0件';
@@ -2084,32 +2135,51 @@ const uiUtils = {
 
     updateChatSearchHighlights() {
         if (!this.supportsChatSearchHighlights()) return;
+        this.pruneDeadChatSearchMatches();
         const ranges = state.chatSearch.matches.map(match => match.range).filter(Boolean);
         if (ranges.length > 0) {
-            CSS.highlights.set(CHAT_SEARCH_MATCH_HIGHLIGHT, new Highlight(...ranges));
+            try {
+                CSS.highlights.set(CHAT_SEARCH_MATCH_HIGHLIGHT, new Highlight(...ranges));
+            } catch (error) {
+                console.debug('[ChatAI PWA] 検索ハイライト更新:', error);
+                this.discardChatSearchRanges();
+                return;
+            }
         } else {
-            CSS.highlights.delete(CHAT_SEARCH_MATCH_HIGHLIGHT);
+            this.clearChatSearchHighlights();
         }
         this.updateCurrentChatSearchHighlight(false);
     },
 
     updateCurrentChatSearchHighlight(scrollIntoView = false) {
         if (!this.supportsChatSearchHighlights()) return;
-        CSS.highlights.delete(CHAT_SEARCH_CURRENT_HIGHLIGHT);
+        try {
+            CSS.highlights.delete(CHAT_SEARCH_CURRENT_HIGHLIGHT);
+        } catch (error) {
+            console.debug('[ChatAI PWA] 現在一致ハイライト解除:', error);
+        }
 
         const currentMatch = state.chatSearch.matches[state.chatSearch.currentIndex];
-        if (currentMatch?.range) {
-            CSS.highlights.set(CHAT_SEARCH_CURRENT_HIGHLIGHT, new Highlight(currentMatch.range));
+        if (currentMatch?.range && this.isChatSearchRangeAlive(currentMatch.range)) {
+            try {
+                CSS.highlights.set(CHAT_SEARCH_CURRENT_HIGHLIGHT, new Highlight(currentMatch.range));
+            } catch (error) {
+                console.debug('[ChatAI PWA] 現在一致ハイライト更新:', error);
+                this.discardChatSearchRanges();
+                return;
+            }
             if (scrollIntoView) {
                 this.ensureChatSearchMatchVisible(currentMatch);
             }
+        } else if (currentMatch) {
+            this.pruneDeadChatSearchMatches();
         }
 
         this.updateChatSearchNavigation();
     },
 
     ensureChatSearchMatchVisible(match) {
-        if (!match?.range) return;
+        if (!match?.range || !this.isChatSearchRangeAlive(match.range)) return;
         const messageElement = match.messageElement || match.range.startContainer?.parentElement?.closest?.('.message');
         if (messageElement?.classList?.contains('tm-collapsed')) {
             messageElement.classList.remove('tm-collapsed');
@@ -2124,6 +2194,9 @@ const uiUtils = {
                 selection.addRange(match.range);
                 match.range.startContainer?.parentElement?.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' });
                 selection.removeAllRanges();
+                if (messageElement) {
+                    this.keepMessageAboveComposer(messageElement);
+                }
             } catch (error) {
                 console.warn('[ChatSearch] 現在一致箇所へのスクロールに失敗しました:', error);
             }
@@ -2138,6 +2211,7 @@ const uiUtils = {
     },
 
     runChatSearch({ scrollToFirst = false } = {}) {
+        if (!this.isChatSearchOpen()) return;
         const query = elements.chatSearchQuery?.value || '';
         const useRegex = Boolean(elements.chatSearchRegex?.checked);
         const caseSensitive = Boolean(elements.chatSearchCaseSensitive?.checked);
@@ -2149,16 +2223,12 @@ const uiUtils = {
         this.setChatSearchStatus('');
 
         if (!query) {
-            state.chatSearch.matches = [];
-            state.chatSearch.currentIndex = -1;
-            this.updateChatSearchNavigation();
+            this.discardChatSearchRanges();
             return;
         }
 
         if (!this.supportsChatSearchHighlights()) {
-            state.chatSearch.matches = [];
-            state.chatSearch.currentIndex = -1;
-            this.updateChatSearchNavigation();
+            this.discardChatSearchRanges();
             this.setChatSearchStatus('このブラウザでは検索ハイライトを利用できません。', true);
             return;
         }
@@ -2167,9 +2237,7 @@ const uiUtils = {
         try {
             pattern = this.createChatSearchPattern(query, useRegex, caseSensitive);
         } catch (error) {
-            state.chatSearch.matches = [];
-            state.chatSearch.currentIndex = -1;
-            this.updateChatSearchNavigation();
+            this.discardChatSearchRanges();
             this.setChatSearchStatus(`正規表現エラー: ${error.message}`, true);
             return;
         }
@@ -2185,7 +2253,7 @@ const uiUtils = {
             let match;
             while ((match = pattern.exec(text)) !== null) {
                 if (!match[0] || match.index === undefined) {
-                    pattern.lastIndex = Math.max(pattern.lastIndex + 1, (match.index || 0) + 1);
+                    pattern.lastIndex = Math.max(pattern.lastIndex + 1, (match.index ?? 0) + 1);
                     continue;
                 }
 
@@ -2217,7 +2285,11 @@ const uiUtils = {
     },
 
     moveChatSearchCurrent(delta) {
-        const total = state.chatSearch.matches.length;
+        let total = this.pruneDeadChatSearchMatches();
+        if (total === 0 && state.chatSearch.query) {
+            this.runChatSearch({ scrollToFirst: false });
+            total = state.chatSearch.matches.length;
+        }
         if (total === 0) return;
         state.chatSearch.currentIndex = (state.chatSearch.currentIndex + delta + total) % total;
         this.updateCurrentChatSearchHighlight(true);
@@ -2228,6 +2300,7 @@ const uiUtils = {
         state.chatSearch.isOpen = true;
         elements.chatSearchDialog.hidden = false;
         elements.chatSearchOpenBtn?.classList.add('active');
+        this.setChatSearchOpenClass(true);
         if (elements.chatSearchQuery) {
             elements.chatSearchQuery.focus();
             elements.chatSearchQuery.select();
@@ -2240,11 +2313,12 @@ const uiUtils = {
         }
     },
 
-    closeChatSearch() {
+    closeChatSearch({ restoreFocus = true } = {}) {
         if (!elements.chatSearchDialog) return;
         state.chatSearch.isOpen = false;
         elements.chatSearchDialog.hidden = true;
         elements.chatSearchOpenBtn?.classList.remove('active');
+        this.setChatSearchOpenClass(false);
         if (elements.chatSearchQuery) elements.chatSearchQuery.value = '';
         if (elements.chatSearchRegex) elements.chatSearchRegex.checked = false;
         if (elements.chatSearchCaseSensitive) elements.chatSearchCaseSensitive.checked = false;
@@ -2252,8 +2326,11 @@ const uiUtils = {
         state.chatSearch.useRegex = false;
         state.chatSearch.caseSensitive = false;
         this.setChatSearchStatus('');
-        this.resetChatSearchResults();
+        this.resetChatSearchResults({ clearStatus: true });
         this.restoreChatSearchTemporaryExpansions();
+        if (restoreFocus) {
+            elements.chatSearchOpenBtn?.focus?.();
+        }
     },
 
     setupChatSearch() {
@@ -2265,8 +2342,10 @@ const uiUtils = {
         elements.chatSearchPrevBtn?.addEventListener('click', () => this.moveChatSearchCurrent(-1));
         elements.chatSearchNextBtn?.addEventListener('click', () => this.moveChatSearchCurrent(1));
         elements.chatSearchQuery?.addEventListener('keydown', (event) => {
+            if (event.isComposing) return;
             if (event.key === 'Enter') {
                 event.preventDefault();
+                if (!elements.chatSearchQuery?.value || state.chatSearch.matches.length === 0) return;
                 this.moveChatSearchCurrent(event.shiftKey ? -1 : 1);
             } else if (event.key === 'Escape') {
                 event.preventDefault();
@@ -2385,7 +2464,7 @@ renderChatMessages() {
         else state.editingMessageIndex = null;
     }
 
-    this.clearChatSearchHighlights();
+    this.discardChatSearchRanges();
     container.innerHTML = '';
     const fragment = document.createDocumentFragment();
     
@@ -9941,6 +10020,7 @@ const appLogic = {
 
     // 新規チャットを開始する (状態リセット)
     startNewChat() {
+        uiUtils.closeChatSearch({ restoreFocus: false });
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         state.currentChatId = null;
         state.currentMessages = [];
@@ -9995,6 +10075,8 @@ const appLogic = {
             state.pendingAttachments = [];
             uiUtils.updateAttachmentBadgeVisibility();
         }
+
+        uiUtils.closeChatSearch({ restoreFocus: false });
 
         try {
             const dbGetStartTime = performance.now();
