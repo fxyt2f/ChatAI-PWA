@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.28.9">
+    <link rel="stylesheet" href="./style.css?v=1.29.0">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.28.9" defer></script>
+    <script src="./dropbox.js?v=1.29.0" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.28.9" defer></script>
+    <script src="./app.js?v=1.29.0" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -84,12 +84,46 @@
                 <button id="character-profile-btn" class="floating-action-button" title="キャラクタープロファイル">
                     <span class="material-symbols-outlined">group</span>
                 </button>
+                <button id="chat-search-open-btn" class="floating-action-button" title="チャット内を検索" aria-label="チャット内を検索">
+                    <span class="material-symbols-outlined">search</span>
+                </button>
                 <button id="scroll-to-top-btn" class="floating-action-button" title="最上部へ">
                     <span class="material-symbols-outlined">arrow_upward</span>
                 </button>
                 <button id="scroll-to-bottom-btn" class="floating-action-button" title="最下部へ">
                     <span class="material-symbols-outlined">arrow_downward</span>
                 </button>
+            </div>
+
+            <div id="chat-search-dialog" class="chat-search-dialog" role="search" aria-label="チャット内検索" hidden>
+                <div class="chat-search-compact-toolbar">
+                    <div class="chat-search-toolbar-top">
+                        <div class="chat-search-field">
+                            <input id="chat-search-query" class="chat-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="検索" aria-label="検索語">
+                            <span id="chat-search-count" class="chat-search-count" aria-live="polite">0件</span>
+                        </div>
+                    </div>
+                    <div class="chat-search-toolbar-bottom">
+                        <button id="chat-search-prev-btn" class="floating-action-button chat-search-tool-icon" type="button" title="前の一致" aria-label="前の一致">
+                            <span class="material-symbols-outlined">arrow_upward</span>
+                        </button>
+                        <button id="chat-search-next-btn" class="floating-action-button chat-search-tool-icon" type="button" title="次の一致" aria-label="次の一致">
+                            <span class="material-symbols-outlined">arrow_downward</span>
+                        </button>
+                        <label class="chat-search-toggle" title="正規表現">
+                            <input id="chat-search-regex" type="checkbox">
+                            <span class="floating-action-button chat-search-toggle-label">.*</span>
+                        </label>
+                        <label class="chat-search-toggle" title="大文字・小文字を区別">
+                            <input id="chat-search-case-sensitive" type="checkbox">
+                            <span class="floating-action-button chat-search-toggle-label">Aa</span>
+                        </label>
+                        <button id="chat-search-close-btn" class="floating-action-button chat-search-tool-icon" type="button" title="検索を閉じる" aria-label="検索を閉じる">
+                            <span class="material-symbols-outlined">close</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="chat-search-status" class="chat-search-status" role="status" aria-live="polite"></div>
             </div>
 
             <div id="generation-status-indicator" class="generation-status-indicator" aria-live="polite" hidden>
