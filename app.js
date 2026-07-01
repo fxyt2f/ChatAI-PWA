@@ -51,14 +51,25 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.27.6";
-const APP_CACHE_VERSION = "v1.27.6";
+const APP_VERSION = "1.28.0";
+const APP_CACHE_VERSION = "v1.28.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
+const INPUT_DRAFT_STORAGE_PREFIX = 'chatai-pwa-input-draft:';
+const INPUT_DRAFT_CLIENT_ID_KEY = 'chatai-pwa-client-id';
+const INPUT_DRAFT_SAVE_DELAY = 400;
+const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
+const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.0": [
+        "入力欄の下書きをチャット/プロファイル単位で自動保存するようにしました。",
+        "Dropbox接続済みの場合、入力下書きをDropbox App Folderのdrafts配下へ共有保存するようにしました。",
+        "チャット切り替えや再読み込み時に、空の入力欄へ最新下書きを復元するようにしました。",
+        "送信後は該当する入力下書きを削除扱いにし、古い下書きの誤復元を防止するようにしました。"
+    ],
     "1.27.6": [
         "スマホ表示時の色設定UIで、操作部が右寄せになるよう調整しました。",
         "チャット左上部の同期ボタンを、設定画面への移動ではなく即時同期実行に変更しました。"
@@ -104,6 +115,13 @@ const RELEASE_NOTES = {
         "GitHub Pages / PWAキャッシュを v1.26 に更新しました。"
     ]
 };
+let inputDraftSaveTimer = 0;
+let inputDraftDropboxSaveTimer = 0;
+let inputDraftRestoreTimer = 0;
+let inputDraftRestoreSequence = 0;
+let inputDraftRestoring = false;
+let activeInputDraftContextKey = null;
+let pendingInputDraftDropboxRecord = null;
 
 // プロバイダーごとのモデルリスト
 const GEMINI_MODELS = [
@@ -5634,6 +5652,251 @@ const appLogic = {
         await uiUtils.showCustomAlert(this.formatReleaseNotes(version));
     },
 
+    getInputDraftClientId() {
+        try {
+            const existingClientId = localStorage.getItem(INPUT_DRAFT_CLIENT_ID_KEY);
+            if (existingClientId) return existingClientId;
+            const newClientId = (window.crypto?.randomUUID?.() || `client_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+            localStorage.setItem(INPUT_DRAFT_CLIENT_ID_KEY, newClientId);
+            return newClientId;
+        } catch (error) {
+            console.warn("[InputDraft] clientIdの取得に失敗しました。一時IDを使用します:", error);
+            return `client_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        }
+    },
+
+    getInputDraftContextKey(chatId = state.currentChatId, profileId = state.activeProfileId) {
+        if (chatId !== null && chatId !== undefined) {
+            return `chat:${String(chatId)}`;
+        }
+        return `new:${String(profileId || state.activeProfile?.id || 'default')}`;
+    },
+
+    getInputDraftStorageKey(contextKey) {
+        return `${INPUT_DRAFT_STORAGE_PREFIX}${contextKey}`;
+    },
+
+    buildInputDraftRecord(text, deleted = false, contextKey = this.getInputDraftContextKey()) {
+        const isChatContext = contextKey.startsWith('chat:');
+        return {
+            schemaVersion: 1,
+            kind: 'inputDraft',
+            contextKey,
+            chatId: isChatContext ? contextKey.slice('chat:'.length) : null,
+            profileId: String(state.activeProfileId || state.activeProfile?.id || 'default'),
+            text: deleted ? '' : String(text ?? ''),
+            updatedAt: Date.now(),
+            clientId: this.getInputDraftClientId(),
+            deleted: Boolean(deleted)
+        };
+    },
+
+    normalizeInputDraftRecord(value, expectedContextKey = '') {
+        if (!value || typeof value !== 'object') return null;
+        if (value.kind !== 'inputDraft') return null;
+        const contextKey = typeof value.contextKey === 'string' ? value.contextKey : '';
+        if (!contextKey || (expectedContextKey && contextKey !== expectedContextKey)) return null;
+        const deleted = value.deleted === true;
+        const text = typeof value.text === 'string' ? value.text : '';
+        return {
+            schemaVersion: Number(value.schemaVersion) || 1,
+            kind: 'inputDraft',
+            contextKey,
+            chatId: value.chatId ?? null,
+            profileId: value.profileId ?? 'default',
+            text: deleted ? '' : text,
+            updatedAt: Number(value.updatedAt) || 0,
+            clientId: typeof value.clientId === 'string' ? value.clientId : '',
+            deleted
+        };
+    },
+
+    chooseLatestInputDraftRecord(localRecord, remoteRecord) {
+        const localUpdatedAt = Number(localRecord?.updatedAt) || 0;
+        const remoteUpdatedAt = Number(remoteRecord?.updatedAt) || 0;
+        if (remoteRecord && remoteUpdatedAt > localUpdatedAt) {
+            return remoteRecord;
+        }
+        return localRecord || remoteRecord || null;
+    },
+
+    loadInputDraftLocal(contextKey) {
+        if (!contextKey) return null;
+        try {
+            const rawValue = localStorage.getItem(this.getInputDraftStorageKey(contextKey));
+            if (!rawValue) return null;
+            return this.normalizeInputDraftRecord(JSON.parse(rawValue), contextKey);
+        } catch (error) {
+            console.error("[InputDraft] 下書きの読み込みに失敗しました:", error);
+            return null;
+        }
+    },
+
+    saveInputDraftLocal(record) {
+        if (!record?.contextKey) return;
+        try {
+            localStorage.setItem(this.getInputDraftStorageKey(record.contextKey), JSON.stringify(record));
+        } catch (error) {
+            console.error("[InputDraft] 下書きの保存に失敗しました:", error);
+        }
+    },
+
+    deleteInputDraftLocal(contextKey) {
+        if (!contextKey) return;
+        try {
+            localStorage.removeItem(this.getInputDraftStorageKey(contextKey));
+        } catch (error) {
+            console.error("[InputDraft] 下書きの削除に失敗しました:", error);
+        }
+    },
+
+    persistInputDraft(contextKey, text) {
+        if (!contextKey) return;
+        const draftText = String(text ?? '');
+        const record = this.buildInputDraftRecord(draftText, !draftText, contextKey);
+        if (!draftText) {
+            this.deleteInputDraftLocal(contextKey);
+            this.scheduleInputDraftDropboxSave(record);
+            return;
+        }
+        if (draftText.length > INPUT_DRAFT_MAX_LENGTH) {
+            console.warn("[InputDraft] 下書きが保存上限を超えたため保存を見送りました。");
+            return;
+        }
+        this.saveInputDraftLocal(record);
+        this.scheduleInputDraftDropboxSave(record);
+    },
+
+    deleteInputDraft(contextKey) {
+        this.deleteInputDraftLocal(contextKey);
+    },
+
+    async isDropboxConnectedForInputDraft() {
+        try {
+            const tokenData = await dbUtils.getSetting('dropboxTokens');
+            return Boolean(tokenData?.value && window.dropboxApi?.uploadInputDraftToDropbox);
+        } catch (error) {
+            console.warn("[InputDraft] Dropbox接続状態の確認に失敗しました:", error);
+            return false;
+        }
+    },
+
+    scheduleInputDraftDropboxSave(record) {
+        pendingInputDraftDropboxRecord = record;
+        clearTimeout(inputDraftDropboxSaveTimer);
+        inputDraftDropboxSaveTimer = setTimeout(() => {
+            this.flushInputDraftDropboxSave();
+        }, INPUT_DRAFT_DROPBOX_SAVE_DELAY);
+    },
+
+    async flushInputDraftDropboxSave(record = pendingInputDraftDropboxRecord) {
+        clearTimeout(inputDraftDropboxSaveTimer);
+        pendingInputDraftDropboxRecord = null;
+        if (!record?.contextKey) return;
+        try {
+            if (!(await this.isDropboxConnectedForInputDraft())) return;
+            await window.dropboxApi.uploadInputDraftToDropbox(record);
+        } catch (error) {
+            console.warn("[InputDraft] Dropboxへの下書き保存に失敗しました。ローカル下書きは保持します:", error);
+        }
+    },
+
+    async loadInputDraftDropbox(contextKey) {
+        try {
+            if (!(await this.isDropboxConnectedForInputDraft())) return null;
+            const remoteRecord = await window.dropboxApi.downloadInputDraftFromDropbox(contextKey);
+            return this.normalizeInputDraftRecord(remoteRecord, contextKey);
+        } catch (error) {
+            console.warn("[InputDraft] Dropbox下書きの読み込みに失敗しました。ローカル下書きのみ使用します:", error);
+            return null;
+        }
+    },
+
+    markInputDraftDeletedInDropbox(contextKey) {
+        const tombstoneRecord = this.buildInputDraftRecord('', true, contextKey);
+        this.flushInputDraftDropboxSave(tombstoneRecord);
+    },
+
+    scheduleInputDraftSave() {
+        if (inputDraftRestoring || !elements.userInput) return;
+        const contextKey = this.getInputDraftContextKey();
+        const text = elements.userInput.value;
+        clearTimeout(inputDraftSaveTimer);
+        inputDraftSaveTimer = setTimeout(() => {
+            this.persistInputDraft(contextKey, text);
+        }, INPUT_DRAFT_SAVE_DELAY);
+    },
+
+    flushInputDraft() {
+        if (inputDraftRestoring || !elements.userInput) return;
+        const contextKey = this.getInputDraftContextKey();
+        clearTimeout(inputDraftSaveTimer);
+        this.persistInputDraft(contextKey, elements.userInput.value);
+        this.flushInputDraftDropboxSave();
+    },
+
+    scheduleInputDraftRestore(delay = 60, force = false) {
+        clearTimeout(inputDraftRestoreTimer);
+        inputDraftRestoreTimer = setTimeout(() => {
+            this.restoreInputDraftForCurrentContext(force)
+                .catch(error => console.error("[InputDraft] 下書き復元に失敗しました:", error));
+        }, delay);
+    },
+
+    async restoreInputDraftForCurrentContext(force = false) {
+        const textarea = elements.userInput;
+        const contextKey = this.getInputDraftContextKey();
+        if (!textarea || !contextKey) return;
+        if (!force && activeInputDraftContextKey === contextKey) return;
+
+        activeInputDraftContextKey = contextKey;
+        const restoreSequence = ++inputDraftRestoreSequence;
+        const localRecord = this.loadInputDraftLocal(contextKey);
+        const remoteRecord = await this.loadInputDraftDropbox(contextKey);
+        if (restoreSequence !== inputDraftRestoreSequence) return;
+        if (contextKey !== this.getInputDraftContextKey()) return;
+
+        if (textarea.value) {
+            return;
+        }
+
+        const draft = this.chooseLatestInputDraftRecord(localRecord, remoteRecord);
+        if (draft?.deleted) {
+            if (remoteRecord?.deleted && (Number(remoteRecord.updatedAt) || 0) > (Number(localRecord?.updatedAt) || 0)) {
+                this.deleteInputDraftLocal(contextKey);
+            }
+            uiUtils.adjustTextareaHeight();
+            return;
+        }
+        if (!draft?.text) {
+            uiUtils.adjustTextareaHeight();
+            return;
+        }
+        if (remoteRecord && draft === remoteRecord) {
+            this.saveInputDraftLocal(remoteRecord);
+        }
+
+        inputDraftRestoring = true;
+        try {
+            textarea.value = draft.text;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            uiUtils.adjustTextareaHeight();
+            uiUtils.showSyncNotification('入力下書きを復元しました。');
+        } finally {
+            inputDraftRestoring = false;
+        }
+    },
+
+    clearInputDraftAfterSend(...contextKeys) {
+        const uniqueContextKeys = [...new Set(contextKeys.filter(Boolean))];
+        clearTimeout(inputDraftSaveTimer);
+        uniqueContextKeys.forEach(contextKey => {
+            this.deleteInputDraftLocal(contextKey);
+            this.markInputDraftDeletedInDropbox(contextKey);
+        });
+        activeInputDraftContextKey = null;
+    },
+
     async saveProfileSettingValues(updates) {
         Object.assign(state.settings, updates);
         if (!state.activeProfile || !state.activeProfile.settings) return;
@@ -5795,12 +6058,14 @@ const appLogic = {
         if (newProfileId === state.activeProfileId) return;
         
         console.log(`[Profile] プロファイルを ID: ${newProfileId} に切り替えます。`);
+        this.flushInputDraft();
         await dbUtils.saveSetting('activeProfileId', newProfileId);
         state.activeProfileId = newProfileId;
         
         // プロファイル設定の適用とUI更新のみを行う
         this.applyActiveProfile();
         uiUtils.updateProfileSwitcherUI();
+        this.scheduleInputDraftRestore(80, true);
     },
 
     async saveNewProfile() {
@@ -7585,7 +7850,11 @@ const appLogic = {
                 this.handleSend();
             }
         });
-        elements.userInput.addEventListener('input', () => uiUtils.adjustTextareaHeight());
+        elements.userInput.addEventListener('input', () => {
+            uiUtils.adjustTextareaHeight();
+            this.scheduleInputDraftSave();
+        });
+        elements.userInput.addEventListener('focusout', () => this.flushInputDraft());
         elements.userInput.addEventListener('keydown', (e) => {
             if (e.ctrlKey && e.key === 'Enter') {
                 e.preventDefault();
@@ -7597,6 +7866,14 @@ const appLogic = {
                 if (!elements.sendButton.disabled) this.handleSend();
             }
         });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                this.flushInputDraft();
+            } else {
+                this.scheduleInputDraftRestore(80);
+            }
+        });
+        window.addEventListener('pagehide', () => this.flushInputDraft(), { capture: true });
     
         // --- システムプロンプト ---
         elements.systemPromptDetails.addEventListener('toggle', (event) => {
@@ -8639,6 +8916,13 @@ const appLogic = {
             await uiUtils.showCustomAlert("現在のチャットの保存に失敗しました。");
         }
 
+        const previousDraftContextKey = this.getInputDraftContextKey();
+        if (state.currentChatId) {
+            this.flushInputDraft();
+        } else {
+            this.clearInputDraftAfterSend(previousDraftContextKey);
+        }
+
         // 新規チャットを開始
         this.startNewChat();
         uiUtils.showScreen('chat');
@@ -8665,11 +8949,13 @@ const appLogic = {
         uiUtils.setSendingState(false);
         this.updateCharacterProfileButtonVisibility();
         state.currentStyleProfiles = {};
+        this.scheduleInputDraftRestore(0, true);
     },
 
 
     // app.js の appLogic オブジェクト内
     async loadChat(id) {
+        this.flushInputDraft();
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         const loadChatStartTime = performance.now();
         state.syncMessageCounter = 0;
@@ -8748,6 +9034,7 @@ const appLogic = {
                 elements.userInput.value = '';
                 uiUtils.adjustTextareaHeight();
                 uiUtils.setSendingState(false);
+                this.scheduleInputDraftRestore(0, true);
 
                 if (needsSave) {
                     console.log("読み込み時に isSelected を正規化しました。DBに保存します。");
@@ -9614,6 +9901,7 @@ const appLogic = {
         const text = elements.userInput.value.trim();
         const attachmentsToSend = [...state.pendingAttachments];
         if (!text && attachmentsToSend.length === 0) return;
+        const inputDraftContextKeyBeforeSend = this.getInputDraftContextKey();
 
         uiUtils.setSendingState(true);
         uiUtils.setLoadingIndicatorText('応答生成中...');
@@ -9639,6 +9927,7 @@ const appLogic = {
         }
         
         await dbUtils.saveChat(null, null, { skipPush: true });
+        this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
         
         try {
             const generationConfig = {};

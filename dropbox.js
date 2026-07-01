@@ -5,6 +5,7 @@ window.dropboxApi = {
     APP_KEY: '',
     METADATA_PATH: '/gemini_pwa_data.json',
     ASSETS_DIR_PATH: '/Gemini_PWA_Assets',
+    DRAFTS_DIR_PATH: '/drafts',
     MAX_RETRY_COUNT: 3,
     BASE_RETRY_DELAY_MS: 1000,
     MAX_RETRY_DELAY_MS: 30000,
@@ -307,6 +308,93 @@ window.dropboxApi = {
             }
             throw error;
         }
+    },
+
+    encodeDraftKey(contextKey) {
+        const utf8Bytes = new TextEncoder().encode(String(contextKey || 'default'));
+        let binary = '';
+        utf8Bytes.forEach(byte => {
+            binary += String.fromCharCode(byte);
+        });
+        return btoa(binary)
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/g, '');
+    },
+
+    getInputDraftPath(contextKey) {
+        return `${this.DRAFTS_DIR_PATH}/${this.encodeDraftKey(contextKey)}.json`;
+    },
+
+    async ensureDraftsFolder() {
+        try {
+            await this._request('api', '/files/get_metadata', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: this.DRAFTS_DIR_PATH }),
+            });
+        } catch (error) {
+            if (error.message && error.message.includes('path/not_found')) {
+                try {
+                    await this._request('api', '/files/create_folder_v2', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: this.DRAFTS_DIR_PATH, autorename: false }),
+                    });
+                } catch (createError) {
+                    if (!createError.message?.includes('path/conflict/folder')) {
+                        throw createError;
+                    }
+                }
+                return;
+            }
+            throw error;
+        }
+    },
+
+    async uploadInputDraftToDropbox(draftRecord) {
+        if (!draftRecord || draftRecord.kind !== 'inputDraft' || !draftRecord.contextKey) {
+            throw new Error('Invalid input draft record.');
+        }
+        await this.ensureDraftsFolder();
+        const args = {
+            path: this.getInputDraftPath(draftRecord.contextKey),
+            mode: 'overwrite',
+            mute: true
+        };
+        return this._request('content', '/files/upload', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'Dropbox-API-Arg': JSON.stringify(args),
+            },
+            body: JSON.stringify(draftRecord),
+        });
+    },
+
+    async downloadInputDraftFromDropbox(contextKey) {
+        const args = { path: this.getInputDraftPath(contextKey) };
+        try {
+            const blob = await this._request('content', '/files/download', {
+                method: 'POST',
+                headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
+            });
+            return JSON.parse(await blob.text());
+        } catch (error) {
+            if (error.message && error.message.includes('path/not_found')) {
+                return null;
+            }
+            throw error;
+        }
+    },
+
+    async markInputDraftDeletedInDropbox(draftRecord) {
+        return this.uploadInputDraftToDropbox({
+            ...draftRecord,
+            text: '',
+            deleted: true,
+            updatedAt: draftRecord?.updatedAt || Date.now()
+        });
     },
 
     async listAssets() {
