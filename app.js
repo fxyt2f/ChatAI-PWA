@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.28.8";
-const APP_CACHE_VERSION = "v1.28.8";
+const APP_VERSION = "1.28.9";
+const APP_CACHE_VERSION = "v1.28.9";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -74,6 +74,14 @@ const INPUT_DRAFT_SAVE_DELAY = 400;
 const INPUT_DRAFT_DROPBOX_SAVE_DELAY = 4000;
 const INPUT_DRAFT_MAX_LENGTH = 1_000_000;
 const RELEASE_NOTES = {
+    "1.28.9": [
+        "生成中でも回答下のトークン数、生成時メタ情報、操作ボタン、cascade controlsを表示するように変更しました。",
+        "生成中に編集・削除・再生成などの変更系操作を実行しようとした場合、操作を止めてダイアログを表示するようにしました。",
+        "コピーや折りたたみなどの読み取り・表示補助系操作は生成中でも扱いやすいように調整しました。",
+        "入力欄カードと最下部モデル回答の間の余白を自然な量へ調整しました。",
+        "回答下ボタン類が入力欄カードに被らないよう下部余白を見直しました。",
+        "アプリバージョンとキャッシュバージョンを1.28.9に更新しました。"
+    ],
     "1.28.8": [
         "送信中・応答生成中に画面下部中央へ応答生成中ステータスを表示するようにしました。",
         "入力欄カードの上に小さな点滅ドット付きステータスを出すように調整しました。",
@@ -11277,11 +11285,30 @@ const appLogic = {
         }
     },
 
+    isGenerationBlockingActive() {
+        return Boolean(uiUtils.isResponseGenerationActive?.());
+    },
+
+    async showGenerationBlockedDialog() {
+        await uiUtils.showCustomAlert('応答生成中は操作できません。');
+    },
+
+    async guardGenerationMutableAction(event = null) {
+        if (!this.isGenerationBlockingActive()) return false;
+
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        event?.stopImmediatePropagation?.();
+        await this.showGenerationBlockedDialog();
+        return true;
+    },
+
     // メッセージ編集開始
     async startEditMessage(index, messageElement) {
         const startTime = performance.now();
         console.log(`[PERF_DEBUG] startEditMessage 開始 (index: ${index})`);
 
+        if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) {
             await uiUtils.showCustomAlert("送信中は編集できません。");
             return;
@@ -11359,6 +11386,7 @@ const appLogic = {
 
     // メッセージ編集を保存
     async saveEditMessage(index, messageElement) {
+        if (await this.guardGenerationMutableAction()) return;
         const textarea = messageElement.querySelector('.edit-textarea');
         if (!textarea) {
             this.cancelEditMessage(index, messageElement);
@@ -11559,6 +11587,7 @@ const appLogic = {
 
     // メッセージを削除 (会話ターン全体)
     async deleteMessage(index) {
+        if (await this.guardGenerationMutableAction()) return;
         if (state.editingMessageIndex === index) {
             this.cancelEditMessage(index);
         }
@@ -11662,6 +11691,7 @@ const appLogic = {
     },
 
     async retryFromMessage(index) {
+        if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) { await uiUtils.showCustomAlert("送信中です。"); return; }
         
         const userMessage = state.currentMessages[index];
@@ -11825,6 +11855,7 @@ const appLogic = {
     },
 
     async navigateCascade(currentIndex, direction) {
+        if (await this.guardGenerationMutableAction()) return;
         const currentMsg = state.currentMessages[currentIndex];
         if (!currentMsg || !currentMsg.isCascaded || !currentMsg.siblingGroupId) return;
 
@@ -11877,6 +11908,7 @@ const appLogic = {
     },
 
     async confirmDeleteCascadeResponse(indexToDelete) {
+        if (await this.guardGenerationMutableAction()) return;
         const msgToDelete = state.currentMessages[indexToDelete];
         if (!msgToDelete || msgToDelete.role !== 'model' || !msgToDelete.isCascaded || !msgToDelete.siblingGroupId) {
             return;
