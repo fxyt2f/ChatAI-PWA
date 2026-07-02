@@ -1046,8 +1046,13 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
         transform: translateY(0) scale(1);
     }
 }
-.message:nth-last-child(-n+2) {
+.message.should-pop-in {
     animation: pop-in 0.3s var(--transition-timing) forwards;
+}
+
+body.suppress-message-animations #chat-screen .message,
+body.suppress-message-animations #chat-screen .message-content {
+    animation: none !important;
 }
 
 @keyframes ripple {

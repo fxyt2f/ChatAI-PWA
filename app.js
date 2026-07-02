@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.4";
-const APP_CACHE_VERSION = "v1.29.4";
+const APP_VERSION = "1.29.5";
+const APP_CACHE_VERSION = "v1.29.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +80,14 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.29.5": [
+        "変更履歴を使ったUndo/Redo実行に対応しました。",
+        "手動編集履歴と置換履歴を元に、直近の変更を元に戻す/やり直す操作を追加しました。",
+        "Undo/Redo前に現在本文と履歴のbefore/after一致を検証し、古い履歴による誤適用を防止しました。",
+        "複数メッセージ置換でも一部だけ適用されないよう、全件検証後に反映するようにしました。",
+        "Undo/Redo後に検索結果・置換プレビュー・履歴ボタン状態を再計算するようにしました。",
+        "アプリバージョンとキャッシュバージョンを1.29.5に更新しました。"
+    ],
     "1.29.4": [
         "置換プレビューplanを元に、現在表示中メッセージ本文を置換できるようにしました。",
         "置換実行後にtype: replaceの変更履歴を保存するようにしました。",
@@ -923,6 +931,7 @@ Reason: [NGの場合の理由]`,
         error: '',
         isExecuting: false
     },
+    isApplyingChangeHistory: false,
     sync: {
         isDirty: false, // ローカルに変更があったか
         lastSyncId: null, // 最後に同期したクラウドのID
@@ -2610,7 +2619,13 @@ const uiUtils = {
             return;
         }
 
-        const historyChanges = latestPlan.changes.map(change => ({ ...change }));
+        const historyChanges = latestPlan.changes.map(change => ({
+            ...change,
+            status: 'applied',
+            undoneAt: null,
+            redoneAt: null,
+            discardedAt: null
+        }));
         const originalMessages = historyChanges.map(change => {
             const message = state.currentMessages[change.index];
             return {
@@ -2669,6 +2684,7 @@ const uiUtils = {
             requestAnimationFrame(() => {
                 this.runChatSearch({ scrollToFirst: false });
                 this.updateChatReplacePreview();
+                appLogic.updateChangeHistoryControls();
             });
         } catch (error) {
             originalMessages.forEach(original => {
@@ -3390,8 +3406,13 @@ const uiUtils = {
         this.scheduleChatSearch(false);
     },
 
-renderChatMessages() {
+renderChatMessages(options = {}) {
     const renderStartTime = performance.now();
+    const suppressMessageAnimation = Boolean(options?.suppressMessageAnimation);
+
+    if (suppressMessageAnimation) {
+        document.body?.classList.add('suppress-message-animations');
+    }
 
     const container = elements.messageContainer;
     
@@ -3485,9 +3506,15 @@ renderChatMessages() {
         this.applyMessageCollapseToAll(container);
         this.updateGenerationStatusIndicator();
         this.scheduleChatSearch(false);
+        if (suppressMessageAnimation) {
+            requestAnimationFrame(() => {
+                document.body?.classList.remove('suppress-message-animations');
+            });
+        }
     });
     
     appLogic.updateSummarizeButtonState();
+    appLogic.updateChangeHistoryControls();
     const renderEndTime = performance.now();
 },
 
@@ -3501,6 +3528,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     const messageDiv = document.createElement('div');
     messageDiv.classList.add('message', role);
     messageDiv.dataset.index = index;
+    messageDiv.dataset.messageIndex = String(index);
+    messageDiv.dataset.role = role;
     
     if (role === 'model' && messageData && messageData.thoughtSummary) {
         const thoughtDetails = document.createElement('details');
@@ -3931,6 +3960,24 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             copyButton.classList.add('tm-copy-message-btn');
             copyButton.onclick = () => appLogic.copyMessageText(messageDiv, copyButton);
             actionsDiv.appendChild(copyButton);
+
+            const undoButton = document.createElement('button');
+            undoButton.innerHTML = '<span class="material-symbols-outlined">undo</span>';
+            undoButton.title = '直前の変更を元に戻す';
+            undoButton.setAttribute('aria-label', '直前の変更を元に戻す');
+            undoButton.classList.add('tm-message-undo-btn');
+            undoButton.disabled = true;
+            undoButton.onclick = () => appLogic.undoLatestChangeForMessage(index, role);
+            actionsDiv.appendChild(undoButton);
+
+            const redoButton = document.createElement('button');
+            redoButton.innerHTML = '<span class="material-symbols-outlined">redo</span>';
+            redoButton.title = '元に戻した変更をやり直す';
+            redoButton.setAttribute('aria-label', '元に戻した変更をやり直す');
+            redoButton.classList.add('tm-message-redo-btn');
+            redoButton.disabled = true;
+            redoButton.onclick = () => appLogic.redoLatestChangeForMessage(index, role);
+            actionsDiv.appendChild(redoButton);
 
             const collapseButton = document.createElement('button');
             collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
@@ -5033,6 +5080,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         this.scheduleComposerTextareaResize(true);
         this.updateGenerationStatusIndicator();
+        appLogic.updateChangeHistoryControls();
     },
 
     getComposerTextarea() {
@@ -7522,9 +7570,24 @@ function normalizeChangeHistoryTarget(target, changes) {
     return 'both';
 }
 
+function normalizeChangeHistoryStatus(value, fallback = 'applied') {
+    return CHANGE_HISTORY_STATUSES.has(value) ? value : fallback;
+}
+
+function summarizeChangeHistoryEntryStatus(entry) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    if (changes.length === 0) {
+        return normalizeChangeHistoryStatus(entry?.status, 'applied');
+    }
+    if (changes.every(change => change.status === 'discarded')) return 'discarded';
+    if (changes.every(change => change.status === 'undone')) return 'undone';
+    return 'applied';
+}
+
 function normalizeChangeHistoryEntry(entry, chatId) {
     if (!entry || typeof entry !== 'object') return null;
     if (!hasChangeHistoryChatId(chatId)) return null;
+    const fallbackChangeStatus = normalizeChangeHistoryStatus(entry.status, 'applied');
 
     const changes = Array.isArray(entry.changes)
         ? entry.changes.map(change => {
@@ -7540,6 +7603,10 @@ function normalizeChangeHistoryEntry(entry, chatId) {
                 after: String(change.after ?? ''),
                 count: normalizeChangeHistoryNonNegativeNumber(change.count, 0)
             };
+            normalizedChange.status = normalizeChangeHistoryStatus(change.status, fallbackChangeStatus);
+            normalizedChange.undoneAt = normalizeChangeHistoryNullableTimestamp(change.undoneAt);
+            normalizedChange.redoneAt = normalizeChangeHistoryNullableTimestamp(change.redoneAt);
+            normalizedChange.discardedAt = normalizeChangeHistoryNullableTimestamp(change.discardedAt);
             const cascadeIndex = Number(change.cascadeIndex);
             if (Number.isInteger(cascadeIndex) && cascadeIndex >= 0) {
                 normalizedChange.cascadeIndex = cascadeIndex;
@@ -7554,7 +7621,6 @@ function normalizeChangeHistoryEntry(entry, chatId) {
     if (changes.length === 0) return null;
 
     const type = CHANGE_HISTORY_TYPES.has(entry.type) ? entry.type : 'edit';
-    const status = CHANGE_HISTORY_STATUSES.has(entry.status) ? entry.status : 'applied';
     const messageCount = normalizeChangeHistoryNonNegativeNumber(entry.messageCount, changes.length);
     const occurrenceCount = normalizeChangeHistoryNonNegativeNumber(
         entry.occurrenceCount,
@@ -7565,7 +7631,7 @@ function normalizeChangeHistoryEntry(entry, chatId) {
         id: typeof entry.id === 'string' && entry.id ? entry.id : createChangeHistoryId(),
         chatId: String(chatId),
         type,
-        status,
+        status: summarizeChangeHistoryEntryStatus({ ...entry, changes }),
         timestamp: normalizeChangeHistoryTimestamp(entry.timestamp),
         undoneAt: normalizeChangeHistoryNullableTimestamp(entry.undoneAt),
         redoneAt: normalizeChangeHistoryNullableTimestamp(entry.redoneAt),
@@ -7667,11 +7733,26 @@ async function appendChangeHistory(chatId, entry) {
 
     const now = Date.now();
     const invalidatedHistory = history.map(historyEntry => {
-        if (historyEntry.status !== 'undone') return historyEntry;
-        return {
+        const changes = Array.isArray(historyEntry.changes)
+            ? historyEntry.changes.map(change => {
+                if (change.status !== 'undone') return change;
+                return {
+                    ...change,
+                    status: 'discarded',
+                    discardedAt: now
+                };
+            })
+            : [];
+        const nextEntry = {
             ...historyEntry,
-            status: 'discarded',
-            discardedAt: now
+            changes
+        };
+        const nextStatus = summarizeChangeHistoryEntryStatus(nextEntry);
+        if (nextStatus === historyEntry.status) return nextEntry;
+        return {
+            ...nextEntry,
+            status: nextStatus,
+            discardedAt: nextStatus === 'discarded' ? now : historyEntry.discardedAt
         };
     });
     const nextHistory = [normalizedEntry, ...invalidatedHistory];
@@ -7693,6 +7774,10 @@ function getCurrentMessageMapForHistory() {
         });
     });
     return messageMap;
+}
+
+function isUndoRedoChangeHistoryEntry(entry) {
+    return entry && (entry.type === 'edit' || entry.type === 'replace');
 }
 
 function getCurrentVisibleMessagesForReplacePreview() {
@@ -7745,30 +7830,245 @@ function getCurrentVisibleMessagesForReplacePreview() {
     return visibleMessages;
 }
 
+function getHistoryChangeTarget(change) {
+    if (!change || typeof change !== 'object') return null;
+    const index = Number(change.index);
+    if (!Number.isInteger(index) || index < 0) return null;
+
+    const message = state.currentMessages?.[index];
+    if (!message || message.isHidden || message.role !== change.role) return null;
+    if (!CHANGE_HISTORY_ROLES.has(message.role)) return null;
+    if (change.siblingGroupId && message.siblingGroupId !== change.siblingGroupId) return null;
+
+    const visibleMessage = getCurrentVisibleMessagesForReplacePreview()
+        .find(item => item.index === index && item.role === change.role);
+    if (!visibleMessage) return null;
+    if (
+        change.cascadeIndex !== null &&
+        change.cascadeIndex !== undefined &&
+        visibleMessage.cascadeIndex !== change.cascadeIndex
+    ) {
+        return null;
+    }
+
+    return {
+        index,
+        message,
+        content: String(message.content ?? '')
+    };
+}
+
+function getVisibleHistoryTargetForMessage(messageIndex, role) {
+    const index = Number(messageIndex);
+    if (!Number.isInteger(index) || !CHANGE_HISTORY_ROLES.has(role)) return null;
+    return getCurrentVisibleMessagesForReplacePreview()
+        .find(message => message.index === index && message.role === role) || null;
+}
+
+function doesHistoryChangeMatchMessage(change, messageIndex, role, cascadeIndex = null) {
+    if (!change || change.status === 'discarded') return false;
+    if (Number(change.index) !== Number(messageIndex)) return false;
+    if (change.role !== role) return false;
+    if (cascadeIndex !== null && cascadeIndex !== undefined) {
+        return Number(change.cascadeIndex) === Number(cascadeIndex);
+    }
+    return change.cascadeIndex === null || change.cascadeIndex === undefined;
+}
+
+function findLatestChangeForMessage(history, messageIndex, role, cascadeIndex, status) {
+    if (!Array.isArray(history)) return null;
+    for (let entryIndex = 0; entryIndex < history.length; entryIndex += 1) {
+        const entry = history[entryIndex];
+        if (!isUndoRedoChangeHistoryEntry(entry)) continue;
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        for (let changeIndex = 0; changeIndex < changes.length; changeIndex += 1) {
+            const change = changes[changeIndex];
+            if (change.status !== status) continue;
+            if (!doesHistoryChangeMatchMessage(change, messageIndex, role, cascadeIndex)) continue;
+            return { entry, entryIndex, change, changeIndex };
+        }
+    }
+    return null;
+}
+
+function findLatestAppliedChangeForMessage(history, messageIndex, role, cascadeIndex = null) {
+    return findLatestChangeForMessage(history, messageIndex, role, cascadeIndex, 'applied');
+}
+
+function findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIndex = null) {
+    return findLatestChangeForMessage(history, messageIndex, role, cascadeIndex, 'undone');
+}
+
+function validateHistoryChangeApplication(change, direction) {
+    const target = getHistoryChangeTarget(change);
+    if (!target) {
+        return { valid: false, reason: '現在の本文が履歴と一致しないため操作できません', target: null };
+    }
+    const expectedCurrent = direction === 'undo'
+        ? String(change.after ?? '')
+        : String(change.before ?? '');
+    const nextContent = direction === 'undo'
+        ? String(change.before ?? '')
+        : String(change.after ?? '');
+
+    if (target.content !== expectedCurrent) {
+        return {
+            valid: false,
+            reason: direction === 'undo'
+                ? '現在の本文が履歴と一致しないため元に戻せません'
+                : '現在の本文が履歴と一致しないためやり直せません',
+            target: null
+        };
+    }
+
+    return {
+        valid: true,
+        reason: '',
+        target: {
+            ...target,
+            beforeApply: target.content,
+            nextContent
+        }
+    };
+}
+
+function validateHistoryEntryApplication(entry, direction) {
+    if (!isUndoRedoChangeHistoryEntry(entry)) {
+        return { valid: false, reason: '対応していない履歴です', targets: [] };
+    }
+    if (!Array.isArray(entry.changes) || entry.changes.length === 0) {
+        return { valid: false, reason: '対象履歴がありません', targets: [] };
+    }
+    if (direction === 'undo' && entry.status !== 'applied') {
+        return { valid: false, reason: '元に戻せる変更がありません', targets: [] };
+    }
+    if (direction === 'redo' && entry.status !== 'undone') {
+        return { valid: false, reason: 'やり直せる変更がありません', targets: [] };
+    }
+    if (direction !== 'undo' && direction !== 'redo') {
+        return { valid: false, reason: '変更履歴の操作に失敗しました', targets: [] };
+    }
+
+    const targets = [];
+    for (const change of entry.changes) {
+        const target = getHistoryChangeTarget(change);
+        if (!target) {
+            return { valid: false, reason: '現在の本文が履歴と一致しないため操作できません', targets: [] };
+        }
+        const expectedCurrent = direction === 'undo'
+            ? String(change.after ?? '')
+            : String(change.before ?? '');
+        const nextContent = direction === 'undo'
+            ? String(change.before ?? '')
+            : String(change.after ?? '');
+
+        if (target.content !== expectedCurrent) {
+            return { valid: false, reason: '現在の本文が履歴と一致しないため操作できません', targets: [] };
+        }
+
+        targets.push({
+            ...target,
+            beforeApply: target.content,
+            nextContent
+        });
+    }
+
+    return { valid: true, reason: '', targets };
+}
+
+function setHistoryChangeTargetContent(target, nextContent) {
+    if (!target?.message) return false;
+    target.message.content = String(nextContent ?? '');
+    target.message.timestamp = Date.now();
+    return true;
+}
+
+function updateChangeHistoryEntryStatus(history, targetEntry, direction) {
+    const now = Date.now();
+    return history.map(entry => {
+        if (!entry || entry.id !== targetEntry.id) return entry;
+        const changes = Array.isArray(entry.changes)
+            ? entry.changes.map(change => {
+                if (direction === 'undo') {
+                    return {
+                        ...change,
+                        status: 'undone',
+                        undoneAt: now
+                    };
+                }
+                return {
+                    ...change,
+                    status: 'applied',
+                    redoneAt: now
+                };
+            })
+            : [];
+        if (direction === 'undo') {
+            return {
+                ...entry,
+                changes,
+                status: 'undone',
+                undoneAt: now
+            };
+        }
+        return {
+            ...entry,
+            changes,
+            status: 'applied',
+            redoneAt: now
+        };
+    });
+}
+
+function updateChangeHistoryChangeStatus(history, targetEntryIndex, targetChangeIndex, direction) {
+    const now = Date.now();
+    return history.map((entry, entryIndex) => {
+        if (entryIndex !== targetEntryIndex) return entry;
+        const changes = Array.isArray(entry.changes)
+            ? entry.changes.map((change, changeIndex) => {
+                if (changeIndex !== targetChangeIndex) return change;
+                if (direction === 'undo') {
+                    return {
+                        ...change,
+                        status: 'undone',
+                        undoneAt: now
+                    };
+                }
+                return {
+                    ...change,
+                    status: 'applied',
+                    redoneAt: now
+                };
+            })
+            : [];
+        const nextEntry = {
+            ...entry,
+            changes
+        };
+        return {
+            ...nextEntry,
+            status: summarizeChangeHistoryEntryStatus(nextEntry),
+            undoneAt: direction === 'undo' ? now : entry.undoneAt,
+            redoneAt: direction === 'redo' ? now : entry.redoneAt
+        };
+    });
+}
+
 function canApplyHistoryEntry(entry, messageMap, direction) {
     if (!entry || !Array.isArray(entry.changes)) return false;
     if (!(messageMap instanceof Map)) return false;
+    if (!isUndoRedoChangeHistoryEntry(entry)) return false;
     if (direction === 'undo' && entry.status !== 'applied') return false;
     if (direction === 'redo' && entry.status !== 'undone') return false;
     if (direction !== 'undo' && direction !== 'redo') return false;
 
-    return entry.changes.every(change => {
-        const index = Number(change.index);
-        const current = messageMap.get(index);
-        const expected = direction === 'undo'
-            ? String(change.after ?? '')
-            : String(change.before ?? '');
-
-        return Boolean(current) &&
-            current.role === change.role &&
-            current.content === expected;
-    });
+    return validateHistoryEntryApplication(entry, direction).valid;
 }
 
 function getLatestAppliedHistoryEntry(history) {
     if (!Array.isArray(history)) return null;
     return history
-        .filter(entry => entry?.status === 'applied')
+        .filter(entry => entry?.status === 'applied' && isUndoRedoChangeHistoryEntry(entry))
         .reduce((latest, entry) => {
             if (!latest) return entry;
             return normalizeChangeHistoryTimestamp(entry.timestamp, 0) > normalizeChangeHistoryTimestamp(latest.timestamp, 0)
@@ -7780,7 +8080,7 @@ function getLatestAppliedHistoryEntry(history) {
 function getLatestUndoneHistoryEntry(history) {
     if (!Array.isArray(history)) return null;
     return history
-        .filter(entry => entry?.status === 'undone')
+        .filter(entry => entry?.status === 'undone' && isUndoRedoChangeHistoryEntry(entry))
         .reduce((latest, entry) => {
             if (!latest) return entry;
             const entryTime = normalizeChangeHistoryNullableTimestamp(entry.undoneAt) || normalizeChangeHistoryTimestamp(entry.timestamp, 0);
@@ -7800,6 +8100,293 @@ const appLogic = {
             .replace(/\s{2,}/g, ' ')
             .trim()
             .slice(0, maxLength);
+    },
+
+    setChangeHistoryStatus(message, isError = false) {
+        if (uiUtils.isChatSearchOpen?.()) {
+            uiUtils.setChatSearchStatus(message, isError);
+            return;
+        }
+        if (isError) {
+            uiUtils.showCustomAlert(message);
+        }
+        console[isError ? 'warn' : 'info'](`[ChangeHistory] ${message}`);
+    },
+
+    getHistoryTargetTitleAfterApply(targets) {
+        const firstUserIndex = state.currentMessages.findIndex(message => message.role === 'user');
+        const firstUserTarget = targets.find(target => target.index === firstUserIndex);
+        if (!firstUserTarget) return null;
+        return String(firstUserTarget.nextContent || '').substring(0, 50) || '無題のチャット';
+    },
+
+    recalculateSearchAndReplaceAfterHistoryApply() {
+        requestAnimationFrame(() => {
+            if (uiUtils.isChatSearchOpen?.()) {
+                uiUtils.runChatSearch({ scrollToFirst: false });
+            }
+            if (state.chatReplacePreview.isOpen) {
+                uiUtils.updateChatReplacePreview();
+            }
+            this.updateChangeHistoryControls();
+        });
+    },
+
+    async updateChangeHistoryControls() {
+        const undoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-undo-btn') || []);
+        const redoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-redo-btn') || []);
+        const setAllDisabled = (buttons, disabled) => {
+            buttons.forEach(button => {
+                button.disabled = disabled;
+            });
+        };
+        const disabledBase = Boolean(
+            state.isApplyingChangeHistory ||
+            this.isGenerationBlockingActive() ||
+            state.editingMessageIndex !== null ||
+            state.isEditingSystemPrompt ||
+            !hasChangeHistoryChatId(state.currentChatId)
+        );
+
+        setAllDisabled(undoButtons, true);
+        setAllDisabled(redoButtons, true);
+        if (disabledBase) return;
+
+        try {
+            const history = await loadChangeHistory(state.currentChatId);
+            const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
+            const visibleByIndex = new Map(visibleMessages.map(message => [message.index, message]));
+
+            elements.messageContainer?.querySelectorAll?.('.message.user, .message.model')?.forEach(messageElement => {
+                const messageIndex = Number(messageElement.dataset.index);
+                const role = messageElement.classList.contains('model') ? 'model' : 'user';
+                const visibleMessage = visibleByIndex.get(messageIndex);
+                const cascadeIndex = visibleMessage?.cascadeIndex ?? null;
+                const canUndo = Boolean(findLatestAppliedChangeForMessage(history, messageIndex, role, cascadeIndex));
+                const canRedo = Boolean(findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIndex));
+                const undoButton = messageElement.querySelector(':scope > .message-actions .tm-message-undo-btn');
+                const redoButton = messageElement.querySelector(':scope > .message-actions .tm-message-redo-btn');
+
+                if (undoButton) undoButton.disabled = !canUndo;
+                if (redoButton) redoButton.disabled = !canRedo;
+            });
+        } catch (error) {
+            console.warn('[ChangeHistory] Undo/Redoボタン状態の更新に失敗しました:', error);
+        }
+    },
+
+    async applyLatestChangeForMessage(messageIndex, role, direction) {
+        if (state.isApplyingChangeHistory) return { success: false };
+        const isUndo = direction === 'undo';
+        const actionLabel = isUndo ? 'Undo' : 'Redo';
+
+        if (await this.guardGenerationMutableAction()) {
+            this.setChangeHistoryStatus(`生成中は${actionLabel}できません`, true);
+            return { success: false };
+        }
+        if (state.editingMessageIndex !== null || state.isEditingSystemPrompt) {
+            this.setChangeHistoryStatus(`編集中は${actionLabel}できません`, true);
+            return { success: false };
+        }
+        if (!hasChangeHistoryChatId(state.currentChatId)) {
+            this.setChangeHistoryStatus(isUndo ? 'このメッセージに元に戻せる変更がありません' : 'このメッセージにやり直せる変更がありません', true);
+            return { success: false };
+        }
+
+        const visibleTarget = getVisibleHistoryTargetForMessage(messageIndex, role);
+        if (!visibleTarget) {
+            this.setChangeHistoryStatus('対象メッセージが見つかりません', true);
+            return { success: false };
+        }
+
+        state.isApplyingChangeHistory = true;
+        await this.updateChangeHistoryControls();
+
+        const chatId = state.currentChatId;
+        const history = await loadChangeHistory(chatId, true);
+        const cascadeIndex = visibleTarget.cascadeIndex ?? null;
+        const changeTarget = isUndo
+            ? findLatestAppliedChangeForMessage(history, visibleTarget.index, visibleTarget.role, cascadeIndex)
+            : findLatestUndoneChangeForMessage(history, visibleTarget.index, visibleTarget.role, cascadeIndex);
+        const noTargetMessage = isUndo
+            ? 'このメッセージに元に戻せる変更がありません'
+            : 'このメッセージにやり直せる変更がありません';
+
+        if (!changeTarget) {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+            this.setChangeHistoryStatus(noTargetMessage, true);
+            return { success: false };
+        }
+
+        const validation = validateHistoryChangeApplication(changeTarget.change, direction);
+        if (!validation.valid) {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+            this.setChangeHistoryStatus(validation.reason || noTargetMessage, true);
+            return { success: false };
+        }
+
+        const target = validation.target;
+        const changedTarget = {
+            index: target.index,
+            role: visibleTarget.role,
+            cascadeIndex
+        };
+        const original = {
+            message: target.message,
+            content: target.message.content,
+            timestamp: target.message.timestamp
+        };
+        const firstUserIndex = state.currentMessages.findIndex(message => message.role === 'user');
+        const newTitleForSave = target.index === firstUserIndex
+            ? String(target.nextContent || '').substring(0, 50) || '無題のチャット'
+            : null;
+
+        try {
+            setHistoryChangeTargetContent(target, target.nextContent);
+
+            await dbUtils.saveChat(newTitleForSave);
+            if (newTitleForSave) {
+                uiUtils.updateChatTitle(newTitleForSave);
+            }
+
+            const nextHistory = updateChangeHistoryChangeStatus(
+                history,
+                changeTarget.entryIndex,
+                changeTarget.changeIndex,
+                direction
+            );
+            const saved = await saveChangeHistory(chatId, nextHistory);
+            if (!saved) {
+                throw new Error('変更履歴statusの保存に失敗しました');
+            }
+
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            this.setChangeHistoryStatus(isUndo ? 'このメッセージの変更を元に戻しました' : 'このメッセージの変更をやり直しました', false);
+            this.recalculateSearchAndReplaceAfterHistoryApply();
+            return { success: true, changedTarget };
+        } catch (error) {
+            original.message.content = original.content;
+            original.message.timestamp = original.timestamp;
+            try {
+                await dbUtils.saveChat();
+            } catch (rollbackError) {
+                console.warn('[ChangeHistory] メッセージUndo/Redo失敗後のロールバック保存に失敗しました:', rollbackError);
+            }
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            console.warn(`[ChangeHistory] メッセージ${actionLabel}に失敗しました:`, error);
+            this.setChangeHistoryStatus(`${actionLabel}に失敗しました`, true);
+            return { success: false };
+        } finally {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+        }
+    },
+
+    async undoLatestChangeForMessage(messageIndex, role) {
+        return await this.applyLatestChangeForMessage(messageIndex, role, 'undo');
+    },
+
+    async redoLatestChangeForMessage(messageIndex, role) {
+        return await this.applyLatestChangeForMessage(messageIndex, role, 'redo');
+    },
+
+    async applyChangeHistoryEntry(direction) {
+        if (state.isApplyingChangeHistory) return;
+        const isUndo = direction === 'undo';
+        const actionLabel = isUndo ? 'Undo' : 'Redo';
+
+        if (await this.guardGenerationMutableAction()) {
+            this.setChangeHistoryStatus(`生成中は${actionLabel}できません`, true);
+            return;
+        }
+        if (state.editingMessageIndex !== null || state.isEditingSystemPrompt) {
+            this.setChangeHistoryStatus(`編集中は${actionLabel}できません`, true);
+            return;
+        }
+        if (!hasChangeHistoryChatId(state.currentChatId)) {
+            this.setChangeHistoryStatus(isUndo ? '元に戻せる変更がありません' : 'やり直せる変更がありません', true);
+            return;
+        }
+
+        state.isApplyingChangeHistory = true;
+        await this.updateChangeHistoryControls();
+
+        const chatId = state.currentChatId;
+        const history = await loadChangeHistory(chatId, true);
+        const entry = isUndo
+            ? getLatestAppliedHistoryEntry(history)
+            : getLatestUndoneHistoryEntry(history);
+        const noEntryMessage = isUndo ? '元に戻せる変更がありません' : 'やり直せる変更がありません';
+
+        if (!entry) {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+            this.setChangeHistoryStatus(noEntryMessage, true);
+            return;
+        }
+
+        const validation = validateHistoryEntryApplication(entry, direction);
+        if (!validation.valid) {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+            this.setChangeHistoryStatus(validation.reason || noEntryMessage, true);
+            return;
+        }
+
+        const targets = validation.targets;
+        const originals = targets.map(target => ({
+            message: target.message,
+            content: target.message.content,
+            timestamp: target.message.timestamp
+        }));
+        const newTitleForSave = this.getHistoryTargetTitleAfterApply(targets);
+
+        try {
+            targets.forEach(target => {
+                setHistoryChangeTargetContent(target, target.nextContent);
+            });
+
+            await dbUtils.saveChat(newTitleForSave);
+            if (newTitleForSave) {
+                uiUtils.updateChatTitle(newTitleForSave);
+            }
+
+            const nextHistory = updateChangeHistoryEntryStatus(history, entry, direction);
+            const saved = await saveChangeHistory(chatId, nextHistory);
+            if (!saved) {
+                throw new Error('変更履歴statusの保存に失敗しました');
+            }
+
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            this.setChangeHistoryStatus(isUndo ? '直前の変更を元に戻しました' : '元に戻した変更をやり直しました', false);
+            this.recalculateSearchAndReplaceAfterHistoryApply();
+        } catch (error) {
+            originals.forEach(original => {
+                original.message.content = original.content;
+                original.message.timestamp = original.timestamp;
+            });
+            try {
+                await dbUtils.saveChat();
+            } catch (rollbackError) {
+                console.warn('[ChangeHistory] Undo/Redo失敗後のロールバック保存に失敗しました:', rollbackError);
+            }
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            console.warn(`[ChangeHistory] ${actionLabel}に失敗しました:`, error);
+            this.setChangeHistoryStatus(`${actionLabel}に失敗しました`, true);
+        } finally {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+        }
+    },
+
+    async undoLatestChangeHistoryEntry() {
+        await this.applyChangeHistoryEntry('undo');
+    },
+
+    async redoLatestChangeHistoryEntry() {
+        await this.applyChangeHistoryEntry('redo');
     },
 
     resolveExecutionModelName(provider) {
@@ -13262,6 +13849,25 @@ const appLogic = {
                 originalContentForHistory !== newRawContent
             ) {
                 try {
+                    const visibleEditTarget = getCurrentVisibleMessagesForReplacePreview()
+                        .find(message => message.index === index && message.role === originalRoleForHistory);
+                    const editHistoryChange = {
+                        index,
+                        role: originalRoleForHistory,
+                        before: originalContentForHistory,
+                        after: newRawContent,
+                        count: 1,
+                        status: 'applied',
+                        undoneAt: null,
+                        redoneAt: null,
+                        discardedAt: null
+                    };
+                    if (visibleEditTarget?.cascadeIndex !== null && visibleEditTarget?.cascadeIndex !== undefined) {
+                        editHistoryChange.cascadeIndex = visibleEditTarget.cascadeIndex;
+                    }
+                    if (visibleEditTarget?.siblingGroupId) {
+                        editHistoryChange.siblingGroupId = visibleEditTarget.siblingGroupId;
+                    }
                     await appendChangeHistory(chatIdForHistory, {
                         id: createChangeHistoryId(),
                         chatId: chatIdForHistory,
@@ -13276,16 +13882,9 @@ const appLogic = {
                         caseSensitive: false,
                         messageCount: 1,
                         occurrenceCount: 1,
-                        changes: [
-                            {
-                                index,
-                                role: originalRoleForHistory,
-                                before: originalContentForHistory,
-                                after: newRawContent,
-                                count: 1
-                            }
-                        ]
+                        changes: [editHistoryChange]
                     });
+                    await this.updateChangeHistoryControls();
                 } catch (historyError) {
                     console.warn('[ChangeHistory] 編集履歴の記録に失敗しました:', historyError);
                 }
