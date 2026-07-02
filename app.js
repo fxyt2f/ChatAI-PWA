@@ -61,8 +61,32 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.30.0";
-const APP_CACHE_VERSION = "v1.30.0";
+const DEFAULT_GLOBAL_OTHER_SETTINGS = {
+    enterToSend: true,
+    enableWideMode: true,
+    autoScroll: true,
+    enableSwipeNavigation: false,
+    headerAutoHide: false,
+    historySortOrder: 'updatedAt',
+    fontFamily: '',
+    additionalModels: '',
+    additionalOpenRouterModels: '',
+    debugMode: false
+};
+const GLOBAL_OTHER_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_OTHER_SETTINGS);
+const DEFAULT_GLOBAL_THEME_SETTINGS = {
+    darkMode: false,
+    themeColorMode: DEFAULT_THEME_COLOR_MODE,
+    accentColor: DEFAULT_ACCENT_COLOR,
+    headerColor: '',
+    headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
+    headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
+    newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
+    userMessageColor: DEFAULT_USER_MESSAGE_COLOR
+};
+const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
+const APP_VERSION = "1.30.1";
+const APP_CACHE_VERSION = "v1.30.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +104,14 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.30.1": [
+        "「その他設定」をプロファイルに依存しないグローバル設定へ変更しました。",
+        "ワイドモード設定を「その他設定」へ移動し、「Enterキーで送信する」の下に配置しました。",
+        "テーマ設定をプロファイルごとに保存するか、全プロファイル共通にするかを選べる設定を追加しました。",
+        "既存設定からの安全な移行処理を追加しました。",
+        "検索/置換/Undo/Redoのロジックは変更していません。",
+        "アプリバージョンとキャッシュバージョンを1.30.1に更新しました。"
+    ],
     "1.30.0": [
         "スマホ表示時にメッセージ下メニューが崩れる問題を修正しました。",
         "メッセージ下メニューは2行表示にせず、1行表示を維持するようにしました。",
@@ -621,6 +653,7 @@ try {
         overlayOpacitySlider: document.getElementById('overlay-opacity-slider'),
         overlayOpacityValue: document.getElementById('overlay-opacity-value'),
         themeColorModeSelect: document.getElementById('theme-color-mode-select'),
+        themeSettingsProfileScopedToggle: document.getElementById('theme-settings-profile-scoped-toggle'),
         accentColorSettings: document.getElementById('accent-color-settings'),
         individualColorSettings: document.getElementById('individual-color-settings'),
         accentColorInput: document.getElementById('accent-color-input'),
@@ -898,7 +931,11 @@ Reason: [NGの場合の理由]`,
         debugMode: false,
     },
     localUiSettings: { ...DEFAULT_LOCAL_UI_SETTINGS },
+    globalOtherSettings: { ...DEFAULT_GLOBAL_OTHER_SETTINGS },
+    globalThemeSettings: { ...DEFAULT_GLOBAL_THEME_SETTINGS },
+    themeSettingsProfileScoped: false,
     hasSavedLocalUiSettings: false,
+    settingsScopeMigrationComplete: false,
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
@@ -4624,6 +4661,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         elements.enterToSendCheckbox.checked = state.settings.enterToSend;
         elements.historySortOrderSelect.value = state.settings.historySortOrder || 'updatedAt';
+        if (elements.themeSettingsProfileScopedToggle) {
+            elements.themeSettingsProfileScopedToggle.checked = state.themeSettingsProfileScoped === true;
+        }
         elements.darkModeToggle.checked = state.settings.darkMode;
         elements.debugModeToggle.checked = state.settings.debugMode;
         elements.fontFamilyInput.value = state.settings.fontFamily || '';
@@ -8558,8 +8598,168 @@ const appLogic = {
     getSharedProfileSettings(settings = {}) {
         const sharedSettings = { ...settings };
         delete sharedSettings.localUiSettings;
+        delete sharedSettings.globalOtherSettings;
+        delete sharedSettings.globalThemeSettings;
+        delete sharedSettings.themeSettingsProfileScoped;
         LOCAL_UI_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
+        GLOBAL_OTHER_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
         return sharedSettings;
+    },
+
+    normalizeGlobalOtherSettings(settings = {}) {
+        const normalized = { ...DEFAULT_GLOBAL_OTHER_SETTINGS };
+        normalized.enterToSend = typeof settings.enterToSend === 'boolean' ? settings.enterToSend : DEFAULT_GLOBAL_OTHER_SETTINGS.enterToSend;
+        normalized.enableWideMode = typeof settings.enableWideMode === 'boolean' ? settings.enableWideMode : DEFAULT_GLOBAL_OTHER_SETTINGS.enableWideMode;
+        normalized.autoScroll = typeof settings.autoScroll === 'boolean' ? settings.autoScroll : DEFAULT_GLOBAL_OTHER_SETTINGS.autoScroll;
+        normalized.enableSwipeNavigation = typeof settings.enableSwipeNavigation === 'boolean' ? settings.enableSwipeNavigation : DEFAULT_GLOBAL_OTHER_SETTINGS.enableSwipeNavigation;
+        normalized.headerAutoHide = typeof settings.headerAutoHide === 'boolean' ? settings.headerAutoHide : DEFAULT_GLOBAL_OTHER_SETTINGS.headerAutoHide;
+        normalized.historySortOrder = ['updatedAt', 'createdAt'].includes(settings.historySortOrder) ? settings.historySortOrder : DEFAULT_GLOBAL_OTHER_SETTINGS.historySortOrder;
+        normalized.fontFamily = typeof settings.fontFamily === 'string' ? settings.fontFamily : DEFAULT_GLOBAL_OTHER_SETTINGS.fontFamily;
+        normalized.additionalModels = typeof settings.additionalModels === 'string' ? settings.additionalModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalModels;
+        normalized.additionalOpenRouterModels = typeof settings.additionalOpenRouterModels === 'string' ? settings.additionalOpenRouterModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalOpenRouterModels;
+        normalized.debugMode = typeof settings.debugMode === 'boolean' ? settings.debugMode : DEFAULT_GLOBAL_OTHER_SETTINGS.debugMode;
+        return normalized;
+    },
+
+    normalizeGlobalThemeSettings(settings = {}) {
+        const normalized = { ...DEFAULT_GLOBAL_THEME_SETTINGS };
+        normalized.darkMode = typeof settings.darkMode === 'boolean' ? settings.darkMode : DEFAULT_GLOBAL_THEME_SETTINGS.darkMode;
+        normalized.themeColorMode = uiUtils.getValidThemeColorMode(settings.themeColorMode);
+        normalized.accentColor = uiUtils.getValidColor(settings.accentColor, DEFAULT_ACCENT_COLOR);
+        normalized.headerColor = typeof settings.headerColor === 'string' ? settings.headerColor : DEFAULT_GLOBAL_THEME_SETTINGS.headerColor;
+        normalized.headerTextColorMode = uiUtils.getValidHeaderTextColorMode(settings.headerTextColorMode);
+        normalized.headerTextColor = uiUtils.getValidColor(settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR);
+        normalized.newChatButtonColor = uiUtils.getValidColor(settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        normalized.userMessageColor = uiUtils.getValidColor(settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
+        return normalized;
+    },
+
+    migrateSettingsScopeFromProfile(profileSettings = {}) {
+        const migratedOtherSettings = {};
+        GLOBAL_OTHER_SETTING_KEYS.forEach(key => {
+            if (profileSettings[key] !== undefined) {
+                migratedOtherSettings[key] = profileSettings[key];
+            } else if (state.settings[key] !== undefined) {
+                migratedOtherSettings[key] = state.settings[key];
+            }
+        });
+        const migratedThemeSettings = {};
+        THEME_SETTING_KEYS.forEach(key => {
+            if (profileSettings[key] !== undefined) {
+                migratedThemeSettings[key] = profileSettings[key];
+            } else if (state.settings[key] !== undefined) {
+                migratedThemeSettings[key] = state.settings[key];
+            }
+        });
+        state.globalOtherSettings = this.normalizeGlobalOtherSettings({
+            ...state.globalOtherSettings,
+            ...migratedOtherSettings
+        });
+        state.globalThemeSettings = this.normalizeGlobalThemeSettings({
+            ...state.globalThemeSettings,
+            ...migratedThemeSettings
+        });
+        state.themeSettingsProfileScoped = false;
+        state.settingsScopeMigrationComplete = true;
+        Promise.all([
+            dbUtils.saveSetting('globalOtherSettings', state.globalOtherSettings),
+            dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings),
+            dbUtils.saveSetting('themeSettingsProfileScoped', state.themeSettingsProfileScoped),
+            dbUtils.saveSetting('settingsScopeMigration_v1_30_1_complete', true)
+        ]).catch(error => console.error("[SettingsMigration] v1.30.1設定スコープ移行の保存に失敗しました:", error));
+    },
+
+    applyGlobalOtherSettingsToEffectiveSettings() {
+        state.globalOtherSettings = this.normalizeGlobalOtherSettings(state.globalOtherSettings);
+        GLOBAL_OTHER_SETTING_KEYS.forEach(key => {
+            state.settings[key] = state.globalOtherSettings[key];
+        });
+    },
+
+    applyThemeScopeToEffectiveSettings(profileSettings = {}) {
+        state.themeSettingsProfileScoped = state.themeSettingsProfileScoped === true;
+        state.settings.themeSettingsProfileScoped = state.themeSettingsProfileScoped;
+        if (!state.themeSettingsProfileScoped) {
+            state.globalThemeSettings = this.normalizeGlobalThemeSettings(state.globalThemeSettings);
+            THEME_SETTING_KEYS.forEach(key => {
+                state.settings[key] = state.globalThemeSettings[key];
+            });
+            return;
+        }
+        THEME_SETTING_KEYS.forEach(key => {
+            if (profileSettings[key] === undefined || profileSettings[key] === null) {
+                state.settings[key] = DEFAULT_GLOBAL_THEME_SETTINGS[key];
+            }
+        });
+        const normalizedThemeSettings = this.normalizeGlobalThemeSettings(state.settings);
+        THEME_SETTING_KEYS.forEach(key => {
+            state.settings[key] = normalizedThemeSettings[key];
+        });
+    },
+
+    async saveGlobalOtherSettings() {
+        state.globalOtherSettings = this.normalizeGlobalOtherSettings(state.globalOtherSettings);
+        this.applyGlobalOtherSettingsToEffectiveSettings();
+        await dbUtils.saveSetting('globalOtherSettings', state.globalOtherSettings);
+        this.markAsDirtyAndSchedulePush('structural');
+    },
+
+    async updateGlobalOtherSetting(key, value) {
+        if (!GLOBAL_OTHER_SETTING_KEYS.includes(key)) return;
+        state.globalOtherSettings = this.normalizeGlobalOtherSettings({
+            ...state.globalOtherSettings,
+            [key]: value
+        });
+        await this.saveGlobalOtherSettings();
+    },
+
+    async updateThemeSettingValue(key, value) {
+        if (!THEME_SETTING_KEYS.includes(key)) return;
+        state.settings[key] = value;
+        if (state.themeSettingsProfileScoped) {
+            if (!state.activeProfile || !state.activeProfile.settings) return;
+            state.activeProfile.settings[key] = value;
+            await dbUtils.updateProfile(state.activeProfile);
+        } else {
+            state.globalThemeSettings = this.normalizeGlobalThemeSettings({
+                ...state.globalThemeSettings,
+                [key]: value
+            });
+            this.applyThemeScopeToEffectiveSettings(state.activeProfile?.settings || {});
+            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
+        }
+        this.markAsDirtyAndSchedulePush('structural');
+    },
+
+    getCurrentThemeSettings() {
+        const themeSettings = {};
+        THEME_SETTING_KEYS.forEach(key => {
+            themeSettings[key] = state.settings[key];
+        });
+        return this.normalizeGlobalThemeSettings(themeSettings);
+    },
+
+    async updateThemeSettingsProfileScoped(value) {
+        const nextValue = value === true;
+        const currentThemeSettings = this.getCurrentThemeSettings();
+        state.themeSettingsProfileScoped = nextValue;
+        state.settings.themeSettingsProfileScoped = nextValue;
+
+        if (nextValue) {
+            if (state.activeProfile && state.activeProfile.settings) {
+                THEME_SETTING_KEYS.forEach(key => {
+                    state.activeProfile.settings[key] = currentThemeSettings[key];
+                });
+                await dbUtils.updateProfile(state.activeProfile);
+            }
+        } else {
+            state.globalThemeSettings = currentThemeSettings;
+            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
+        }
+        await dbUtils.saveSetting('themeSettingsProfileScoped', nextValue);
+        this.applyThemeScopeToEffectiveSettings(state.activeProfile?.settings || {});
+        uiUtils.applySettingsToUI();
+        this.markAsDirtyAndSchedulePush('structural');
     },
 
     normalizeLocalUiSettings(settings = {}) {
@@ -8874,8 +9074,24 @@ const appLogic = {
         this.markAsDirtyAndSchedulePush('structural');
     },
 
+    async saveThemeSettingValues(updates) {
+        Object.assign(state.settings, updates);
+        if (state.themeSettingsProfileScoped) {
+            if (!state.activeProfile || !state.activeProfile.settings) return;
+            Object.assign(state.activeProfile.settings, updates);
+            await dbUtils.updateProfile(state.activeProfile);
+        } else {
+            state.globalThemeSettings = this.normalizeGlobalThemeSettings({
+                ...state.globalThemeSettings,
+                ...updates
+            });
+            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
+        }
+        this.markAsDirtyAndSchedulePush('structural');
+    },
+
     async resetHeaderColorSetting() {
-        await this.saveProfileSettingValues({ headerColor: '' });
+        await this.saveThemeSettingValues({ headerColor: '' });
         if (elements.headerColorInput) {
             elements.headerColorInput.value = state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
         }
@@ -8883,7 +9099,7 @@ const appLogic = {
     },
 
     async resetAccentColorSetting() {
-        await this.saveProfileSettingValues({ accentColor: DEFAULT_ACCENT_COLOR });
+        await this.saveThemeSettingValues({ accentColor: DEFAULT_ACCENT_COLOR });
         if (elements.accentColorInput) {
             elements.accentColorInput.value = DEFAULT_ACCENT_COLOR;
         }
@@ -8891,7 +9107,7 @@ const appLogic = {
     },
 
     async resetHeaderTextColorSetting() {
-        await this.saveProfileSettingValues({
+        await this.saveThemeSettingValues({
             headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
             headerTextColor: DEFAULT_HEADER_TEXT_COLOR
         });
@@ -8906,7 +9122,7 @@ const appLogic = {
     },
 
     async resetNewChatButtonColorSetting() {
-        await this.saveProfileSettingValues({ newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR });
+        await this.saveThemeSettingValues({ newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR });
         if (elements.newChatButtonColorInput) {
             elements.newChatButtonColorInput.value = DEFAULT_NEW_CHAT_BUTTON_COLOR;
         }
@@ -8914,7 +9130,7 @@ const appLogic = {
     },
 
     async resetUserMessageColorSetting() {
-        await this.saveProfileSettingValues({ userMessageColor: DEFAULT_USER_MESSAGE_COLOR });
+        await this.saveThemeSettingValues({ userMessageColor: DEFAULT_USER_MESSAGE_COLOR });
         if (elements.userMessageColorInput) {
             elements.userMessageColorInput.value = DEFAULT_USER_MESSAGE_COLOR;
         }
@@ -8935,6 +9151,22 @@ const appLogic = {
             state.localUiSettings = this.normalizeLocalUiSettings(storedLocalUiSettings?.value || {});
             this.applyLocalUiSettingsToEffectiveSettings();
             console.log("[GlobalSettings] 端末ごとのUI設定を読み込みました:", state.localUiSettings);
+
+            const storedGlobalOtherSettings = await dbUtils.getSetting('globalOtherSettings');
+            state.globalOtherSettings = this.normalizeGlobalOtherSettings(storedGlobalOtherSettings?.value || {});
+            this.applyGlobalOtherSettingsToEffectiveSettings();
+
+            const storedGlobalThemeSettings = await dbUtils.getSetting('globalThemeSettings');
+            state.globalThemeSettings = this.normalizeGlobalThemeSettings(storedGlobalThemeSettings?.value || {});
+            state.themeSettingsProfileScoped = (await dbUtils.getSetting('themeSettingsProfileScoped'))?.value === true;
+            state.settings.themeSettingsProfileScoped = state.themeSettingsProfileScoped;
+            state.settingsScopeMigrationComplete = (await dbUtils.getSetting('settingsScopeMigration_v1_30_1_complete'))?.value === true;
+            console.log("[GlobalSettings] グローバルその他設定/テーマ設定を読み込みました:", {
+                globalOtherSettings: state.globalOtherSettings,
+                globalThemeSettings: state.globalThemeSettings,
+                themeSettingsProfileScoped: state.themeSettingsProfileScoped,
+                settingsScopeMigrationComplete: state.settingsScopeMigrationComplete
+            });
         } catch (error) {
             console.error("[GlobalSettings] 共通設定の読み込み中にエラーが発生しました:", error);
             // エラーが発生しても起動処理は続行する
@@ -8990,6 +9222,10 @@ const appLogic = {
             const loadedProfileSettings = state.activeProfile.settings || {};
             Object.assign(newSettings, loadedProfileSettings);
 
+            if (!state.settingsScopeMigrationComplete) {
+                this.migrateSettingsScopeFromProfile(loadedProfileSettings);
+            }
+
             if (!state.hasSavedLocalUiSettings) {
                 const migratedLocalUiSettings = {};
                 LOCAL_UI_SETTING_KEYS.forEach(key => {
@@ -9009,6 +9245,8 @@ const appLogic = {
 
             // 3. state.settings を更新する
             state.settings = newSettings;
+            this.applyGlobalOtherSettingsToEffectiveSettings();
+            this.applyThemeScopeToEffectiveSettings(loadedProfileSettings);
             this.applyLocalUiSettingsToEffectiveSettings();
 
             uiUtils.applySettingsToUI(); 
@@ -9230,7 +9468,11 @@ const appLogic = {
         });
 
         console.log("[Profile] 現在のUIから設定を取得しました:", settings);
-        return settings;
+        const profileSettings = this.getSharedProfileSettings(settings);
+        if (!state.themeSettingsProfileScoped) {
+            THEME_SETTING_KEYS.forEach(key => delete profileSettings[key]);
+        }
+        return profileSettings;
     },
 
     fileToBase64(file) {
@@ -10948,7 +11190,6 @@ const appLogic = {
         const setupInstantSave = (element, key, eventType = 'change', onUpdate = null, getValue = null) => { // getValue関数を追加
             if (element) {
                 element.addEventListener(eventType, async () => {
-                    if (!state.activeProfile) return;
                     let value;
                     
                     // getValue関数が提供されている場合はそれを使用
@@ -10977,12 +11218,21 @@ const appLogic = {
                         }
                     }
                     
-                    state.settings[key] = value;
-                    state.activeProfile.settings[key] = value;
-                    
-                    await dbUtils.updateProfile(state.activeProfile);
-                    appLogic.markAsDirtyAndSchedulePush('structural');
-                    
+                    if (key === 'themeSettingsProfileScoped') {
+                        await this.updateThemeSettingsProfileScoped(value);
+                    } else if (GLOBAL_OTHER_SETTING_KEYS.includes(key)) {
+                        await this.updateGlobalOtherSetting(key, value);
+                    } else if (THEME_SETTING_KEYS.includes(key)) {
+                        await this.updateThemeSettingValue(key, value);
+                    } else {
+                        if (!state.activeProfile) return;
+                        state.settings[key] = value;
+                        state.activeProfile.settings[key] = value;
+
+                        await dbUtils.updateProfile(state.activeProfile);
+                        appLogic.markAsDirtyAndSchedulePush('structural');
+                    }
+
                     if (onUpdate) {
                         onUpdate(value);
                     }
@@ -11065,6 +11315,7 @@ const appLogic = {
             } },
             enterToSend: { element: elements.enterToSendCheckbox, event: 'change' },
             historySortOrder: { element: elements.historySortOrderSelect, event: 'change' },
+            themeSettingsProfileScoped: { element: elements.themeSettingsProfileScopedToggle, event: 'change' },
             darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },
             debugMode: { element: elements.debugModeToggle, event: 'change', onUpdate: (value) => {
                 DebugLogger.init();
