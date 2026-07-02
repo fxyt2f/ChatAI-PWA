@@ -1,11 +1,12 @@
 // sw.js
 
-const CACHE_NAME = 'chatai-pwa-cache-v1.30.3'; // 更新後はここも変更
+const CACHE_NAME = 'chatai-pwa-cache-v1.30.4'; // 更新後はここも変更
 const urlsToCache = [
   './',
   './index.html',
   './app.js',
   './dropbox.js',
+  './CHANGELOG.md',
   './manifest.json',
   './marked.js',
   // アイコンファイルもキャッシュする場合 (manifest.json で指定したもの)

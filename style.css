@@ -760,6 +760,58 @@ body.dark-mode #settings-screen a:hover {
     gap: var(--spacing-unit);
     margin-top: calc(var(--spacing-unit) * 2);
 }
+.custom-dialog.release-notes-dialog {
+    width: min(720px, calc(100vw - 32px));
+    max-height: min(720px, calc(100dvh - 32px));
+    display: flex;
+    flex-direction: column;
+}
+.custom-dialog.release-notes-dialog .release-notes-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+    white-space: normal;
+}
+.custom-dialog.release-notes-dialog .release-notes-content h2,
+.custom-dialog.release-notes-dialog .release-notes-content h3 {
+    margin: 0 0 10px;
+    font-size: 1.05rem;
+    line-height: 1.35;
+}
+.custom-dialog.release-notes-dialog .release-notes-content ul {
+    margin: 0 0 18px;
+    padding-left: 1.4em;
+}
+.custom-dialog.release-notes-dialog .release-notes-content li {
+    margin-bottom: 6px;
+}
+.custom-dialog.release-notes-dialog .release-notes-content code {
+    font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+    font-size: 0.92em;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-tertiary);
+    border-radius: 4px;
+    padding: 0 0.25em;
+}
+.custom-dialog.release-notes-dialog .dialog-actions {
+    flex: 0 0 auto;
+}
+
+@media screen and (max-width: 600px) {
+    .custom-dialog.release-notes-dialog {
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        max-height: calc(100dvh - 16px);
+        padding: 14px;
+    }
+
+    .custom-dialog.release-notes-dialog .release-notes-content {
+        font-size: 0.95rem;
+        line-height: 1.55;
+        padding-right: 2px;
+    }
+}
 
 /* --- Other Styles --- */
 .danger-zone {

@@ -85,13 +85,14 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.30.3";
-const APP_CACHE_VERSION = "v1.30.3";
+const APP_VERSION = "1.30.4";
+const APP_CACHE_VERSION = "v1.30.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
+const RELEASE_NOTES_FALLBACK_MESSAGE = 'リリースノートを読み込めませんでした。CHANGELOG.md を確認してください。';
 const INPUT_DRAFT_STORAGE_PREFIX = 'chatai-pwa-input-draft:';
 const INPUT_DRAFT_CLIENT_ID_KEY = 'chatai-pwa-client-id';
 const INPUT_DRAFT_SAVE_DELAY = 400;
@@ -103,220 +104,6 @@ const CHANGE_HISTORY_MAX_SERIALIZED_LENGTH = 2_000_000;
 const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
-const RELEASE_NOTES = {
-    "1.30.3": [
-        "ヘッダーのチャットタイトルを従来より長く表示できるよう調整しました。",
-        "固定文字数でのタイトル短縮をやめ、表示上の省略はCSSのellipsisで処理するよう変更しました。",
-        "ヘッダーのチャットタイトルをクリック/タップして直接編集できる機能を追加しました。",
-        "Enter保存、Escapeキャンセル、blur保存に対応しました。",
-        "未保存チャットではタイトル編集を行わないよう制御しました。",
-        "検索/置換/Undo/Redoのロジックは変更していません。"
-    ],
-    "1.30.2": [
-        "ユーザーメッセージの大きな固定最小幅を廃止し、内容に応じて自然に横幅が変わるよう調整しました。",
-        "ユーザーメッセージ下の操作ボタン領域を、メッセージ本体の幅と連動しないよう分離しました。",
-        "ユーザー下のコピーアイコンが途中で切れる問題を修正しました。",
-        "検索/置換/Undo/Redoのロジックは変更していません。",
-        "アプリバージョンとキャッシュバージョンを1.30.2に更新しました。"
-    ],
-    "1.30.1": [
-        "「その他設定」をプロファイルに依存しないグローバル設定へ変更しました。",
-        "ワイドモード設定を「その他設定」へ移動し、「Enterキーで送信する」の下に配置しました。",
-        "テーマ設定をプロファイルごとに保存するか、全プロファイル共通にするかを選べる設定を追加しました。",
-        "既存設定からの安全な移行処理を追加しました。",
-        "検索/置換/Undo/Redoのロジックは変更していません。",
-        "アプリバージョンとキャッシュバージョンを1.30.1に更新しました。"
-    ],
-    "1.30.0": [
-        "スマホ表示時にメッセージ下メニューが崩れる問題を修正しました。",
-        "メッセージ下メニューは2行表示にせず、1行表示を維持するようにしました。",
-        "横幅が足りない場合はメニュー内横スクロールで対応するようにしました。",
-        "検索/置換/Undo/Redoのロジックは変更していません。",
-        "アプリバージョンとキャッシュバージョンを1.30.0に更新しました。"
-    ],
-    "1.29.6": [
-        "検索・置換・変更履歴・Undo/Redoまわりの総合安定化を実施しました。",
-        "1文字検索/置換、個別メッセージ置換、cascade表示候補限定、メッセージ単位Undo/Redoの相互干渉を確認・調整しました。",
-        "Undo/Redo後に不要なメッセージpop-inが発火しないよう、再描画時のアニメーション抑制を安定化しました。",
-        "検索/置換UIのスマホ表示、フローティングボタン非表示、置換メニュー切替の表示を確認しました。",
-        "変更履歴の正規化、change単位status、Redo無効化、before/after一致検証の安定性を確認・補強しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.6に更新しました。"
-    ],
-    "1.29.5": [
-        "変更履歴を使ったUndo/Redo実行に対応しました。",
-        "手動編集履歴と置換履歴を元に、直近の変更を元に戻す/やり直す操作を追加しました。",
-        "Undo/Redo前に現在本文と履歴のbefore/after一致を検証し、古い履歴による誤適用を防止しました。",
-        "複数メッセージ置換でも一部だけ適用されないよう、全件検証後に反映するようにしました。",
-        "Undo/Redo後に検索結果・置換プレビュー・履歴ボタン状態を再計算するようにしました。",
-        "アプリバージョンとキャッシュバージョンを1.29.5に更新しました。"
-    ],
-    "1.29.4": [
-        "置換プレビューplanを元に、現在表示中メッセージ本文を置換できるようにしました。",
-        "置換実行後にtype: replaceの変更履歴を保存するようにしました。",
-        "cascade候補は現在表示中の候補のみを置換対象にし、非表示候補を書き換えないようにしました。",
-        "置換実行前にbefore一致を検証し、古いプレビューによる誤置換を防止しました。",
-        "置換後に検索結果・置換プレビューを再計算するようにしました。",
-        "ユーザー発言・モデル回答のメッセージ下部メニューから個別メッセージ置換を開始できるようにしました。",
-        "個別置換ではscopeと対象メッセージ情報を履歴へ保存するようにしました。",
-        "個別メッセージ置換モードでは検索対象も選択した1メッセージだけに限定するようにしました。",
-        "置換プレビューで文頭ではなく変更箇所周辺を表示するようにしました。",
-        "複数件置換では不要なスニペット表示を抑え、件数中心の表示に整理しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.4に更新しました。"
-    ],
-    "1.29.3": [
-        "置換実行に備えた置換プレビュー機能を追加しました。",
-        "検索語・正規表現・大文字小文字区別設定を使って置換候補を抽出できるようにしました。",
-        "対象範囲をモデル回答・ユーザー発言・両方から選べるようにしました。",
-        "置換候補のメッセージ数・一致件数・before/afterプレビュー計画を作成する基盤を追加しました。",
-        "本文変更・変更履歴追加・Undo/Redo実行は行わない非破壊プレビューに限定しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.3に更新しました。"
-    ],
-    "1.29.2": [
-        "置換・整形・Undo/Redoに備えた変更履歴基盤を追加しました。",
-        "チャット単位で変更履歴をlocalStorageへ保存・読み込みできるようにしました。",
-        "履歴entryの正規化、最大件数・最大保存サイズの制限、redo履歴の無効化処理を追加しました。",
-        "手動メッセージ編集を変更履歴へ記録する最小フックを追加しました。",
-        "将来のUndo/Redo適用前検証に使う履歴検証関数を追加しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.2に更新しました。"
-    ],
-    "1.29.1": [
-        "チャット内検索のハイライト解除と再描画時の安定性を改善しました。",
-        "チャット切替・編集保存・再生成後に古い検索Rangeが残らないように調整しました。",
-        "不正な正規表現や空検索時の表示とハイライト解除を安定化しました。",
-        "長文折りたたみ中のメッセージ検索と現在一致への移動を改善しました。",
-        "検索UIの二段構成・角丸デザインを維持しつつ、スマホ幅での表示を微調整しました。",
-        "IME変換中の検索実行を抑制しました。",
-        "検索バー表示中に最初のフローティングボタンを一時的に非表示化しました。",
-        "検索移動時にヒット箇所へ正確にスクロールするように調整しました。",
-        "長文折りたたみ中のメッセージを検索中だけ一時展開し、検索終了時に元へ戻すように対応しました。",
-        "1文字検索を通常検索として扱うように検索ロジックを整理しました。",
-        "2文字以上制限や1文字検索専用の例外状態を撤去し、検索状態管理を単純化しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.1に更新しました。"
-    ],
-    "1.29.0": [
-        "現在表示中のチャット内を検索できる検索UIを追加しました。",
-        "ユーザー発言・モデル回答の本文に対して一致箇所をハイライト表示するようにしました。",
-        "前の一致 / 次の一致への移動と件数表示に対応しました。",
-        "大文字小文字区別・正規表現検索の切り替えを追加しました。",
-        "CSS Custom Highlight APIを使い、本文DOMを書き換えずに検索ハイライトを表示するようにしました。",
-        "操作ボタン、トークン数、生成時メタ情報、編集欄など本文以外を検索対象から除外しました。",
-        "アプリバージョンとキャッシュバージョンを1.29.0に更新しました。"
-    ],
-    "1.28.9": [
-        "生成中でも回答下のトークン数、生成時メタ情報、操作ボタン、cascade controlsを表示するように変更しました。",
-        "生成中に編集・削除・再生成などの変更系操作を実行しようとした場合、操作を止めてダイアログを表示するようにしました。",
-        "コピーや折りたたみなどの読み取り・表示補助系操作は生成中でも扱いやすいように調整しました。",
-        "入力欄カードと最下部モデル回答の間の余白を自然な量へ調整しました。",
-        "回答下ボタン類が入力欄カードに被らないよう下部余白を見直しました。",
-        "アプリバージョンとキャッシュバージョンを1.28.9に更新しました。"
-    ],
-    "1.28.8": [
-        "送信中・応答生成中に画面下部中央へ応答生成中ステータスを表示するようにしました。",
-        "入力欄カードの上に小さな点滅ドット付きステータスを出すように調整しました。",
-        "ストリーミング中・送信中状態を監視し、応答完了・中断・エラー時に非表示化するようにしました。",
-        "生成中はメッセージ操作ボタンとcascade controlsを非表示にして誤操作を抑制しました。",
-        "アプリバージョンとキャッシュバージョンを1.28.8に更新しました。"
-    ],
-    "1.28.7": [
-        "v1.28系で追加したメッセージ周辺UIの表示安定性を改善しました。",
-        "長文折りたたみのフェード表示と展開/折りたたみ時の見え方を微調整しました。",
-        "回答下2段表示、コピー、折りたたみ、編集ボタンの並びと折り返しを調整しました。",
-        "編集中Markdownコピーボタンのコピー・保存・キャンセル並びと#a4c7d5単色表示を安定化しました。",
-        "スマホ幅での操作ボタン、編集UI、入力欄カードとの干渉を抑制しました。"
-    ],
-    "1.28.6": [
-        "長文メッセージを自動で折りたたむ機能を追加しました。",
-        "1200pxを超える長文のみを対象にし、短めの回答は折りたたまないよう調整しました。",
-        "折りたたみ/展開状態をメッセージ単位で保存するようにしました。",
-        "展開/折りたたみ時に入力欄カードへ操作列が隠れにくいようスクロール補正を追加しました。",
-        "編集中Markdownコピーボタンの並び順をコピー・保存・キャンセルに変更しました。",
-        "編集中Markdownコピーボタンの色を#a4c7d5ベースの淡い水色に変更しました。"
-    ],
-    "1.28.5": [
-        "ユーザー発言・モデル回答の操作ボタンに本文コピー機能を追加しました。",
-        "コピー時に本文以外の操作UI、生成時メタ情報、トークン表示などが混ざらないように調整しました。",
-        "コピー成功時に一時的な成功表示を出すようにしました。",
-        "編集中Markdownコピーボタンを保存ボタンの左に配置しました。",
-        "編集中Markdownコピーボタンを淡い水色の見た目に変更しました。"
-    ],
-    "1.28.4": [
-        "メッセージ編集時の表示幅と編集textareaの高さ調整を改善しました。",
-        "編集開始時に本文が全選択される挙動を抑制し、カーソルを末尾へ移動するようにしました。",
-        "編集アクションボタンの見た目を整理しました。",
-        "message-cascade-controlsをChatGPT風の丸アイコンボタン表示に調整しました。",
-        "編集中・生成中は通常アクションボタンとcascade controlsを非表示にし、表示被りを抑制しました。"
-    ],
-    "1.28.3": [
-        "モデル回答下の情報表示を2段化し、トークン数と操作ボタンの視認性を改善しました。",
-        "モデル回答ごとに生成時のプロファイル名・プロバイダー・モデル名を記録するようにしました。",
-        "回答下にプロファイル名 / モデル名を表示し、過去回答の生成条件を確認しやすくしました。",
-        "長いモデル名は省略表示し、スマホ幅でも横はみ出ししにくいように調整しました。"
-    ],
-    "1.28.2": [
-        "チャット本文の最大幅を調整し、中央寄せのChatGPT風レイアウトに変更しました。",
-        "モデル回答のカード背景・枠線・影を抑え、本文中心の透明な表示に変更しました。",
-        "既存メッセージ操作ボタンを常時表示に変更しました。",
-        "ユーザー発言の操作ボタンを右下、モデル回答の操作ボタンを左下に配置しました。",
-        "編集中・生成中は操作ボタンを非表示にし、誤操作や表示被りを抑制しました。"
-    ],
-    "1.28.1": [
-        "入力欄を画面下部中央のカード状UIに変更しました。",
-        "入力内容に応じて入力欄の高さを52px〜520pxで自動調整するようにしました。",
-        "入力欄の高さに合わせてチャット本文の最下部余白を自動調整するようにしました。",
-        "プロファイル、添付、送信ボタンを入力カード下段に配置しました。",
-        "プロファイルメニューが入力欄の上に開くように調整しました。"
-    ],
-    "1.28.0": [
-        "入力欄の下書きをチャット/プロファイル単位で自動保存するようにしました。",
-        "Dropbox接続済みの場合、入力下書きをDropbox App Folderのdrafts配下へ共有保存するようにしました。",
-        "チャット切り替えや再読み込み時に、空の入力欄へ最新下書きを復元するようにしました。",
-        "送信後は該当する入力下書きを削除扱いにし、古い下書きの誤復元を防止するようにしました。"
-    ],
-    "1.27.6": [
-        "スマホ表示時の色設定UIで、操作部が右寄せになるよう調整しました。",
-        "チャット左上部の同期ボタンを、設定画面への移動ではなく即時同期実行に変更しました。"
-    ],
-    "1.27.5": [
-        "ヘッダー内ボタンのマウスオーバー/タップ時の視認性を改善しました。",
-        "暗いヘッダー色でもヘッダー内ボタンのhover/tap時に見やすくなるよう調整しました。",
-        "テーマ設定内の「色」見出しを「色設定」に変更しました。",
-        "バージョン更新時の更新内容を、最初から表示してOKで閉じる形式に変更しました。"
-    ],
-    "1.27.4": [
-        "PC表示時ワイドモード設定をテーマ設定セクションへ移動しました。",
-        "アクセントカラー方式と個別設定方式を切り替えられるようにしました。",
-        "テーマ色の個別設定UIを、選択中の方式に応じて有効/無効化するようにしました。",
-        "ユーザーメッセージ表記へ統一しました。"
-    ],
-    "1.27.3": [
-        "テーマ設定を独立したセクションに整理しました。",
-        "ダークテーマ設定をテーマ設定セクションへ移動しました。",
-        "アクセントカラーから主要なテーマ色を調整できる設定を追加しました。",
-        "ユーザーメッセージの色設定を追加しました。"
-    ],
-    "1.27.2": [
-        "ヘッダー文字色と新規チャットボタン色が反映されない問題を修正しました。",
-        "ヘッダー文字色と新規チャットボタン色にリセットボタンを追加しました。",
-        "色設定エリアのUIを整理しました。"
-    ],
-    "1.27.1": [
-        "ヘッダー文字色を自動/手動で選べるようにしました。",
-        "新規チャットボタン色を設定できるようにしました。",
-        "ヘッダー内アイコンやボタンの文字色追従を改善しました。"
-    ],
-    "1.27.0": [
-        "PWAの見た目、テーマ色、バージョン表示を整理しました。",
-        "ヘッダー色に合わせて文字色とtheme-colorが追従するよう改善しました。",
-        "リリースノート表示ボタンと端末ごとの既読管理を追加しました。",
-        "PWAキャッシュを v1.27 に更新しました。"
-    ],
-    "1.26.0": [
-        "PWAのedge-to-edge表示を改善しました。",
-        "viewport-fit=cover と safe area 対応を追加しました。",
-        "ヘッダーと下部入力欄のステータスバー/ホームバー被りを軽減しました。",
-        "GitHub Pages / PWAキャッシュを v1.26 に更新しました。"
-    ]
-};
 let inputDraftSaveTimer = 0;
 let inputDraftDropboxSaveTimer = 0;
 let inputDraftRestoreTimer = 0;
@@ -5712,6 +5499,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // アラートダイアログ表示
     async showCustomAlert(message) {
+        elements.alertDialog.classList.remove('release-notes-dialog');
+        elements.alertMessage.classList.remove('release-notes-content');
+        elements.alertMessage.textContent = '';
         elements.alertMessage.textContent = message;
          // ボタンのイベントリスナーが重複しないように複製して置き換え
          const newOkBtn = elements.alertOkBtn.cloneNode(true);
@@ -8944,23 +8734,65 @@ const appLogic = {
         await this.saveLocalUiSettings();
     },
 
-    formatReleaseNotes(version = APP_VERSION, options = {}) {
-        const notes = RELEASE_NOTES[version] || [];
-        const lines = [
-            options.isUpdateNotice
-                ? `ChatAI PWA v${version} に更新されました`
-                : `ChatAI PWA v${version}`
-        ];
-        if (notes.length > 0) {
-            lines.push('', '更新内容:', ...notes.map(note => `- ${note}`));
-        } else {
-            lines.push('', 'このバージョンのリリースノートは未登録です。');
+    async loadChangelogText() {
+        const response = await fetch('./CHANGELOG.md', {
+            cache: 'no-cache'
+        });
+        if (!response.ok) {
+            throw new Error(`CHANGELOG.mdの読み込みに失敗しました (${response.status})`);
         }
-        return lines.join('\n');
+        return response.text();
+    },
+
+    extractChangelogSections(changelogText, version = APP_VERSION, sectionLimit = 4) {
+        const text = String(changelogText || '').replace(/\r\n/g, '\n');
+        const sections = text.match(/^##\s+v?[^\n]+(?:\n(?!##\s).*)*/gm) || [];
+        if (version) {
+            const escapedVersion = String(version).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const versionPattern = new RegExp(`^##\\s+v?${escapedVersion}(?:\\s|$)`, 'i');
+            const matched = sections.find(section => versionPattern.test(section));
+            if (matched) return matched.trim();
+        }
+        return sections.slice(0, sectionLimit).join('\n\n').trim();
+    },
+
+    async formatReleaseNotes(version = APP_VERSION, options = {}) {
+        try {
+            const changelogText = await this.loadChangelogText();
+            const changelogNotes = this.extractChangelogSections(
+                changelogText,
+                options.includeRecent ? null : version,
+                options.includeRecent ? 4 : 1
+            );
+            if (!changelogNotes) throw new Error('CHANGELOG.mdに表示対象の内容がありません。');
+            if (options.isUpdateNotice) {
+                return `ChatAI PWA v${version} に更新されました\n\n${changelogNotes}`;
+            }
+            return changelogNotes;
+        } catch (error) {
+            console.error('[ReleaseNotes] CHANGELOG.mdの読み込みに失敗しました:', error);
+            return RELEASE_NOTES_FALLBACK_MESSAGE;
+        }
     },
 
     async showReleaseNotes(version = APP_VERSION) {
-        await uiUtils.showCustomAlert(this.formatReleaseNotes(version));
+        const releaseNotes = await this.formatReleaseNotes(version, { includeRecent: true });
+        elements.alertDialog.classList.add('release-notes-dialog');
+        elements.alertMessage.classList.add('release-notes-content');
+        if (releaseNotes === RELEASE_NOTES_FALLBACK_MESSAGE || typeof marked === 'undefined') {
+            elements.alertMessage.textContent = releaseNotes;
+        } else {
+            elements.alertMessage.innerHTML = marked.parse(releaseNotes);
+        }
+
+        const newOkBtn = elements.alertOkBtn.cloneNode(true);
+        elements.alertOkBtn.parentNode.replaceChild(newOkBtn, elements.alertOkBtn);
+        elements.alertOkBtn = newOkBtn;
+        elements.alertOkBtn.onclick = () => elements.alertDialog.close('ok');
+        await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
+        elements.alertDialog.classList.remove('release-notes-dialog');
+        elements.alertMessage.classList.remove('release-notes-content');
+        elements.alertMessage.replaceChildren();
     },
 
     getInputDraftClientId() {
@@ -10242,7 +10074,7 @@ const appLogic = {
                 try {
                     versionNoticeData = JSON.parse(pendingNoticeRaw);
                     if (versionNoticeData && !versionNoticeData.message) {
-                        versionNoticeData.message = this.formatReleaseNotes(versionNoticeData.version || APP_VERSION, { isUpdateNotice: true });
+                        versionNoticeData.message = await this.formatReleaseNotes(versionNoticeData.version || APP_VERSION, { isUpdateNotice: true });
                     }
                     if (versionNoticeData) {
                         delete versionNoticeData.promptMessage;
@@ -10484,7 +10316,7 @@ const appLogic = {
             if (!versionNoticeData && state.localUiSettings.lastSeenReleaseVersion !== APP_VERSION) {
                 versionNoticeData = {
                     version: APP_VERSION,
-                    message: this.formatReleaseNotes(APP_VERSION, { isUpdateNotice: true }),
+                    message: await this.formatReleaseNotes(APP_VERSION, { isUpdateNotice: true }),
                     shouldPersist: true
                 };
                 sessionStorage.setItem(VERSION_NOTICE_SESSION_KEY, JSON.stringify(versionNoticeData));
