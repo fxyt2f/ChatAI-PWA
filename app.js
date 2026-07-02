@@ -86,7 +86,7 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.30.4";
-const APP_CACHE_VERSION = "v1.30.4-fix1";
+const APP_CACHE_VERSION = "v1.30.4-fix2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -8809,13 +8809,13 @@ const appLogic = {
                     elements.alertDialog.close('ok');
                 }
             };
-            await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
+            await uiUtils.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
         } catch (error) {
             console.error('[ReleaseNotes] リリースノート表示に失敗しました。通常アラートでフォールバック表示します:', error);
             if (elements.alertDialog.open) {
                 elements.alertDialog.close('error');
             }
-            await this.showCustomAlert(RELEASE_NOTES_FALLBACK_MESSAGE);
+            await uiUtils.showCustomAlert(RELEASE_NOTES_FALLBACK_MESSAGE);
         } finally {
             if (shouldCleanupReleaseNotesClasses) {
                 elements.alertDialog.classList.remove('release-notes-dialog');
