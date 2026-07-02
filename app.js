@@ -89,6 +89,8 @@ const RELEASE_NOTES = {
         "ユーザー発言・モデル回答のメッセージ下部メニューから個別メッセージ置換を開始できるようにしました。",
         "個別置換ではscopeと対象メッセージ情報を履歴へ保存するようにしました。",
         "個別メッセージ置換モードでは検索対象も選択した1メッセージだけに限定するようにしました。",
+        "置換プレビューで文頭ではなく変更箇所周辺を表示するようにしました。",
+        "複数件置換では不要なスニペット表示を抑え、件数中心の表示に整理しました。",
         "アプリバージョンとキャッシュバージョンを1.29.4に更新しました。"
     ],
     "1.29.3": [
@@ -2424,10 +2426,75 @@ const uiUtils = {
         }
     },
 
-    createReplacePreviewSnippet(value, maxLength = 120) {
-        const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
-        if (normalized.length <= maxLength) return normalized;
-        return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+    normalizeReplacePreviewText(value) {
+        return String(value ?? '').replace(/\s+/g, ' ').trim();
+    },
+
+    findReplacePreviewDiffBounds(before, after) {
+        const beforeText = String(before ?? '');
+        const afterText = String(after ?? '');
+        const minLength = Math.min(beforeText.length, afterText.length);
+        let start = 0;
+
+        while (start < minLength && beforeText[start] === afterText[start]) {
+            start += 1;
+        }
+
+        if (start === beforeText.length && start === afterText.length) {
+            return null;
+        }
+
+        let beforeEnd = beforeText.length;
+        let afterEnd = afterText.length;
+        while (
+            beforeEnd > start &&
+            afterEnd > start &&
+            beforeText[beforeEnd - 1] === afterText[afterEnd - 1]
+        ) {
+            beforeEnd -= 1;
+            afterEnd -= 1;
+        }
+
+        return { start, beforeEnd, afterEnd };
+    },
+
+    createFocusedReplacePreviewSnippet(before, after, maxContext = 40) {
+        const beforeText = String(before ?? '');
+        const afterText = String(after ?? '');
+        const bounds = this.findReplacePreviewDiffBounds(beforeText, afterText);
+
+        if (!bounds) {
+            const maxLength = maxContext * 2;
+            return {
+                before: this.normalizeReplacePreviewText(beforeText.slice(0, maxLength)),
+                after: this.normalizeReplacePreviewText(afterText.slice(0, maxLength))
+            };
+        }
+
+        const start = Math.max(0, bounds.start - maxContext);
+        const beforeEnd = Math.min(beforeText.length, bounds.beforeEnd + maxContext);
+        const afterEnd = Math.min(afterText.length, bounds.afterEnd + maxContext);
+        const beforePrefix = start > 0 ? '…' : '';
+        const afterPrefix = start > 0 ? '…' : '';
+        const beforeSuffix = beforeEnd < beforeText.length ? '…' : '';
+        const afterSuffix = afterEnd < afterText.length ? '…' : '';
+
+        return {
+            before: `${beforePrefix}${this.normalizeReplacePreviewText(beforeText.slice(start, beforeEnd))}${beforeSuffix}`,
+            after: `${afterPrefix}${this.normalizeReplacePreviewText(afterText.slice(start, afterEnd))}${afterSuffix}`
+        };
+    },
+
+    getReplacePreviewRoleLabel(role) {
+        return role === 'model' ? 'モデル回答' : 'ユーザー発言';
+    },
+
+    formatReplacePreviewSummary(plan) {
+        if (!plan || plan.occurrenceCount <= 0) return '0件';
+        if (plan.scope === 'message') {
+            return `このメッセージ内 ${plan.occurrenceCount}件を置換予定`;
+        }
+        return `${plan.messageCount}メッセージ内 ${plan.occurrenceCount}件を置換予定`;
     },
 
     clearChatReplacePreviewTimer() {
@@ -2449,29 +2516,43 @@ const uiUtils = {
         }
 
         elements.chatReplaceSummary.classList.remove('is-error');
-        elements.chatReplaceSummary.textContent = plan.occurrenceCount > 0
-            ? `${plan.occurrenceCount}件をプレビュー / ${plan.messageCount}メッセージ`
-            : '0件';
+        elements.chatReplaceSummary.textContent = this.formatReplacePreviewSummary(plan);
         this.updateChatReplaceExecuteButtonState(plan);
 
-        const previewChanges = plan.changes.slice(0, 5);
+        if (plan.occurrenceCount === 1 && plan.changes.length === 1) {
+            const change = plan.changes[0];
+            const item = document.createElement('div');
+            item.className = 'chat-replace-preview-item';
+
+            const meta = document.createElement('div');
+            meta.className = 'chat-replace-preview-meta';
+            meta.textContent = `${this.getReplacePreviewRoleLabel(change.role)} #${change.index + 1} / 1件`;
+
+            const snippets = this.createFocusedReplacePreviewSnippet(change.before, change.after);
+
+            const before = document.createElement('div');
+            before.className = 'chat-replace-preview-snippet';
+            before.textContent = `変更前: ${snippets.before}`;
+
+            const after = document.createElement('div');
+            after.className = 'chat-replace-preview-snippet';
+            after.textContent = `変更後: ${snippets.after}`;
+
+            item.append(meta, before, after);
+            elements.chatReplacePreviewList.appendChild(item);
+            return;
+        }
+
+        const previewChanges = plan.changes.slice(0, 8);
         previewChanges.forEach(change => {
             const item = document.createElement('div');
             item.className = 'chat-replace-preview-item';
 
             const meta = document.createElement('div');
             meta.className = 'chat-replace-preview-meta';
-            meta.textContent = `${change.role === 'model' ? 'モデル' : 'ユーザー'} #${change.index + 1} / ${change.count}件`;
+            meta.textContent = `${this.getReplacePreviewRoleLabel(change.role)} #${change.index + 1}: ${change.count}件`;
 
-            const before = document.createElement('div');
-            before.className = 'chat-replace-preview-snippet';
-            before.textContent = `before: ${this.createReplacePreviewSnippet(change.before)}`;
-
-            const after = document.createElement('div');
-            after.className = 'chat-replace-preview-snippet';
-            after.textContent = `after: ${this.createReplacePreviewSnippet(change.after)}`;
-
-            item.append(meta, before, after);
+            item.appendChild(meta);
             elements.chatReplacePreviewList.appendChild(item);
         });
     },
