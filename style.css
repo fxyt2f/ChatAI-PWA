@@ -2182,6 +2182,10 @@ body.header-auto-hide.header-force-show #chat-screen .app-header {
     pointer-events: auto;
 }
 
+body.chat-search-open #floating-action-panel {
+    display: none !important;
+}
+
 /* ヘッダー自動非表示が有効な場合、ボタンの初期位置を上に設定 */
 body.header-auto-hide .floating-action-panel {
     top: calc(16px + var(--safe-top));
@@ -2306,6 +2310,10 @@ body.dark-mode .floating-action-panel .floating-action-button.active {
     box-shadow: none;
 }
 
+#chat-screen .chat-search-dialog.is-replace-preview-open .chat-search-compact-toolbar {
+    min-height: 40px;
+}
+
 #chat-screen .chat-search-toolbar-top {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -2377,6 +2385,10 @@ body.dark-mode .floating-action-panel .floating-action-button.active {
     height: 40px;
     min-height: 40px;
     gap: 6px;
+}
+
+#chat-screen .chat-search-dialog.is-replace-preview-open .chat-search-toolbar-bottom {
+    display: none;
 }
 
 #chat-screen .chat-search-tool-icon,
@@ -2502,6 +2514,7 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
 #chat-screen .chat-replace-preview-panel {
     width: 100%;
     box-sizing: border-box;
+    margin-top: 6px;
     padding: 8px;
     color: var(--text-primary);
     background: var(--bg-primary);
@@ -2512,6 +2525,33 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
 
 #chat-screen .chat-replace-preview-panel[hidden] {
     display: none;
+}
+
+#chat-screen .chat-replace-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+#chat-screen .chat-replace-preview-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+#chat-screen .chat-replace-back-btn {
+    flex: 0 0 auto;
+    height: 28px;
+    padding: 0 10px;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 14px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
 }
 
 #chat-screen .chat-replace-preview-controls {

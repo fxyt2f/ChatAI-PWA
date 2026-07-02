@@ -668,6 +668,7 @@ try {
         chatReplaceTarget: document.getElementById('chat-replace-target'),
         chatReplaceSummary: document.getElementById('chat-replace-summary'),
         chatReplacePreviewList: document.getElementById('chat-replace-preview-list'),
+        chatReplaceBackBtn: document.getElementById('chat-replace-back-btn'),
         chatSearchCloseBtn: document.getElementById('chat-search-close-btn'),
         chatSearchStatus: document.getElementById('chat-search-status'),
         summaryModelNameSelect: document.getElementById('summary-model-name'),
@@ -2302,6 +2303,7 @@ const uiUtils = {
 
     setChatReplacePreviewOpen(isOpen) {
         state.chatReplacePreview.isOpen = Boolean(isOpen);
+        elements.chatSearchDialog?.classList.toggle('is-replace-preview-open', state.chatReplacePreview.isOpen);
         if (elements.chatReplacePreviewPanel) {
             elements.chatReplacePreviewPanel.hidden = !state.chatReplacePreview.isOpen;
         }
@@ -2770,6 +2772,7 @@ const uiUtils = {
     setupChatSearch() {
         elements.chatSearchOpenBtn?.addEventListener('click', () => this.openChatSearch());
         elements.chatSearchReplaceToggleBtn?.addEventListener('click', () => this.toggleChatReplacePreview());
+        elements.chatReplaceBackBtn?.addEventListener('click', () => this.setChatReplacePreviewOpen(false));
         elements.chatReplaceInput?.addEventListener('input', () => this.scheduleChatReplacePreviewUpdate());
         elements.chatReplaceTarget?.addEventListener('change', () => this.scheduleChatReplacePreviewUpdate(0));
         elements.chatSearchCloseBtn?.addEventListener('click', () => this.closeChatSearch());
