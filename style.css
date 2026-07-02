@@ -2584,6 +2584,17 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
     outline: none;
 }
 
+#chat-screen .chat-replace-target:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+#chat-screen .chat-replace-scope {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
 #chat-screen .chat-replace-summary {
     margin-top: 6px;
     font-size: 12px;
@@ -2592,6 +2603,30 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
 
 #chat-screen .chat-replace-summary.is-error {
     color: #b42318;
+}
+
+#chat-screen .chat-replace-actions {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 6px;
+}
+
+#chat-screen .chat-replace-execute-btn {
+    min-height: 32px;
+    padding: 4px 12px;
+    color: #fff;
+    background: var(--bg-button-action);
+    border: 1px solid transparent;
+    border-radius: 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+#chat-screen .chat-replace-execute-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 #chat-screen .chat-replace-preview-list {

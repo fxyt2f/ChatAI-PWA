@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.3";
-const APP_CACHE_VERSION = "v1.29.3";
+const APP_VERSION = "1.29.4";
+const APP_CACHE_VERSION = "v1.29.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +80,17 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.29.4": [
+        "置換プレビューplanを元に、現在表示中メッセージ本文を置換できるようにしました。",
+        "置換実行後にtype: replaceの変更履歴を保存するようにしました。",
+        "cascade候補は現在表示中の候補のみを置換対象にし、非表示候補を書き換えないようにしました。",
+        "置換実行前にbefore一致を検証し、古いプレビューによる誤置換を防止しました。",
+        "置換後に検索結果・置換プレビューを再計算するようにしました。",
+        "ユーザー発言・モデル回答のメッセージ下部メニューから個別メッセージ置換を開始できるようにしました。",
+        "個別置換ではscopeと対象メッセージ情報を履歴へ保存するようにしました。",
+        "個別メッセージ置換モードでは検索対象も選択した1メッセージだけに限定するようにしました。",
+        "アプリバージョンとキャッシュバージョンを1.29.4に更新しました。"
+    ],
     "1.29.3": [
         "置換実行に備えた置換プレビュー機能を追加しました。",
         "検索語・正規表現・大文字小文字区別設定を使って置換候補を抽出できるようにしました。",
@@ -666,9 +677,11 @@ try {
         chatReplacePreviewPanel: document.getElementById('chat-replace-preview-panel'),
         chatReplaceInput: document.getElementById('chat-replace-input'),
         chatReplaceTarget: document.getElementById('chat-replace-target'),
+        chatReplaceScope: document.getElementById('chat-replace-scope'),
         chatReplaceSummary: document.getElementById('chat-replace-summary'),
         chatReplacePreviewList: document.getElementById('chat-replace-preview-list'),
         chatReplaceBackBtn: document.getElementById('chat-replace-back-btn'),
+        chatReplaceExecuteBtn: document.getElementById('chat-replace-execute-btn'),
         chatSearchCloseBtn: document.getElementById('chat-search-close-btn'),
         chatSearchStatus: document.getElementById('chat-search-status'),
         summaryModelNameSelect: document.getElementById('summary-model-name'),
@@ -898,9 +911,15 @@ Reason: [NGの場合の理由]`,
         isOpen: false,
         replacement: '',
         target: 'model',
+        scope: 'chat',
+        targetMessageIndex: null,
+        targetMessageRole: null,
+        targetCascadeIndex: null,
+        targetSiblingGroupId: null,
         plan: null,
         timer: 0,
-        error: ''
+        error: '',
+        isExecuting: false
     },
     sync: {
         isDirty: false, // ローカルに変更があったか
@@ -2140,6 +2159,197 @@ const uiUtils = {
         return count;
     },
 
+    getChatReplaceScopeMeta() {
+        const isMessageScope = state.chatReplacePreview.scope === 'message';
+        return {
+            scope: isMessageScope ? 'message' : 'chat',
+            targetMessageIndex: isMessageScope ? state.chatReplacePreview.targetMessageIndex : null,
+            targetMessageRole: isMessageScope ? state.chatReplacePreview.targetMessageRole : null,
+            targetCascadeIndex: isMessageScope ? state.chatReplacePreview.targetCascadeIndex : null,
+            targetSiblingGroupId: isMessageScope ? state.chatReplacePreview.targetSiblingGroupId : null
+        };
+    },
+
+    setChatReplaceScope(scope = 'chat', options = {}) {
+        const isMessageScope = scope === 'message';
+        state.chatReplacePreview.scope = isMessageScope ? 'message' : 'chat';
+        state.chatReplacePreview.targetMessageIndex = isMessageScope && Number.isInteger(Number(options.messageIndex))
+            ? Number(options.messageIndex)
+            : null;
+        state.chatReplacePreview.targetMessageRole = isMessageScope && CHANGE_HISTORY_ROLES.has(options.role)
+            ? options.role
+            : null;
+        state.chatReplacePreview.targetCascadeIndex = isMessageScope && Number.isInteger(Number(options.cascadeIndex))
+            ? Number(options.cascadeIndex)
+            : null;
+        state.chatReplacePreview.targetSiblingGroupId = isMessageScope && options.siblingGroupId
+            ? String(options.siblingGroupId)
+            : null;
+
+        if (isMessageScope && state.chatReplacePreview.targetMessageRole) {
+            state.chatReplacePreview.target = state.chatReplacePreview.targetMessageRole;
+        }
+        this.applyChatReplaceScopeUi();
+    },
+
+    applyChatReplaceScopeUi() {
+        const isMessageScope = state.chatReplacePreview.scope === 'message';
+        if (elements.chatReplaceTarget) {
+            elements.chatReplaceTarget.disabled = isMessageScope;
+            if (isMessageScope && state.chatReplacePreview.targetMessageRole) {
+                elements.chatReplaceTarget.value = state.chatReplacePreview.targetMessageRole;
+            }
+        }
+        if (elements.chatReplaceScope) {
+            const label = this.getChatReplaceScopeLabel();
+            elements.chatReplaceScope.hidden = !label;
+            elements.chatReplaceScope.textContent = label;
+        }
+    },
+
+    getChatReplaceScopeLabel() {
+        if (state.chatReplacePreview.scope !== 'message') return '';
+        if (state.chatReplacePreview.targetMessageRole === 'user') {
+            return '対象: このユーザーメッセージのみ';
+        }
+        if (state.chatReplacePreview.targetMessageRole === 'model') {
+            return '対象: このモデル回答のみ';
+        }
+        return '対象: このメッセージのみ';
+    },
+
+    getReplaceMessagesForCurrentScope(target) {
+        const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
+        if (state.chatReplacePreview.scope !== 'message') {
+            return visibleMessages;
+        }
+
+        const targetRole = state.chatReplacePreview.targetMessageRole;
+        if (!CHANGE_HISTORY_ROLES.has(targetRole)) return [];
+
+        let targetMessage = visibleMessages.find(message => (
+            message.index === state.chatReplacePreview.targetMessageIndex &&
+            message.role === targetRole
+        ));
+
+        if (!targetMessage && state.chatReplacePreview.targetSiblingGroupId) {
+            targetMessage = visibleMessages.find(message => (
+                message.role === targetRole &&
+                message.siblingGroupId === state.chatReplacePreview.targetSiblingGroupId
+            ));
+        }
+
+        if (!targetMessage || !this.doesReplaceTargetIncludeRole(target, targetMessage.role)) return [];
+
+        state.chatReplacePreview.targetMessageIndex = targetMessage.index;
+        state.chatReplacePreview.targetMessageRole = targetMessage.role;
+        state.chatReplacePreview.targetCascadeIndex = targetMessage.cascadeIndex;
+        state.chatReplacePreview.targetSiblingGroupId = targetMessage.siblingGroupId || null;
+        this.applyChatReplaceScopeUi();
+
+        return [targetMessage];
+    },
+
+    getChatSearchMessageScopeTarget() {
+        if (!state.chatReplacePreview.isOpen || state.chatReplacePreview.scope !== 'message') {
+            return null;
+        }
+
+        const targetRole = state.chatReplacePreview.targetMessageRole;
+        if (!CHANGE_HISTORY_ROLES.has(targetRole)) return null;
+
+        const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
+        let targetMessage = visibleMessages.find(message => (
+            message.index === state.chatReplacePreview.targetMessageIndex &&
+            message.role === targetRole
+        ));
+
+        if (!targetMessage && state.chatReplacePreview.targetSiblingGroupId) {
+            targetMessage = visibleMessages.find(message => (
+                message.role === targetRole &&
+                message.siblingGroupId === state.chatReplacePreview.targetSiblingGroupId
+            ));
+        }
+
+        if (!targetMessage) return null;
+
+        state.chatReplacePreview.targetMessageIndex = targetMessage.index;
+        state.chatReplacePreview.targetMessageRole = targetMessage.role;
+        state.chatReplacePreview.targetCascadeIndex = targetMessage.cascadeIndex;
+        state.chatReplacePreview.targetSiblingGroupId = targetMessage.siblingGroupId || null;
+        this.applyChatReplaceScopeUi();
+
+        return targetMessage;
+    },
+
+    getChatSearchTargetRoots() {
+        const scopedTarget = this.getChatSearchMessageScopeTarget();
+        if (state.chatReplacePreview.isOpen && state.chatReplacePreview.scope === 'message') {
+            if (!scopedTarget) return [];
+            const messageElement = elements.messageContainer?.querySelector?.(`.message.${scopedTarget.role}[data-index="${scopedTarget.index}"]`);
+            const contentElement = messageElement?.querySelector?.(':scope > .message-content');
+            return contentElement ? [contentElement] : [];
+        }
+
+        return Array.from(elements.messageContainer?.querySelectorAll?.('#chat-screen .message.user .message-content, #chat-screen .message.model .message-content') || []);
+    },
+
+    getCurrentVisibleReplaceMessageForChange(change) {
+        const changeIndex = Number(change?.index);
+        return getCurrentVisibleMessagesForReplacePreview()
+            .find(message => message.index === changeIndex);
+    },
+
+    validateReplacePlanAgainstCurrentMessages(plan) {
+        if (!plan || plan.error) {
+            return { valid: false, reason: plan?.error || '置換対象がありません' };
+        }
+        if (!this.hasChatSearchQuery(plan.query)) {
+            return { valid: false, reason: '置換対象がありません' };
+        }
+        if (!Array.isArray(plan.changes) || plan.changes.length === 0 || plan.occurrenceCount <= 0) {
+            return { valid: false, reason: '置換対象がありません' };
+        }
+        if (plan.scope === 'message') {
+            if (!Number.isInteger(Number(plan.targetMessageIndex)) || !CHANGE_HISTORY_ROLES.has(plan.targetMessageRole)) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+            if (plan.changes.some(change => (
+                change.index !== plan.targetMessageIndex ||
+                change.role !== plan.targetMessageRole
+            ))) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+        }
+
+        for (const change of plan.changes) {
+            const index = Number(change.index);
+            const currentMessage = state.currentMessages[index];
+            const visibleMessage = this.getCurrentVisibleReplaceMessageForChange(change);
+            if (!currentMessage || !visibleMessage) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+            if (currentMessage.role !== change.role || visibleMessage.role !== change.role) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+            if (change.siblingGroupId && currentMessage.siblingGroupId !== change.siblingGroupId) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+            if (
+                change.cascadeIndex !== null &&
+                change.cascadeIndex !== undefined &&
+                visibleMessage.cascadeIndex !== change.cascadeIndex
+            ) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+            if (String(currentMessage.content ?? '') !== String(change.before ?? '')) {
+                return { valid: false, reason: 'プレビューが古くなりました' };
+            }
+        }
+
+        return { valid: true, reason: '' };
+    },
+
     buildChatReplacePreviewPlan(options = {}) {
         const query = this.normalizeChatSearchQuery(options.query ?? elements.chatSearchQuery?.value);
         const replacement = String(options.replacement ?? state.chatReplacePreview.replacement ?? '');
@@ -2152,6 +2362,7 @@ const uiUtils = {
             target,
             useRegex,
             caseSensitive,
+            ...this.getChatReplaceScopeMeta(),
             messageCount: 0,
             occurrenceCount: 0,
             changes: []
@@ -2172,7 +2383,7 @@ const uiUtils = {
         }
 
         try {
-            const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
+            const visibleMessages = this.getReplaceMessagesForCurrentScope(target);
             const changes = [];
             let occurrenceCount = 0;
 
@@ -2200,6 +2411,7 @@ const uiUtils = {
 
             return {
                 ...emptyPlan,
+                ...this.getChatReplaceScopeMeta(),
                 messageCount: changes.length,
                 occurrenceCount,
                 changes
@@ -2227,10 +2439,12 @@ const uiUtils = {
     renderChatReplacePreview(plan = state.chatReplacePreview.plan) {
         if (!elements.chatReplaceSummary || !elements.chatReplacePreviewList) return;
         elements.chatReplacePreviewList.textContent = '';
+        this.applyChatReplaceScopeUi();
 
         if (!plan || plan.error) {
             elements.chatReplaceSummary.textContent = plan?.error || '0件';
             elements.chatReplaceSummary.classList.toggle('is-error', Boolean(plan?.error));
+            this.updateChatReplaceExecuteButtonState(plan);
             return;
         }
 
@@ -2238,6 +2452,7 @@ const uiUtils = {
         elements.chatReplaceSummary.textContent = plan.occurrenceCount > 0
             ? `${plan.occurrenceCount}件をプレビュー / ${plan.messageCount}メッセージ`
             : '0件';
+        this.updateChatReplaceExecuteButtonState(plan);
 
         const previewChanges = plan.changes.slice(0, 5);
         previewChanges.forEach(change => {
@@ -2259,6 +2474,135 @@ const uiUtils = {
             item.append(meta, before, after);
             elements.chatReplacePreviewList.appendChild(item);
         });
+    },
+
+    updateChatReplaceExecuteButtonState(plan = state.chatReplacePreview.plan) {
+        if (!elements.chatReplaceExecuteBtn) return;
+        const disabled = Boolean(
+            state.chatReplacePreview.isExecuting ||
+            appLogic?.isGenerationBlockingActive?.() ||
+            state.editingMessageIndex !== null ||
+            state.isEditingSystemPrompt ||
+            !hasChangeHistoryChatId(state.currentChatId) ||
+            !plan ||
+            plan.error ||
+            !Array.isArray(plan.changes) ||
+            plan.changes.length === 0 ||
+            !plan.occurrenceCount
+        );
+        elements.chatReplaceExecuteBtn.disabled = disabled;
+        elements.chatReplaceExecuteBtn.textContent = state.chatReplacePreview.isExecuting
+            ? '置換中...'
+            : 'プレビュー分を置換';
+    },
+
+    async executeChatReplacePreviewPlan() {
+        if (state.chatReplacePreview.isExecuting) return;
+
+        if (appLogic?.isGenerationBlockingActive?.()) {
+            this.setChatSearchStatus('生成中は置換できません', true);
+            return;
+        }
+        if (state.editingMessageIndex !== null || state.isEditingSystemPrompt) {
+            this.setChatSearchStatus('編集中は置換できません', true);
+            return;
+        }
+        if (!hasChangeHistoryChatId(state.currentChatId)) {
+            this.setChatSearchStatus('保存済みチャットでのみ置換できます', true);
+            return;
+        }
+
+        state.chatReplacePreview.isExecuting = true;
+        this.updateChatReplaceExecuteButtonState();
+
+        const chatId = state.currentChatId;
+        const latestPlan = this.buildChatReplacePreviewPlan();
+        state.chatReplacePreview.plan = latestPlan;
+        state.chatReplacePreview.error = latestPlan.error || '';
+        this.renderChatReplacePreview(latestPlan);
+
+        const validation = this.validateReplacePlanAgainstCurrentMessages(latestPlan);
+        if (!validation.valid) {
+            state.chatReplacePreview.isExecuting = false;
+            this.updateChatReplacePreview();
+            this.setChatSearchStatus(validation.reason || '置換対象がありません', true);
+            return;
+        }
+
+        const historyChanges = latestPlan.changes.map(change => ({ ...change }));
+        const originalMessages = historyChanges.map(change => {
+            const message = state.currentMessages[change.index];
+            return {
+                index: change.index,
+                content: message.content,
+                timestamp: message.timestamp
+            };
+        });
+        const firstUserIndex = state.currentMessages.findIndex(message => message.role === 'user');
+        const titleChange = historyChanges.find(change => change.index === firstUserIndex && change.role === 'user');
+        const newTitleForSave = titleChange
+            ? String(titleChange.after || '').substring(0, 50) || '無題のチャット'
+            : null;
+
+        try {
+            historyChanges.forEach(change => {
+                const message = state.currentMessages[change.index];
+                message.content = String(change.after ?? '');
+                message.timestamp = Date.now();
+            });
+
+            await dbUtils.saveChat(newTitleForSave);
+            if (newTitleForSave) {
+                uiUtils.updateChatTitle(newTitleForSave);
+            }
+
+            const historyResult = await appendChangeHistory(chatId, {
+                id: createChangeHistoryId(),
+                chatId,
+                type: 'replace',
+                status: 'applied',
+                timestamp: Date.now(),
+                query: latestPlan.query,
+                replacement: latestPlan.replacement,
+                formatLabel: '',
+                target: latestPlan.target,
+                scope: latestPlan.scope,
+                targetMessageIndex: latestPlan.targetMessageIndex,
+                targetMessageRole: latestPlan.targetMessageRole,
+                targetCascadeIndex: latestPlan.targetCascadeIndex,
+                targetSiblingGroupId: latestPlan.targetSiblingGroupId,
+                useRegex: latestPlan.useRegex,
+                caseSensitive: latestPlan.caseSensitive,
+                messageCount: latestPlan.messageCount,
+                occurrenceCount: latestPlan.occurrenceCount,
+                changes: historyChanges
+            });
+
+            uiUtils.renderChatMessages();
+            this.setChatSearchStatus(
+                historyResult.saved
+                    ? `${latestPlan.occurrenceCount}件を置換しました`
+                    : `${latestPlan.occurrenceCount}件を置換しました（履歴保存に失敗）`,
+                !historyResult.saved
+            );
+            requestAnimationFrame(() => {
+                this.runChatSearch({ scrollToFirst: false });
+                this.updateChatReplacePreview();
+            });
+        } catch (error) {
+            originalMessages.forEach(original => {
+                const message = state.currentMessages[original.index];
+                if (!message) return;
+                message.content = original.content;
+                message.timestamp = original.timestamp;
+            });
+            uiUtils.renderChatMessages();
+            console.warn('[ChatReplace] 置換実行に失敗しました:', error);
+            this.setChatSearchStatus('置換の保存に失敗しました', true);
+        } finally {
+            state.chatReplacePreview.isExecuting = false;
+            this.updateChatReplaceExecuteButtonState();
+        }
     },
 
     updateChatReplacePreview() {
@@ -2292,6 +2636,12 @@ const uiUtils = {
             state.chatReplacePreview.target = 'model';
             if (elements.chatReplaceTarget) elements.chatReplaceTarget.value = 'model';
         }
+        state.chatReplacePreview.scope = 'chat';
+        state.chatReplacePreview.targetMessageIndex = null;
+        state.chatReplacePreview.targetMessageRole = null;
+        state.chatReplacePreview.targetCascadeIndex = null;
+        state.chatReplacePreview.targetSiblingGroupId = null;
+        this.applyChatReplaceScopeUi();
         if (elements.chatReplaceSummary) {
             elements.chatReplaceSummary.textContent = '0件';
             elements.chatReplaceSummary.classList.remove('is-error');
@@ -2299,6 +2649,7 @@ const uiUtils = {
         if (elements.chatReplacePreviewList) {
             elements.chatReplacePreviewList.textContent = '';
         }
+        this.updateChatReplaceExecuteButtonState(null);
     },
 
     setChatReplacePreviewOpen(isOpen) {
@@ -2312,15 +2663,64 @@ const uiUtils = {
             elements.chatSearchReplaceToggleBtn.setAttribute('aria-expanded', state.chatReplacePreview.isOpen ? 'true' : 'false');
         }
         if (state.chatReplacePreview.isOpen) {
+            this.applyChatReplaceScopeUi();
             this.updateChatReplacePreview();
             elements.chatReplaceInput?.focus?.();
             return;
         }
+        const shouldRestoreChatSearch = state.chatReplacePreview.scope === 'message' && this.isChatSearchOpen();
         this.clearChatReplacePreviewState({ clearInput: false, resetTarget: false });
+        if (shouldRestoreChatSearch) {
+            this.resetChatSearchResults({ clearStatus: false });
+            if (this.hasChatSearchQuery(elements.chatSearchQuery?.value)) {
+                this.runChatSearch({ scrollToFirst: false });
+            }
+        }
     },
 
     toggleChatReplacePreview() {
+        if (!state.chatReplacePreview.isOpen) {
+            this.setChatReplaceScope('chat');
+        }
         this.setChatReplacePreviewOpen(!state.chatReplacePreview.isOpen);
+    },
+
+    async openReplacePreviewForMessage(messageIndex, role, options = {}) {
+        if (appLogic?.isGenerationBlockingActive?.()) {
+            await appLogic.guardGenerationMutableAction();
+            return;
+        }
+        if (state.editingMessageIndex !== null || state.isEditingSystemPrompt) {
+            await this.showCustomAlert('編集中は置換できません。');
+            return;
+        }
+
+        const index = Number(messageIndex);
+        const targetMessage = getCurrentVisibleMessagesForReplacePreview()
+            .find(message => message.index === index && message.role === role);
+        if (!targetMessage) {
+            this.setChatSearchStatus('対象メッセージが見つかりません', true);
+            return;
+        }
+
+        if (!this.isChatSearchOpen()) {
+            this.openChatSearch();
+        }
+        this.setChatReplaceScope('message', {
+            messageIndex: targetMessage.index,
+            role: targetMessage.role,
+            cascadeIndex: targetMessage.cascadeIndex,
+            siblingGroupId: targetMessage.siblingGroupId,
+            ...options
+        });
+        this.setChatReplacePreviewOpen(true);
+        this.resetChatSearchResults({ clearStatus: false });
+        if (this.hasChatSearchQuery(elements.chatSearchQuery?.value)) {
+            this.runChatSearch({ scrollToFirst: true });
+        }
+        this.updateChatReplacePreview();
+        elements.chatSearchQuery?.focus?.();
+        elements.chatSearchQuery?.select?.();
     },
 
     normalizeChatSearchQuery(value) {
@@ -2527,6 +2927,14 @@ const uiUtils = {
     },
 
     temporarilyExpandCollapsedMessagesForSearch() {
+        if (state.chatReplacePreview.isOpen && state.chatReplacePreview.scope === 'message') {
+            this.getChatSearchTargetRoots()
+                .map(root => root.closest?.('.message'))
+                .filter(Boolean)
+                .forEach(messageElement => this.temporarilyExpandCollapsedMessageForSearch(messageElement));
+            return;
+        }
+
         elements.messageContainer
             ?.querySelectorAll?.('#chat-screen .message.tm-collapsible.tm-collapsed')
             ?.forEach(messageElement => this.temporarilyExpandCollapsedMessageForSearch(messageElement));
@@ -2627,7 +3035,7 @@ const uiUtils = {
     runChatSearchAfterLayoutReady({ query, pattern, scrollToFirst = false, runId }) {
         if (!this.isChatSearchOpen() || runId !== state.chatSearch.searchRunId) return;
         const matches = [];
-        const contentRoots = elements.messageContainer?.querySelectorAll?.('#chat-screen .message.user .message-content, #chat-screen .message.model .message-content') || [];
+        const contentRoots = this.getChatSearchTargetRoots();
         contentRoots.forEach(root => {
             if (root.classList.contains('hidden')) return;
             const { text, segments } = this.collectChatSearchTextSegments(root);
@@ -2773,6 +3181,7 @@ const uiUtils = {
         elements.chatSearchOpenBtn?.addEventListener('click', () => this.openChatSearch());
         elements.chatSearchReplaceToggleBtn?.addEventListener('click', () => this.toggleChatReplacePreview());
         elements.chatReplaceBackBtn?.addEventListener('click', () => this.setChatReplacePreviewOpen(false));
+        elements.chatReplaceExecuteBtn?.addEventListener('click', () => this.executeChatReplacePreviewPlan());
         elements.chatReplaceInput?.addEventListener('input', () => this.scheduleChatReplacePreviewUpdate());
         elements.chatReplaceTarget?.addEventListener('change', () => this.scheduleChatReplacePreviewUpdate(0));
         elements.chatSearchCloseBtn?.addEventListener('click', () => this.closeChatSearch());
@@ -3452,6 +3861,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
 
         if (!isSummarized) {
+            if (!isStreamingPlaceholder && CHANGE_HISTORY_ROLES.has(role)) {
+                const replaceButton = document.createElement('button');
+                replaceButton.innerHTML = '<span class="material-symbols-outlined">find_replace</span>';
+                replaceButton.title = 'このメッセージを置換';
+                replaceButton.setAttribute('aria-label', 'このメッセージを置換');
+                replaceButton.classList.add('tm-replace-message-btn');
+                replaceButton.disabled = Boolean(appLogic?.isGenerationBlockingActive?.() || state.editingMessageIndex !== null);
+                replaceButton.onclick = () => uiUtils.openReplacePreviewForMessage(index, role);
+                actionsDiv.appendChild(replaceButton);
+            }
             const editButton = document.createElement('button');
             editButton.innerHTML = '<span class="material-symbols-outlined">edit</span> 編集'; 
             editButton.title = 'メッセージを編集'; 
@@ -6981,6 +7400,7 @@ const CHANGE_HISTORY_TYPES = new Set(['edit', 'replace', 'format']);
 const CHANGE_HISTORY_STATUSES = new Set(['applied', 'undone', 'discarded']);
 const CHANGE_HISTORY_ROLES = new Set(['user', 'model']);
 const CHANGE_HISTORY_TARGETS = new Set(['model', 'user', 'both']);
+const CHANGE_HISTORY_SCOPES = new Set(['chat', 'message']);
 
 function hasChangeHistoryChatId(chatId) {
     return chatId !== null && chatId !== undefined && String(chatId) !== '';
@@ -7032,13 +7452,21 @@ function normalizeChangeHistoryEntry(entry, chatId) {
             const role = String(change.role || '');
             if (!Number.isInteger(index) || index < 0) return null;
             if (!CHANGE_HISTORY_ROLES.has(role)) return null;
-            return {
+            const normalizedChange = {
                 index,
                 role,
                 before: String(change.before ?? ''),
                 after: String(change.after ?? ''),
                 count: normalizeChangeHistoryNonNegativeNumber(change.count, 0)
             };
+            const cascadeIndex = Number(change.cascadeIndex);
+            if (Number.isInteger(cascadeIndex) && cascadeIndex >= 0) {
+                normalizedChange.cascadeIndex = cascadeIndex;
+            }
+            if (change.siblingGroupId) {
+                normalizedChange.siblingGroupId = String(change.siblingGroupId);
+            }
+            return normalizedChange;
         }).filter(Boolean)
         : [];
 
@@ -7065,6 +7493,11 @@ function normalizeChangeHistoryEntry(entry, chatId) {
         replacement: String(entry.replacement ?? ''),
         formatLabel: String(entry.formatLabel ?? ''),
         target: normalizeChangeHistoryTarget(entry.target, changes),
+        scope: CHANGE_HISTORY_SCOPES.has(entry.scope) ? entry.scope : 'chat',
+        targetMessageIndex: Number.isInteger(Number(entry.targetMessageIndex)) ? Number(entry.targetMessageIndex) : null,
+        targetMessageRole: CHANGE_HISTORY_ROLES.has(entry.targetMessageRole) ? entry.targetMessageRole : null,
+        targetCascadeIndex: Number.isInteger(Number(entry.targetCascadeIndex)) ? Number(entry.targetCascadeIndex) : null,
+        targetSiblingGroupId: entry.targetSiblingGroupId ? String(entry.targetSiblingGroupId) : null,
         useRegex: entry.useRegex === true,
         caseSensitive: entry.caseSensitive === true,
         messageCount,
@@ -13127,6 +13560,12 @@ const appLogic = {
             // UIを再描画し、その後で操作UIを強制的に再表示する
             uiUtils.renderChatMessages();
             uiUtils.scheduleChatReplacePreviewUpdate(0);
+            if (state.chatReplacePreview.isOpen && state.chatReplacePreview.scope === 'message') {
+                uiUtils.resetChatSearchResults({ clearStatus: false });
+                if (uiUtils.hasChatSearchQuery(elements.chatSearchQuery?.value)) {
+                    uiUtils.runChatSearch({ scrollToFirst: false });
+                }
+            }
             
             // requestAnimationFrameを使用して、DOMの更新が完了した後に実行
             requestAnimationFrame(() => {
