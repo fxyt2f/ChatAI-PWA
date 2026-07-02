@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.5";
-const APP_CACHE_VERSION = "v1.29.5";
+const APP_VERSION = "1.29.6";
+const APP_CACHE_VERSION = "v1.29.6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +80,14 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.29.6": [
+        "検索・置換・変更履歴・Undo/Redoまわりの総合安定化を実施しました。",
+        "1文字検索/置換、個別メッセージ置換、cascade表示候補限定、メッセージ単位Undo/Redoの相互干渉を確認・調整しました。",
+        "Undo/Redo後に不要なメッセージpop-inが発火しないよう、再描画時のアニメーション抑制を安定化しました。",
+        "検索/置換UIのスマホ表示、フローティングボタン非表示、置換メニュー切替の表示を確認しました。",
+        "変更履歴の正規化、change単位status、Redo無効化、before/after一致検証の安定性を確認・補強しました。",
+        "アプリバージョンとキャッシュバージョンを1.29.6に更新しました。"
+    ],
     "1.29.5": [
         "変更履歴を使ったUndo/Redo実行に対応しました。",
         "手動編集履歴と置換履歴を元に、直近の変更を元に戻す/やり直す操作を追加しました。",
@@ -3394,6 +3402,9 @@ const uiUtils = {
     appendMessage(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
         const messageElement = this.createMessageElement(role, content, index, isStreamingPlaceholder, cascadeInfo, attachments);
         if (messageElement) {
+            if (role === 'user' || role === 'model') {
+                messageElement.classList.add('should-pop-in');
+            }
             elements.messageContainer.appendChild(messageElement);
             if (window.Prism) {
                 // 追加した要素内のコードブロックのみをハイライトする
@@ -3408,7 +3419,9 @@ const uiUtils = {
 
 renderChatMessages(options = {}) {
     const renderStartTime = performance.now();
-    const suppressMessageAnimation = Boolean(options?.suppressMessageAnimation);
+    const renderOptions = typeof options === 'function' ? { afterRender: options } : (options || {});
+    const suppressMessageAnimation = Boolean(renderOptions.suppressMessageAnimation);
+    const afterRender = typeof renderOptions.afterRender === 'function' ? renderOptions.afterRender : null;
 
     if (suppressMessageAnimation) {
         document.body?.classList.add('suppress-message-animations');
@@ -3506,6 +3519,13 @@ renderChatMessages(options = {}) {
         this.applyMessageCollapseToAll(container);
         this.updateGenerationStatusIndicator();
         this.scheduleChatSearch(false);
+        if (afterRender) {
+            try {
+                afterRender();
+            } catch (error) {
+                console.warn('[ChatAI PWA] renderChatMessages afterRender callback failed:', error);
+            }
+        }
         if (suppressMessageAnimation) {
             requestAnimationFrame(() => {
                 document.body?.classList.remove('suppress-message-animations');
