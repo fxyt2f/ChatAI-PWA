@@ -85,8 +85,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.30.1";
-const APP_CACHE_VERSION = "v1.30.1";
+const APP_VERSION = "1.30.2";
+const APP_CACHE_VERSION = "v1.30.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -104,6 +104,13 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.30.2": [
+        "ユーザーメッセージの大きな固定最小幅を廃止し、内容に応じて自然に横幅が変わるよう調整しました。",
+        "ユーザーメッセージ下の操作ボタン領域を、メッセージ本体の幅と連動しないよう分離しました。",
+        "ユーザー下のコピーアイコンが途中で切れる問題を修正しました。",
+        "検索/置換/Undo/Redoのロジックは変更していません。",
+        "アプリバージョンとキャッシュバージョンを1.30.2に更新しました。"
+    ],
     "1.30.1": [
         "「その他設定」をプロファイルに依存しないグローバル設定へ変更しました。",
         "ワイドモード設定を「その他設定」へ移動し、「Enterキーで送信する」の下に配置しました。",
@@ -4015,6 +4022,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     if (role !== 'error') {
         const actionsDiv = document.createElement('div');
         actionsDiv.classList.add('message-actions');
+        const actionMetaDiv = document.createElement('div');
+        actionMetaDiv.classList.add('message-action-meta');
+        const actionButtonsDiv = document.createElement('div');
+        actionButtonsDiv.classList.add('message-action-buttons');
 
         if (!isStreamingPlaceholder) {
             const copyButton = document.createElement('button');
@@ -4023,7 +4034,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             copyButton.setAttribute('aria-label', '本文をコピー');
             copyButton.classList.add('tm-copy-message-btn');
             copyButton.onclick = () => appLogic.copyMessageText(messageDiv, copyButton);
-            actionsDiv.appendChild(copyButton);
+            actionButtonsDiv.appendChild(copyButton);
 
             const undoButton = document.createElement('button');
             undoButton.innerHTML = '<span class="material-symbols-outlined">undo</span>';
@@ -4032,7 +4043,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             undoButton.classList.add('tm-message-undo-btn');
             undoButton.disabled = true;
             undoButton.onclick = () => appLogic.undoLatestChangeForMessage(index, role);
-            actionsDiv.appendChild(undoButton);
+            actionButtonsDiv.appendChild(undoButton);
 
             const redoButton = document.createElement('button');
             redoButton.innerHTML = '<span class="material-symbols-outlined">redo</span>';
@@ -4041,7 +4052,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             redoButton.classList.add('tm-message-redo-btn');
             redoButton.disabled = true;
             redoButton.onclick = () => appLogic.redoLatestChangeForMessage(index, role);
-            actionsDiv.appendChild(redoButton);
+            actionButtonsDiv.appendChild(redoButton);
 
             const collapseButton = document.createElement('button');
             collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
@@ -4049,7 +4060,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             collapseButton.setAttribute('aria-label', '全文を表示');
             collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
             collapseButton.onclick = () => this.toggleMessageCollapse(messageDiv);
-            actionsDiv.appendChild(collapseButton);
+            actionButtonsDiv.appendChild(collapseButton);
         }
 
         if (!isSummarized) {
@@ -4061,27 +4072,27 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 replaceButton.classList.add('tm-replace-message-btn');
                 replaceButton.disabled = Boolean(appLogic?.isGenerationBlockingActive?.() || state.editingMessageIndex !== null);
                 replaceButton.onclick = () => uiUtils.openReplacePreviewForMessage(index, role);
-                actionsDiv.appendChild(replaceButton);
+                actionButtonsDiv.appendChild(replaceButton);
             }
             const editButton = document.createElement('button');
             editButton.innerHTML = '<span class="material-symbols-outlined">edit</span> 編集'; 
             editButton.title = 'メッセージを編集'; 
             editButton.classList.add('js-edit-btn');
             editButton.onclick = () => appLogic.startEditMessage(index, messageDiv);
-            actionsDiv.appendChild(editButton);
+            actionButtonsDiv.appendChild(editButton);
             const deleteButton = document.createElement('button');
             deleteButton.innerHTML = '<span class="material-symbols-outlined">delete</span> 削除'; 
             deleteButton.title = 'この会話ターンを削除'; 
             deleteButton.classList.add('js-delete-btn');
             deleteButton.onclick = () => appLogic.deleteMessage(index);
-            actionsDiv.appendChild(deleteButton);
+            actionButtonsDiv.appendChild(deleteButton);
             if (role === 'user') {
                 const retryButton = document.createElement('button');
                 retryButton.innerHTML = '<span class="material-symbols-outlined">replay</span> 再生成'; 
                 retryButton.title = 'このメッセージから再生成'; 
                 retryButton.classList.add('js-retry-btn');
                 retryButton.onclick = () => appLogic.retryFromMessage(index);
-                actionsDiv.appendChild(retryButton);
+                actionButtonsDiv.appendChild(retryButton);
             }
         }
 
@@ -4100,17 +4111,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             const formattedTotal = finalTotalTokenCount.toLocaleString('en-US');
             tokenSpan.textContent = `${formattedCandidates} / ${formattedTotal}`;
             tokenSpan.title = `Candidate Tokens / Total Tokens`;
-            actionsDiv.appendChild(tokenSpan);
+            actionMetaDiv.appendChild(tokenSpan);
         }
         if (role === 'model' && typeof messageData?.retryCount === 'number' && messageData.retryCount > 0) {
             const retrySpan = document.createElement('span');
             retrySpan.classList.add('token-count-display');
             retrySpan.textContent = `(リトライ: ${messageData.retryCount}回)`;
             retrySpan.title = `APIリクエストを${messageData.retryCount}回再試行した結果です`;
-            if (actionsDiv.querySelector('.token-count-display')) {
+            if (actionMetaDiv.querySelector('.token-count-display')) {
                 retrySpan.style.marginLeft = '8px';
             }
-            actionsDiv.appendChild(retrySpan);
+            actionMetaDiv.appendChild(retrySpan);
         }
 
         if (role === 'model' && !isStreamingPlaceholder) {
@@ -4125,10 +4136,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     executionMetaSpan.title = executionTitle;
                     executionMetaSpan.setAttribute('aria-label', executionTitle);
                 }
-                actionsDiv.appendChild(executionMetaSpan);
+                actionMetaDiv.appendChild(executionMetaSpan);
             }
         }
         
+        if (actionMetaDiv.hasChildNodes()) {
+            actionsDiv.appendChild(actionMetaDiv);
+        }
+        if (actionButtonsDiv.hasChildNodes()) {
+            actionsDiv.appendChild(actionButtonsDiv);
+        }
         if (actionsDiv.hasChildNodes()) {
             messageDiv.appendChild(actionsDiv);
         }
