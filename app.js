@@ -36,7 +36,7 @@ const DEFAULT_LOCAL_UI_SETTINGS = {
 };
 const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
-const CHAT_TITLE_LENGTH = 15;
+const CHAT_TITLE_MAX_LENGTH = 100;
 const TEXTAREA_MAX_HEIGHT = 120;
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 52;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 520;
@@ -85,8 +85,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.30.2";
-const APP_CACHE_VERSION = "v1.30.2";
+const APP_VERSION = "1.30.3";
+const APP_CACHE_VERSION = "v1.30.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -104,6 +104,14 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.30.3": [
+        "ヘッダーのチャットタイトルを従来より長く表示できるよう調整しました。",
+        "固定文字数でのタイトル短縮をやめ、表示上の省略はCSSのellipsisで処理するよう変更しました。",
+        "ヘッダーのチャットタイトルをクリック/タップして直接編集できる機能を追加しました。",
+        "Enter保存、Escapeキャンセル、blur保存に対応しました。",
+        "未保存チャットではタイトル編集を行わないよう制御しました。",
+        "検索/置換/Undo/Redoのロジックは変更していません。"
+    ],
     "1.30.2": [
         "ユーザーメッセージの大きな固定最小幅を廃止し、内容に応じて自然に横幅が変わるよう調整しました。",
         "ユーザーメッセージ下の操作ボタン領域を、メッセージ本体の幅と連動しないよう分離しました。",
@@ -827,6 +835,9 @@ const state = {
     currentSystemPrompt: '',
     currentPersistentMemory: {}, // 現在のチャットの永続メモリ
     currentSummarizedContext: null,
+    isEditingChatTitle: false,
+    isSavingChatTitle: false,
+    chatTitleBeforeEdit: '',
     profiles: [], // 全プロファイルのリスト
     activeProfileId: null, // 現在アクティブなプロファイルのID
     activeProfile: null, // 現在アクティブなプロファイルの完全なデータ
@@ -4166,43 +4177,157 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.loadingIndicator.classList.add('hidden'); // ローディング非表示
         this.setSendingState(false); // 送信状態解除
     },
+    normalizeChatTitleText(value, fallback = '') {
+        const normalized = String(value ?? '')
+            .replace(/[\r\n\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, CHAT_TITLE_MAX_LENGTH);
+        if (normalized) return normalized;
+        return String(fallback ?? '')
+            .replace(/[\r\n\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, CHAT_TITLE_MAX_LENGTH);
+    },
+
+    getChatTitleFallback() {
+        if (!state.currentChatId) return '新規チャット';
+        const firstUserMessage = state.currentMessages.find(m => m.role === 'user' && !m.isHidden);
+        if (firstUserMessage) {
+            return this.normalizeChatTitleText(firstUserMessage.content, 'チャット履歴') || 'チャット履歴';
+        }
+        if (state.currentMessages.length > 0) return 'チャット履歴';
+        return '新規チャット';
+    },
+
     // チャットタイトルを更新
     updateChatTitle(definitiveTitle = null) {
-        let titleText = '新規チャット';
-        let baseTitle = '';
-        let isNewChat = !state.currentChatId;
+        let titleText = this.getChatTitleFallback();
 
-        if (state.currentChatId) {
-            isNewChat = false;
-            if (definitiveTitle !== null) {
-                baseTitle = definitiveTitle;
-            } else {
-                const firstUserMessage = state.currentMessages.find(m => m.role === 'user' && !m.isHidden);
-                if (firstUserMessage) {
-                    baseTitle = firstUserMessage.content;
-                } else if (state.currentMessages.length > 0) {
-                    baseTitle = "チャット履歴";
-                }
-            }
-            if(baseTitle) {
-                const displayBase = baseTitle.startsWith(IMPORT_PREFIX) ? baseTitle.substring(IMPORT_PREFIX.length) : baseTitle;
-                const truncated = displayBase.substring(0, CHAT_TITLE_LENGTH);
-                titleText = truncated + (displayBase.length > CHAT_TITLE_LENGTH ? '...' : '');
-                if (baseTitle.startsWith(IMPORT_PREFIX)) {
-                    titleText = IMPORT_PREFIX + titleText;
-                }
-            } else if(state.currentMessages.length > 0) {
-                titleText = 'チャット履歴';
-            }
-            if (titleText === '新規チャット' && state.currentMessages.length > 0) {
-                titleText = 'チャット履歴';
-            }
+        if (state.currentChatId && definitiveTitle !== null) {
+            titleText = this.normalizeChatTitleText(definitiveTitle, this.getChatTitleFallback()) || 'チャット履歴';
+        } else if (state.currentChatId) {
+            titleText = this.normalizeChatTitleText(titleText, 'チャット履歴') || 'チャット履歴';
         }
-        
-        // コロンを削除
-        const displayTitle = titleText;
-        elements.chatTitle.textContent = displayTitle;
-        document.title = `Gemini PWA Mk-II - ${titleText}`;
+
+        elements.chatTitle.textContent = titleText;
+        elements.chatTitle.title = titleText;
+        elements.chatTitle.setAttribute('aria-label', state.currentChatId ? 'チャットタイトル。タップして編集' : '新規チャット。最初のメッセージ送信後にタイトルを編集できます。');
+        elements.chatTitle.classList.toggle('is-editable', Boolean(state.currentChatId));
+        elements.chatTitle.classList.toggle('is-readonly', !state.currentChatId);
+        document.title = `ChatAI PWA - ${titleText}`;
+    },
+
+    setupChatTitleEditing() {
+        if (this._chatTitleEditingBound || !elements.chatTitle) return;
+        this._chatTitleEditingBound = true;
+        elements.chatTitle.setAttribute('role', 'button');
+        elements.chatTitle.setAttribute('tabindex', '0');
+        elements.chatTitle.addEventListener('click', () => this.startChatTitleEdit());
+        elements.chatTitle.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                this.startChatTitleEdit();
+            }
+        });
+    },
+
+    async startChatTitleEdit() {
+        if (!elements.chatTitle || state.isEditingChatTitle) return;
+        if (!state.currentChatId) {
+            await this.showCustomAlert('最初のメッセージ送信後にタイトルを編集できます。');
+            return;
+        }
+
+        try {
+            state.isEditingChatTitle = true;
+            const currentTitle = this.normalizeChatTitleText(elements.chatTitle.textContent, this.getChatTitleFallback());
+            state.chatTitleBeforeEdit = currentTitle;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'chat-title-input';
+            input.value = currentTitle;
+            input.maxLength = CHAT_TITLE_MAX_LENGTH;
+            input.setAttribute('aria-label', 'チャットタイトルを編集');
+            input.dataset.originalTitle = currentTitle;
+
+            elements.chatTitle.hidden = true;
+            elements.chatTitle.insertAdjacentElement('afterend', input);
+            input.focus();
+            const end = input.value.length;
+            input.setSelectionRange(end, end);
+
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    this.commitChatTitleEdit(input);
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    this.cancelChatTitleEdit(input);
+                }
+            });
+            input.addEventListener('blur', () => this.commitChatTitleEdit(input));
+        } catch (error) {
+            state.isEditingChatTitle = false;
+            console.error('タイトル編集開始エラー:', error);
+            await this.showCustomAlert('タイトル編集を開始できませんでした。');
+        }
+    },
+
+    cancelChatTitleEdit(input) {
+        if (input) input.dataset.cancelled = 'true';
+        state.isEditingChatTitle = false;
+        state.isSavingChatTitle = false;
+        if (input?.isConnected) input.remove();
+        elements.chatTitle.hidden = false;
+        this.updateChatTitle(state.chatTitleBeforeEdit);
+    },
+
+    async commitChatTitleEdit(input) {
+        if (!input || !input.isConnected || state.isSavingChatTitle) return;
+        if (input.dataset.cancelled === 'true') return;
+        const originalTitle = this.normalizeChatTitleText(input.dataset.originalTitle, this.getChatTitleFallback());
+        const nextTitle = this.normalizeChatTitleText(input.value, '');
+
+        if (!nextTitle) {
+            this.cancelChatTitleEdit(input);
+            return;
+        }
+        if (nextTitle === originalTitle) {
+            this.cancelChatTitleEdit(input);
+            return;
+        }
+        if (!state.currentChatId) {
+            this.cancelChatTitleEdit(input);
+            await this.showCustomAlert('最初のメッセージ送信後にタイトルを編集できます。');
+            return;
+        }
+
+        state.isSavingChatTitle = true;
+        input.disabled = true;
+        try {
+            await dbUtils.updateChatTitleDb(state.currentChatId, nextTitle);
+            input.dataset.cancelled = 'true';
+            input.remove();
+            state.isEditingChatTitle = false;
+            state.isSavingChatTitle = false;
+            elements.chatTitle.hidden = false;
+            this.updateChatTitle(nextTitle);
+
+            const titleElement = elements.historyList?.querySelector?.(`.history-item[data-chat-id="${state.currentChatId}"] .history-item-title`);
+            if (titleElement) {
+                titleElement.textContent = nextTitle;
+                titleElement.title = nextTitle;
+            }
+            await this.showCustomAlert('タイトルを保存しました。');
+        } catch (error) {
+            console.error('タイトル保存エラー:', error);
+            state.isSavingChatTitle = false;
+            input.disabled = false;
+            input.focus();
+            await this.showCustomAlert('タイトルを保存できませんでした。');
+        }
     },
 
 
@@ -11077,6 +11202,7 @@ const appLogic = {
         this._setupEventListenersCallCount++;
     
         // --- 画面遷移 ---
+        uiUtils.setupChatTitleEditing();
         elements.gotoHistoryBtn.addEventListener('click', () => uiUtils.showScreen('history'));
         elements.gotoSettingsBtn.addEventListener('click', () => uiUtils.showScreen('settings'));
         elements.backToChatFromHistoryBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
