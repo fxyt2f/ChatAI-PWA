@@ -4044,29 +4044,35 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
     }
 
     #chat-screen .message.model {
-        margin-bottom: 82px;
+        margin-bottom: 42px;
     }
 
     #chat-screen .message.model:not(:has(.message-actions .token-count-display, .message-actions .tm-execution-meta)) {
-        margin-bottom: 82px;
+        margin-bottom: 42px;
     }
 
     #chat-screen .message.model .message-actions {
-        bottom: -72px;
+        bottom: -36px;
         width: 100%;
         max-width: 100%;
-        min-height: 66px;
-        overflow-x: visible;
+        min-height: 32px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    #chat-screen .message.model .message-actions::before {
+        display: none;
     }
 
     #chat-screen .message.model .message-actions:not(:has(.token-count-display, .tm-execution-meta)) {
-        bottom: -72px;
-        min-height: 66px;
+        bottom: -36px;
+        min-height: 32px;
     }
 
     #chat-screen .message.user {
         max-width: min(92%, 100%);
-        margin-bottom: 82px;
+        margin-bottom: 42px;
     }
 
     #chat-screen .message.model.editing,
@@ -4087,18 +4093,20 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
 
     #chat-screen .message-actions {
         max-width: calc(100vw - 32px);
-        flex-wrap: wrap;
-        align-items: flex-start;
-        align-content: flex-start;
-        row-gap: 3px;
-        column-gap: 2px;
-        min-height: 66px;
-        overflow-x: visible;
+        flex-wrap: nowrap;
+        align-items: center;
+        align-content: center;
+        row-gap: 0;
+        column-gap: 1px;
+        min-height: 32px;
+        overflow-x: auto;
+        overflow-y: hidden;
         scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
     }
 
     #chat-screen .message.user .message-actions {
-        bottom: -72px;
+        bottom: -36px;
         max-width: min(100%, calc(100vw - 32px));
         justify-content: flex-end;
     }
