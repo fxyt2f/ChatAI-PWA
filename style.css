@@ -2634,7 +2634,7 @@ body.header-auto-hide.header-force-show #chat-screen .chat-search-dialog {
 
 @media screen and (max-width: 600px) {
     #chat-screen .chat-search-dialog {
-        top: calc(54px + var(--safe-top));
+        top: calc(60px + var(--safe-top));
         left: max(8px, var(--safe-left));
         width: min(364px, calc(100vw - 16px));
         max-width: calc(100vw - 16px);
