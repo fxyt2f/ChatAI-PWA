@@ -763,8 +763,10 @@ body.dark-mode #settings-screen a:hover {
 .custom-dialog.release-notes-dialog {
     width: min(720px, calc(100vw - 32px));
     max-height: min(720px, calc(100dvh - 32px));
-    display: flex;
     flex-direction: column;
+}
+.custom-dialog.release-notes-dialog[open] {
+    display: flex;
 }
 .custom-dialog.release-notes-dialog .release-notes-content {
     flex: 1 1 auto;

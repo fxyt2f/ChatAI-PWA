@@ -86,7 +86,7 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.30.4";
-const APP_CACHE_VERSION = "v1.30.4";
+const APP_CACHE_VERSION = "v1.30.4-fix1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -8776,23 +8776,53 @@ const appLogic = {
     },
 
     async showReleaseNotes(version = APP_VERSION) {
-        const releaseNotes = await this.formatReleaseNotes(version, { includeRecent: true });
-        elements.alertDialog.classList.add('release-notes-dialog');
-        elements.alertMessage.classList.add('release-notes-content');
-        if (releaseNotes === RELEASE_NOTES_FALLBACK_MESSAGE || typeof marked === 'undefined') {
-            elements.alertMessage.textContent = releaseNotes;
-        } else {
-            elements.alertMessage.innerHTML = marked.parse(releaseNotes);
-        }
+        let releaseNotes = RELEASE_NOTES_FALLBACK_MESSAGE;
+        let shouldCleanupReleaseNotesClasses = false;
+        try {
+            releaseNotes = await this.formatReleaseNotes(version, { includeRecent: true });
+            if (elements.alertDialog.open) {
+                elements.alertDialog.close('replace');
+            }
+            elements.alertDialog.classList.add('release-notes-dialog');
+            elements.alertMessage.classList.add('release-notes-content');
+            shouldCleanupReleaseNotesClasses = true;
+            elements.alertMessage.replaceChildren();
 
-        const newOkBtn = elements.alertOkBtn.cloneNode(true);
-        elements.alertOkBtn.parentNode.replaceChild(newOkBtn, elements.alertOkBtn);
-        elements.alertOkBtn = newOkBtn;
-        elements.alertOkBtn.onclick = () => elements.alertDialog.close('ok');
-        await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
-        elements.alertDialog.classList.remove('release-notes-dialog');
-        elements.alertMessage.classList.remove('release-notes-content');
-        elements.alertMessage.replaceChildren();
+            if (releaseNotes === RELEASE_NOTES_FALLBACK_MESSAGE || typeof marked === 'undefined') {
+                elements.alertMessage.textContent = releaseNotes;
+            } else {
+                try {
+                    elements.alertMessage.innerHTML = marked.parse(releaseNotes);
+                } catch (renderError) {
+                    console.error('[ReleaseNotes] Markdown描画に失敗しました。プレーンテキストで表示します:', renderError);
+                    elements.alertMessage.textContent = releaseNotes || RELEASE_NOTES_FALLBACK_MESSAGE;
+                }
+            }
+
+            const newOkBtn = elements.alertOkBtn.cloneNode(true);
+            newOkBtn.type = 'button';
+            elements.alertOkBtn.parentNode.replaceChild(newOkBtn, elements.alertOkBtn);
+            elements.alertOkBtn = newOkBtn;
+            elements.alertOkBtn.onclick = (event) => {
+                event.preventDefault();
+                if (elements.alertDialog.open) {
+                    elements.alertDialog.close('ok');
+                }
+            };
+            await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
+        } catch (error) {
+            console.error('[ReleaseNotes] リリースノート表示に失敗しました。通常アラートでフォールバック表示します:', error);
+            if (elements.alertDialog.open) {
+                elements.alertDialog.close('error');
+            }
+            await this.showCustomAlert(RELEASE_NOTES_FALLBACK_MESSAGE);
+        } finally {
+            if (shouldCleanupReleaseNotesClasses) {
+                elements.alertDialog.classList.remove('release-notes-dialog');
+                elements.alertMessage.classList.remove('release-notes-content');
+                elements.alertMessage.replaceChildren();
+            }
+        }
     },
 
     getInputDraftClientId() {
