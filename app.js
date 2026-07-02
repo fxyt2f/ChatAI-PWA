@@ -61,8 +61,8 @@ const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
-const APP_VERSION = "1.29.6";
-const APP_CACHE_VERSION = "v1.29.6";
+const APP_VERSION = "1.30.0";
+const APP_CACHE_VERSION = "v1.30.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -80,6 +80,12 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const RELEASE_NOTES = {
+    "1.30.0": [
+        "スマホ表示時にメッセージ下メニューが崩れる問題を修正しました。",
+        "ボタン数が多い場合の折り返しと余白を調整しました。",
+        "検索/置換/Undo/Redoのロジックは変更していません。",
+        "アプリバージョンとキャッシュバージョンを1.30.0に更新しました。"
+    ],
     "1.29.6": [
         "検索・置換・変更履歴・Undo/Redoまわりの総合安定化を実施しました。",
         "1文字検索/置換、個別メッセージ置換、cascade表示候補限定、メッセージ単位Undo/Redoの相互干渉を確認・調整しました。",
