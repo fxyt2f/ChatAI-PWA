@@ -86,13 +86,14 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.30.4";
-const APP_CACHE_VERSION = "v1.30.4-fix2";
+const APP_CACHE_VERSION = "v1.30.4-fix3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
 const RELEASE_NOTES_FALLBACK_MESSAGE = 'リリースノートを読み込めませんでした。CHANGELOG.md を確認してください。';
+const RELEASE_NOTES_LOADING_MESSAGE = 'リリースノートを読み込んでいます...';
 const INPUT_DRAFT_STORAGE_PREFIX = 'chatai-pwa-input-draft:';
 const INPUT_DRAFT_CLIENT_ID_KEY = 'chatai-pwa-client-id';
 const INPUT_DRAFT_SAVE_DELAY = 400;
@@ -8091,6 +8092,8 @@ function getLatestUndoneHistoryEntry(history) {
 // --- アプリケーションロジック (appLogic) ---
 const appLogic = {
     _setupEventListenersCallCount: 0,
+    releaseNotesChangelogTextCache: null,
+    releaseNotesChangelogTextPromise: null,
 
     cleanExecutionMetaText(value, maxLength) {
         if (value === null || value === undefined) return '';
@@ -8734,14 +8737,40 @@ const appLogic = {
         await this.saveLocalUiSettings();
     },
 
-    async loadChangelogText() {
-        const response = await fetch('./CHANGELOG.md', {
-            cache: 'no-cache'
-        });
-        if (!response.ok) {
-            throw new Error(`CHANGELOG.mdの読み込みに失敗しました (${response.status})`);
+    scheduleReleaseNotesPreload() {
+        if (this.releaseNotesChangelogTextCache || this.releaseNotesChangelogTextPromise) return;
+        const preload = () => {
+            this.loadChangelogText().catch(error => {
+                console.info('[ReleaseNotes] 先読みをスキップしました:', error);
+            });
+        };
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(preload, { timeout: 5000 });
+        } else {
+            setTimeout(preload, 1500);
         }
-        return response.text();
+    },
+
+    async loadChangelogText() {
+        if (this.releaseNotesChangelogTextCache) {
+            return this.releaseNotesChangelogTextCache;
+        }
+        if (!this.releaseNotesChangelogTextPromise) {
+            this.releaseNotesChangelogTextPromise = fetch('./CHANGELOG.md', {
+                cache: 'no-cache'
+            }).then(response => {
+                if (!response.ok) {
+                    throw new Error(`CHANGELOG.mdの読み込みに失敗しました (${response.status})`);
+                }
+                return response.text();
+            }).then(text => {
+                this.releaseNotesChangelogTextCache = text;
+                return text;
+            }).finally(() => {
+                this.releaseNotesChangelogTextPromise = null;
+            });
+        }
+        return this.releaseNotesChangelogTextPromise;
     },
 
     extractChangelogSections(changelogText, version = APP_VERSION, sectionLimit = 4) {
@@ -8778,8 +8807,8 @@ const appLogic = {
     async showReleaseNotes(version = APP_VERSION) {
         let releaseNotes = RELEASE_NOTES_FALLBACK_MESSAGE;
         let shouldCleanupReleaseNotesClasses = false;
+        let dialogPromise = null;
         try {
-            releaseNotes = await this.formatReleaseNotes(version, { includeRecent: true });
             if (elements.alertDialog.open) {
                 elements.alertDialog.close('replace');
             }
@@ -8787,17 +8816,7 @@ const appLogic = {
             elements.alertMessage.classList.add('release-notes-content');
             shouldCleanupReleaseNotesClasses = true;
             elements.alertMessage.replaceChildren();
-
-            if (releaseNotes === RELEASE_NOTES_FALLBACK_MESSAGE || typeof marked === 'undefined') {
-                elements.alertMessage.textContent = releaseNotes;
-            } else {
-                try {
-                    elements.alertMessage.innerHTML = marked.parse(releaseNotes);
-                } catch (renderError) {
-                    console.error('[ReleaseNotes] Markdown描画に失敗しました。プレーンテキストで表示します:', renderError);
-                    elements.alertMessage.textContent = releaseNotes || RELEASE_NOTES_FALLBACK_MESSAGE;
-                }
-            }
+            elements.alertMessage.textContent = RELEASE_NOTES_LOADING_MESSAGE;
 
             const newOkBtn = elements.alertOkBtn.cloneNode(true);
             newOkBtn.type = 'button';
@@ -8809,7 +8828,23 @@ const appLogic = {
                     elements.alertDialog.close('ok');
                 }
             };
-            await uiUtils.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
+            dialogPromise = uiUtils.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
+
+            releaseNotes = await this.formatReleaseNotes(version, { includeRecent: true });
+            if (elements.alertDialog.open) {
+                elements.alertMessage.replaceChildren();
+                if (releaseNotes === RELEASE_NOTES_FALLBACK_MESSAGE || typeof marked === 'undefined') {
+                    elements.alertMessage.textContent = releaseNotes;
+                } else {
+                    try {
+                        elements.alertMessage.innerHTML = marked.parse(releaseNotes);
+                    } catch (renderError) {
+                        console.error('[ReleaseNotes] Markdown描画に失敗しました。プレーンテキストで表示します:', renderError);
+                        elements.alertMessage.textContent = releaseNotes || RELEASE_NOTES_FALLBACK_MESSAGE;
+                    }
+                }
+            }
+            await dialogPromise;
         } catch (error) {
             console.error('[ReleaseNotes] リリースノート表示に失敗しました。通常アラートでフォールバック表示します:', error);
             if (elements.alertDialog.open) {
@@ -10477,6 +10512,7 @@ const appLogic = {
             this.toggleSummaryButtonVisibility();
             this.scrollToBottom();
             this.applyFloatingPanelBehavior();
+            this.scheduleReleaseNotesPreload();
             
             // finallyブロックで必ずダイアログを閉じる
             uiUtils.hideProgressDialog();
