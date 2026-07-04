@@ -727,6 +727,155 @@ body.dark-mode #attach-file-btn {
     padding-bottom: var(--spacing-unit);
 }
 
+.api-config-help {
+    margin: 0 0 calc(var(--spacing-unit) * 1.5);
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+
+.api-config-inline-note {
+    margin: 4px 0 calc(var(--spacing-unit) * 1.5);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.api-config-basic-list {
+    margin-top: calc(var(--spacing-unit) * 2);
+    padding-top: calc(var(--spacing-unit) * 1.5);
+    border-top: 1px solid var(--border-primary);
+}
+
+.api-config-list {
+    display: grid;
+    gap: calc(var(--spacing-unit) * 1.5);
+    margin-bottom: calc(var(--spacing-unit) * 2);
+}
+
+.api-config-empty {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+}
+
+.api-config-card {
+    display: grid;
+    gap: var(--spacing-unit);
+    padding: calc(var(--spacing-unit) * 1.5);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-sm);
+    background: var(--bg-secondary);
+    box-sizing: border-box;
+}
+
+.api-config-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-unit);
+    min-width: 0;
+}
+
+.api-config-name {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.api-config-status {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.api-config-status.is-enabled {
+    background: var(--bg-button-action);
+    color: var(--other-button-fg, var(--text-light));
+}
+
+.api-config-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px calc(var(--spacing-unit) * 2);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.api-config-meta span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.api-config-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--spacing-unit);
+}
+
+.api-config-actions button,
+#add-api-config-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
+
+.api-config-dialog {
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(720px, calc(100dvh - 32px));
+    overflow: hidden;
+}
+
+.api-config-dialog[open] {
+    display: block;
+}
+
+.api-config-form {
+    display: grid;
+    gap: var(--spacing-unit);
+    max-height: calc(100dvh - 88px);
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.api-config-form .dialog-title {
+    margin: 0 0 var(--spacing-unit);
+}
+
+.api-config-form input[type="text"],
+.api-config-form input[type="password"],
+.api-config-form select,
+.api-config-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.api-config-form textarea {
+    resize: vertical;
+}
+
+.api-config-enabled-row {
+    margin-top: 4px;
+}
+
+.api-config-form .dialog-actions {
+    position: sticky;
+    bottom: 0;
+    margin: calc(var(--spacing-unit) * 1.5) -2px 0;
+    padding-top: calc(var(--spacing-unit) * 1.5);
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-primary);
+}
+
 /* ダークモード時の設定画面のリンク色をピンク色に変更 */
 body.dark-mode #settings-screen a {
     color: #ff91af;
@@ -820,6 +969,35 @@ body.dark-mode #settings-screen a:hover {
 }
 
 @media screen and (max-width: 600px) {
+    .api-config-meta {
+        grid-template-columns: 1fr;
+    }
+
+    .api-config-card-header {
+        align-items: flex-start;
+    }
+
+    .api-config-actions {
+        justify-content: flex-start;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .api-config-actions button {
+        flex: 0 0 auto;
+    }
+
+    .api-config-dialog {
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        max-height: calc(100dvh - 16px);
+        padding: 14px;
+    }
+
+    .api-config-form {
+        max-height: calc(100dvh - 44px);
+    }
+
     .custom-dialog.release-notes-dialog {
         width: calc(100vw - 16px);
         max-width: calc(100vw - 16px);

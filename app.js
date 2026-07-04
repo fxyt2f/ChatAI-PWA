@@ -114,8 +114,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.0";
-const APP_CACHE_VERSION = "v1.31.0";
+const APP_VERSION = "1.31.1";
+const APP_CACHE_VERSION = "v1.31.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -384,6 +384,7 @@ try {
         cancelSystemPromptBtn: document.getElementById('cancel-system-prompt-btn'),
         apiProviderSelect: document.getElementById('api-provider'),
         apiProviderRow: document.getElementById('api-provider-row'),
+        basicApiConfigNameInput: document.getElementById('basic-api-config-name'),
         apiKeyInput: document.getElementById('api-key'),
         zaiApiKeyInput: document.getElementById('zai-api-key'),
         geminiApiKeyContainer: document.getElementById('gemini-api-key-container'),
@@ -398,6 +399,21 @@ try {
         bedrockSecretKeyInput: document.getElementById('bedrock-secret-key'),
         bedrockRegionSelect: document.getElementById('bedrock-region'),
         bedrockApiKeyContainer: document.getElementById('bedrock-api-key-container'),
+        apiConfigList: document.getElementById('api-config-list'),
+        addApiConfigBtn: document.getElementById('add-api-config-btn'),
+        apiConfigDialog: document.getElementById('api-config-dialog'),
+        apiConfigForm: document.getElementById('api-config-form'),
+        apiConfigDialogTitle: document.getElementById('api-config-dialog-title'),
+        apiConfigIdInput: document.getElementById('api-config-id'),
+        apiConfigNameInput: document.getElementById('api-config-name'),
+        apiConfigProviderSelect: document.getElementById('api-config-provider'),
+        apiConfigApiKeyInput: document.getElementById('api-config-api-key'),
+        apiConfigBaseUrlInput: document.getElementById('api-config-base-url'),
+        apiConfigDefaultModelInput: document.getElementById('api-config-default-model'),
+        apiConfigAdditionalModelsTextarea: document.getElementById('api-config-additional-models'),
+        apiConfigEnabledCheckbox: document.getElementById('api-config-enabled'),
+        saveApiConfigBtn: document.getElementById('save-api-config-btn'),
+        cancelApiConfigBtn: document.getElementById('cancel-api-config-btn'),
         modelNameSelect: document.getElementById('model-name'),
         modelNameLabel: document.getElementById('model-name-label'),
         userDefinedModelsGroup: document.getElementById('user-defined-models-group'),
@@ -7416,7 +7432,7 @@ const apiUtils = {
             console.error('[Bedrock Debug] 認証情報が不足しています。elements確認:', {
                 bedrockAccessKeyInput: elements.bedrockAccessKeyInput,
                 bedrockSecretKeyInput: elements.bedrockSecretKeyInput,
-                bedrockAccessKeyValue: elements.bedrockAccessKeyInput?.value,
+                bedrockAccessKeyValue: elements.bedrockAccessKeyInput?.value ? '設定済み' : 'なし',
                 bedrockSecretKeyValue: elements.bedrockSecretKeyInput ? '存在する' : 'なし'
             });
             throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
@@ -8877,6 +8893,339 @@ const appLogic = {
         state.apiConfigs = this.normalizeApiConfigs(configs);
         state.settings.apiConfigs = state.apiConfigs;
         await dbUtils.saveSetting('apiConfigs', state.apiConfigs);
+        this.renderApiConfigList();
+    },
+
+    getApiConfigProviderDefaults(provider = 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        if (normalizedProvider === 'openrouter') {
+            return {
+                name: 'OpenRouter',
+                baseUrl: 'https://openrouter.ai/api/v1',
+                defaultModel: DEFAULT_OPENROUTER_MODEL,
+                additionalModels: state.settings.additionalOpenRouterModels || ''
+            };
+        }
+        if (normalizedProvider === 'zai') {
+            return {
+                name: 'Z.ai',
+                baseUrl: 'https://api.z.ai/api/paas/v4',
+                defaultModel: DEFAULT_ZAI_MODEL,
+                additionalModels: ''
+            };
+        }
+        if (normalizedProvider === 'bedrock') {
+            return {
+                name: 'Amazon Bedrock',
+                baseUrl: '',
+                defaultModel: state.settings.apiProvider === 'bedrock' ? (state.settings.modelName || '') : '',
+                additionalModels: ''
+            };
+        }
+        return {
+            name: 'Gemini',
+            baseUrl: '',
+            defaultModel: DEFAULT_MODEL,
+            additionalModels: state.settings.additionalModels || ''
+        };
+    },
+
+    generateApiConfigId(provider = 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        const existingIds = new Set((state.apiConfigs || []).map(config => config.id));
+        let id = '';
+        do {
+            id = `api_${normalizedProvider}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        } while (existingIds.has(id));
+        return id;
+    },
+
+    getSanitizedApiConfigForLog(config = {}) {
+        return {
+            id: config.id,
+            name: config.name,
+            provider: config.provider,
+            defaultModel: config.defaultModel,
+            enabled: config.enabled
+        };
+    },
+
+    updateBasicApiConfigNameInput(provider = state.settings.apiProvider || 'gemini') {
+        if (!elements.basicApiConfigNameInput) return;
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        const config = this.getDefaultApiConfigForProvider(normalizedProvider)
+            || this.createLegacyApiConfig(normalizedProvider, state.settings);
+        elements.basicApiConfigNameInput.value = config.name || this.getApiConfigProviderDefaults(normalizedProvider).name;
+    },
+
+    async saveBasicApiConfigName() {
+        if (!elements.basicApiConfigNameInput) return;
+        const provider = this.normalizeApiProvider(state.settings.apiProvider || 'gemini');
+        const name = elements.basicApiConfigNameInput.value.trim();
+        const defaultId = this.getDefaultApiConfigIdForProvider(provider);
+        const configs = this.ensureDefaultApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const index = configs.findIndex(config => config.id === defaultId);
+        if (index === -1) {
+            this.updateBasicApiConfigNameInput(provider);
+            return;
+        }
+        if (!name) {
+            this.updateBasicApiConfigNameInput(provider);
+            await uiUtils.showCustomAlert('API設定表示名を入力してください。');
+            return;
+        }
+
+        const previous = configs[index];
+        const next = this.normalizeApiConfig({
+            ...previous,
+            name: name.slice(0, 80),
+            updatedAt: Date.now()
+        });
+        if (previous.name === next.name) {
+            this.updateBasicApiConfigNameInput(provider);
+            return;
+        }
+
+        configs[index] = next;
+        await this.saveApiConfigs(configs);
+        this.syncActiveApiConfigState();
+        this.renderApiConfigList();
+        this.markAsDirtyAndSchedulePush('structural');
+    },
+
+    renderApiConfigList() {
+        if (!elements.apiConfigList) return;
+        const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        elements.apiConfigList.innerHTML = '';
+
+        if (configs.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'api-config-empty';
+            empty.textContent = 'API設定はまだありません。';
+            elements.apiConfigList.appendChild(empty);
+            return;
+        }
+
+        const activeConfigId = state.activeApiConfig?.id || state.settings.apiConfigId || '';
+        configs.forEach(config => {
+            const card = document.createElement('article');
+            card.className = 'api-config-card';
+            card.dataset.apiConfigId = config.id;
+
+            const header = document.createElement('div');
+            header.className = 'api-config-card-header';
+
+            const name = document.createElement('div');
+            name.className = 'api-config-name';
+            name.textContent = config.name;
+            name.title = config.name;
+
+            const status = document.createElement('span');
+            status.className = `api-config-status${config.enabled ? ' is-enabled' : ''}`;
+            status.textContent = config.enabled ? '有効' : '無効';
+
+            header.append(name, status);
+
+            const meta = document.createElement('div');
+            meta.className = 'api-config-meta';
+            [
+                `プロバイダ: ${this.getProviderDisplayName(config.provider)}`,
+                `既定モデル: ${config.defaultModel || '未設定'}`,
+                `追加モデル: ${config.additionalModels ? 'あり' : 'なし'}`,
+                activeConfigId === config.id ? '現在のプロファイル: 参照中' : '現在のプロファイル: 未参照'
+            ].forEach(text => {
+                const item = document.createElement('span');
+                item.textContent = text;
+                item.title = text;
+                meta.appendChild(item);
+            });
+
+            const actions = document.createElement('div');
+            actions.className = 'api-config-actions';
+
+            const editButton = document.createElement('button');
+            editButton.type = 'button';
+            editButton.className = 'settings-action-button';
+            editButton.dataset.action = 'edit-api-config';
+            editButton.dataset.apiConfigId = config.id;
+            editButton.textContent = '編集';
+
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'settings-reset-button';
+            deleteButton.dataset.action = 'delete-api-config';
+            deleteButton.dataset.apiConfigId = config.id;
+            deleteButton.textContent = '削除';
+
+            actions.append(editButton, deleteButton);
+            card.append(header, meta, actions);
+            elements.apiConfigList.appendChild(card);
+        });
+    },
+
+    openApiConfigDialog(configId = '') {
+        if (!elements.apiConfigDialog || !elements.apiConfigForm) return;
+        const config = configId ? this.getApiConfigById(configId) : null;
+        const provider = config?.provider || 'gemini';
+        const defaults = this.getApiConfigProviderDefaults(provider);
+
+        elements.apiConfigForm.reset();
+        elements.apiConfigIdInput.value = config?.id || '';
+        elements.apiConfigDialogTitle.textContent = config ? 'API設定を編集' : 'API設定を追加';
+        elements.apiConfigNameInput.value = config?.name || defaults.name;
+        elements.apiConfigProviderSelect.value = provider;
+        elements.apiConfigProviderSelect.disabled = Boolean(config);
+        elements.apiConfigApiKeyInput.value = config?.apiKey || '';
+        elements.apiConfigBaseUrlInput.value = config?.baseUrl || defaults.baseUrl;
+        elements.apiConfigDefaultModelInput.value = config?.defaultModel || defaults.defaultModel;
+        elements.apiConfigAdditionalModelsTextarea.value = config?.additionalModels || defaults.additionalModels;
+        elements.apiConfigEnabledCheckbox.checked = config ? config.enabled !== false : true;
+
+        if (elements.apiConfigDialog.showModal) {
+            elements.apiConfigDialog.showModal();
+        } else {
+            elements.apiConfigDialog.setAttribute('open', '');
+        }
+
+        requestAnimationFrame(() => {
+            elements.apiConfigNameInput?.focus();
+            elements.apiConfigNameInput?.select();
+        });
+    },
+
+    closeApiConfigDialog() {
+        if (!elements.apiConfigDialog) return;
+        elements.apiConfigProviderSelect.disabled = false;
+        if (elements.apiConfigDialog.open && elements.apiConfigDialog.close) {
+            elements.apiConfigDialog.close('cancel');
+        } else {
+            elements.apiConfigDialog.removeAttribute('open');
+        }
+    },
+
+    updateApiConfigDialogDefaultsForProvider() {
+        if (!elements.apiConfigProviderSelect || elements.apiConfigIdInput?.value) return;
+        const defaults = this.getApiConfigProviderDefaults(elements.apiConfigProviderSelect.value);
+        elements.apiConfigNameInput.value = defaults.name;
+        elements.apiConfigBaseUrlInput.value = defaults.baseUrl;
+        elements.apiConfigDefaultModelInput.value = defaults.defaultModel;
+        elements.apiConfigAdditionalModelsTextarea.value = defaults.additionalModels;
+    },
+
+    collectApiConfigFormValues() {
+        const existingId = elements.apiConfigIdInput?.value.trim() || '';
+        const existingConfig = existingId ? this.getApiConfigById(existingId) : null;
+        const provider = existingConfig?.provider || this.normalizeApiProvider(elements.apiConfigProviderSelect?.value);
+        const name = (elements.apiConfigNameInput?.value || '').trim();
+        if (!name) {
+            throw new Error('表示名を入力してください。');
+        }
+
+        const now = Date.now();
+        const id = existingConfig?.id || this.generateApiConfigId(provider);
+        return this.normalizeApiConfig({
+            ...(existingConfig || {}),
+            id,
+            name: name.slice(0, 80),
+            provider,
+            apiKey: (elements.apiConfigApiKeyInput?.value || '').trim(),
+            baseUrl: (elements.apiConfigBaseUrlInput?.value || '').trim(),
+            defaultModel: (elements.apiConfigDefaultModelInput?.value || '').trim(),
+            additionalModels: (elements.apiConfigAdditionalModelsTextarea?.value || '').trim(),
+            enabled: Boolean(elements.apiConfigEnabledCheckbox?.checked),
+            createdAt: existingConfig?.createdAt || now,
+            updatedAt: now
+        });
+    },
+
+    getApiConfigUsage(configId) {
+        const usedByProfiles = (state.profiles || [])
+            .filter(profile => profile?.settings?.apiConfigId === configId)
+            .map(profile => profile.name || `ID:${profile.id}`);
+        const isActiveSettingsReference = state.settings.apiConfigId === configId || state.activeApiConfig?.id === configId;
+        return {
+            usedByProfiles,
+            isActiveSettingsReference,
+            isDefaultFallback: Object.values(API_CONFIG_DEFAULT_IDS).includes(configId)
+        };
+    },
+
+    async syncLegacySettingsFromDefaultApiConfig(config) {
+        if (!config || config.id !== this.getDefaultApiConfigIdForProvider(config.provider)) return;
+        const provider = this.normalizeApiProvider(config.provider);
+        if (provider === 'gemini') {
+            state.settings.apiKey = config.apiKey || '';
+            state.settings.additionalModels = config.additionalModels || '';
+            if (state.settings.apiProvider === 'gemini' && config.defaultModel) state.settings.modelName = config.defaultModel;
+        } else if (provider === 'openrouter') {
+            state.settings.openrouterApiKey = config.apiKey || '';
+            state.settings.additionalOpenRouterModels = config.additionalModels || '';
+            if (state.settings.apiProvider === 'openrouter' && config.defaultModel) state.settings.modelName = config.defaultModel;
+        } else if (provider === 'zai') {
+            state.settings.zaiApiKey = config.apiKey || '';
+            if (state.settings.apiProvider === 'zai' && config.defaultModel) state.settings.modelName = config.defaultModel;
+        } else if (provider === 'bedrock') {
+            state.settings.bedrockAccessKey = config.apiKey || config.bedrockAccessKey || '';
+            state.settings.bedrockRegion = config.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+            if (state.settings.apiProvider === 'bedrock' && config.defaultModel) state.settings.modelName = config.defaultModel;
+        }
+
+        if (state.activeProfile?.settings) {
+            Object.assign(state.activeProfile.settings, this.getSharedProfileSettings(state.settings));
+            await dbUtils.updateProfile(state.activeProfile);
+        }
+        uiUtils.applySettingsToUI();
+    },
+
+    async saveApiConfigFromDialog(event) {
+        event?.preventDefault();
+        try {
+            const nextConfig = this.collectApiConfigFormValues();
+            const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+            const index = configs.findIndex(config => config.id === nextConfig.id);
+            if (index >= 0) {
+                configs[index] = nextConfig;
+            } else {
+                configs.push(nextConfig);
+            }
+            await this.saveApiConfigs(configs);
+            await this.syncLegacySettingsFromDefaultApiConfig(nextConfig);
+            this.syncActiveApiConfigState();
+            this.renderApiConfigList();
+            this.closeApiConfigDialog();
+            this.markAsDirtyAndSchedulePush('structural');
+            await uiUtils.showCustomAlert('API設定を保存しました。');
+        } catch (error) {
+            await uiUtils.showCustomAlert(error?.message || 'API設定を保存できませんでした。');
+        }
+    },
+
+    async deleteApiConfig(configId) {
+        const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const target = configs.find(config => config.id === configId);
+        if (!target) return;
+        if (configs.length <= 1) {
+            await uiUtils.showCustomAlert('最後のAPI設定は削除できません。');
+            return;
+        }
+
+        const usage = this.getApiConfigUsage(configId);
+        if (usage.isDefaultFallback) {
+            await uiUtils.showCustomAlert('既定fallbackとして使われるAPI設定はv1.31.1では削除できません。');
+            return;
+        }
+        if (usage.isActiveSettingsReference || usage.usedByProfiles.length > 0) {
+            await uiUtils.showCustomAlert('このAPI設定はプロファイルで使用中のため削除できません。先にプロファイルのAPI設定を変更してください。');
+            return;
+        }
+
+        const confirmed = await uiUtils.showCustomConfirm(`API設定「${target.name}」を削除しますか？`);
+        if (!confirmed) return;
+        await this.saveApiConfigs(configs.filter(config => config.id !== configId));
+        this.syncActiveApiConfigState();
+        this.renderApiConfigList();
+        this.markAsDirtyAndSchedulePush('structural');
+        await uiUtils.showCustomAlert('API設定を削除しました。');
     },
 
     async ensureApiConfigsMigrationV1310() {
@@ -8919,10 +9268,11 @@ const appLogic = {
             state.apiConfigsMigratedV1310 = true;
             state.settings.apiConfigsMigratedV1310 = true;
             this.markAsDirtyAndSchedulePush('structural');
-            console.log("[ApiConfigMigration] v1.31.0 API設定リスト移行を保存しました。", nextConfigs);
+            console.log("[ApiConfigMigration] v1.31.0 API設定リスト移行を保存しました。", nextConfigs.map(config => this.getSanitizedApiConfigForLog(config)));
         }
 
         this.syncActiveApiConfigState();
+        this.renderApiConfigList();
     },
 
     normalizeGlobalOtherSettings(settings = {}) {
@@ -9704,6 +10054,7 @@ const appLogic = {
 
             uiUtils.applySettingsToUI(); 
             uiUtils.updateProfileCardUI();
+            this.renderApiConfigList();
 
             // 4. プロファイル適用後にデバッグロガーを初期化/再設定する
             DebugLogger.init();
@@ -10319,6 +10670,7 @@ const appLogic = {
         if (elements.bedrockApiKeyContainer) {
             elements.bedrockApiKeyContainer.classList.toggle('hidden', !isBedrock);
         }
+        this.updateBasicApiConfigNameInput(provider);
         
         // モデル選択UIの表示/非表示（OpenRouterはテキスト入力、その他はセレクトボックス）
         if (elements.modelNameLabel) {
@@ -11889,6 +12241,58 @@ const appLogic = {
         for (const key in settingsMap) {
             const { element, event, onUpdate, getValue } = settingsMap[key];
             setupInstantSave(element, key, event, onUpdate, getValue);
+        }
+
+        if (elements.addApiConfigBtn) {
+            elements.addApiConfigBtn.addEventListener('click', () => this.openApiConfigDialog());
+        }
+
+        if (elements.apiConfigList) {
+            elements.apiConfigList.addEventListener('click', (event) => {
+                const button = event.target.closest('button[data-action][data-api-config-id]');
+                if (!button) return;
+                const configId = button.dataset.apiConfigId;
+                if (button.dataset.action === 'edit-api-config') {
+                    this.openApiConfigDialog(configId);
+                } else if (button.dataset.action === 'delete-api-config') {
+                    this.deleteApiConfig(configId).catch(error => {
+                        console.error('[ApiConfig] API設定の削除に失敗しました:', error);
+                        uiUtils.showCustomAlert('API設定を削除できませんでした。');
+                    });
+                }
+            });
+        }
+
+        if (elements.apiConfigForm) {
+            elements.apiConfigForm.addEventListener('submit', (event) => {
+                this.saveApiConfigFromDialog(event).catch(error => {
+                    console.error('[ApiConfig] API設定の保存に失敗しました:', error);
+                    uiUtils.showCustomAlert('API設定を保存できませんでした。');
+                });
+            });
+        }
+
+        if (elements.cancelApiConfigBtn) {
+            elements.cancelApiConfigBtn.addEventListener('click', () => this.closeApiConfigDialog());
+        }
+
+        if (elements.apiConfigProviderSelect) {
+            elements.apiConfigProviderSelect.addEventListener('change', () => this.updateApiConfigDialogDefaultsForProvider());
+        }
+
+        if (elements.basicApiConfigNameInput) {
+            elements.basicApiConfigNameInput.addEventListener('change', () => {
+                this.saveBasicApiConfigName().catch(error => {
+                    console.error('[ApiConfig] 基本設定のAPI設定表示名保存に失敗しました:', error);
+                    uiUtils.showCustomAlert('API設定表示名を保存できませんでした。');
+                });
+            });
+            elements.basicApiConfigNameInput.addEventListener('blur', () => {
+                this.saveBasicApiConfigName().catch(error => {
+                    console.error('[ApiConfig] 基本設定のAPI設定表示名保存に失敗しました:', error);
+                    uiUtils.showCustomAlert('API設定表示名を保存できませんでした。');
+                });
+            });
         }
 
         const setupLocalUiSettingSave = (element, key, eventType = 'change', getValue = null, onUpdate = null) => {
