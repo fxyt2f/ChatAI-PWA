@@ -90,7 +90,7 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.30.6";
-const APP_CACHE_VERSION = "v1.30.6-fix2";
+const APP_CACHE_VERSION = "v1.30.6-fix4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -4385,6 +4385,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             : (state.settings.darkMode ? DARK_THEME_COLOR : LIGHT_THEME_COLOR);
     },
 
+    getEffectiveHeaderTextColor(headerColor = this.getEffectiveHeaderColor()) {
+        const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
+        const headerTextColorMode = this.getValidHeaderTextColorMode(state.settings.headerTextColorMode);
+        return themeColorMode === 'individual' && headerTextColorMode === 'custom'
+            ? this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR)
+            : this.getReadableTextColor(headerColor);
+    },
+
     getEffectiveNewChatButtonColor() {
         const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
         return themeColorMode === 'accent'
@@ -4402,7 +4410,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     getEffectiveOtherButtonColor() {
         const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
         return themeColorMode === 'accent'
-            ? this.getEffectiveAccentColor()
+            ? this.deriveButtonColorFromAccentColor(this.getEffectiveAccentColor())
             : this.getValidColor(state.settings.otherButtonColor, DEFAULT_OTHER_BUTTON_COLOR);
     },
 
@@ -4424,12 +4432,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
         const finalHeaderColor = this.getEffectiveHeaderColor();
-        const headerTextColorMode = this.getValidHeaderTextColorMode(state.settings.headerTextColorMode);
-        const readableTextColor = themeColorMode === 'individual' && headerTextColorMode === 'custom'
-            ? this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR)
-            : this.getReadableTextColor(finalHeaderColor);
+        const readableTextColor = this.getEffectiveHeaderTextColor(finalHeaderColor);
         const hoverBackgroundColor = this.deriveHeaderButtonHoverColor(finalHeaderColor);
-        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        const hoverTextColor = readableTextColor;
         this.setThemeCssVariable('--app-header-bg', finalHeaderColor);
         this.setThemeCssVariable('--app-header-fg', readableTextColor);
         this.setThemeCssVariable('--app-header-hover-bg', hoverBackgroundColor);
@@ -4442,9 +4447,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     applyNewChatButtonColor() {
         const buttonColor = this.getEffectiveNewChatButtonColor();
-        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const buttonTextColor = this.getEffectiveHeaderTextColor();
         const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
-        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        const hoverTextColor = buttonTextColor;
         this.setThemeCssVariable('--new-chat-button-bg', buttonColor);
         this.setThemeCssVariable('--new-chat-button-fg', buttonTextColor);
         this.setThemeCssVariable('--new-chat-button-hover-bg', hoverBackgroundColor);
@@ -4454,9 +4459,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     applySendButtonColor() {
         const buttonColor = this.getEffectiveSendButtonColor();
-        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const buttonTextColor = this.getEffectiveHeaderTextColor();
         const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
-        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        const hoverTextColor = buttonTextColor;
         this.setThemeCssVariable('--send-button-bg', buttonColor);
         this.setThemeCssVariable('--send-button-icon', buttonTextColor);
         this.setThemeCssVariable('--send-button-hover-bg', hoverBackgroundColor);
@@ -4466,9 +4471,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     applyOtherButtonColor() {
         const buttonColor = this.getEffectiveOtherButtonColor();
-        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const buttonTextColor = this.getEffectiveHeaderTextColor();
         const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
-        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        const hoverTextColor = buttonTextColor;
         this.setThemeCssVariable('--bg-button', buttonColor);
         this.setThemeCssVariable('--bg-button-hover', hoverBackgroundColor);
         this.setThemeCssVariable('--bg-button-update', buttonColor);

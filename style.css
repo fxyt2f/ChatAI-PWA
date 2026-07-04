@@ -187,7 +187,7 @@ button {
     font-weight: 500;
     text-transform: uppercase;
     background-color: var(--bg-button);
-    color: var(--text-light);
+    color: var(--other-button-fg, var(--text-light));
     transition: background-color var(--transition-duration) var(--transition-timing), box-shadow var(--transition-duration) var(--transition-timing);
     box-shadow: var(--shadow-1);
     display: inline-flex;
@@ -200,6 +200,7 @@ button {
 }
 button:hover:not(:disabled) {
     background-color: var(--bg-button-hover);
+    color: var(--other-button-hover-fg, var(--other-button-fg, var(--text-light)));
     box-shadow: var(--shadow-2);
 }
 button:disabled {
@@ -1081,7 +1082,7 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
     font-size: 14px;
     font-weight: 500;
     text-transform: uppercase;
-    color: var(--text-light);
+    color: var(--other-button-fg, var(--text-light));
     background-color: var(--bg-button);
     border: none;
     border-radius: var(--border-radius-sm);
@@ -1965,11 +1966,11 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
     padding: 6px 16px;
     font-size: 0.8rem;
     background-color: var(--bg-button-update);
-    color: var(--text-light);
+    color: var(--other-button-fg, var(--text-light));
     box-shadow: none;
 }
 body.dark-mode #reload-for-update-btn {
-    color: var(--text-primary);
+    color: var(--other-button-fg, var(--text-primary));
 }
 
 /* --- Wide Mode Styles (for PC) --- */
@@ -2973,7 +2974,7 @@ body.dark-mode .dialog-delete-btn {
 }
 .profile-character-item.active {
     background-color: var(--bg-button);
-    color: var(--text-light);
+    color: var(--other-button-fg, var(--text-light));
 }
 
 .profile-detail-pane {
