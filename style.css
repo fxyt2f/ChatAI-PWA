@@ -742,15 +742,15 @@ body.dark-mode #attach-file-btn {
 }
 
 .api-config-basic-list {
-    margin-top: calc(var(--spacing-unit) * 2);
-    padding-top: calc(var(--spacing-unit) * 1.5);
-    border-top: 1px solid var(--border-primary);
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
 }
 
 .api-config-list {
     display: grid;
-    gap: calc(var(--spacing-unit) * 1.5);
-    margin-bottom: calc(var(--spacing-unit) * 2);
+    gap: var(--spacing-unit);
+    margin-bottom: calc(var(--spacing-unit) * 1.25);
 }
 
 .api-config-empty {
@@ -761,8 +761,10 @@ body.dark-mode #attach-file-btn {
 
 .api-config-card {
     display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(84px, 0.7fr) auto;
+    align-items: center;
     gap: var(--spacing-unit);
-    padding: calc(var(--spacing-unit) * 1.5);
+    padding: calc(var(--spacing-unit) * 0.9) var(--spacing-unit);
     border: 1px solid var(--border-primary);
     border-radius: var(--border-radius-sm);
     background: var(--bg-secondary);
@@ -772,7 +774,6 @@ body.dark-mode #attach-file-btn {
 .api-config-card-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: var(--spacing-unit);
     min-width: 0;
 }
@@ -786,31 +787,11 @@ body.dark-mode #attach-file-btn {
     white-space: nowrap;
 }
 
-.api-config-status {
-    flex: 0 0 auto;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-}
-
-.api-config-status.is-enabled {
-    background: var(--bg-button-action);
-    color: var(--other-button-fg, var(--text-light));
-}
-
-.api-config-meta {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px calc(var(--spacing-unit) * 2);
-    color: var(--text-secondary);
-    font-size: 0.85rem;
-}
-
-.api-config-meta span {
+.api-config-provider {
     min-width: 0;
     overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.86rem;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -831,8 +812,10 @@ body.dark-mode #attach-file-btn {
 
 .api-config-dialog {
     width: min(560px, calc(100vw - 32px));
-    max-height: min(720px, calc(100dvh - 32px));
+    height: min(820px, calc(100dvh - 16px));
+    max-height: calc(100dvh - 16px);
     overflow: hidden;
+    padding: 0;
 }
 
 .api-config-dialog[open] {
@@ -841,14 +824,38 @@ body.dark-mode #attach-file-btn {
 
 .api-config-form {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: var(--spacing-unit);
-    max-height: calc(100dvh - 88px);
-    overflow-y: auto;
-    padding-right: 2px;
+    height: 100%;
+    max-height: none;
+    overflow: hidden;
+    padding: calc(var(--spacing-unit) * 3);
+    box-sizing: border-box;
+}
+
+.api-config-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-unit);
+    min-width: 0;
 }
 
 .api-config-form .dialog-title {
-    margin: 0 0 var(--spacing-unit);
+    margin: 0;
+}
+
+.api-config-enabled-row {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.api-config-fields {
+    display: grid;
+    gap: var(--spacing-unit);
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
 }
 
 .api-config-form input[type="text"],
@@ -863,17 +870,44 @@ body.dark-mode #attach-file-btn {
     resize: vertical;
 }
 
-.api-config-enabled-row {
-    margin-top: 4px;
+.parameter-extra-section {
+    margin-top: 15px;
+}
+
+.basic-settings-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-tertiary);
+}
+
+.basic-settings-section h4 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.settings-description {
+    margin: 0 0 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.5;
 }
 
 .api-config-form .dialog-actions {
-    position: sticky;
-    bottom: 0;
-    margin: calc(var(--spacing-unit) * 1.5) -2px 0;
-    padding-top: calc(var(--spacing-unit) * 1.5);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-unit);
+    margin: calc(var(--spacing-unit) * 1.5) 0 0;
+    padding: calc(var(--spacing-unit) * 1.5) 0 0;
     background: var(--bg-primary);
     border-top: 1px solid var(--border-primary);
+}
+
+.api-config-form .dialog-actions-main {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--spacing-unit);
 }
 
 /* ダークモード時の設定画面のリンク色をピンク色に変更 */
@@ -969,18 +1003,24 @@ body.dark-mode #settings-screen a:hover {
 }
 
 @media screen and (max-width: 600px) {
-    .api-config-meta {
-        grid-template-columns: 1fr;
+    .api-config-card {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+            "name action"
+            "provider action";
     }
 
     .api-config-card-header {
-        align-items: flex-start;
+        grid-area: name;
+    }
+
+    .api-config-provider {
+        grid-area: provider;
     }
 
     .api-config-actions {
-        justify-content: flex-start;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
+        grid-area: action;
+        justify-content: flex-end;
     }
 
     .api-config-actions button {
@@ -990,12 +1030,14 @@ body.dark-mode #settings-screen a:hover {
     .api-config-dialog {
         width: calc(100vw - 16px);
         max-width: calc(100vw - 16px);
+        height: calc(100dvh - 16px);
         max-height: calc(100dvh - 16px);
-        padding: 14px;
+        padding: 0;
     }
 
     .api-config-form {
-        max-height: calc(100dvh - 44px);
+        height: 100%;
+        max-height: none;
     }
 
     .custom-dialog.release-notes-dialog {

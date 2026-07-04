@@ -54,6 +54,7 @@ const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
 const API_CONFIG_MIGRATION_KEY = 'apiConfigsMigratedV1310';
+const API_MODEL_REF_MIGRATION_KEY = 'apiModelRefsMigratedV1312';
 const API_CONFIG_DEFAULT_IDS = {
     gemini: 'api_gemini_default',
     openrouter: 'api_openrouter_default',
@@ -114,8 +115,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.1";
-const APP_CACHE_VERSION = "v1.31.1";
+const APP_VERSION = "1.31.2";
+const APP_CACHE_VERSION = "v1.31.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -414,6 +415,7 @@ try {
         apiConfigEnabledCheckbox: document.getElementById('api-config-enabled'),
         saveApiConfigBtn: document.getElementById('save-api-config-btn'),
         cancelApiConfigBtn: document.getElementById('cancel-api-config-btn'),
+        deleteApiConfigDialogBtn: document.getElementById('delete-api-config-dialog-btn'),
         modelNameSelect: document.getElementById('model-name'),
         modelNameLabel: document.getElementById('model-name-label'),
         userDefinedModelsGroup: document.getElementById('user-defined-models-group'),
@@ -686,6 +688,9 @@ const state = {
         apiConfigs: [],
         apiConfigsMigratedV1310: false,
         apiConfigId: '',
+        defaultModelRef: null,
+        thoughtTranslationModelRef: null,
+        summaryModelRef: null,
         apiKey: '',
         zaiApiKey: '',
         openrouterApiKey: '',
@@ -4683,7 +4688,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.includeThoughtsToggle.checked = state.settings.includeThoughts;
         elements.enableThoughtTranslationCheckbox.checked = state.settings.enableThoughtTranslation;
         elements.thoughtTranslationModelSelect.value = state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite';
-        elements.thoughtTranslationOptionsDiv.classList.toggle('hidden', !state.settings.includeThoughts);
+        if (elements.thoughtTranslationOptionsDiv) {
+            elements.thoughtTranslationOptionsDiv.classList.toggle('hidden', !state.settings.includeThoughts);
+        }
         elements.dummyUserInput.value = state.settings.dummyUser || '';
         elements.applyDummyToProofreadCheckbox.checked = state.settings.applyDummyToProofread;
         elements.applyDummyToTranslateCheckbox.checked = state.settings.applyDummyToTranslate;
@@ -4695,8 +4702,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (elements.additionalOpenRouterModelsTextarea) {
             elements.additionalOpenRouterModelsTextarea.value = state.settings.additionalOpenRouterModels || '';
-        } else {
-            console.warn("[Settings] OpenRouter追加モデル欄が見つかりません: #additional-openrouter-models");
         }
         elements.enterToSendCheckbox.checked = state.settings.enterToSend;
         elements.historySortOrderSelect.value = state.settings.historySortOrder || 'updatedAt';
@@ -4823,6 +4828,33 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // ユーザー指定モデルをコンボボックスに反映
     updateUserModelOptions() {
+        const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '') => {
+            if (!selectElement) return;
+            const choices = appLogic.getApiModelChoices();
+            const effectiveRef = appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
+            selectElement.innerHTML = '';
+            choices.forEach(choice => {
+                const option = document.createElement('option');
+                option.value = choice.value;
+                option.textContent = choice.label;
+                option.dataset.apiConfigId = choice.apiConfigId;
+                option.dataset.provider = choice.provider;
+                option.dataset.modelName = choice.modelName;
+                selectElement.appendChild(option);
+            });
+            if (effectiveRef) {
+                selectElement.value = appLogic.encodeModelRefValue(effectiveRef);
+            }
+            if (!selectElement.value && selectElement.options.length > 0) {
+                selectElement.selectedIndex = 0;
+            }
+        };
+
+        populateModelRefSelect(elements.modelNameSelect, 'defaultModelRef', state.settings.modelName || DEFAULT_MODEL, state.settings.apiConfigId);
+        populateModelRefSelect(elements.thoughtTranslationModelSelect, 'thoughtTranslationModelRef', state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite');
+        populateModelRefSelect(elements.proofreadingModelNameSelect, '', state.settings.proofreadingModelName || 'gemini-2.5-flash');
+        populateModelRefSelect(elements.summaryModelNameSelect, 'summaryModelRef', state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL);
+
         const geminiModels = (state.settings.additionalModels || '')
             .split(',')
             .map(m => m.trim())
@@ -4846,14 +4878,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 groupId: 'thought-translation-user-models', 
                 selectElement: elements.thoughtTranslationModelSelect, 
                 currentValue: state.settings.thoughtTranslationModel,
-                models: auxiliaryModels,
-                label: auxiliaryLabel,
-                fallbackValue: auxiliaryFallback
-            },
-            { 
-                groupId: 'proofreading-user-models', 
-                selectElement: elements.proofreadingModelNameSelect, 
-                currentValue: state.settings.proofreadingModelName,
                 models: auxiliaryModels,
                 label: auxiliaryLabel,
                 fallbackValue: auxiliaryFallback
@@ -8671,6 +8695,96 @@ const appLogic = {
         return API_CONFIG_PROVIDER_NAMES[this.normalizeApiProvider(provider)] || API_CONFIG_PROVIDER_NAMES.gemini;
     },
 
+    splitModelCandidateList(value = '') {
+        return [...new Set(String(value || '')
+            .split(/[\n,]/)
+            .map(model => model.trim())
+            .filter(Boolean))];
+    },
+
+    joinModelCandidateList(models = []) {
+        return [...new Set((Array.isArray(models) ? models : [])
+            .map(model => String(model || '').trim())
+            .filter(Boolean))].join('\n');
+    },
+
+    encodeModelRefValue(ref = {}) {
+        if (!ref?.apiConfigId || !ref?.modelName) return '';
+        return `${ref.apiConfigId}|||${encodeURIComponent(ref.modelName)}`;
+    },
+
+    decodeModelRefValue(value = '') {
+        const [apiConfigId, encodedModelName] = String(value || '').split('|||');
+        if (!apiConfigId || !encodedModelName) return null;
+        return {
+            apiConfigId,
+            modelName: decodeURIComponent(encodedModelName)
+        };
+    },
+
+    getApiConfigModelCandidates(config = {}) {
+        return this.splitModelCandidateList([
+            config.defaultModel || '',
+            config.additionalModels || ''
+        ].filter(Boolean).join('\n'));
+    },
+
+    getApiModelChoices() {
+        let configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        if (!configs.length) {
+            configs = this.ensureDefaultApiConfigs(configs);
+            state.apiConfigs = configs;
+            state.settings.apiConfigs = configs;
+        }
+
+        let choices = configs
+            .filter(config => config.enabled !== false)
+            .flatMap(config => this.getApiConfigModelCandidates(config).map(modelName => ({
+                apiConfigId: config.id,
+                provider: config.provider,
+                apiConfigName: config.name,
+                modelName,
+                value: this.encodeModelRefValue({ apiConfigId: config.id, modelName }),
+                label: `${config.name} / ${modelName}`
+            })));
+
+        if (!choices.length) {
+            const fallbackConfig = this.createLegacyApiConfig(state.settings.apiProvider || 'gemini', state.settings);
+            choices = this.getApiConfigModelCandidates(fallbackConfig).map(modelName => ({
+                apiConfigId: fallbackConfig.id,
+                provider: fallbackConfig.provider,
+                apiConfigName: fallbackConfig.name,
+                modelName,
+                value: this.encodeModelRefValue({ apiConfigId: fallbackConfig.id, modelName }),
+                label: `${fallbackConfig.name} / ${modelName}`
+            }));
+        }
+
+        return choices;
+    },
+
+    findModelRefForLegacyModel(modelName = '', preferredApiConfigId = '') {
+        const normalizedModelName = String(modelName || '').trim();
+        const choices = this.getApiModelChoices();
+        if (!choices.length) return null;
+        if (preferredApiConfigId) {
+            const preferred = choices.find(choice => choice.apiConfigId === preferredApiConfigId && choice.modelName === normalizedModelName);
+            if (preferred) return { apiConfigId: preferred.apiConfigId, modelName: preferred.modelName };
+        }
+        const exact = choices.find(choice => choice.modelName === normalizedModelName);
+        if (exact) return { apiConfigId: exact.apiConfigId, modelName: exact.modelName };
+        return { apiConfigId: choices[0].apiConfigId, modelName: choices[0].modelName };
+    },
+
+    getEffectiveModelRef(refKey, legacyModelName = '', preferredApiConfigId = '') {
+        const ref = state.settings[refKey];
+        const existing = ref?.apiConfigId && ref?.modelName
+            ? this.getApiModelChoices().find(choice => choice.apiConfigId === ref.apiConfigId && choice.modelName === ref.modelName)
+            : null;
+        if (existing) return { apiConfigId: existing.apiConfigId, modelName: existing.modelName };
+        return this.findModelRefForLegacyModel(legacyModelName, preferredApiConfigId);
+    },
+
     createLegacyApiConfig(provider = 'gemini', sourceSettings = {}) {
         const normalizedProvider = this.normalizeApiProvider(provider);
         const now = Date.now();
@@ -8869,12 +8983,16 @@ const appLogic = {
 
         const previous = configs[index];
         const legacyConfig = this.createLegacyApiConfig(normalizedProvider, state.settings);
+        const mergedCandidates = this.joinModelCandidateList([
+            ...this.getApiConfigModelCandidates(previous),
+            ...this.getApiConfigModelCandidates(legacyConfig)
+        ]);
         const next = this.normalizeApiConfig({
             ...previous,
             apiKey: legacyConfig.apiKey,
             baseUrl: legacyConfig.baseUrl || previous.baseUrl,
             defaultModel: legacyConfig.defaultModel || previous.defaultModel,
-            additionalModels: legacyConfig.additionalModels,
+            additionalModels: mergedCandidates,
             bedrockAccessKey: legacyConfig.bedrockAccessKey || previous.bedrockAccessKey,
             bedrockSecretKey: legacyConfig.bedrockSecretKey || previous.bedrockSecretKey,
             bedrockRegion: legacyConfig.bedrockRegion || previous.bedrockRegion,
@@ -8894,6 +9012,7 @@ const appLogic = {
         state.settings.apiConfigs = state.apiConfigs;
         await dbUtils.saveSetting('apiConfigs', state.apiConfigs);
         this.renderApiConfigList();
+        uiUtils.updateUserModelOptions();
     },
 
     getApiConfigProviderDefaults(provider = 'gemini') {
@@ -8971,7 +9090,7 @@ const appLogic = {
         }
         if (!name) {
             this.updateBasicApiConfigNameInput(provider);
-            await uiUtils.showCustomAlert('API設定表示名を入力してください。');
+            await uiUtils.showCustomAlert('表示名を入力してください。');
             return;
         }
 
@@ -9006,7 +9125,6 @@ const appLogic = {
             return;
         }
 
-        const activeConfigId = state.activeApiConfig?.id || state.settings.apiConfigId || '';
         configs.forEach(config => {
             const card = document.createElement('article');
             card.className = 'api-config-card';
@@ -9020,25 +9138,12 @@ const appLogic = {
             name.textContent = config.name;
             name.title = config.name;
 
-            const status = document.createElement('span');
-            status.className = `api-config-status${config.enabled ? ' is-enabled' : ''}`;
-            status.textContent = config.enabled ? '有効' : '無効';
+            header.append(name);
 
-            header.append(name, status);
-
-            const meta = document.createElement('div');
-            meta.className = 'api-config-meta';
-            [
-                `プロバイダ: ${this.getProviderDisplayName(config.provider)}`,
-                `既定モデル: ${config.defaultModel || '未設定'}`,
-                `追加モデル: ${config.additionalModels ? 'あり' : 'なし'}`,
-                activeConfigId === config.id ? '現在のプロファイル: 参照中' : '現在のプロファイル: 未参照'
-            ].forEach(text => {
-                const item = document.createElement('span');
-                item.textContent = text;
-                item.title = text;
-                meta.appendChild(item);
-            });
+            const provider = document.createElement('div');
+            provider.className = 'api-config-provider';
+            provider.textContent = this.getProviderDisplayName(config.provider);
+            provider.title = provider.textContent;
 
             const actions = document.createElement('div');
             actions.className = 'api-config-actions';
@@ -9050,15 +9155,8 @@ const appLogic = {
             editButton.dataset.apiConfigId = config.id;
             editButton.textContent = '編集';
 
-            const deleteButton = document.createElement('button');
-            deleteButton.type = 'button';
-            deleteButton.className = 'settings-reset-button';
-            deleteButton.dataset.action = 'delete-api-config';
-            deleteButton.dataset.apiConfigId = config.id;
-            deleteButton.textContent = '削除';
-
-            actions.append(editButton, deleteButton);
-            card.append(header, meta, actions);
+            actions.append(editButton);
+            card.append(header, provider, actions);
             elements.apiConfigList.appendChild(card);
         });
     },
@@ -9071,15 +9169,22 @@ const appLogic = {
 
         elements.apiConfigForm.reset();
         elements.apiConfigIdInput.value = config?.id || '';
-        elements.apiConfigDialogTitle.textContent = config ? 'API設定を編集' : 'API設定を追加';
+        elements.apiConfigDialogTitle.textContent = config ? 'API設定を編集' : 'API設定';
         elements.apiConfigNameInput.value = config?.name || defaults.name;
         elements.apiConfigProviderSelect.value = provider;
         elements.apiConfigProviderSelect.disabled = Boolean(config);
         elements.apiConfigApiKeyInput.value = config?.apiKey || '';
         elements.apiConfigBaseUrlInput.value = config?.baseUrl || defaults.baseUrl;
-        elements.apiConfigDefaultModelInput.value = config?.defaultModel || defaults.defaultModel;
-        elements.apiConfigAdditionalModelsTextarea.value = config?.additionalModels || defaults.additionalModels;
+        const modelCandidates = config
+            ? this.getApiConfigModelCandidates(config)
+            : this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
+        elements.apiConfigDefaultModelInput.value = modelCandidates[0] || defaults.defaultModel || '';
+        elements.apiConfigAdditionalModelsTextarea.value = this.joinModelCandidateList(modelCandidates);
         elements.apiConfigEnabledCheckbox.checked = config ? config.enabled !== false : true;
+        if (elements.deleteApiConfigDialogBtn) {
+            elements.deleteApiConfigDialogBtn.classList.toggle('hidden', !config);
+            elements.deleteApiConfigDialogBtn.dataset.apiConfigId = config?.id || '';
+        }
 
         if (elements.apiConfigDialog.showModal) {
             elements.apiConfigDialog.showModal();
@@ -9096,6 +9201,9 @@ const appLogic = {
     closeApiConfigDialog() {
         if (!elements.apiConfigDialog) return;
         elements.apiConfigProviderSelect.disabled = false;
+        if (elements.deleteApiConfigDialogBtn) {
+            elements.deleteApiConfigDialogBtn.dataset.apiConfigId = '';
+        }
         if (elements.apiConfigDialog.open && elements.apiConfigDialog.close) {
             elements.apiConfigDialog.close('cancel');
         } else {
@@ -9108,8 +9216,9 @@ const appLogic = {
         const defaults = this.getApiConfigProviderDefaults(elements.apiConfigProviderSelect.value);
         elements.apiConfigNameInput.value = defaults.name;
         elements.apiConfigBaseUrlInput.value = defaults.baseUrl;
-        elements.apiConfigDefaultModelInput.value = defaults.defaultModel;
-        elements.apiConfigAdditionalModelsTextarea.value = defaults.additionalModels;
+        const candidates = this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
+        elements.apiConfigDefaultModelInput.value = candidates[0] || '';
+        elements.apiConfigAdditionalModelsTextarea.value = this.joinModelCandidateList(candidates);
     },
 
     collectApiConfigFormValues() {
@@ -9123,6 +9232,7 @@ const appLogic = {
 
         const now = Date.now();
         const id = existingConfig?.id || this.generateApiConfigId(provider);
+        const modelCandidates = this.splitModelCandidateList(elements.apiConfigAdditionalModelsTextarea?.value || '');
         return this.normalizeApiConfig({
             ...(existingConfig || {}),
             id,
@@ -9130,8 +9240,8 @@ const appLogic = {
             provider,
             apiKey: (elements.apiConfigApiKeyInput?.value || '').trim(),
             baseUrl: (elements.apiConfigBaseUrlInput?.value || '').trim(),
-            defaultModel: (elements.apiConfigDefaultModelInput?.value || '').trim(),
-            additionalModels: (elements.apiConfigAdditionalModelsTextarea?.value || '').trim(),
+            defaultModel: modelCandidates[0] || '',
+            additionalModels: this.joinModelCandidateList(modelCandidates),
             enabled: Boolean(elements.apiConfigEnabledCheckbox?.checked),
             createdAt: existingConfig?.createdAt || now,
             updatedAt: now
@@ -9211,7 +9321,7 @@ const appLogic = {
 
         const usage = this.getApiConfigUsage(configId);
         if (usage.isDefaultFallback) {
-            await uiUtils.showCustomAlert('既定fallbackとして使われるAPI設定はv1.31.1では削除できません。');
+            await uiUtils.showCustomAlert('既定fallbackとして使われるAPI設定は削除できません。');
             return;
         }
         if (usage.isActiveSettingsReference || usage.usedByProfiles.length > 0) {
@@ -9226,6 +9336,21 @@ const appLogic = {
         this.renderApiConfigList();
         this.markAsDirtyAndSchedulePush('structural');
         await uiUtils.showCustomAlert('API設定を削除しました。');
+    },
+
+    async toggleApiConfigEnabled(configId, enabled) {
+        const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const index = configs.findIndex(config => config.id === configId);
+        if (index === -1) return;
+        configs[index] = this.normalizeApiConfig({
+            ...configs[index],
+            enabled: Boolean(enabled),
+            updatedAt: Date.now()
+        });
+        await this.saveApiConfigs(configs);
+        this.syncActiveApiConfigState();
+        this.renderApiConfigList();
+        this.markAsDirtyAndSchedulePush('structural');
     },
 
     async ensureApiConfigsMigrationV1310() {
@@ -9273,6 +9398,72 @@ const appLogic = {
 
         this.syncActiveApiConfigState();
         this.renderApiConfigList();
+    },
+
+    async ensureModelRefsMigrationV1312() {
+        const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_REF_MIGRATION_KEY))?.value === true;
+        let changed = false;
+        const sources = this.collectLegacyApiConfigSources();
+        const configs = this.ensureDefaultApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
+            const defaultId = this.getDefaultApiConfigIdForProvider(provider);
+            const index = configs.findIndex(config => config.id === defaultId);
+            if (index === -1) return;
+            const legacyConfig = this.createLegacyApiConfig(provider, this.findLegacyApiSourceForProvider(provider, sources));
+            const mergedCandidates = this.joinModelCandidateList([
+                ...this.getApiConfigModelCandidates(configs[index]),
+                ...this.getApiConfigModelCandidates(legacyConfig)
+            ]);
+            if (mergedCandidates !== configs[index].additionalModels) {
+                configs[index] = this.normalizeApiConfig({
+                    ...configs[index],
+                    defaultModel: this.splitModelCandidateList(mergedCandidates)[0] || configs[index].defaultModel,
+                    additionalModels: mergedCandidates,
+                    updatedAt: Date.now()
+                });
+                changed = true;
+            }
+        });
+        if (changed) {
+            await this.saveApiConfigs(configs);
+            this.syncActiveApiConfigState();
+        }
+        const refsForSettings = (settings = {}) => ({
+            defaultModelRef: settings.defaultModelRef || this.findModelRefForLegacyModel(settings.modelName || DEFAULT_MODEL, settings.apiConfigId),
+            thoughtTranslationModelRef: settings.thoughtTranslationModelRef || this.findModelRefForLegacyModel(settings.thoughtTranslationModel || 'gemini-2.5-flash-lite'),
+            summaryModelRef: settings.summaryModelRef || this.findModelRefForLegacyModel(settings.summaryModelName || settings.modelName || DEFAULT_MODEL)
+        });
+
+        for (const profile of state.profiles || []) {
+            if (!profile.settings) profile.settings = {};
+            let profileChanged = false;
+            const nextRefs = refsForSettings(profile.settings);
+            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef'].forEach(key => {
+                if (!profile.settings[key] && nextRefs[key]) {
+                    profile.settings[key] = nextRefs[key];
+                    profileChanged = true;
+                }
+            });
+            if (profileChanged) {
+                try {
+                    await dbUtils.updateProfile(profile);
+                    changed = true;
+                } catch (error) {
+                    console.error(`[ApiConfigMigration] プロファイル(ID: ${profile.id})のModelRef補完に失敗しました:`, error);
+                }
+            }
+        }
+
+        if (state.activeProfile?.settings) {
+            const refs = refsForSettings(state.activeProfile.settings);
+            Object.assign(state.settings, refs);
+            Object.assign(state.activeProfile.settings, refs);
+        }
+
+        if (!alreadyMigrated || changed) {
+            await dbUtils.saveSetting(API_MODEL_REF_MIGRATION_KEY, true);
+            this.markAsDirtyAndSchedulePush('structural');
+        }
     },
 
     normalizeGlobalOtherSettings(settings = {}) {
@@ -10001,6 +10192,7 @@ const appLogic = {
             console.log(`[Profile] ${state.profiles.length}件のプロファイルを読み込みました。アクティブID: ${state.activeProfileId}`);
             this.applyActiveProfile();
             await this.ensureApiConfigsMigrationV1310();
+            await this.ensureModelRefsMigrationV1312();
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
 
@@ -10227,6 +10419,7 @@ const appLogic = {
     getCurrentUiSettings() {
         const settings = {};
         const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -10240,18 +10433,32 @@ const appLogic = {
         stringKeys.forEach(key => {
             // modelNameは特別処理（OpenRouter選択時はテキスト入力から取得）
             if (key === 'modelName') {
-                const provider = settings.apiProvider || state.settings.apiProvider || 'gemini';
-                if (provider === 'openrouter' && elements.openrouterModelInput) {
-                    settings[key] = elements.openrouterModelInput.value.trim();
-                } else if (elements.modelNameSelect) {
-                    settings[key] = elements.modelNameSelect.value.trim();
-                }
+                const modelRef = this.decodeModelRefValue(elements.modelNameSelect?.value || '');
+                settings[key] = modelRef?.modelName || state.settings.modelName || DEFAULT_MODEL;
             } else if (key === 'apiConfigId') {
                 settings[key] = state.settings.apiConfigId || state.activeProfile?.settings?.apiConfigId || this.getDefaultApiConfigIdForProvider(settings.apiProvider || state.settings.apiProvider || 'gemini');
+            } else if (key === 'thoughtTranslationModel') {
+                const modelRef = this.decodeModelRefValue(elements.thoughtTranslationModelSelect?.value || '');
+                settings[key] = modelRef?.modelName || state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite';
+            } else if (key === 'proofreadingModelName') {
+                const modelRef = this.decodeModelRefValue(elements.proofreadingModelNameSelect?.value || '');
+                settings[key] = modelRef?.modelName || state.settings.proofreadingModelName || 'gemini-2.5-flash';
+            } else if (key === 'summaryModelName') {
+                const modelRef = this.decodeModelRefValue(elements.summaryModelNameSelect?.value || '');
+                settings[key] = modelRef?.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
             } else {
                 const element = elements[key + 'Input'] || elements[key + 'Select'] || elements[key + 'Textarea'];
                 if (element) settings[key] = element.value.trim();
             }
+        });
+        modelRefKeys.forEach(key => {
+            const selectByKey = {
+                defaultModelRef: elements.modelNameSelect,
+                thoughtTranslationModelRef: elements.thoughtTranslationModelSelect,
+                summaryModelRef: elements.summaryModelNameSelect
+            };
+            const ref = this.decodeModelRefValue(selectByKey[key]?.value || '');
+            if (ref) settings[key] = ref;
         });
         
         numberKeys.forEach(key => {
@@ -10672,12 +10879,12 @@ const appLogic = {
         }
         this.updateBasicApiConfigNameInput(provider);
         
-        // モデル選択UIの表示/非表示（OpenRouterはテキスト入力、その他はセレクトボックス）
+        // 基本モデルはAPI設定由来の候補を表示するため、プロバイダーに関係なく常時表示する。
         if (elements.modelNameLabel) {
-            elements.modelNameLabel.classList.toggle('hidden', isOpenRouter);
+            elements.modelNameLabel.classList.remove('hidden');
         }
         if (elements.modelNameSelect) {
-            elements.modelNameSelect.classList.toggle('hidden', isOpenRouter);
+            elements.modelNameSelect.classList.remove('hidden');
         }
         if (elements.openrouterModelInputContainer) {
             elements.openrouterModelInputContainer.classList.toggle('hidden', !isOpenRouter);
@@ -10707,102 +10914,11 @@ const appLogic = {
 
     // プロバイダーに応じたモデルリストの更新
     updateModelOptions(provider) {
-        // OpenRouterの場合はテキスト入力を使用するためセレクトボックスの更新は不要
-        if (provider === 'openrouter') {
-            // テキストボックスに現在のモデル名を設定
-            if (elements.openrouterModelInput) {
-                const currentModel = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
-                elements.openrouterModelInput.value = currentModel;
-            }
-            uiUtils.updateOpenRouterModelChoices();
-            uiUtils.updateUserModelOptions();
-            // モデル警告メッセージとAPI使用状況の更新
-            uiUtils.updateModelWarningMessage();
-            this.updateApiUsageUI();
-            return;
+        if (elements.openrouterModelInput) {
+            elements.openrouterModelInput.value = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
         }
-        
-        const modelSelect = elements.modelNameSelect;
-        if (!modelSelect) return;
-        
-        // 既存のオプションをクリア（ユーザー指定モデルグループを除く）
-        const userDefinedGroup = elements.userDefinedModelsGroup;
-        const currentValue = state.settings.modelName || modelSelect.value;
-        
-        // すべてのoptgroupとoptionを削除（ユーザー指定グループを除く）
-        const optgroups = Array.from(modelSelect.querySelectorAll('optgroup'));
-        optgroups.forEach(group => {
-            if (group.id !== 'user-defined-models-group') {
-                group.remove();
-            }
-        });
-        
-        const options = Array.from(modelSelect.querySelectorAll('option:not([data-user-defined])'));
-        options.forEach(option => option.remove());
-        
-        // プロバイダーに応じたモデルリストを追加
-        let models;
-        if (provider === 'zai') {
-            models = ZAI_MODELS;
-        } else if (provider === 'bedrock') {
-            models = BEDROCK_MODELS;
-        } else {
-            models = GEMINI_MODELS;
-        }
-        
-        const groups = {};
-        
-        models.forEach(model => {
-            if (model.group) {
-                // グループ化されたモデル
-                if (!groups[model.group]) {
-                    const optgroup = document.createElement('optgroup');
-                    optgroup.label = model.group;
-                    modelSelect.appendChild(optgroup);
-                    groups[model.group] = optgroup;
-                }
-                const option = document.createElement('option');
-                option.value = model.value;
-                option.textContent = model.label;
-                groups[model.group].appendChild(option);
-            } else {
-                // 通常のモデル
-                const option = document.createElement('option');
-                option.value = model.value;
-                option.textContent = model.label;
-                modelSelect.appendChild(option);
-            }
-        });
-        
-        // ユーザー指定モデルグループを最後に追加
-        if (userDefinedGroup && userDefinedGroup.parentNode !== modelSelect) {
-            modelSelect.appendChild(userDefinedGroup);
-        }
-        
-        // 現在の値が新しいリストに含まれているか確認
-        const userDefinedValues = userDefinedGroup
-            ? Array.from(userDefinedGroup.querySelectorAll('option')).map(option => option.value)
-            : [];
-        const availableValues = [...models.map(m => m.value), ...userDefinedValues];
-        if (availableValues.includes(currentValue)) {
-            modelSelect.value = currentValue;
-        } else {
-            // デフォルトモデルを設定
-            let defaultModel;
-            if (provider === 'zai') {
-                defaultModel = DEFAULT_ZAI_MODEL;
-            } else if (provider === 'openrouter') {
-                defaultModel = DEFAULT_OPENROUTER_MODEL;
-            } else if (provider === 'bedrock') {
-                defaultModel = DEFAULT_BEDROCK_MODEL;
-            } else {
-                defaultModel = DEFAULT_MODEL;
-            }
-            modelSelect.value = defaultModel;
-        }
-        
-        // モデル警告メッセージを更新
         uiUtils.updateUserModelOptions();
+        uiUtils.updateOpenRouterModelChoices();
         uiUtils.updateModelWarningMessage();
         this.updateApiUsageUI();
     },
@@ -12040,6 +12156,36 @@ const appLogic = {
                         state.settings[key] = value;
                         state.activeProfile.settings[key] = value;
 
+                        const modelRefKeyBySetting = {
+                            modelName: 'defaultModelRef',
+                            thoughtTranslationModel: 'thoughtTranslationModelRef',
+                            summaryModelName: 'summaryModelRef'
+                        };
+                        const modelRefKey = modelRefKeyBySetting[key];
+                        if (modelRefKey && element?.value) {
+                            const modelRef = this.decodeModelRefValue(element.value);
+                            if (modelRef) {
+                                state.settings[modelRefKey] = modelRef;
+                                state.activeProfile.settings[modelRefKey] = modelRef;
+                                if (key === 'modelName') {
+                                    const selectedConfig = this.getApiConfigById(modelRef.apiConfigId);
+                                    if (selectedConfig) {
+                                        state.settings.apiConfigId = selectedConfig.id;
+                                        state.settings.apiProvider = selectedConfig.provider;
+                                        state.activeProfile.settings.apiConfigId = selectedConfig.id;
+                                        state.activeProfile.settings.apiProvider = selectedConfig.provider;
+                                        if (elements.apiProviderSelect) {
+                                            elements.apiProviderSelect.value = selectedConfig.provider;
+                                        }
+                                        if (elements.openrouterModelInput) {
+                                            elements.openrouterModelInput.value = modelRef.modelName;
+                                        }
+                                        this.updateProviderUI(selectedConfig.provider);
+                                    }
+                                }
+                            }
+                        }
+
                         await dbUtils.updateProfile(state.activeProfile);
                         appLogic.markAsDirtyAndSchedulePush('structural');
                     }
@@ -12104,12 +12250,8 @@ const appLogic = {
                     this.updateApiUsageUI(); // onUpdateに統合
                 },
                 getValue: () => {
-                    // OpenRouter選択時はテキスト入力から取得
-                    const provider = state.settings.apiProvider || 'gemini';
-                    if (provider === 'openrouter' && elements.openrouterModelInput) {
-                        return elements.openrouterModelInput.value.trim();
-                    }
-                    return elements.modelNameSelect ? elements.modelNameSelect.value.trim() : '';
+                    const modelRef = this.decodeModelRefValue(elements.modelNameSelect?.value || '');
+                    return modelRef?.modelName || '';
                 }
             },
             systemPrompt: { element: elements.systemPromptDefaultTextarea, event: 'input' },
@@ -12120,18 +12262,20 @@ const appLogic = {
             thinkingBudget: { element: elements.thinkingBudgetInput, event: 'input' },
             includeThoughts: { element: elements.includeThoughtsToggle, event: 'change' },
             enableThoughtTranslation: { element: elements.enableThoughtTranslationCheckbox, event: 'change' },
-            thoughtTranslationModel: { element: elements.thoughtTranslationModelSelect, event: 'change' },
+            thoughtTranslationModel: {
+                element: elements.thoughtTranslationModelSelect,
+                event: 'change',
+                getValue: () => {
+                    const modelRef = this.decodeModelRefValue(elements.thoughtTranslationModelSelect?.value || '');
+                    return modelRef?.modelName || '';
+                }
+            },
             dummyUser: { element: elements.dummyUserInput, event: 'input' },
             applyDummyToProofread: { element: elements.applyDummyToProofreadCheckbox, event: 'change' },
             applyDummyToTranslate: { element: elements.applyDummyToTranslateCheckbox, event: 'change' },
             dummyModel: { element: elements.dummyModelInput, event: 'input' },
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
-            additionalModels: { element: elements.additionalModelsTextarea, event: 'input', onUpdate: () => uiUtils.updateUserModelOptions() },
-            additionalOpenRouterModels: { element: elements.additionalOpenRouterModelsTextarea, event: 'input', onUpdate: () => {
-                uiUtils.updateOpenRouterModelChoices();
-                uiUtils.updateUserModelOptions();
-            } },
             enterToSend: { element: elements.enterToSendCheckbox, event: 'change' },
             historySortOrder: { element: elements.historySortOrderSelect, event: 'change' },
             themeSettingsProfileScoped: { element: elements.themeSettingsProfileScopedToggle, event: 'change' },
@@ -12173,7 +12317,14 @@ const appLogic = {
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
             enableSwipeNavigation: { element: elements.swipeNavigationToggle, event: 'change' },
             enableProofreading: { element: elements.enableProofreadingCheckbox, event: 'change' },
-            proofreadingModelName: { element: elements.proofreadingModelNameSelect, event: 'change' },
+            proofreadingModelName: {
+                element: elements.proofreadingModelNameSelect,
+                event: 'change',
+                getValue: () => {
+                    const modelRef = this.decodeModelRefValue(elements.proofreadingModelNameSelect?.value || '');
+                    return modelRef?.modelName || '';
+                }
+            },
             proofreadingSystemInstruction: { element: elements.proofreadingSystemInstructionTextarea, event: 'input' },
             enableAutoRetry: { element: elements.enableAutoRetryCheckbox, event: 'change' },
             maxRetries: { element: elements.maxRetriesInput, event: 'input' },
@@ -12206,7 +12357,14 @@ const appLogic = {
             memoryAutoSaveInterval: { element: elements.memoryAutoSaveIntervalSelect, event: 'change' },
             headerAutoHide: { element: elements.headerAutoHideToggle, event: 'change', onUpdate: (value) => document.body.classList.toggle('header-auto-hide', value) },
             dropboxSyncFrequency: { element: elements.dropboxSyncFrequencySelect, event: 'change' },
-            summaryModelName: { element: elements.summaryModelNameSelect, event: 'change' },
+            summaryModelName: {
+                element: elements.summaryModelNameSelect,
+                event: 'change',
+                getValue: () => {
+                    const modelRef = this.decodeModelRefValue(elements.summaryModelNameSelect?.value || '');
+                    return modelRef?.modelName || '';
+                }
+            },
             summarySystemPrompt: { element: elements.summarySystemPromptTextarea, event: 'input' },
             enableSummaryButton: { element: elements.enableSummaryButtonToggle, event: 'change', onUpdate: () => this.toggleSummaryButtonVisibility() },
             dropboxAppKey: { element: elements.dropboxAppKeyInput, event: 'change', onUpdate: (value) => {
@@ -12254,11 +12412,6 @@ const appLogic = {
                 const configId = button.dataset.apiConfigId;
                 if (button.dataset.action === 'edit-api-config') {
                     this.openApiConfigDialog(configId);
-                } else if (button.dataset.action === 'delete-api-config') {
-                    this.deleteApiConfig(configId).catch(error => {
-                        console.error('[ApiConfig] API設定の削除に失敗しました:', error);
-                        uiUtils.showCustomAlert('API設定を削除できませんでした。');
-                    });
                 }
             });
         }
@@ -12276,6 +12429,23 @@ const appLogic = {
             elements.cancelApiConfigBtn.addEventListener('click', () => this.closeApiConfigDialog());
         }
 
+        if (elements.deleteApiConfigDialogBtn) {
+            elements.deleteApiConfigDialogBtn.addEventListener('click', () => {
+                const configId = elements.deleteApiConfigDialogBtn.dataset.apiConfigId;
+                if (!configId) return;
+                this.deleteApiConfig(configId)
+                    .then(() => {
+                        if (!this.getApiConfigById(configId)) {
+                            this.closeApiConfigDialog();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('[ApiConfig] API設定の削除に失敗しました:', error);
+                        uiUtils.showCustomAlert('API設定を削除できませんでした。');
+                    });
+            });
+        }
+
         if (elements.apiConfigProviderSelect) {
             elements.apiConfigProviderSelect.addEventListener('change', () => this.updateApiConfigDialogDefaultsForProvider());
         }
@@ -12283,14 +12453,14 @@ const appLogic = {
         if (elements.basicApiConfigNameInput) {
             elements.basicApiConfigNameInput.addEventListener('change', () => {
                 this.saveBasicApiConfigName().catch(error => {
-                    console.error('[ApiConfig] 基本設定のAPI設定表示名保存に失敗しました:', error);
-                    uiUtils.showCustomAlert('API設定表示名を保存できませんでした。');
+                    console.error('[ApiConfig] 基本設定の表示名保存に失敗しました:', error);
+                    uiUtils.showCustomAlert('表示名を保存できませんでした。');
                 });
             });
             elements.basicApiConfigNameInput.addEventListener('blur', () => {
                 this.saveBasicApiConfigName().catch(error => {
-                    console.error('[ApiConfig] 基本設定のAPI設定表示名保存に失敗しました:', error);
-                    uiUtils.showCustomAlert('API設定表示名を保存できませんでした。');
+                    console.error('[ApiConfig] 基本設定の表示名保存に失敗しました:', error);
+                    uiUtils.showCustomAlert('表示名を保存できませんでした。');
                 });
             });
         }
@@ -12386,7 +12556,9 @@ const appLogic = {
     
         elements.includeThoughtsToggle.addEventListener('change', () => {
             const isEnabled = elements.includeThoughtsToggle.checked;
-            elements.thoughtTranslationOptionsDiv.classList.toggle('hidden', !isEnabled);
+            if (elements.thoughtTranslationOptionsDiv) {
+                elements.thoughtTranslationOptionsDiv.classList.toggle('hidden', !isEnabled);
+            }
         });
         
         elements.enableApiTimeoutCheckbox.addEventListener('change', () => {
