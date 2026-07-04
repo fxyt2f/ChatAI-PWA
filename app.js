@@ -53,6 +53,31 @@ const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
+const API_CONFIG_MIGRATION_KEY = 'apiConfigsMigratedV1310';
+const API_CONFIG_DEFAULT_IDS = {
+    gemini: 'api_gemini_default',
+    openrouter: 'api_openrouter_default',
+    zai: 'api_zai_default',
+    bedrock: 'api_bedrock_default'
+};
+const API_CONFIG_PROVIDER_NAMES = {
+    gemini: 'Gemini',
+    openrouter: 'OpenRouter',
+    zai: 'Z.ai',
+    bedrock: 'Amazon Bedrock'
+};
+const API_CONFIG_LEGACY_SYNC_KEYS = new Set([
+    'apiProvider',
+    'apiKey',
+    'zaiApiKey',
+    'openrouterApiKey',
+    'bedrockAccessKey',
+    'bedrockSecretKey',
+    'bedrockRegion',
+    'modelName',
+    'additionalModels',
+    'additionalOpenRouterModels'
+]);
 const LIGHT_THEME_COLOR = '#1976d2';
 const DARK_THEME_COLOR = '#007aff';
 const DEFAULT_ACCENT_COLOR = '#1976d2';
@@ -89,8 +114,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.30.6";
-const APP_CACHE_VERSION = "v1.30.6-fix4";
+const APP_VERSION = "1.31.0";
+const APP_CACHE_VERSION = "v1.31.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -642,6 +667,9 @@ const state = {
     imageUrlCache: new Map(),
     settings: {
         apiProvider: 'gemini', // 'gemini' | 'zai' | 'bedrock' | 'openrouter'
+        apiConfigs: [],
+        apiConfigsMigratedV1310: false,
+        apiConfigId: '',
         apiKey: '',
         zaiApiKey: '',
         openrouterApiKey: '',
@@ -752,6 +780,9 @@ Reason: [NGの場合の理由]`,
     themeSettingsProfileScoped: false,
     hasSavedLocalUiSettings: false,
     settingsScopeMigrationComplete: false,
+    apiConfigs: [],
+    activeApiConfig: null,
+    apiConfigsMigratedV1310: false,
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
@@ -1069,7 +1100,7 @@ const dbUtils = {
                             });
 
                                 const profileSettingKeys = [
-                                'apiProvider', 'apiKey', 'zaiApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 
+                                'apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion',
                                 'modelName', 'systemPrompt', 'temperature', 'maxTokens', 'topK', 'topP',
                                 'presencePenalty', 'frequencyPenalty', 'thinkingBudget', 'includeThoughts',
                                 'enableThoughtTranslation', 'thoughtTranslationModel', 'dummyUser',
@@ -8600,6 +8631,8 @@ const appLogic = {
 
     getSharedProfileSettings(settings = {}) {
         const sharedSettings = { ...settings };
+        delete sharedSettings.apiConfigs;
+        delete sharedSettings.apiConfigsMigratedV1310;
         delete sharedSettings.localUiSettings;
         delete sharedSettings.globalOtherSettings;
         delete sharedSettings.globalThemeSettings;
@@ -8607,6 +8640,289 @@ const appLogic = {
         LOCAL_UI_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
         GLOBAL_OTHER_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
         return sharedSettings;
+    },
+
+    normalizeApiProvider(provider) {
+        const normalized = typeof provider === 'string' ? provider.trim().toLowerCase() : '';
+        return ['gemini', 'openrouter', 'zai', 'bedrock'].includes(normalized) ? normalized : 'gemini';
+    },
+
+    getDefaultApiConfigIdForProvider(provider = 'gemini') {
+        return API_CONFIG_DEFAULT_IDS[this.normalizeApiProvider(provider)] || API_CONFIG_DEFAULT_IDS.gemini;
+    },
+
+    getProviderDisplayName(provider = 'gemini') {
+        return API_CONFIG_PROVIDER_NAMES[this.normalizeApiProvider(provider)] || API_CONFIG_PROVIDER_NAMES.gemini;
+    },
+
+    createLegacyApiConfig(provider = 'gemini', sourceSettings = {}) {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        const now = Date.now();
+        const config = {
+            id: this.getDefaultApiConfigIdForProvider(normalizedProvider),
+            name: `${this.getProviderDisplayName(normalizedProvider)} 既定`,
+            provider: normalizedProvider,
+            apiKey: '',
+            baseUrl: '',
+            defaultModel: '',
+            additionalModels: '',
+            enabled: true,
+            createdAt: now,
+            updatedAt: now
+        };
+
+        if (normalizedProvider === 'gemini') {
+            config.apiKey = sourceSettings.apiKey || '';
+            config.defaultModel = sourceSettings.apiProvider === 'gemini' ? (sourceSettings.modelName || DEFAULT_MODEL) : DEFAULT_MODEL;
+            config.additionalModels = sourceSettings.additionalModels || '';
+        } else if (normalizedProvider === 'openrouter') {
+            config.apiKey = sourceSettings.openrouterApiKey || '';
+            config.baseUrl = 'https://openrouter.ai/api/v1';
+            config.defaultModel = sourceSettings.apiProvider === 'openrouter' ? (sourceSettings.modelName || DEFAULT_OPENROUTER_MODEL) : DEFAULT_OPENROUTER_MODEL;
+            config.additionalModels = sourceSettings.additionalOpenRouterModels || '';
+        } else if (normalizedProvider === 'zai') {
+            config.apiKey = sourceSettings.zaiApiKey || '';
+            config.baseUrl = 'https://api.z.ai/api/paas/v4';
+            config.defaultModel = sourceSettings.apiProvider === 'zai' ? (sourceSettings.modelName || DEFAULT_ZAI_MODEL) : DEFAULT_ZAI_MODEL;
+        } else if (normalizedProvider === 'bedrock') {
+            config.apiKey = sourceSettings.bedrockAccessKey || '';
+            config.defaultModel = sourceSettings.apiProvider === 'bedrock' ? (sourceSettings.modelName || '') : '';
+            config.bedrockAccessKey = sourceSettings.bedrockAccessKey || '';
+            config.bedrockSecretKey = sourceSettings.bedrockSecretKey || '';
+            config.bedrockRegion = sourceSettings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+        }
+
+        return config;
+    },
+
+    normalizeApiConfig(config = {}) {
+        const provider = this.normalizeApiProvider(config.provider);
+        const fallback = this.createLegacyApiConfig(provider, {});
+        const id = typeof config.id === 'string' && config.id.trim()
+            ? config.id.trim()
+            : this.getDefaultApiConfigIdForProvider(provider);
+        const createdAt = Number.isFinite(Number(config.createdAt)) ? Number(config.createdAt) : Date.now();
+        const updatedAt = Number.isFinite(Number(config.updatedAt)) ? Number(config.updatedAt) : createdAt;
+        return {
+            ...config,
+            id,
+            name: typeof config.name === 'string' && config.name.trim() ? config.name.trim() : fallback.name,
+            provider,
+            apiKey: typeof config.apiKey === 'string' ? config.apiKey : '',
+            baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : fallback.baseUrl,
+            defaultModel: typeof config.defaultModel === 'string' ? config.defaultModel : fallback.defaultModel,
+            additionalModels: typeof config.additionalModels === 'string' ? config.additionalModels : '',
+            enabled: config.enabled !== false,
+            createdAt,
+            updatedAt
+        };
+    },
+
+    normalizeApiConfigs(configs = []) {
+        const result = [];
+        const seenIds = new Set();
+        (Array.isArray(configs) ? configs : []).forEach(config => {
+            const normalized = this.normalizeApiConfig(config);
+            if (!normalized.id || seenIds.has(normalized.id)) return;
+            seenIds.add(normalized.id);
+            result.push(normalized);
+        });
+        return result;
+    },
+
+    getApiConfigById(id) {
+        if (!id) return null;
+        const configs = this.normalizeApiConfigs(state.settings.apiConfigs || state.apiConfigs || []);
+        return configs.find(config => config.id === id) || null;
+    },
+
+    getDefaultApiConfigForProvider(provider = 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        const defaultId = this.getDefaultApiConfigIdForProvider(normalizedProvider);
+        const configs = this.normalizeApiConfigs(state.settings.apiConfigs || state.apiConfigs || []);
+        return configs.find(config => config.id === defaultId)
+            || configs.find(config => config.provider === normalizedProvider && config.enabled)
+            || null;
+    },
+
+    resolveApiConfigForProfile(profile = state.activeProfile) {
+        const profileSettings = profile?.settings || {};
+        const configById = this.getApiConfigById(profileSettings.apiConfigId || state.settings.apiConfigId);
+        if (configById) return configById;
+
+        const provider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
+        const providerConfig = this.getDefaultApiConfigForProvider(provider);
+        if (providerConfig) return providerConfig;
+
+        const fallbackConfig = this.getDefaultApiConfigForProvider('gemini');
+        if (fallbackConfig) return fallbackConfig;
+
+        return this.createLegacyApiConfig(provider, { ...state.settings, ...profileSettings });
+    },
+
+    getActiveApiConfig() {
+        return this.resolveApiConfigForProfile(state.activeProfile);
+    },
+
+    collectLegacyApiConfigSources() {
+        const sources = [{ ...state.settings, ...(state.activeProfile?.settings || {}) }];
+        (state.profiles || []).forEach(profile => {
+            if (profile?.settings) sources.push(profile.settings);
+        });
+        return sources;
+    },
+
+    findLegacyApiSourceForProvider(provider, sources = this.collectLegacyApiConfigSources()) {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        return sources.find(settings => settings?.apiProvider === normalizedProvider)
+            || sources.find(settings => {
+                if (normalizedProvider === 'gemini') return Boolean(settings?.apiKey || settings?.additionalModels);
+                if (normalizedProvider === 'openrouter') return Boolean(settings?.openrouterApiKey || settings?.additionalOpenRouterModels);
+                if (normalizedProvider === 'zai') return Boolean(settings?.zaiApiKey);
+                if (normalizedProvider === 'bedrock') return Boolean(settings?.bedrockAccessKey || settings?.bedrockSecretKey || settings?.bedrockRegion);
+                return false;
+            })
+            || sources[0]
+            || {};
+    },
+
+    shouldCreateApiConfigForProvider(provider, sources = this.collectLegacyApiConfigSources()) {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        if (normalizedProvider === 'gemini') return true;
+        return sources.some(settings => {
+            if (!settings) return false;
+            if (settings.apiProvider === normalizedProvider) return true;
+            if (normalizedProvider === 'openrouter') return Boolean(settings.openrouterApiKey || settings.additionalOpenRouterModels);
+            if (normalizedProvider === 'zai') return Boolean(settings.zaiApiKey);
+            if (normalizedProvider === 'bedrock') return Boolean(settings.bedrockAccessKey || settings.bedrockSecretKey || settings.bedrockRegion);
+            return false;
+        });
+    },
+
+    ensureDefaultApiConfigs(existingConfigs = state.settings.apiConfigs || state.apiConfigs || []) {
+        const sources = this.collectLegacyApiConfigSources();
+        const configs = this.normalizeApiConfigs(existingConfigs);
+        const existingIds = new Set(configs.map(config => config.id));
+        ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
+            const defaultId = this.getDefaultApiConfigIdForProvider(provider);
+            if (existingIds.has(defaultId)) return;
+            if (!this.shouldCreateApiConfigForProvider(provider, sources)) return;
+            const source = this.findLegacyApiSourceForProvider(provider, sources);
+            configs.push(this.createLegacyApiConfig(provider, source));
+            existingIds.add(defaultId);
+        });
+        return this.normalizeApiConfigs(configs);
+    },
+
+    inferApiConfigIdForProfile(profile = state.activeProfile) {
+        const settings = profile?.settings || {};
+        const existing = this.getApiConfigById(settings.apiConfigId);
+        if (existing) return existing.id;
+        const provider = settings.apiProvider || state.settings.apiProvider || 'gemini';
+        const providerConfig = this.getDefaultApiConfigForProvider(provider);
+        return providerConfig?.id || this.getDefaultApiConfigIdForProvider(provider);
+    },
+
+    syncActiveApiConfigState() {
+        state.apiConfigs = this.normalizeApiConfigs(state.settings.apiConfigs || state.apiConfigs || []);
+        state.settings.apiConfigs = state.apiConfigs;
+        state.activeApiConfig = this.getActiveApiConfig();
+        if (state.activeApiConfig && state.activeProfile?.settings) {
+            state.settings.apiConfigId = state.activeApiConfig.id;
+        }
+    },
+
+    async setActiveProfileApiConfigIdForProvider(provider = state.settings.apiProvider || 'gemini') {
+        if (!state.activeProfile?.settings) return null;
+        const config = this.getDefaultApiConfigForProvider(provider)
+            || this.createLegacyApiConfig(provider, state.settings);
+        state.settings.apiConfigId = config.id;
+        state.activeProfile.settings.apiConfigId = config.id;
+        state.activeApiConfig = config;
+        await dbUtils.updateProfile(state.activeProfile);
+        this.markAsDirtyAndSchedulePush('structural');
+        return config;
+    },
+
+    async syncDefaultApiConfigFromLegacySettings(provider = state.settings.apiProvider || 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        const defaultId = this.getDefaultApiConfigIdForProvider(normalizedProvider);
+        const configs = this.ensureDefaultApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const index = configs.findIndex(config => config.id === defaultId);
+        if (index === -1) return null;
+
+        const previous = configs[index];
+        const legacyConfig = this.createLegacyApiConfig(normalizedProvider, state.settings);
+        const next = this.normalizeApiConfig({
+            ...previous,
+            apiKey: legacyConfig.apiKey,
+            baseUrl: legacyConfig.baseUrl || previous.baseUrl,
+            defaultModel: legacyConfig.defaultModel || previous.defaultModel,
+            additionalModels: legacyConfig.additionalModels,
+            bedrockAccessKey: legacyConfig.bedrockAccessKey || previous.bedrockAccessKey,
+            bedrockSecretKey: legacyConfig.bedrockSecretKey || previous.bedrockSecretKey,
+            bedrockRegion: legacyConfig.bedrockRegion || previous.bedrockRegion,
+            updatedAt: Date.now()
+        });
+
+        if (JSON.stringify(previous) === JSON.stringify(next)) return next;
+        configs[index] = next;
+        await this.saveApiConfigs(configs);
+        this.syncActiveApiConfigState();
+        this.markAsDirtyAndSchedulePush('structural');
+        return next;
+    },
+
+    async saveApiConfigs(configs = state.apiConfigs) {
+        state.apiConfigs = this.normalizeApiConfigs(configs);
+        state.settings.apiConfigs = state.apiConfigs;
+        await dbUtils.saveSetting('apiConfigs', state.apiConfigs);
+    },
+
+    async ensureApiConfigsMigrationV1310() {
+        const beforeConfigs = this.normalizeApiConfigs(state.settings.apiConfigs || state.apiConfigs || []);
+        const nextConfigs = this.ensureDefaultApiConfigs(beforeConfigs);
+        const beforeJson = JSON.stringify(beforeConfigs);
+        const nextJson = JSON.stringify(nextConfigs);
+        let changed = beforeJson !== nextJson;
+
+        state.apiConfigs = nextConfigs;
+        state.settings.apiConfigs = nextConfigs;
+
+        const defaultGeminiId = this.getDefaultApiConfigIdForProvider('gemini');
+        for (const profile of state.profiles || []) {
+            if (!profile.settings) profile.settings = {};
+            const currentId = profile.settings.apiConfigId;
+            const resolvedId = this.inferApiConfigIdForProfile(profile) || defaultGeminiId;
+            if (!currentId || !this.getApiConfigById(currentId)) {
+                profile.settings.apiConfigId = resolvedId;
+                try {
+                    await dbUtils.updateProfile(profile);
+                    changed = true;
+                } catch (error) {
+                    console.error(`[ApiConfigMigration] プロファイル(ID: ${profile.id})のapiConfigId補完に失敗しました:`, error);
+                }
+            }
+        }
+
+        if (state.activeProfile?.settings) {
+            const latestActiveProfile = state.profiles.find(profile => profile.id === state.activeProfileId);
+            if (latestActiveProfile) {
+                state.activeProfile = latestActiveProfile;
+                state.settings.apiConfigId = latestActiveProfile.settings?.apiConfigId || defaultGeminiId;
+            }
+        }
+
+        if (changed || !state.apiConfigsMigratedV1310) {
+            await this.saveApiConfigs(nextConfigs);
+            await dbUtils.saveSetting(API_CONFIG_MIGRATION_KEY, true);
+            state.apiConfigsMigratedV1310 = true;
+            state.settings.apiConfigsMigratedV1310 = true;
+            this.markAsDirtyAndSchedulePush('structural');
+            console.log("[ApiConfigMigration] v1.31.0 API設定リスト移行を保存しました。", nextConfigs);
+        }
+
+        this.syncActiveApiConfigState();
     },
 
     normalizeGlobalOtherSettings(settings = {}) {
@@ -9286,11 +9602,18 @@ const appLogic = {
             state.themeSettingsProfileScoped = (await dbUtils.getSetting('themeSettingsProfileScoped'))?.value === true;
             state.settings.themeSettingsProfileScoped = state.themeSettingsProfileScoped;
             state.settingsScopeMigrationComplete = (await dbUtils.getSetting('settingsScopeMigration_v1_30_1_complete'))?.value === true;
+            const storedApiConfigs = await dbUtils.getSetting('apiConfigs');
+            state.apiConfigs = this.normalizeApiConfigs(storedApiConfigs?.value || state.settings.apiConfigs || []);
+            state.settings.apiConfigs = state.apiConfigs;
+            state.apiConfigsMigratedV1310 = (await dbUtils.getSetting(API_CONFIG_MIGRATION_KEY))?.value === true;
+            state.settings.apiConfigsMigratedV1310 = state.apiConfigsMigratedV1310;
             console.log("[GlobalSettings] グローバルその他設定/テーマ設定を読み込みました:", {
                 globalOtherSettings: state.globalOtherSettings,
                 globalThemeSettings: state.globalThemeSettings,
                 themeSettingsProfileScoped: state.themeSettingsProfileScoped,
-                settingsScopeMigrationComplete: state.settingsScopeMigrationComplete
+                settingsScopeMigrationComplete: state.settingsScopeMigrationComplete,
+                apiConfigs: state.apiConfigs,
+                apiConfigsMigratedV1310: state.apiConfigsMigratedV1310
             });
         } catch (error) {
             console.error("[GlobalSettings] 共通設定の読み込み中にエラーが発生しました:", error);
@@ -9326,6 +9649,8 @@ const appLogic = {
             }
             
             console.log(`[Profile] ${state.profiles.length}件のプロファイルを読み込みました。アクティブID: ${state.activeProfileId}`);
+            this.applyActiveProfile();
+            await this.ensureApiConfigsMigrationV1310();
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
 
@@ -9370,9 +9695,12 @@ const appLogic = {
 
             // 3. state.settings を更新する
             state.settings = newSettings;
+            state.settings.apiConfigs = state.apiConfigs;
+            state.settings.apiConfigsMigratedV1310 = state.apiConfigsMigratedV1310;
             this.applyGlobalOtherSettingsToEffectiveSettings();
             this.applyThemeScopeToEffectiveSettings(loadedProfileSettings);
             this.applyLocalUiSettingsToEffectiveSettings();
+            this.syncActiveApiConfigState();
 
             uiUtils.applySettingsToUI(); 
             uiUtils.updateProfileCardUI();
@@ -9547,7 +9875,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -9567,6 +9895,8 @@ const appLogic = {
                 } else if (elements.modelNameSelect) {
                     settings[key] = elements.modelNameSelect.value.trim();
                 }
+            } else if (key === 'apiConfigId') {
+                settings[key] = state.settings.apiConfigId || state.activeProfile?.settings?.apiConfigId || this.getDefaultApiConfigIdForProvider(settings.apiProvider || state.settings.apiProvider || 'gemini');
             } else {
                 const element = elements[key + 'Input'] || elements[key + 'Select'] || elements[key + 'Textarea'];
                 if (element) settings[key] = element.value.trim();
@@ -10008,6 +10338,8 @@ const appLogic = {
             state.settings.apiProvider = 'gemini';
             if (state.activeProfile && state.activeProfile.settings) {
                 state.activeProfile.settings.apiProvider = 'gemini';
+                state.activeProfile.settings.apiConfigId = this.getDefaultApiConfigIdForProvider('gemini');
+                state.settings.apiConfigId = state.activeProfile.settings.apiConfigId;
                 dbUtils.updateProfile(state.activeProfile)
                     .then(() => this.markAsDirtyAndSchedulePush('structural'))
                     .catch(error => console.error("[Settings] APIプロバイダーの同期更新に失敗しました:", error));
@@ -11360,6 +11692,10 @@ const appLogic = {
                         appLogic.markAsDirtyAndSchedulePush('structural');
                     }
 
+                    if (API_CONFIG_LEGACY_SYNC_KEYS.has(key)) {
+                        await this.syncDefaultApiConfigFromLegacySettings(state.settings.apiProvider || 'gemini');
+                    }
+
                     if (onUpdate) {
                         onUpdate(value);
                     }
@@ -11389,11 +11725,15 @@ const appLogic = {
                         if (elements.apiProviderSelect) {
                             elements.apiProviderSelect.value = fallbackProvider;
                         }
+                        this.setActiveProfileApiConfigIdForProvider(fallbackProvider)
+                            .catch(error => console.error("[ApiConfig] Gemini既定API設定IDへの補正に失敗しました:", error));
                         this.updateProviderUI(fallbackProvider);
                         this.updateModelOptions(fallbackProvider);
                         uiUtils.showCustomAlert("デバッグモードが無効のため、このプロバイダーは選択できません。Geminiに戻しました。");
                         return;
                     }
+                    this.setActiveProfileApiConfigIdForProvider(value)
+                        .catch(error => console.error("[ApiConfig] APIプロバイダー変更時のapiConfigId更新に失敗しました:", error));
                     this.updateProviderUI(value);
                     this.updateModelOptions(value);
                 }
@@ -11465,6 +11805,8 @@ const appLogic = {
                     if (elements.apiProviderSelect) {
                         elements.apiProviderSelect.value = fallbackProvider;
                     }
+                    this.setActiveProfileApiConfigIdForProvider(fallbackProvider)
+                        .catch(error => console.error("[ApiConfig] デバッグモードOFF時のapiConfigId更新に失敗しました:", error));
                     this.updateProviderUI(fallbackProvider);
                     this.updateModelOptions(fallbackProvider);
                     uiUtils.showCustomAlert("デバッグモードを無効にしたため、APIプロバイダーをGeminiに戻しました。");
@@ -11574,6 +11916,7 @@ const appLogic = {
                 state.settings.modelName = value;
                 state.activeProfile.settings.modelName = value;
                 await dbUtils.updateProfile(state.activeProfile);
+                await this.syncDefaultApiConfigFromLegacySettings('openrouter');
                 appLogic.markAsDirtyAndSchedulePush('structural');
                 uiUtils.updateOpenRouterModelOptions();
                 uiUtils.updateUserModelOptions();
@@ -11591,6 +11934,7 @@ const appLogic = {
                 if (state.activeProfile && state.activeProfile.settings) {
                     state.activeProfile.settings.modelName = value;
                     await dbUtils.updateProfile(state.activeProfile);
+                    await this.syncDefaultApiConfigFromLegacySettings('openrouter');
                     appLogic.markAsDirtyAndSchedulePush('structural');
                 }
                 uiUtils.updateOpenRouterModelOptions();

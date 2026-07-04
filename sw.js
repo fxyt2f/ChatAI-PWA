@@ -1,6 +1,6 @@
 // sw.js
 
-const CACHE_NAME = 'chatai-pwa-cache-v1.30.6-fix4'; // 更新後はここも変更
+const CACHE_NAME = 'chatai-pwa-cache-v1.31.0'; // 更新後はここも変更
 const urlsToCache = [
   './',
   './index.html',
