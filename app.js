@@ -60,6 +60,8 @@ const DEFAULT_THEME_COLOR_MODE = 'accent';
 const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
 const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
+const DEFAULT_SEND_BUTTON_COLOR = '#1976d2';
+const DEFAULT_OTHER_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
 const DEFAULT_GLOBAL_OTHER_SETTINGS = {
     enterToSend: true,
@@ -82,11 +84,13 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
     headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
     newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
+    sendButtonColor: DEFAULT_SEND_BUTTON_COLOR,
+    otherButtonColor: DEFAULT_OTHER_BUTTON_COLOR,
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.30.5";
-const APP_CACHE_VERSION = "v1.30.5";
+const APP_VERSION = "1.30.6";
+const APP_CACHE_VERSION = "v1.30.6-fix2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -465,10 +469,14 @@ try {
         headerTextColorModeSelect: document.getElementById('header-text-color-mode-select'),
         headerTextColorInput: document.getElementById('header-text-color-input'),
         newChatButtonColorInput: document.getElementById('new-chat-button-color-input'),
+        sendButtonColorInput: document.getElementById('send-button-color-input'),
+        otherButtonColorInput: document.getElementById('other-button-color-input'),
         userMessageColorInput: document.getElementById('user-message-color-input'),
         resetHeaderColorBtn: document.getElementById('reset-header-color-btn'),
         resetHeaderTextColorBtn: document.getElementById('reset-header-text-color-btn'),
         resetNewChatButtonColorBtn: document.getElementById('reset-new-chat-button-color-btn'),
+        resetSendButtonColorBtn: document.getElementById('reset-send-button-color-btn'),
+        resetOtherButtonColorBtn: document.getElementById('reset-other-button-color-btn'),
         resetUserMessageColorBtn: document.getElementById('reset-user-message-color-btn'),
         messageOpacitySlider: document.getElementById('message-opacity-slider'),
         messageOpacityValue:  document.getElementById('message-opacity-value'),
@@ -689,6 +697,8 @@ const state = {
         headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
         headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
         newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
+        sendButtonColor: DEFAULT_SEND_BUTTON_COLOR,
+        otherButtonColor: DEFAULT_OTHER_BUTTON_COLOR,
         userMessageColor: DEFAULT_USER_MESSAGE_COLOR,
         allowPromptUiChanges: true,
         forceFunctionCalling: false,
@@ -4382,6 +4392,20 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             : this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
     },
 
+    getEffectiveSendButtonColor() {
+        const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
+        return themeColorMode === 'accent'
+            ? this.getEffectiveAccentColor()
+            : this.getValidColor(state.settings.sendButtonColor, DEFAULT_SEND_BUTTON_COLOR);
+    },
+
+    getEffectiveOtherButtonColor() {
+        const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
+        return themeColorMode === 'accent'
+            ? this.getEffectiveAccentColor()
+            : this.getValidColor(state.settings.otherButtonColor, DEFAULT_OTHER_BUTTON_COLOR);
+    },
+
     getEffectiveUserMessageColor() {
         const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
         return themeColorMode === 'accent'
@@ -4428,6 +4452,33 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}, hover背景: ${hoverBackgroundColor}`);
     },
 
+    applySendButtonColor() {
+        const buttonColor = this.getEffectiveSendButtonColor();
+        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
+        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        this.setThemeCssVariable('--send-button-bg', buttonColor);
+        this.setThemeCssVariable('--send-button-icon', buttonTextColor);
+        this.setThemeCssVariable('--send-button-hover-bg', hoverBackgroundColor);
+        this.setThemeCssVariable('--send-button-hover-icon', hoverTextColor);
+        console.log(`送信ボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}, hover背景: ${hoverBackgroundColor}`);
+    },
+
+    applyOtherButtonColor() {
+        const buttonColor = this.getEffectiveOtherButtonColor();
+        const buttonTextColor = this.getReadableTextColor(buttonColor);
+        const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
+        const hoverTextColor = this.getReadableTextColor(hoverBackgroundColor);
+        this.setThemeCssVariable('--bg-button', buttonColor);
+        this.setThemeCssVariable('--bg-button-hover', hoverBackgroundColor);
+        this.setThemeCssVariable('--bg-button-update', buttonColor);
+        this.setThemeCssVariable('--bg-button-update-hover', hoverBackgroundColor);
+        this.setThemeCssVariable('--text-link', buttonColor);
+        this.setThemeCssVariable('--other-button-fg', buttonTextColor);
+        this.setThemeCssVariable('--other-button-hover-fg', hoverTextColor);
+        console.log(`その他ボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}, hover背景: ${hoverBackgroundColor}`);
+    },
+
     applyUserMessageColor() {
         const messageColor = this.getEffectiveUserMessageColor();
         const messageTextColor = this.getReadableTextColor(messageColor);
@@ -4439,6 +4490,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     applyThemeColorSettings() {
         this.applyHeaderColor();
         this.applyNewChatButtonColor();
+        this.applySendButtonColor();
+        this.applyOtherButtonColor();
         this.applyUserMessageColor();
         this.updateThemeColorModeControls();
     },
@@ -4466,10 +4519,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.headerColorInput,
             elements.headerTextColorModeSelect,
             elements.newChatButtonColorInput,
+            elements.sendButtonColorInput,
+            elements.otherButtonColorInput,
             elements.userMessageColorInput,
             elements.resetHeaderColorBtn,
             elements.resetHeaderTextColorBtn,
             elements.resetNewChatButtonColorBtn,
+            elements.resetSendButtonColorBtn,
+            elements.resetOtherButtonColorBtn,
             elements.resetUserMessageColorBtn
         ].forEach(element => {
             if (element) element.disabled = isAccentMode;
@@ -4672,6 +4729,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (elements.newChatButtonColorInput) {
             elements.newChatButtonColorInput.value = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        }
+        if (elements.sendButtonColorInput) {
+            elements.sendButtonColorInput.value = this.getValidColor(state.settings.sendButtonColor, DEFAULT_SEND_BUTTON_COLOR);
+        }
+        if (elements.otherButtonColorInput) {
+            elements.otherButtonColorInput.value = this.getValidColor(state.settings.otherButtonColor, DEFAULT_OTHER_BUTTON_COLOR);
         }
         if (elements.userMessageColorInput) {
             elements.userMessageColorInput.value = this.getValidColor(state.settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
@@ -8565,6 +8628,8 @@ const appLogic = {
         normalized.headerTextColorMode = uiUtils.getValidHeaderTextColorMode(settings.headerTextColorMode);
         normalized.headerTextColor = uiUtils.getValidColor(settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR);
         normalized.newChatButtonColor = uiUtils.getValidColor(settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
+        normalized.sendButtonColor = uiUtils.getValidColor(settings.sendButtonColor, DEFAULT_SEND_BUTTON_COLOR);
+        normalized.otherButtonColor = uiUtils.getValidColor(settings.otherButtonColor, DEFAULT_OTHER_BUTTON_COLOR);
         normalized.userMessageColor = uiUtils.getValidColor(settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
         return normalized;
     },
@@ -9168,6 +9233,22 @@ const appLogic = {
         uiUtils.applyThemeColorSettings();
     },
 
+    async resetSendButtonColorSetting() {
+        await this.saveThemeSettingValues({ sendButtonColor: DEFAULT_SEND_BUTTON_COLOR });
+        if (elements.sendButtonColorInput) {
+            elements.sendButtonColorInput.value = DEFAULT_SEND_BUTTON_COLOR;
+        }
+        uiUtils.applyThemeColorSettings();
+    },
+
+    async resetOtherButtonColorSetting() {
+        await this.saveThemeSettingValues({ otherButtonColor: DEFAULT_OTHER_BUTTON_COLOR });
+        if (elements.otherButtonColorInput) {
+            elements.otherButtonColorInput.value = DEFAULT_OTHER_BUTTON_COLOR;
+        }
+        uiUtils.applyThemeColorSettings();
+    },
+
     async resetUserMessageColorSetting() {
         await this.saveThemeSettingValues({ userMessageColor: DEFAULT_USER_MESSAGE_COLOR });
         if (elements.userMessageColorInput) {
@@ -9461,7 +9542,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -11415,6 +11496,8 @@ const appLogic = {
             } },
             headerTextColor: { element: elements.headerTextColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             newChatButtonColor: { element: elements.newChatButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
+            sendButtonColor: { element: elements.sendButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
+            otherButtonColor: { element: elements.otherButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             userMessageColor: { element: elements.userMessageColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             allowPromptUiChanges: { element: document.getElementById('allow-prompt-ui-changes'), event: 'change' },
             forceFunctionCalling: { element: elements.forceFunctionCallingToggle, event: 'change' },
@@ -11587,6 +11670,12 @@ const appLogic = {
         }
         if (elements.resetNewChatButtonColorBtn) {
             elements.resetNewChatButtonColorBtn.addEventListener('click', () => this.resetNewChatButtonColorSetting());
+        }
+        if (elements.resetSendButtonColorBtn) {
+            elements.resetSendButtonColorBtn.addEventListener('click', () => this.resetSendButtonColorSetting());
+        }
+        if (elements.resetOtherButtonColorBtn) {
+            elements.resetOtherButtonColorBtn.addEventListener('click', () => this.resetOtherButtonColorSetting());
         }
         if (elements.resetUserMessageColorBtn) {
             elements.resetUserMessageColorBtn.addEventListener('click', () => this.resetUserMessageColorSetting());

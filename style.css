@@ -126,8 +126,8 @@ body.dark-mode {
     --bg-button-save-hover: #c8e6c9;
     --bg-button-cancel: #bdbdbd;
     --bg-button-cancel-hover: #e0e0e0;
-    --bg-button-update: #90caf9;
-    --bg-button-update-hover: #e3f2fd;
+    --bg-button-update: var(--bg-button);
+    --bg-button-update-hover: var(--bg-button-hover);
     --header-color-default: #007aff;
     --app-header-bg: var(--header-color-custom, var(--header-color-default));
     --app-header-fg: #ffffff;
@@ -148,7 +148,7 @@ body.dark-mode {
     --text-light: #121212;
     --text-disabled: rgba(255, 255, 255, 0.3);
     --text-error: #ffcdd2;
-    --text-link: #90caf9;
+    --text-link: var(--bg-button);
     --text-placeholder: #757575;
     --text-system: #B0C4DE;
 
@@ -620,6 +620,24 @@ body.dark-mode #chat-overlay {
 #chat-screen #send-button {
     grid-area: send;
 }
+#chat-screen #send-button {
+    background-color: var(--send-button-bg, var(--bg-button));
+    color: var(--send-button-icon, var(--text-light));
+}
+#chat-screen #send-button:hover:not(:disabled),
+#chat-screen #send-button.sending:hover:not(:disabled) {
+    background-color: var(--send-button-hover-bg, var(--bg-button-hover));
+    color: var(--send-button-hover-icon, var(--send-button-icon, var(--text-light)));
+}
+#chat-screen #send-button:active:not(:disabled),
+#chat-screen #send-button.sending:active:not(:disabled) {
+    background-color: var(--send-button-hover-bg, var(--bg-button-hover));
+    color: var(--send-button-hover-icon, var(--send-button-icon, var(--text-light)));
+}
+#chat-screen #send-button:disabled {
+    background-color: var(--bg-button-disabled);
+    color: var(--text-disabled);
+}
 #chat-screen #attach-file-btn,
 #chat-screen #send-button {
     justify-self: end;
@@ -638,9 +656,9 @@ body.dark-mode #chat-overlay {
 body.dark-mode #attach-file-btn {
     color: var(--text-primary);
 }
-#send-button.sending {
-    background-color: #ffc107;
-    color: #333;
+#chat-screen #send-button.sending {
+    background-color: var(--send-button-bg, var(--bg-button));
+    color: var(--send-button-icon, var(--text-light));
 }
 
 @media screen and (max-width: 600px) {
@@ -3251,7 +3269,7 @@ body.dark-mode .delete-character-btn {
 
 /* --- リンク色の視認性改善 (ダークモード) --- */
 body.dark-mode {
-    --text-link: #90caf9; /* 明るいブルーに変更 */
+    --text-link: var(--bg-button); /* 汎用主ボタン色に追従 */
 }
 
 /* --- Sync Status Header Icon --- */
