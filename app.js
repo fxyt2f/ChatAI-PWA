@@ -115,8 +115,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.2";
-const APP_CACHE_VERSION = "v1.31.2";
+const APP_VERSION = "1.31.3";
+const APP_CACHE_VERSION = "v1.31.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -680,6 +680,7 @@ const state = {
     profiles: [], // 全プロファイルのリスト
     activeProfileId: null, // 現在アクティブなプロファイルのID
     activeProfile: null, // 現在アクティブなプロファイルの完全なデータ
+    currentExecutionApiConfig: null,
     profileIconUrls: new Map(),
     videoUrlCache: new Map(),
     imageUrlCache: new Map(),
@@ -3280,23 +3281,27 @@ const uiUtils = {
 
     formatExecutionMetadataLabel(metadata) {
         if (!metadata || typeof metadata !== 'object') return '';
+        const apiConfigName = String(metadata.apiConfigName || '').trim();
         const profileName = String(metadata.profileName || '').trim();
         const modelName = String(metadata.modelName || '').trim();
         const providerLabel = this.getExecutionProviderLabel(metadata.provider);
 
+        if (apiConfigName && modelName) return `${apiConfigName} / ${modelName}`;
         if (profileName && modelName) return `${profileName} / ${modelName}`;
         if (modelName) return modelName;
         if (profileName && providerLabel) return `${profileName} / ${providerLabel}`;
-        return profileName || providerLabel;
+        return apiConfigName || profileName || providerLabel;
     },
 
     formatExecutionMetadataTitle(metadata) {
         if (!metadata || typeof metadata !== 'object') return '';
         const lines = [];
+        const apiConfigName = String(metadata.apiConfigName || '').trim();
         const profileName = String(metadata.profileName || '').trim();
         const modelName = String(metadata.modelName || '').trim();
         const providerLabel = this.getExecutionProviderLabel(metadata.provider);
 
+        if (apiConfigName) lines.push(`API設定: ${apiConfigName}`);
         if (profileName) lines.push(`プロファイル: ${profileName}`);
         if (modelName) lines.push(`モデル: ${modelName}`);
         if (providerLabel) lines.push(`プロバイダー: ${providerLabel}`);
@@ -6636,13 +6641,15 @@ const apiUtils = {
 
     // Gemini APIを呼び出す
     async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callGeminiApi: 現在の設定値を確認します。`, {
             forceFunctionCalling: state.settings.forceFunctionCalling,
             geminiEnableFunctionCalling: state.settings.geminiEnableFunctionCalling,
-            isForcedNow: forceCalling
+            isForcedNow: forceCalling,
+            apiConfigId: executionConfig?.id || ''
         });
 
-        const apiKey = state.settings.apiKey;
+        const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || state.settings.apiKey) : state.settings.apiKey;
         if (!apiKey) {
             throw new Error("Gemini APIキーが設定されていません。");
         }
@@ -6653,7 +6660,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = state.settings.modelName || DEFAULT_MODEL;
+        const model = executionConfig?.provider === 'gemini' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_MODEL) : (state.settings.modelName || DEFAULT_MODEL);
 
         if (model === 'gemini-2.5-pro') {
             await appLogic._updateApiUsageCount(state.activeProfileId); 
@@ -6663,7 +6670,10 @@ const apiUtils = {
 
         const endpointMethod = 'generateContent?';
 
-        const endpoint = `${GEMINI_API_BASE_URL}${model}:${endpointMethod}key=${apiKey}`;
+        const geminiBaseUrl = executionConfig?.provider === 'gemini' && executionConfig.baseUrl
+            ? executionConfig.baseUrl.replace(/\/$/, '') + '/'
+            : GEMINI_API_BASE_URL;
+        const endpoint = `${geminiBaseUrl}${model}:${endpointMethod}key=${apiKey}`;
         
         const finalGenerationConfig = { ...generationConfig };
         
@@ -7012,9 +7022,10 @@ const apiUtils = {
 
     // Z.ai APIを呼び出す
     async callZaiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callZaiApi: Z.ai APIを呼び出します。`);
 
-        const apiKey = state.settings.zaiApiKey || state.settings.apiKey;
+        const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey) : (state.settings.zaiApiKey || state.settings.apiKey);
         if (!apiKey) {
             throw new Error("Z.ai APIキーが設定されていません。");
         }
@@ -7025,7 +7036,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = state.settings.modelName || DEFAULT_ZAI_MODEL;
+        const model = executionConfig?.provider === 'zai' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_ZAI_MODEL) : (state.settings.modelName || DEFAULT_ZAI_MODEL);
 
         // Gemini形式のメッセージをOpenAI形式に変換
         const openAIMessages = this.convertGeminiToOpenAIFormat(messagesForApi);
@@ -7134,13 +7145,16 @@ const apiUtils = {
             });
         }
         
-        console.log("ターゲットエンドポイント:", ZAI_API_BASE_URL);
+        const zaiEndpoint = executionConfig?.provider === 'zai' && executionConfig.baseUrl
+            ? `${executionConfig.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions')
+            : ZAI_API_BASE_URL;
+        console.log("ターゲットエンドポイント:", zaiEndpoint);
 
         try {
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to Z.ai API...`);
 
-            const response = await fetch(ZAI_API_BASE_URL, {
+            const response = await fetch(zaiEndpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -7213,9 +7227,10 @@ const apiUtils = {
 
     // OpenRouter APIを呼び出す
     async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callOpenRouterApi: OpenRouter APIを呼び出します。`);
 
-        const apiKey = state.settings.openrouterApiKey;
+        const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || state.settings.openrouterApiKey) : state.settings.openrouterApiKey;
         if (!apiKey) {
             throw new Error("OpenRouter APIキーが設定されていません。");
         }
@@ -7226,7 +7241,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = state.settings.modelName || DEFAULT_OPENROUTER_MODEL;
+        const model = executionConfig?.provider === 'openrouter' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_OPENROUTER_MODEL) : (state.settings.modelName || DEFAULT_OPENROUTER_MODEL);
 
         // Gemini形式のメッセージをOpenAI形式に変換
         const openAIMessages = this.convertGeminiToOpenAIFormat(messagesForApi);
@@ -7341,19 +7356,22 @@ const apiUtils = {
             });
         }
         
-        console.log("ターゲットエンドポイント:", OPENROUTER_API_BASE_URL);
+        const openRouterEndpoint = executionConfig?.provider === 'openrouter' && executionConfig.baseUrl
+            ? `${executionConfig.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions')
+            : OPENROUTER_API_BASE_URL;
+        console.log("ターゲットエンドポイント:", openRouterEndpoint);
 
         try {
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to OpenRouter API...`);
 
-            const response = await fetch(OPENROUTER_API_BASE_URL, {
+            const response = await fetch(openRouterEndpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiKey}`,
                     'HTTP-Referer': window.location.origin,
-                    'X-Title': 'Gemini PWA'
+                    'X-Title': 'ChatAI PWA'
                 },
                 body: JSON.stringify(requestBody),
                 signal
@@ -7438,11 +7456,12 @@ const apiUtils = {
 
     // Amazon Bedrock APIを呼び出す
     async callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callBedrockApi: Amazon Bedrock APIを呼び出します。`);
         
-        const accessKey = state.settings.bedrockAccessKey;
-        const secretKey = state.settings.bedrockSecretKey;
-        const region = state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+        const accessKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockAccessKey || executionConfig.apiKey || state.settings.bedrockAccessKey) : state.settings.bedrockAccessKey;
+        const secretKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockSecretKey || state.settings.bedrockSecretKey) : state.settings.bedrockSecretKey;
+        const region = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION) : (state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION);
         
         // デバッグ情報を出力
         console.log(`[Bedrock Debug] Access Key存在: ${!!accessKey}, Secret Key存在: ${!!secretKey}, Region: ${region}`);
@@ -7473,7 +7492,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const modelId = state.settings.modelName || DEFAULT_BEDROCK_MODEL;
+        const modelId = executionConfig?.provider === 'bedrock' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_BEDROCK_MODEL) : (state.settings.modelName || DEFAULT_BEDROCK_MODEL);
 
         try {
             // BedrockRuntimeClientの初期化
@@ -7586,7 +7605,7 @@ const apiUtils = {
 
     // プロバイダーに応じて適切なAPIを呼び出すラッパー関数
     async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
-        const provider = state.settings.apiProvider || 'gemini';
+        const provider = appLogic.getExecutionProvider();
         
         if (provider === 'zai') {
             return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
@@ -8531,7 +8550,7 @@ const appLogic = {
     },
 
     resolveExecutionModelName(provider) {
-        const modelName = state.settings.modelName || '';
+        const modelName = this.getExecutionApiConfig()?.modelName || state.settings.modelName || '';
         const normalizedProvider = String(provider || '').toLowerCase();
         switch (normalizedProvider) {
             case 'openrouter':
@@ -8547,13 +8566,16 @@ const appLogic = {
     },
 
     createExecutionMetadataSnapshot() {
-        const provider = this.cleanExecutionMetaText(state.settings.apiProvider || 'gemini', 40) || 'gemini';
+        const executionConfig = this.getExecutionApiConfig();
+        const provider = this.cleanExecutionMetaText(executionConfig?.provider || state.settings.apiProvider || 'gemini', 40) || 'gemini';
         const profile = state.activeProfile || {};
 
         return {
             schemaVersion: 1,
             profileId: state.activeProfileId ?? profile.id ?? null,
             profileName: this.cleanExecutionMetaText(profile.name || '', 120),
+            apiConfigId: this.cleanExecutionMetaText(executionConfig?.id || '', 120),
+            apiConfigName: this.cleanExecutionMetaText(executionConfig?.name || '', 120),
             provider,
             modelName: this.cleanExecutionMetaText(this.resolveExecutionModelName(provider), 240),
             generatedAt: Date.now()
@@ -8783,6 +8805,89 @@ const appLogic = {
             : null;
         if (existing) return { apiConfigId: existing.apiConfigId, modelName: existing.modelName };
         return this.findModelRefForLegacyModel(legacyModelName, preferredApiConfigId);
+    },
+
+    getDefaultModelRefForExecution() {
+        const profileSettings = state.activeProfile?.settings || {};
+        const profileRef = profileSettings.defaultModelRef;
+        if (profileRef?.apiConfigId && profileRef?.modelName) {
+            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
+        }
+
+        const settingsRef = state.settings.defaultModelRef;
+        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
+            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
+        }
+
+        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
+        const legacyModelName = profileSettings.modelName || state.settings.modelName || DEFAULT_MODEL;
+        const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
+        if (byLegacyConfig) return byLegacyConfig;
+
+        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
+        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
+        if (providerConfig) {
+            const candidates = this.getApiConfigModelCandidates(providerConfig);
+            return {
+                apiConfigId: providerConfig.id,
+                modelName: candidates.includes(legacyModelName) ? legacyModelName : (candidates[0] || legacyModelName)
+            };
+        }
+
+        return null;
+    },
+
+    resolveApiConfigForModelRef(modelRef = null) {
+        const legacyProvider = state.activeProfile?.settings?.apiProvider || state.settings.apiProvider || 'gemini';
+        let config = modelRef?.apiConfigId ? this.getApiConfigById(modelRef.apiConfigId) : null;
+
+        if (!config) {
+            console.warn('[ModelRef] API設定が見つからないため、旧apiProviderからfallbackします。', {
+                apiConfigId: modelRef?.apiConfigId || '',
+                legacyProvider
+            });
+            config = this.getDefaultApiConfigForProvider(legacyProvider);
+        }
+
+        if (!config) {
+            config = this.createLegacyApiConfig(legacyProvider, { ...state.settings, ...(state.activeProfile?.settings || {}) });
+        }
+
+        const normalizedConfig = this.normalizeApiConfig(config);
+        const fallbackModel = state.activeProfile?.settings?.modelName || state.settings.modelName || normalizedConfig.defaultModel || DEFAULT_MODEL;
+        return {
+            ...normalizedConfig,
+            modelName: modelRef?.modelName || normalizedConfig.defaultModel || fallbackModel,
+            ref: modelRef?.apiConfigId && modelRef?.modelName
+                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
+                : { apiConfigId: normalizedConfig.id, modelName: normalizedConfig.defaultModel || fallbackModel }
+        };
+    },
+
+    resolveDefaultExecutionApiConfig() {
+        const modelRef = this.getDefaultModelRefForExecution();
+        const resolved = this.resolveApiConfigForModelRef(modelRef);
+        if (resolved.enabled === false) {
+            console.warn('[ModelRef] 選択中のAPI設定は無効です。通常送信では互換fallbackとしてそのまま試行します。', {
+                apiConfigId: resolved.id,
+                provider: resolved.provider
+            });
+        }
+        return resolved;
+    },
+
+    getExecutionApiConfig() {
+        return state.currentExecutionApiConfig || null;
+    },
+
+    getExecutionProvider() {
+        return this.getExecutionApiConfig()?.provider || state.settings.apiProvider || 'gemini';
+    },
+
+    getExecutionModelName(provider = this.getExecutionProvider()) {
+        const executionConfig = this.getExecutionApiConfig();
+        if (executionConfig?.modelName) return executionConfig.modelName;
+        return this.resolveExecutionModelName(provider);
     },
 
     createLegacyApiConfig(provider = 'gemini', sourceSettings = {}) {
@@ -14196,6 +14301,7 @@ const appLogic = {
         const attachmentsToSend = [...state.pendingAttachments];
         if (!text && attachmentsToSend.length === 0) return;
         const inputDraftContextKeyBeforeSend = this.getInputDraftContextKey();
+        state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
         uiUtils.setSendingState(true);
@@ -14221,10 +14327,10 @@ const appLogic = {
             this.scrollToBottom();
         }
         
-        await dbUtils.saveChat(null, null, { skipPush: true });
-        this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
-        
         try {
+            await dbUtils.saveChat(null, null, { skipPush: true });
+            this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
+
             const generationConfig = {};
             if (state.settings.temperature !== null) generationConfig.temperature = state.settings.temperature;
             if (state.settings.maxTokens !== null) generationConfig.maxOutputTokens = state.settings.maxTokens;
@@ -14289,6 +14395,7 @@ const appLogic = {
         } finally {
             uiUtils.setSendingState(false);
             state.abortController = null;
+            state.currentExecutionApiConfig = null;
             
             // 処理が完了したこのタイミングで、安全に同期処理をトリガーする
             this.markAsDirtyAndSchedulePush('message');
@@ -15386,6 +15493,7 @@ const appLogic = {
     
         if (confirmed) {
             uiUtils.setSendingState(true);
+            state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
             const executionMetadata = this.createExecutionMetadataSnapshot();
     
             let originalResponses = [];
@@ -15512,6 +15620,7 @@ const appLogic = {
             } finally {
                 uiUtils.setSendingState(false);
                 state.abortController = null; 
+                state.currentExecutionApiConfig = null;
                 if (state.settings.autoScroll) {
                     requestAnimationFrame(() => {
                         this.scrollToBottom();
