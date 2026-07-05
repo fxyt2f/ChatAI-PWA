@@ -1438,7 +1438,7 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
 .message-actions .token-count-display { font-size: 0.8rem; color: var(--text-secondary); vertical-align: middle; line-height: 1.5; white-space: nowrap; }
 .thought-summary-details { margin-bottom: 10px; font-size: 13px; border: 1px solid var(--border-tertiary); border-radius: 5px; background-color: var(--bg-tertiary); }
 .thought-summary-details summary { cursor: pointer; font-weight: 500; color: var(--text-secondary); list-style: none; padding: 6px 10px; outline: none; display: flex; align-items: center; gap: 5px; user-select: none; }
-.thought-summary-details summary::before { content: '🧠'; font-size: 14px; display: inline-block; }
+.thought-summary-details summary::before { content: 'tips_and_updates'; font-family: 'Material Symbols Outlined'; font-size: 16px; font-weight: normal; line-height: 1; display: inline-block; }
 .thought-summary-details[open] summary { border-bottom: 1px solid var(--border-tertiary); }
 .thought-summary-content { padding: 8px 10px; font-size: 13px; line-height: 1.5; color: var(--text-primary); word-wrap: break-word; }
 .attachment-details { margin-top: 10px; font-size: 12px; border: 1px solid var(--border-attachment-details); border-radius: 5px; background-color: var(--bg-attachment-details); }
@@ -1616,8 +1616,11 @@ body.dark-mode .message-cascade-controls .cascade-delete-btn {
     user-select: none;
 }
 .thought-summary-details summary::before {
-    content: '🧠';
-    font-size: 14px;
+    content: 'tips_and_updates';
+    font-family: 'Material Symbols Outlined';
+    font-size: 16px;
+    font-weight: normal;
+    line-height: 1;
     display: inline-block;
 }
 .thought-summary-details {
@@ -3638,6 +3641,7 @@ body.dark-mode .delete-character-btn {
 
 #dropbox-sync-btn {
     background-color: var(--bg-button-save);
+    color: #ffffff;
 }
 #dropbox-sync-btn:hover {
     background-color: var(--bg-button-save-hover);
@@ -3645,9 +3649,16 @@ body.dark-mode .delete-character-btn {
 
 #dropbox-disconnect-btn {
     background-color: var(--bg-button-delete);
+    color: #ffffff;
 }
 #dropbox-disconnect-btn:hover {
     background-color: var(--bg-button-delete-hover);
+}
+
+body.dark-mode .sync-primary-btn,
+body.dark-mode #dropbox-sync-btn,
+body.dark-mode #dropbox-disconnect-btn {
+    color: #000000;
 }
 
 /* Status Icon Colors */
@@ -4234,39 +4245,49 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
-    color: #123f50;
+    color: #ffffff;
     background-color: #a4c7d5;
     border: 1px solid #a4c7d5;
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
-    color: #0b3342;
+    color: #ffffff;
     background-color: #92b8c8;
     border-color: #92b8c8;
 }
 
 #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
-    color: #0b3342;
+    color: #ffffff;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
-    color: #0b3342;
+    color: #000000;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
-    color: #062635;
+    color: #000000;
     background-color: #92b8c8;
     border-color: #92b8c8;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
-    color: #062635;
+    color: #000000;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
+}
+
+#chat-screen .message-edit-actions .save-edit-btn,
+#chat-screen .message-edit-actions .cancel-edit-btn {
+    color: #ffffff;
+}
+
+body.dark-mode #chat-screen .message-edit-actions .save-edit-btn,
+body.dark-mode #chat-screen .message-edit-actions .cancel-edit-btn {
+    color: #000000;
 }
 
 #chat-screen .message-actions {
