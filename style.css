@@ -4249,6 +4249,7 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
     width: 100%;
     min-height: 28px;
     gap: 8px;
+    justify-content: flex-start;
     overflow: hidden;
 }
 
@@ -4280,7 +4281,7 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
 }
 
 #chat-screen .message-actions .token-count-display {
-    order: 0;
+    order: 1;
     display: inline-flex;
     align-items: center;
     min-height: 32px;
@@ -4293,16 +4294,16 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
 }
 
 #chat-screen .message-actions .tm-proofreading-meta {
-    order: 0;
+    order: 2;
 }
 
 #chat-screen .message.model .message-actions .token-count-display {
-    order: 0;
-    flex: 0 1 auto;
+    order: 1;
+    flex: 0 0 auto;
     min-width: 0;
-    max-width: min(45%, 240px);
+    max-width: min(24%, 160px);
     min-height: 28px;
-    margin: 0 8px 0 0;
+    margin: 0;
     padding: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -4311,12 +4312,26 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
     line-height: 28px;
 }
 
-#chat-screen .message.model .message-actions .tm-execution-meta,
-#chat-screen .message.model .message-actions .tm-proofreading-meta {
+#chat-screen .message.model .message-actions .tm-execution-meta {
     order: 0;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-width: 0;
-    max-width: none;
+    max-width: min(46%, 360px);
+    min-height: 28px;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    line-height: 28px;
+}
+
+#chat-screen .message.model .message-actions .tm-proofreading-meta {
+    order: 2;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(42%, 340px);
     min-height: 28px;
     margin: 0;
     overflow: hidden;

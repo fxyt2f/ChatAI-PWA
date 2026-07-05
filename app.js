@@ -116,7 +116,7 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.31.5";
-const APP_CACHE_VERSION = "v1.31.5-fix1";
+const APP_CACHE_VERSION = "v1.31.5-fix3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
