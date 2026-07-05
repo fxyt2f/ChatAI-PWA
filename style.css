@@ -11,6 +11,7 @@
     --composer-height: 150px;
     --composer-textarea-height: 52px;
     --composer-overflow: hidden;
+    --content-max-width: 760px;
 
     /* Spacing Unit */
     --spacing-unit: 8px;
@@ -350,7 +351,6 @@ body.dark-mode .new-chat-button {
     transform: translateX(0);
     z-index: 1;
 }
-
 /* --- Chat Screen --- */
 #chat-screen {
     position: relative;
@@ -416,6 +416,19 @@ body.dark-mode #chat-overlay {
     touch-action: pan-x pan-y pinch-zoom;
     padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
     scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
+}
+#history-screen .main-content,
+#settings-screen .main-content {
+    width: 100%;
+    box-sizing: border-box;
+}
+#history-screen .main-content > *,
+#settings-screen .main-content > * {
+    width: 100%;
+    max-width: var(--content-max-width, 760px);
+    margin-left: auto;
+    margin-right: auto;
+    box-sizing: border-box;
 }
 #chat-screen .app-header,
 #chat-screen .chat-input-area {
@@ -564,7 +577,7 @@ body.dark-mode #chat-overlay {
         "profile attach send";
     align-items: center;
     width: calc(100% - 24px);
-    max-width: 760px;
+    max-width: var(--content-max-width, 760px);
     margin: 0;
     padding: 8px 10px 10px;
     column-gap: 8px;
@@ -2223,7 +2236,13 @@ body.dark-mode #reload-for-update-btn {
 /* --- Wide Mode Styles (for PC) --- */
 @media screen and (min-width: 801px) {
     body.wide-mode-enabled .app-container {
-        max-width: 1600px;
+        max-width: 100%;
+    }
+
+    body.wide-mode-enabled #chat-screen .message-container,
+    body.wide-mode-enabled #chat-screen > footer.chat-input-area {
+        max-width: var(--content-max-width, 760px);
+        width: 100%;
     }
 }
 
@@ -3919,7 +3938,7 @@ body.dark-mode #sd-test-connection-btn {
 /* --- ChatGPT-like Chat Layout (v1.28.2 / v1.28.3 / v1.28.4 / v1.28.5 / v1.28.6 / v1.28.7 / v1.28.8 / v1.28.9) --- */
 #chat-screen .message-container {
     width: 100%;
-    max-width: 760px;
+    max-width: var(--content-max-width, 760px);
     margin-left: auto;
     margin-right: auto;
     box-sizing: border-box;
@@ -4160,7 +4179,7 @@ body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-
     left: auto;
     justify-content: flex-end;
     width: max-content;
-    max-width: min(760px, calc(100vw - 32px));
+    max-width: min(var(--content-max-width, 760px), calc(100vw - 32px));
     overflow: visible;
 }
 
@@ -4172,7 +4191,7 @@ body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-
     flex-direction: column;
     align-items: flex-start;
     justify-content: flex-start;
-    width: min(100%, 760px);
+    width: min(100%, var(--content-max-width, 760px));
     max-width: 100%;
     min-height: 66px;
     row-gap: 3px;
@@ -4298,7 +4317,7 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
 
 #chat-screen .message.user .message-action-buttons {
     width: max-content;
-    max-width: min(760px, calc(100vw - 32px));
+    max-width: min(var(--content-max-width, 760px), calc(100vw - 32px));
     justify-content: flex-start;
 }
 
