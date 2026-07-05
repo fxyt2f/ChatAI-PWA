@@ -115,8 +115,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.3";
-const APP_CACHE_VERSION = "v1.31.3";
+const APP_VERSION = "1.31.4";
+const APP_CACHE_VERSION = "v1.31.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -6823,14 +6823,25 @@ const apiUtils = {
             return textToTranslate;
         }
 
-        if (state.settings.apiProvider === 'openrouter') {
-            return await this.translateTextWithOpenRouter(textToTranslate, translationModelName);
+        const translationConfig = translationModelName && typeof translationModelName === 'object'
+            ? translationModelName
+            : appLogic.resolveThoughtTranslationApiConfig(translationModelName);
+        const provider = appLogic.normalizeApiProvider(translationConfig.provider);
+        if (provider === 'openrouter') {
+            return await this.translateTextWithOpenRouter(textToTranslate, translationConfig);
+        }
+        if (provider === 'zai') {
+            return await this.translateTextWithOpenAICompatible(textToTranslate, translationConfig, 'Z.ai');
+        }
+        if (provider === 'bedrock') {
+            return await this.translateTextWithBedrock(textToTranslate, translationConfig);
         }
 
         console.log("--- 思考プロセスの翻訳処理開始 ---");
         
-        const modelToUse = translationModelName || 'gemini-2.5-flash-lite';
-        const apiKey = state.settings.apiKey;
+        const legacyTranslationModelName = typeof translationModelName === 'string' ? translationModelName : '';
+        const modelToUse = translationConfig.modelName || legacyTranslationModelName || 'gemini-2.5-flash-lite';
+        const apiKey = translationConfig.apiKey || state.settings.apiKey;
         if (!apiKey) {
             console.warn("翻訳スキップ: APIキーが設定されていません。");
             return textToTranslate;
@@ -6948,28 +6959,37 @@ const apiUtils = {
         return textToTranslate;
     },
 
-    async translateTextWithOpenRouter(textToTranslate, translationModelName = '') {
+    getThoughtTranslationMessages(textToTranslate) {
+        return [
+            {
+                role: 'system',
+                content: 'あなたはAIの思考プロセスを自然な日本語に翻訳する専門アシスタントです。余計な説明を足さず、翻訳結果のみを出力してください。'
+            },
+            {
+                role: 'user',
+                content: textToTranslate
+            }
+        ];
+    },
+
+    getOpenAICompatibleEndpoint(config = {}, defaultEndpoint = OPENROUTER_API_BASE_URL) {
+        if (!config.baseUrl) return defaultEndpoint;
+        return `${config.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions');
+    },
+
+    async translateTextWithOpenRouter(textToTranslate, translationConfig = {}) {
         console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
 
-        const apiKey = state.settings.openrouterApiKey;
+        const apiKey = translationConfig.apiKey || state.settings.openrouterApiKey;
         if (!apiKey) {
             console.warn("OpenRouter翻訳スキップ: OpenRouter APIキーが設定されていません。");
             return textToTranslate;
         }
 
-        const model = this.getOpenRouterAuxiliaryModel(translationModelName);
+        const model = translationConfig.modelName || this.getOpenRouterAuxiliaryModel(state.settings.thoughtTranslationModel);
         const requestBody = {
             model,
-            messages: [
-                {
-                    role: 'system',
-                    content: 'あなたはAIの思考プロセスを自然な日本語に翻訳する専門アシスタントです。余計な説明を足さず、翻訳結果のみを出力してください。'
-                },
-                {
-                    role: 'user',
-                    content: textToTranslate
-                }
-            ],
+            messages: this.getThoughtTranslationMessages(textToTranslate),
             temperature: 0.1,
             reasoning: { exclude: true }
         };
@@ -6984,7 +7004,7 @@ const apiUtils = {
             const timeoutController = new AbortController();
             const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
 
-            const response = await fetch(OPENROUTER_API_BASE_URL, {
+            const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, OPENROUTER_API_BASE_URL), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -7016,6 +7036,121 @@ const apiUtils = {
             return textToTranslate;
         } catch (error) {
             console.error("OpenRouterでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
+            return textToTranslate;
+        }
+    },
+
+    async translateTextWithOpenAICompatible(textToTranslate, translationConfig = {}, providerLabel = 'OpenAI互換API') {
+        console.log(`--- ${providerLabel} 思考プロセス翻訳処理開始 ---`);
+
+        const apiKey = translationConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey;
+        if (!apiKey) {
+            console.warn(`${providerLabel}翻訳スキップ: APIキーが設定されていません。`);
+            return textToTranslate;
+        }
+
+        const requestBody = {
+            model: translationConfig.modelName || DEFAULT_ZAI_MODEL,
+            messages: this.getThoughtTranslationMessages(textToTranslate),
+            temperature: 0.1
+        };
+
+        try {
+            if (state.abortController?.signal.aborted) {
+                throw new Error("リクエストがキャンセルされました。");
+            }
+
+            uiUtils.setLoadingIndicatorText(`思考プロセスを${providerLabel}で翻訳中...`);
+
+            const timeoutController = new AbortController();
+            const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
+            const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, ZAI_API_BASE_URL), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify(requestBody),
+                signal: timeoutController.signal
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                let errorBody = await response.text();
+                try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
+                console.error(`${providerLabel}翻訳APIエラー (${response.status})`, errorBody);
+                return textToTranslate;
+            }
+
+            const responseData = await response.json();
+            const translatedText = responseData.choices?.[0]?.message?.content;
+            if (typeof translatedText === 'string' && translatedText.trim() !== '') {
+                console.log(`--- ${providerLabel} 翻訳処理成功 ---`);
+                return translatedText;
+            }
+
+            console.warn(`${providerLabel}翻訳APIの応答形式が不正、またはコンテンツが空です。`, responseData);
+            return textToTranslate;
+        } catch (error) {
+            console.error(`${providerLabel}での思考プロセス翻訳中にエラーが発生しました。原文を返します。`, error);
+            return textToTranslate;
+        }
+    },
+
+    async translateTextWithBedrock(textToTranslate, translationConfig = {}) {
+        console.log("--- Amazon Bedrock 思考プロセス翻訳処理開始 ---");
+
+        const accessKey = translationConfig.bedrockAccessKey || translationConfig.apiKey || state.settings.bedrockAccessKey;
+        const secretKey = translationConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+        const region = translationConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+        if (!accessKey || !secretKey) {
+            console.warn("Bedrock翻訳スキップ: Bedrock認証情報が設定されていません。");
+            return textToTranslate;
+        }
+        if (!window.BedrockRuntimeClient || !window.ConverseCommand) {
+            console.warn("Bedrock翻訳スキップ: AWS Bedrock SDK が読み込まれていません。");
+            return textToTranslate;
+        }
+
+        try {
+            if (state.abortController?.signal.aborted) {
+                throw new Error("リクエストがキャンセルされました。");
+            }
+
+            uiUtils.setLoadingIndicatorText('思考プロセスをAmazon Bedrockで翻訳中...');
+            const client = new window.BedrockRuntimeClient({
+                region,
+                credentials: {
+                    accessKeyId: accessKey,
+                    secretAccessKey: secretKey
+                }
+            });
+            const requestBody = {
+                modelId: translationConfig.modelName || DEFAULT_BEDROCK_MODEL,
+                system: [{ text: 'あなたはAIの思考プロセスを自然な日本語に翻訳する専門アシスタントです。余計な説明を足さず、翻訳結果のみを出力してください。' }],
+                messages: [{
+                    role: 'user',
+                    content: [{ text: textToTranslate }]
+                }],
+                inferenceConfig: {
+                    temperature: 0.1
+                }
+            };
+            const command = new window.ConverseCommand(requestBody);
+            const response = await client.send(command);
+            const translatedText = response?.output?.message?.content
+                ?.map(part => part?.text || '')
+                .join('')
+                .trim();
+            if (translatedText) {
+                console.log("--- Amazon Bedrock 翻訳処理成功 ---");
+                return translatedText;
+            }
+            console.warn("Bedrock翻訳APIの応答形式が不正、またはコンテンツが空です。", response);
+            return textToTranslate;
+        } catch (error) {
+            console.error("Amazon Bedrockでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
             return textToTranslate;
         }
     },
@@ -8827,6 +8962,42 @@ const appLogic = {
         const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
         const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
         if (providerConfig) {
+            return {
+                apiConfigId: providerConfig.id,
+                modelName: legacyModelName || this.getApiConfigModelCandidates(providerConfig)[0] || 'gemini-2.5-flash-lite'
+            };
+        }
+
+        return null;
+    },
+
+    getThoughtTranslationModelRefForExecution() {
+        const profileSettings = state.activeProfile?.settings || {};
+        const profileRef = profileSettings.thoughtTranslationModelRef;
+        if (profileRef?.apiConfigId && profileRef?.modelName) {
+            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
+        }
+
+        const settingsRef = state.settings.thoughtTranslationModelRef;
+        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
+            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
+        }
+
+        const legacyModelName = profileSettings.thoughtTranslationModel
+            || profileSettings.thoughtTranslationModelName
+            || state.settings.thoughtTranslationModel
+            || state.settings.thoughtTranslationModelName
+            || state.settings.modelName
+            || DEFAULT_MODEL;
+        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
+        if (legacyApiConfigId) {
+            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
+            if (byLegacyConfig) return byLegacyConfig;
+        }
+
+        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
+        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
+        if (providerConfig) {
             const candidates = this.getApiConfigModelCandidates(providerConfig);
             return {
                 apiConfigId: providerConfig.id,
@@ -8834,7 +9005,10 @@ const appLogic = {
             };
         }
 
-        return null;
+        const byLegacyModel = this.findModelRefForLegacyModel(legacyModelName);
+        if (byLegacyModel) return byLegacyModel;
+
+        return { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: 'gemini-2.5-flash-lite' };
     },
 
     resolveApiConfigForModelRef(modelRef = null) {
@@ -8874,6 +9048,26 @@ const appLogic = {
             });
         }
         return resolved;
+    },
+
+    resolveThoughtTranslationApiConfig(legacyModelName = '') {
+        const modelRef = this.getThoughtTranslationModelRefForExecution();
+        const resolved = this.resolveApiConfigForModelRef(modelRef);
+        const fallbackModel = legacyModelName
+            || state.activeProfile?.settings?.thoughtTranslationModel
+            || state.activeProfile?.settings?.thoughtTranslationModelName
+            || state.settings.thoughtTranslationModel
+            || state.settings.thoughtTranslationModelName
+            || resolved.defaultModel
+            || state.settings.modelName
+            || 'gemini-2.5-flash-lite';
+        return {
+            ...resolved,
+            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
+            ref: modelRef?.apiConfigId && modelRef?.modelName
+                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
+                : resolved.ref
+        };
     },
 
     getExecutionApiConfig() {
@@ -14211,13 +14405,15 @@ const appLogic = {
                         try {
                             uiUtils.setLoadingIndicatorText('思考プロセスを翻訳中...');
                             const originalThoughtSummary = msg.thoughtSummary;
-                            const translationModel = apiUtils.getOpenRouterAuxiliaryModel(state.settings.thoughtTranslationModel);
-                            const translationMeta = state.settings.apiProvider === 'openrouter'
-                                ? { provider: 'OpenRouter', model: translationModel }
-                                : null;
-                            const translatedThoughtSummary = await apiUtils.translateText(msg.thoughtSummary, state.settings.thoughtTranslationModel);
+                            const translationConfig = appLogic.resolveThoughtTranslationApiConfig(state.settings.thoughtTranslationModel);
+                            const translationMeta = {
+                                provider: appLogic.getProviderDisplayName(translationConfig.provider),
+                                apiConfigName: translationConfig.name,
+                                model: translationConfig.modelName
+                            };
+                            const translatedThoughtSummary = await apiUtils.translateText(msg.thoughtSummary, translationConfig);
                             msg.thoughtSummary = translatedThoughtSummary;
-                            if (translationMeta && translatedThoughtSummary !== originalThoughtSummary) {
+                            if (translatedThoughtSummary !== originalThoughtSummary) {
                                 msg.thoughtTranslationMeta = translationMeta;
                             }
                         } catch (translateError) {

@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.31.4
+
+- 思考翻訳用モデルを `thoughtTranslationModelRef` のAPI設定/モデル名で解決するようにしました。
+- 思考翻訳時のプロバイダ判定をモデル名ではなくAPI設定から行うよう調整しました。
+- OpenRouter経由のGemini系モデルでもOpenRouter API設定を維持して翻訳するようにしました。
+- OpenRouter思考翻訳の `reasoning: { exclude: true }` 指定を維持しました。
+- 既存 `thoughtTranslationModel` などへのfallbackを維持しました。
+- 検索/置換/Undo/Redoのロジックは変更していません。
+- アプリバージョンとキャッシュバージョンを1.31.4に更新しました。
+
 ## v1.31.3
 
 - 基本モデルの選択をModelRef形式で通常送信に反映しました。
