@@ -115,8 +115,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.4";
-const APP_CACHE_VERSION = "v1.31.4";
+const APP_VERSION = "1.31.5";
+const APP_CACHE_VERSION = "v1.31.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -691,6 +691,7 @@ const state = {
         apiConfigId: '',
         defaultModelRef: null,
         thoughtTranslationModelRef: null,
+        proofreadingModelRef: null,
         summaryModelRef: null,
         apiKey: '',
         zaiApiKey: '',
@@ -4857,7 +4858,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         populateModelRefSelect(elements.modelNameSelect, 'defaultModelRef', state.settings.modelName || DEFAULT_MODEL, state.settings.apiConfigId);
         populateModelRefSelect(elements.thoughtTranslationModelSelect, 'thoughtTranslationModelRef', state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite');
-        populateModelRefSelect(elements.proofreadingModelNameSelect, '', state.settings.proofreadingModelName || 'gemini-2.5-flash');
+        populateModelRefSelect(elements.proofreadingModelNameSelect, 'proofreadingModelRef', state.settings.proofreadingModelName || state.settings.modelName || DEFAULT_MODEL);
         populateModelRefSelect(elements.summaryModelNameSelect, 'summaryModelRef', state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL);
 
         const geminiModels = (state.settings.additionalModels || '')
@@ -9011,6 +9012,41 @@ const appLogic = {
         return { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: 'gemini-2.5-flash-lite' };
     },
 
+    getProofreadingModelRefForExecution() {
+        const profileSettings = state.activeProfile?.settings || {};
+        const existingChoices = this.getApiModelChoices();
+        const refs = [
+            profileSettings.proofreadingModelRef,
+            state.settings.proofreadingModelRef,
+            profileSettings.defaultModelRef,
+            state.settings.defaultModelRef,
+            profileSettings.summaryModelRef,
+            state.settings.summaryModelRef
+        ];
+        for (const ref of refs) {
+            if (!ref?.apiConfigId || !ref?.modelName) continue;
+            const existing = existingChoices.find(choice => choice.apiConfigId === ref.apiConfigId && choice.modelName === ref.modelName);
+            if (existing) return { apiConfigId: ref.apiConfigId, modelName: ref.modelName };
+        }
+
+        const legacyModelName = profileSettings.proofreadingModelName
+            || state.settings.proofreadingModelName
+            || profileSettings.modelName
+            || state.settings.modelName
+            || DEFAULT_MODEL;
+        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
+        if (legacyApiConfigId) {
+            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
+            if (byLegacyConfig) return byLegacyConfig;
+        }
+
+        const defaultRef = this.getDefaultModelRefForExecution();
+        if (defaultRef) return defaultRef;
+
+        return this.findModelRefForLegacyModel(legacyModelName)
+            || { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: DEFAULT_MODEL };
+    },
+
     resolveApiConfigForModelRef(modelRef = null) {
         const legacyProvider = state.activeProfile?.settings?.apiProvider || state.settings.apiProvider || 'gemini';
         let config = modelRef?.apiConfigId ? this.getApiConfigById(modelRef.apiConfigId) : null;
@@ -9061,6 +9097,31 @@ const appLogic = {
             || resolved.defaultModel
             || state.settings.modelName
             || 'gemini-2.5-flash-lite';
+        return {
+            ...resolved,
+            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
+            ref: modelRef?.apiConfigId && modelRef?.modelName
+                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
+                : resolved.ref
+        };
+    },
+
+    resolveProofreadingApiConfig(legacyModelName = '') {
+        const modelRef = this.getProofreadingModelRefForExecution();
+        const resolved = this.resolveApiConfigForModelRef(modelRef);
+        const fallbackModel = legacyModelName
+            || state.activeProfile?.settings?.proofreadingModelName
+            || state.settings.proofreadingModelName
+            || state.activeProfile?.settings?.modelName
+            || state.settings.modelName
+            || resolved.defaultModel
+            || DEFAULT_MODEL;
+        if (resolved.enabled === false) {
+            console.warn('[ModelRef] 校正モデルのAPI設定が無効です。互換fallbackとして解決結果を使用します。', {
+                apiConfigId: resolved.id,
+                provider: resolved.provider
+            });
+        }
         return {
             ...resolved,
             modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
@@ -9730,6 +9791,7 @@ const appLogic = {
         const refsForSettings = (settings = {}) => ({
             defaultModelRef: settings.defaultModelRef || this.findModelRefForLegacyModel(settings.modelName || DEFAULT_MODEL, settings.apiConfigId),
             thoughtTranslationModelRef: settings.thoughtTranslationModelRef || this.findModelRefForLegacyModel(settings.thoughtTranslationModel || 'gemini-2.5-flash-lite'),
+            proofreadingModelRef: settings.proofreadingModelRef || this.findModelRefForLegacyModel(settings.proofreadingModelName || settings.modelName || DEFAULT_MODEL, settings.apiConfigId),
             summaryModelRef: settings.summaryModelRef || this.findModelRefForLegacyModel(settings.summaryModelName || settings.modelName || DEFAULT_MODEL)
         });
 
@@ -9737,7 +9799,7 @@ const appLogic = {
             if (!profile.settings) profile.settings = {};
             let profileChanged = false;
             const nextRefs = refsForSettings(profile.settings);
-            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef'].forEach(key => {
+            ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'].forEach(key => {
                 if (!profile.settings[key] && nextRefs[key]) {
                     profile.settings[key] = nextRefs[key];
                     profileChanged = true;
@@ -10718,7 +10780,7 @@ const appLogic = {
     getCurrentUiSettings() {
         const settings = {};
         const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
-        const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef'];
+        const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
         
@@ -10754,6 +10816,7 @@ const appLogic = {
             const selectByKey = {
                 defaultModelRef: elements.modelNameSelect,
                 thoughtTranslationModelRef: elements.thoughtTranslationModelSelect,
+                proofreadingModelRef: elements.proofreadingModelNameSelect,
                 summaryModelRef: elements.summaryModelNameSelect
             };
             const ref = this.decodeModelRefValue(selectByKey[key]?.value || '');
@@ -12458,6 +12521,7 @@ const appLogic = {
                         const modelRefKeyBySetting = {
                             modelName: 'defaultModelRef',
                             thoughtTranslationModel: 'thoughtTranslationModelRef',
+                            proofreadingModelName: 'proofreadingModelRef',
                             summaryModelName: 'summaryModelRef'
                         };
                         const modelRefKey = modelRefKeyBySetting[key];
@@ -14050,32 +14114,131 @@ const appLogic = {
         }
     },
 
-    async proofreadText(textToProofread) {
-        console.log("--- 校正処理開始 ---");
-        const { 
-            proofreadingModelName, 
-            proofreadingSystemInstruction, 
-            apiKey, 
-            temperature, 
-            maxTokens, 
-            topK, 
-            topP,
-            enableAutoRetry,
-            maxRetries
-        } = state.settings;
+    async callProofreadingModel(textToProofread, options = {}) {
+        const proofreadingConfig = options.apiConfig || this.resolveProofreadingApiConfig(state.settings.proofreadingModelName);
+        const provider = this.normalizeApiProvider(proofreadingConfig.provider);
+        const modelName = proofreadingConfig.modelName || state.settings.proofreadingModelName || DEFAULT_MODEL;
+        const systemPrompt = options.systemPrompt || state.settings.proofreadingSystemInstruction || '';
+        const generationConfig = options.generationConfig || {};
+        const signal = options.signal || state.abortController?.signal;
 
-        if (!proofreadingModelName) {
+        if (!modelName) {
             throw new Error("校正用モデルが設定されていません。");
         }
 
-        const endpoint = `${GEMINI_API_BASE_URL}${proofreadingModelName}:generateContent`;
-        const systemInstruction = proofreadingSystemInstruction?.trim() ? { parts: [{ text: proofreadingSystemInstruction.trim() }] } : null;
-        const generationConfig = {};
-        if (temperature !== null) generationConfig.temperature = temperature;
-        if (maxTokens !== null) generationConfig.maxOutputTokens = maxTokens;
-        if (topK !== null) generationConfig.topK = topK;
-        if (topP !== null) generationConfig.topP = topP;
+        if (provider === 'openrouter' || provider === 'zai') {
+            const apiKey = proofreadingConfig.apiKey || (provider === 'openrouter' ? state.settings.openrouterApiKey : state.settings.zaiApiKey);
+            if (!apiKey) {
+                throw new Error(`${this.getProviderDisplayName(provider)} APIキーが設定されていません。`);
+            }
+            const messages = [];
+            if (systemPrompt.trim()) {
+                messages.push({ role: 'system', content: systemPrompt.trim() });
+            }
+            messages.push({ role: 'user', content: textToProofread });
+            if (state.settings.applyDummyToProofread && state.settings.dummyUser) {
+                messages.push({ role: 'user', content: state.settings.dummyUser });
+            }
+            const requestBody = {
+                model: modelName,
+                messages
+            };
+            if (generationConfig.temperature !== undefined) requestBody.temperature = generationConfig.temperature;
+            if (generationConfig.maxOutputTokens !== undefined) requestBody.max_tokens = generationConfig.maxOutputTokens;
+            if (generationConfig.topP !== undefined) requestBody.top_p = generationConfig.topP;
+            if (provider === 'openrouter') {
+                requestBody.reasoning = { exclude: true };
+            }
 
+            const endpoint = apiUtils.getOpenAICompatibleEndpoint(
+                proofreadingConfig,
+                provider === 'openrouter' ? OPENROUTER_API_BASE_URL : ZAI_API_BASE_URL
+            );
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            };
+            if (provider === 'openrouter') {
+                headers['HTTP-Referer'] = window.location.origin;
+                headers['X-Title'] = 'ChatAI PWA';
+            }
+
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(requestBody),
+                signal
+            });
+
+            if (!response.ok) {
+                let errorMsg = `校正APIエラー (${response.status}): ${response.statusText}`;
+                try {
+                    const errorData = await response.json();
+                    if (errorData.error?.message) errorMsg = `校正APIエラー (${response.status}): ${errorData.error.message}`;
+                    else if (errorData.message) errorMsg = `校正APIエラー (${response.status}): ${errorData.message}`;
+                } catch (e) { /* JSONパース失敗は無視 */ }
+                const error = new Error(errorMsg);
+                error.status = response.status;
+                throw error;
+            }
+
+            const responseData = await response.json();
+            const proofreadContent = responseData.choices?.[0]?.message?.content;
+            if (typeof proofreadContent === 'string' && proofreadContent.trim()) {
+                return proofreadContent;
+            }
+            throw new Error(`${this.getProviderDisplayName(provider)} APIから有効な校正結果が得られませんでした。`);
+        }
+
+        if (provider === 'bedrock') {
+            const accessKey = proofreadingConfig.bedrockAccessKey || proofreadingConfig.apiKey || state.settings.bedrockAccessKey;
+            const secretKey = proofreadingConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+            const region = proofreadingConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+            if (!accessKey || !secretKey) {
+                throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
+            }
+            if (!window.BedrockRuntimeClient || !window.ConverseCommand) {
+                throw new Error("AWS Bedrock SDK が読み込まれていません。ページを再読み込みしてください。");
+            }
+            const client = new window.BedrockRuntimeClient({
+                region,
+                credentials: {
+                    accessKeyId: accessKey,
+                    secretAccessKey: secretKey
+                }
+            });
+            const requestBody = {
+                modelId: modelName,
+                messages: [{
+                    role: 'user',
+                    content: [{ text: textToProofread }]
+                }],
+                inferenceConfig: {}
+            };
+            if (systemPrompt.trim()) {
+                requestBody.system = [{ text: systemPrompt.trim() }];
+            }
+            if (generationConfig.temperature !== undefined) requestBody.inferenceConfig.temperature = generationConfig.temperature;
+            if (generationConfig.maxOutputTokens !== undefined) requestBody.inferenceConfig.maxTokens = generationConfig.maxOutputTokens;
+            if (generationConfig.topP !== undefined && !modelName.includes('claude-sonnet-4-5')) {
+                requestBody.inferenceConfig.topP = generationConfig.topP;
+            }
+            const response = await client.send(new window.ConverseCommand(requestBody));
+            const proofreadContent = response?.output?.message?.content
+                ?.map(part => part?.text || '')
+                .join('')
+                .trim();
+            if (proofreadContent) return proofreadContent;
+            throw new Error("Bedrock APIから有効な校正結果が得られませんでした。");
+        }
+
+        const apiKey = proofreadingConfig.apiKey || state.settings.apiKey;
+        if (!apiKey) {
+            throw new Error("Gemini APIキーが設定されていません。");
+        }
+
+        const endpoint = `${GEMINI_API_BASE_URL}${modelName}:generateContent`;
+        const systemInstruction = systemPrompt.trim() ? { parts: [{ text: systemPrompt.trim() }] } : null;
         const requestBody = {
             contents: [{ role: 'user', parts: [{ text: textToProofread }] }],
             ...(Object.keys(generationConfig).length > 0 && { generationConfig }),
@@ -14093,10 +14256,56 @@ const appLogic = {
                 role: 'user',
                 parts: [{ text: state.settings.dummyUser }]
             });
-            console.log("校正リクエストにダミーUserプロンプトを適用しました。");
         }
 
-        console.log("校正APIへの送信データ:", JSON.stringify(requestBody, null, 2));
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+            body: JSON.stringify(requestBody),
+            signal
+        });
+
+        if (!response.ok) {
+            let errorMsg = `校正APIエラー (${response.status}): ${response.statusText}`;
+            try {
+                const errorData = await response.json();
+                if (errorData.error?.message) {
+                    errorMsg = `校正APIエラー (${response.status}): ${errorData.error.message}`;
+                }
+            } catch (e) { /* JSONパース失敗は無視 */ }
+            const error = new Error(errorMsg);
+            error.status = response.status;
+            throw error;
+        }
+
+        const responseData = await response.json();
+        if (responseData.candidates?.[0]?.content?.parts) {
+            return responseData.candidates[0].content.parts.map(p => p.text).join('');
+        }
+        if (responseData.promptFeedback) {
+            const blockReason = responseData.promptFeedback.blockReason || 'SAFETY';
+            throw new Error(`校正モデルに応答がブロックされました (理由: ${blockReason})`);
+        }
+        throw new Error("校正APIの応答に有効なコンテンツが含まれていません。");
+    },
+
+    async proofreadText(textToProofread) {
+        console.log("--- 校正処理開始 ---");
+        const {
+            proofreadingSystemInstruction,
+            temperature,
+            maxTokens,
+            topK,
+            topP,
+            enableAutoRetry,
+            maxRetries
+        } = state.settings;
+        const proofreadingConfig = this.resolveProofreadingApiConfig(state.settings.proofreadingModelName);
+        const generationConfig = {};
+        if (temperature !== null) generationConfig.temperature = temperature;
+        if (maxTokens !== null) generationConfig.maxOutputTokens = maxTokens;
+        if (topK !== null) generationConfig.topK = topK;
+        if (topP !== null) generationConfig.topP = topP;
 
         let lastError = null;
         const maxProofreadRetries = enableAutoRetry ? maxRetries : 0;
@@ -14130,37 +14339,14 @@ const appLogic = {
                     uiUtils.setLoadingIndicatorText(`校正処理${attempt}回目の再試行中...`);
                 }
 
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-                    body: JSON.stringify(requestBody),
+                const proofreadContent = await this.callProofreadingModel(textToProofread, {
+                    apiConfig: proofreadingConfig,
+                    systemPrompt: proofreadingSystemInstruction,
+                    generationConfig,
                     signal: state.abortController?.signal
                 });
-
-                if (!response.ok) {
-                    let errorMsg = `校正APIエラー (${response.status}): ${response.statusText}`;
-                    try {
-                        const errorData = await response.json();
-                        if (errorData.error?.message) {
-                            errorMsg = `校正APIエラー (${response.status}): ${errorData.error.message}`;
-                        }
-                    } catch (e) { /* JSONパース失敗は無視 */ }
-                    const error = new Error(errorMsg);
-                    error.status = response.status;
-                    throw error;
-                }
-
-                const responseData = await response.json();
-                if (responseData.candidates?.[0]?.content?.parts) {
-                    const proofreadContent = responseData.candidates[0].content.parts.map(p => p.text).join('');
-                    console.log("--- 校正処理成功 ---");
-                    return proofreadContent;
-                } else if (responseData.promptFeedback) {
-                    const blockReason = responseData.promptFeedback.blockReason || 'SAFETY';
-                    throw new Error(`校正モデルに応答がブロックされました (理由: ${blockReason})`);
-                } else {
-                    throw new Error("校正APIの応答に有効なコンテンツが含まれていません。");
-                }
+                console.log("--- 校正処理成功 ---");
+                return proofreadContent;
 
             } catch (error) {
                 lastError = error;

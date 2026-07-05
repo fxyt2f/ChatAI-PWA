@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.31.5
+
+- 校正モデルをModelRef形式で設定できるよう追加しました。
+- `proofreadingModelRef` による `apiConfigId + modelName` 保存に対応しました。
+- 校正/文章整形系処理向けのAPI設定解決基盤を追加しました。
+- OpenRouter経由Geminiなどをモデル名だけで誤判定しないよう調整しました。
+- 校正モデル未設定時は基本モデルなどへfallbackするようにしました。
+- 検索/置換/Undo/Redoのロジックは変更していません。
+- アプリバージョンとキャッシュバージョンを1.31.5に更新しました。
+
 ## v1.31.4
 
 - 思考翻訳用モデルを `thoughtTranslationModelRef` のAPI設定/モデル名で解決するようにしました。
