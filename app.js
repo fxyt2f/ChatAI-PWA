@@ -56,6 +56,7 @@ const IMPORT_PREFIX = '(取込) ';
 const API_CONFIG_MIGRATION_KEY = 'apiConfigsMigratedV1310';
 const API_MODEL_REF_MIGRATION_KEY = 'apiModelRefsMigratedV1312';
 const API_MODEL_CANDIDATES_MIGRATION_KEY = 'apiModelCandidatesStabilizedV1317';
+const API_CONFIG_DELETED_IDS_KEY = 'apiConfigDeletedIdsV1318';
 const API_CONFIG_DEFAULT_IDS = {
     gemini: 'api_gemini_default',
     openrouter: 'api_openrouter_default',
@@ -68,6 +69,13 @@ const API_CONFIG_PROVIDER_NAMES = {
     zai: 'Z.ai',
     bedrock: 'Amazon Bedrock'
 };
+const MODEL_REF_USAGE_LABELS = {
+    defaultModelRef: '基本モデル',
+    thoughtTranslationModelRef: '思考翻訳モデル',
+    summaryModelRef: '要約モデル',
+    proofreadingModelRef: '校正モデル'
+};
+const MODEL_REF_USAGE_KEYS = Object.keys(MODEL_REF_USAGE_LABELS);
 const API_CONFIG_LEGACY_SYNC_KEYS = new Set([
     'apiProvider',
     'apiKey',
@@ -118,8 +126,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.7";
-const APP_CACHE_VERSION = "v1.31.7";
+const APP_VERSION = "1.31.8";
+const APP_CACHE_VERSION = "v1.31.8";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -811,6 +819,7 @@ Reason: [NGの場合の理由]`,
     apiConfigs: [],
     activeApiConfig: null,
     apiConfigsMigratedV1310: false,
+    apiConfigDeletedIds: [],
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
@@ -8980,13 +8989,16 @@ const appLogic = {
             const key = `${ref.apiConfigId}\n${ref.modelName}`;
             if (seen.has(key)) return;
             const config = configs.find(item => item.id === ref.apiConfigId);
+            const unavailablePrefix = !config
+                ? `参照切れ / ${ref.apiConfigId}`
+                : `無効: ${safeName(config)}`;
             choices.push({
                 apiConfigId: ref.apiConfigId,
                 provider: config?.provider || 'gemini',
                 apiConfigName: config ? safeName(config) : '不明なAPI設定',
                 modelName: ref.modelName,
                 value: this.encodeModelRefValue(ref),
-                label: `${config ? safeName(config) : '不明なAPI設定'} / ${ref.modelName}${config?.enabled === false ? '（無効）' : config ? '' : '（参照切れ）'}`,
+                label: `${unavailablePrefix} / ${ref.modelName}`,
                 disabled: false,
                 isUnavailable: !config || config.enabled === false
             });
@@ -9039,6 +9051,66 @@ const appLogic = {
             : null;
         if (existing) return { apiConfigId: existing.apiConfigId, modelName: existing.modelName };
         return this.findModelRefForLegacyModel(legacyModelName, preferredApiConfigId);
+    },
+
+    validateModelRef(modelRef = null) {
+        const apiConfigId = String(modelRef?.apiConfigId || '').trim();
+        const modelName = String(modelRef?.modelName || '').trim();
+        if (!apiConfigId && !modelName) {
+            return { valid: false, reason: 'empty', message: 'モデルが選択されていません。', apiConfigId, modelName };
+        }
+        if (!apiConfigId) {
+            return { valid: false, reason: 'apiConfigMissing', message: 'API設定が見つかりません。', apiConfigId, modelName };
+        }
+        if (!modelName) {
+            return { valid: false, reason: 'modelNameMissing', message: 'モデル名が空です。', apiConfigId, modelName };
+        }
+
+        const config = this.getApiConfigById(apiConfigId);
+        if (!config) {
+            return { valid: false, reason: 'apiConfigMissing', message: 'API設定が見つかりません。', apiConfigId, modelName };
+        }
+        if (config.enabled === false) {
+            return { valid: false, reason: 'apiConfigDisabled', message: 'API設定が無効です。', apiConfigId, modelName, config };
+        }
+        if (!this.getApiConfigModelCandidates(config).includes(modelName)) {
+            return { valid: false, reason: 'modelNotInCandidates', message: 'モデル候補に存在しません。', apiConfigId, modelName, config };
+        }
+        return { valid: true, reason: 'ok', message: '', apiConfigId, modelName, config };
+    },
+
+    validateModelRefForUsage(modelRef = null, usageKey = 'defaultModelRef') {
+        const result = this.validateModelRef(modelRef);
+        const usageLabel = MODEL_REF_USAGE_LABELS[usageKey] || 'モデル';
+        if (result.valid) return { ...result, usageKey, usageLabel };
+
+        const detail = result.apiConfigId || result.modelName
+            ? `\n参照: ${result.apiConfigId || '(API設定なし)'} / ${result.modelName || '(モデル名なし)'}`
+            : '';
+        const reasonMessage = {
+            empty: `${usageLabel}が選択されていません。`,
+            apiConfigMissing: `${usageLabel}のAPI設定が見つかりません。`,
+            apiConfigDisabled: `${usageLabel}のAPI設定が無効です。`,
+            modelNameMissing: `${usageLabel}のモデル名が空です。`,
+            modelNotInCandidates: `${usageLabel}のモデルがAPI設定のモデル候補にありません。`
+        }[result.reason] || `${usageLabel}の設定が無効です。`;
+
+        return {
+            ...result,
+            usageKey,
+            usageLabel,
+            message: `${reasonMessage}${detail}\n設定画面で${usageLabel}を選び直してください。`
+        };
+    },
+
+    assertModelRefForExecution(modelRef = null, usageKey = 'defaultModelRef') {
+        const validation = this.validateModelRefForUsage(modelRef, usageKey);
+        if (!validation.valid) {
+            const error = new Error(validation.message);
+            error.modelRefValidation = validation;
+            throw error;
+        }
+        return validation;
     },
 
     getDefaultModelRefForExecution() {
@@ -9112,10 +9184,17 @@ const appLogic = {
 
     getProofreadingModelRefForExecution() {
         const profileSettings = state.activeProfile?.settings || {};
+        const profileRef = profileSettings.proofreadingModelRef;
+        if (profileRef?.apiConfigId || profileRef?.modelName) {
+            return { apiConfigId: profileRef.apiConfigId || '', modelName: profileRef.modelName || '' };
+        }
+        const settingsRef = state.settings.proofreadingModelRef;
+        if (settingsRef?.apiConfigId || settingsRef?.modelName) {
+            return { apiConfigId: settingsRef.apiConfigId || '', modelName: settingsRef.modelName || '' };
+        }
+
         const existingChoices = this.getApiModelChoices();
         const refs = [
-            profileSettings.proofreadingModelRef,
-            state.settings.proofreadingModelRef,
             profileSettings.defaultModelRef,
             state.settings.defaultModelRef,
             profileSettings.summaryModelRef,
@@ -9212,6 +9291,7 @@ const appLogic = {
 
     resolveDefaultExecutionApiConfig() {
         const modelRef = this.getDefaultModelRefForExecution();
+        this.assertModelRefForExecution(modelRef, 'defaultModelRef');
         const resolved = this.resolveApiConfigForModelRef(modelRef);
         if (resolved.enabled === false) {
             console.warn('[ModelRef] 選択中のAPI設定は無効です。通常送信では互換fallbackとしてそのまま試行します。', {
@@ -9224,6 +9304,7 @@ const appLogic = {
 
     resolveThoughtTranslationApiConfig(legacyModelName = '') {
         const modelRef = this.getThoughtTranslationModelRefForExecution();
+        this.assertModelRefForExecution(modelRef, 'thoughtTranslationModelRef');
         const resolved = this.resolveApiConfigForModelRef(modelRef);
         const fallbackModel = legacyModelName
             || state.activeProfile?.settings?.thoughtTranslationModel
@@ -9244,6 +9325,7 @@ const appLogic = {
 
     resolveProofreadingApiConfig(legacyModelName = '') {
         const modelRef = this.getProofreadingModelRefForExecution();
+        this.assertModelRefForExecution(modelRef, 'proofreadingModelRef');
         const resolved = this.resolveApiConfigForModelRef(modelRef);
         const fallbackModel = legacyModelName
             || state.activeProfile?.settings?.proofreadingModelName
@@ -9269,6 +9351,7 @@ const appLogic = {
 
     resolveSummaryApiConfig(legacyModelName = '') {
         const modelRef = this.getSummaryModelRefForExecution();
+        this.assertModelRefForExecution(modelRef, 'summaryModelRef');
         const resolved = this.resolveApiConfigForModelRef(modelRef);
         const fallbackModel = legacyModelName
             || state.activeProfile?.settings?.summaryModelName
@@ -9485,9 +9568,12 @@ const appLogic = {
         const sources = this.collectLegacyApiConfigSources();
         const configs = this.normalizeApiConfigs(existingConfigs);
         const existingIds = new Set(configs.map(config => config.id));
+        const deletedIds = new Set(state.apiConfigDeletedIds || []);
+        const allowDeletedDefaultRestore = configs.length === 0;
         ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
             const defaultId = this.getDefaultApiConfigIdForProvider(provider);
             if (existingIds.has(defaultId)) return;
+            if (deletedIds.has(defaultId) && !allowDeletedDefaultRestore) return;
             if (!this.shouldCreateApiConfigForProvider(provider, sources)) return;
             const source = this.findLegacyApiSourceForProvider(provider, sources);
             configs.push(this.createLegacyApiConfig(provider, source));
@@ -9824,14 +9910,79 @@ const appLogic = {
         });
     },
 
+    collectApiConfigModelRefUsages(configId) {
+        const usages = [];
+        const seen = new Set();
+        const addUsage = ({ scope, profileName = null, usage, modelRefKey, modelName = '', apiConfigId = configId, legacy = false }) => {
+            const key = `${scope}|${profileName || ''}|${usage}|${modelRefKey}|${modelName}|${apiConfigId}|${legacy}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            usages.push({ scope, profileName, usage, modelRefKey, modelName, apiConfigId, legacy });
+        };
+        const collectFromSettings = (settings = {}, scope = 'global', profileName = null) => {
+            MODEL_REF_USAGE_KEYS.forEach(modelRefKey => {
+                const ref = settings?.[modelRefKey];
+                if (ref?.apiConfigId === configId) {
+                    addUsage({
+                        scope,
+                        profileName,
+                        usage: MODEL_REF_USAGE_LABELS[modelRefKey],
+                        modelRefKey,
+                        modelName: ref.modelName || '',
+                        apiConfigId: ref.apiConfigId
+                    });
+                }
+            });
+            if (settings?.apiConfigId === configId) {
+                addUsage({
+                    scope,
+                    profileName,
+                    usage: '旧API設定参照',
+                    modelRefKey: 'apiConfigId',
+                    modelName: settings.modelName || '',
+                    apiConfigId: settings.apiConfigId,
+                    legacy: true
+                });
+            }
+        };
+
+        collectFromSettings(state.settings, 'global', null);
+        collectFromSettings(state.activeProfile?.settings, 'currentProfile', state.activeProfile?.name || null);
+        (state.profiles || []).forEach(profile => {
+            collectFromSettings(profile?.settings, 'profile', profile?.name || `ID:${profile?.id}`);
+        });
+        return usages;
+    },
+
+    formatApiConfigUsageMessage(baseMessage, usages = []) {
+        const usageLines = usages.length
+            ? usages.map(item => {
+                const scopeLabel = item.scope === 'global'
+                    ? '共通設定'
+                    : (item.profileName ? `プロファイル「${item.profileName}」` : 'プロファイル');
+                const modelSuffix = item.modelName ? ` (${item.modelName})` : '';
+                const legacySuffix = item.legacy ? ' [旧設定]' : '';
+                return `- ${item.usage}${modelSuffix} / ${scopeLabel}${legacySuffix}`;
+            }).join('\n')
+            : '- 使用箇所を特定できませんでした';
+        return `${baseMessage}\n使用中:\n${usageLines}\n\n先に基本設定で別のモデルを選択してください。`;
+    },
+
     getApiConfigUsage(configId) {
-        const usedByProfiles = (state.profiles || [])
-            .filter(profile => profile?.settings?.apiConfigId === configId)
-            .map(profile => profile.name || `ID:${profile.id}`);
-        const isActiveSettingsReference = state.settings.apiConfigId === configId || state.activeApiConfig?.id === configId;
+        const usages = this.collectApiConfigModelRefUsages(configId);
+        const blockingUsages = usages.filter(item => item.legacy !== true);
+        const legacyUsages = usages.filter(item => item.legacy === true);
+        const usedByProfiles = blockingUsages
+            .filter(item => item.scope === 'profile' || item.scope === 'currentProfile')
+            .map(item => item.profileName || item.scope);
+        const isActiveSettingsReference = blockingUsages.some(item => item.scope === 'global' || item.scope === 'currentProfile');
         return {
+            usages,
+            blockingUsages,
+            legacyUsages,
             usedByProfiles,
             isActiveSettingsReference,
+            isInUse: blockingUsages.length > 0,
             isDefaultFallback: Object.values(API_CONFIG_DEFAULT_IDS).includes(configId)
         };
     },
@@ -9871,6 +10022,18 @@ const appLogic = {
             const nextConfig = this.collectApiConfigFormValues();
             const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
             const index = configs.findIndex(config => config.id === nextConfig.id);
+            const existingConfig = index >= 0 ? configs[index] : null;
+            const usage = this.getApiConfigUsage(nextConfig.id);
+            if (existingConfig?.enabled !== false && nextConfig.enabled === false && usage.isInUse) {
+                await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
+                return;
+            }
+            const nextCandidates = this.getApiConfigModelCandidates(nextConfig);
+            const removedUsedModels = usage.blockingUsages.filter(item => item.modelName && !nextCandidates.includes(item.modelName));
+            if (removedUsedModels.length > 0) {
+                await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定の使用中モデルはモデル候補から削除できません。', removedUsedModels));
+                return;
+            }
             if (index >= 0) {
                 configs[index] = nextConfig;
             } else {
@@ -9898,18 +10061,16 @@ const appLogic = {
         }
 
         const usage = this.getApiConfigUsage(configId);
-        if (usage.isDefaultFallback) {
-            await uiUtils.showCustomAlert('既定fallbackとして使われるAPI設定は削除できません。');
-            return;
-        }
-        if (usage.isActiveSettingsReference || usage.usedByProfiles.length > 0) {
-            await uiUtils.showCustomAlert('このAPI設定はプロファイルで使用中のため削除できません。先にプロファイルのAPI設定を変更してください。');
+        if (usage.isInUse || usage.isActiveSettingsReference || usage.usedByProfiles.length > 0) {
+            await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため削除できません。', usage.blockingUsages));
             return;
         }
 
         const confirmed = await uiUtils.showCustomConfirm(`API設定「${target.name}」を削除しますか？`);
         if (!confirmed) return;
         await this.saveApiConfigs(configs.filter(config => config.id !== configId));
+        state.apiConfigDeletedIds = [...new Set([...(state.apiConfigDeletedIds || []), configId])];
+        await dbUtils.saveSetting(API_CONFIG_DELETED_IDS_KEY, state.apiConfigDeletedIds);
         this.syncActiveApiConfigState();
         this.renderApiConfigList();
         this.markAsDirtyAndSchedulePush('structural');
@@ -9920,6 +10081,13 @@ const appLogic = {
         const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
         const index = configs.findIndex(config => config.id === configId);
         if (index === -1) return;
+        if (enabled === false) {
+            const usage = this.getApiConfigUsage(configId);
+            if (usage.isInUse) {
+                await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
+                return;
+            }
+        }
         configs[index] = this.normalizeApiConfig({
             ...configs[index],
             enabled: Boolean(enabled),
@@ -10028,12 +10196,12 @@ const appLogic = {
         const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_CANDIDATES_MIGRATION_KEY))?.value === true;
         const beforeConfigs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
         const configs = this.ensureDefaultApiConfigs(beforeConfigs);
-        const legacyByProvider = this.collectLegacyModelCandidatesByProvider();
+        const legacyByProvider = alreadyMigrated ? null : this.collectLegacyModelCandidatesByProvider();
         const refsByConfigId = this.collectModelRefCandidatesByApiConfigId();
 
         const nextConfigs = configs.map(config => {
             const defaultId = this.getDefaultApiConfigIdForProvider(config.provider);
-            const legacyCandidates = config.id === defaultId ? (legacyByProvider[config.provider] || []) : [];
+            const legacyCandidates = !alreadyMigrated && config.id === defaultId ? (legacyByProvider?.[config.provider] || []) : [];
             const refCandidates = refsByConfigId.get(config.id) || [];
             const modelCandidates = this.normalizeModelCandidates([
                 this.getApiConfigModelCandidates(config),
@@ -10074,27 +10242,29 @@ const appLogic = {
         let changed = false;
         const sources = this.collectLegacyApiConfigSources();
         const configs = this.ensureDefaultApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
-        ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
-            const defaultId = this.getDefaultApiConfigIdForProvider(provider);
-            const index = configs.findIndex(config => config.id === defaultId);
-            if (index === -1) return;
-            const legacyConfig = this.createLegacyApiConfig(provider, this.findLegacyApiSourceForProvider(provider, sources));
-            const mergedCandidates = this.joinModelCandidateList([
-                ...this.getApiConfigModelCandidates(configs[index]),
-                ...this.getApiConfigModelCandidates(legacyConfig)
-            ]);
-            const normalizedCandidates = this.normalizeModelCandidates(mergedCandidates);
-            if (mergedCandidates !== configs[index].additionalModels) {
-                configs[index] = this.normalizeApiConfig({
-                    ...configs[index],
-                    defaultModel: normalizedCandidates[0] || configs[index].defaultModel,
-                    modelCandidates: normalizedCandidates,
-                    additionalModels: this.joinModelCandidateList(normalizedCandidates),
-                    updatedAt: Date.now()
-                });
-                changed = true;
-            }
-        });
+        if (!alreadyMigrated) {
+            ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
+                const defaultId = this.getDefaultApiConfigIdForProvider(provider);
+                const index = configs.findIndex(config => config.id === defaultId);
+                if (index === -1) return;
+                const legacyConfig = this.createLegacyApiConfig(provider, this.findLegacyApiSourceForProvider(provider, sources));
+                const mergedCandidates = this.joinModelCandidateList([
+                    ...this.getApiConfigModelCandidates(configs[index]),
+                    ...this.getApiConfigModelCandidates(legacyConfig)
+                ]);
+                const normalizedCandidates = this.normalizeModelCandidates(mergedCandidates);
+                if (mergedCandidates !== configs[index].additionalModels) {
+                    configs[index] = this.normalizeApiConfig({
+                        ...configs[index],
+                        defaultModel: normalizedCandidates[0] || configs[index].defaultModel,
+                        modelCandidates: normalizedCandidates,
+                        additionalModels: this.joinModelCandidateList(normalizedCandidates),
+                        updatedAt: Date.now()
+                    });
+                    changed = true;
+                }
+            });
+        }
         if (changed) {
             await this.saveApiConfigs(configs);
             this.syncActiveApiConfigState();
@@ -10818,6 +10988,10 @@ const appLogic = {
             const storedApiConfigs = await dbUtils.getSetting('apiConfigs');
             state.apiConfigs = this.normalizeApiConfigs(storedApiConfigs?.value || state.settings.apiConfigs || []);
             state.settings.apiConfigs = state.apiConfigs;
+            const storedDeletedApiConfigIds = await dbUtils.getSetting(API_CONFIG_DELETED_IDS_KEY);
+            state.apiConfigDeletedIds = Array.isArray(storedDeletedApiConfigIds?.value)
+                ? [...new Set(storedDeletedApiConfigIds.value.filter(id => typeof id === 'string' && id.trim()))]
+                : [];
             state.apiConfigsMigratedV1310 = (await dbUtils.getSetting(API_CONFIG_MIGRATION_KEY))?.value === true;
             state.settings.apiConfigsMigratedV1310 = state.apiConfigsMigratedV1310;
             console.log("[GlobalSettings] グローバルその他設定/テーマ設定を読み込みました:", {
@@ -14907,6 +15081,7 @@ const appLogic = {
                         }
                     } catch (proofreadError) {
                         console.error("校正処理中にエラーが発生しました。校正前のテキストを使用します。", proofreadError);
+                        await uiUtils.showCustomAlert(proofreadError?.message || '校正モデルの設定が無効です。設定画面で校正モデルを選び直してください。');
                     }
                 }
             }
@@ -14930,6 +15105,7 @@ const appLogic = {
                             }
                         } catch (translateError) {
                             console.error("思考プロセスの翻訳中にエラーが発生しました。原文を使用します。", translateError);
+                            await uiUtils.showCustomAlert(translateError?.message || '思考翻訳モデルの設定が無効です。設定画面で思考翻訳モデルを選び直してください。');
                         }
                     }
                 }
@@ -15009,7 +15185,12 @@ const appLogic = {
         const attachmentsToSend = [...state.pendingAttachments];
         if (!text && attachmentsToSend.length === 0) return;
         const inputDraftContextKeyBeforeSend = this.getInputDraftContextKey();
-        state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
+        try {
+            state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
+        } catch (error) {
+            await uiUtils.showCustomAlert(error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。');
+            return;
+        }
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
         uiUtils.setSendingState(true);
@@ -18116,15 +18297,16 @@ const appLogic = {
 
 
     async _callSummaryApi(originalText) {
-        const summaryConfig = this.resolveSummaryApiConfig(state.settings.summaryModelName);
-        const summaryMeta = {
-            provider: summaryConfig.name || this.getProviderDisplayName(summaryConfig.provider),
-            model: summaryConfig.modelName
-        };
-        const summaryModelLabel = summaryConfig.name && summaryConfig.modelName
-            ? `${summaryConfig.name} / ${summaryConfig.modelName}`
-            : summaryConfig.modelName || '';
+        let summaryModelLabel = '';
         try {
+            const summaryConfig = this.resolveSummaryApiConfig(state.settings.summaryModelName);
+            const summaryMeta = {
+                provider: summaryConfig.name || this.getProviderDisplayName(summaryConfig.provider),
+                model: summaryConfig.modelName
+            };
+            summaryModelLabel = summaryConfig.name && summaryConfig.modelName
+                ? `${summaryConfig.name} / ${summaryConfig.modelName}`
+                : summaryConfig.modelName || '';
             const provider = this.normalizeApiProvider(summaryConfig.provider);
             if (provider === 'openrouter') {
                 const summaryText = await this._callOpenRouterSummaryApi(originalText, summaryConfig);
