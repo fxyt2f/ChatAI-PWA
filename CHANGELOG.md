@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.31.6
+
+- 要約モデルの選択をModelRef形式で実処理に反映しました。
+- `apiConfigId + modelName` による履歴要約API経路判定に対応しました。
+- OpenRouter経由Geminiなどをモデル名だけで誤判定しないよう調整しました。
+- OpenRouter要約時の `reasoning: { exclude: true }` 指定を維持しました。
+- 既存要約モデル設定へのfallbackを維持しました。
+- 検索/置換/Undo/Redoのロジックは変更していません。
+- アプリバージョンとキャッシュバージョンを1.31.6に更新しました。
+
 ## v1.31.5
 
 - 校正モデルをModelRef形式で設定できるよう追加しました。

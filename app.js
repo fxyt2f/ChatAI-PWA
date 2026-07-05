@@ -115,8 +115,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.5";
-const APP_CACHE_VERSION = "v1.31.5-fix3";
+const APP_VERSION = "1.31.6";
+const APP_CACHE_VERSION = "v1.31.6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -9068,6 +9068,44 @@ const appLogic = {
             || { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: DEFAULT_MODEL };
     },
 
+    getSummaryModelRefForExecution() {
+        const profileSettings = state.activeProfile?.settings || {};
+        const profileRef = profileSettings.summaryModelRef;
+        if (profileRef?.apiConfigId && profileRef?.modelName) {
+            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
+        }
+
+        const settingsRef = state.settings.summaryModelRef;
+        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
+            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
+        }
+
+        const legacyModelName = profileSettings.summaryModelName
+            || profileSettings.summaryModel
+            || state.settings.summaryModelName
+            || state.settings.summaryModel
+            || profileSettings.modelName
+            || state.settings.modelName
+            || DEFAULT_MODEL;
+        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
+        if (legacyApiConfigId) {
+            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
+            if (byLegacyConfig) return byLegacyConfig;
+        }
+
+        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
+        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
+        if (providerConfig) {
+            return {
+                apiConfigId: providerConfig.id,
+                modelName: legacyModelName || this.getApiConfigModelCandidates(providerConfig)[0] || DEFAULT_MODEL
+            };
+        }
+
+        return this.findModelRefForLegacyModel(legacyModelName)
+            || { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: DEFAULT_MODEL };
+    },
+
     resolveApiConfigForModelRef(modelRef = null) {
         const legacyProvider = state.activeProfile?.settings?.apiProvider || state.settings.apiProvider || 'gemini';
         let config = modelRef?.apiConfigId ? this.getApiConfigById(modelRef.apiConfigId) : null;
@@ -9139,6 +9177,33 @@ const appLogic = {
             || DEFAULT_MODEL;
         if (resolved.enabled === false) {
             console.warn('[ModelRef] 校正モデルのAPI設定が無効です。互換fallbackとして解決結果を使用します。', {
+                apiConfigId: resolved.id,
+                provider: resolved.provider
+            });
+        }
+        return {
+            ...resolved,
+            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
+            ref: modelRef?.apiConfigId && modelRef?.modelName
+                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
+                : resolved.ref
+        };
+    },
+
+    resolveSummaryApiConfig(legacyModelName = '') {
+        const modelRef = this.getSummaryModelRefForExecution();
+        const resolved = this.resolveApiConfigForModelRef(modelRef);
+        const fallbackModel = legacyModelName
+            || state.activeProfile?.settings?.summaryModelName
+            || state.activeProfile?.settings?.summaryModel
+            || state.settings.summaryModelName
+            || state.settings.summaryModel
+            || state.activeProfile?.settings?.modelName
+            || state.settings.modelName
+            || resolved.defaultModel
+            || DEFAULT_MODEL;
+        if (resolved.enabled === false) {
+            console.warn('[ModelRef] 要約モデルのAPI設定が無効です。互換fallbackとして解決結果を使用します。', {
                 apiConfigId: resolved.id,
                 provider: resolved.provider
             });
@@ -17839,11 +17904,28 @@ const appLogic = {
 
 
     async _callSummaryApi(originalText) {
+        const summaryConfig = this.resolveSummaryApiConfig(state.settings.summaryModelName);
+        const summaryMeta = {
+            provider: summaryConfig.name || this.getProviderDisplayName(summaryConfig.provider),
+            model: summaryConfig.modelName
+        };
+        const summaryModelLabel = summaryConfig.name && summaryConfig.modelName
+            ? `${summaryConfig.name} / ${summaryConfig.modelName}`
+            : summaryConfig.modelName || '';
         try {
-            if (state.settings.apiProvider === 'openrouter') {
-                const summaryModel = apiUtils.getOpenRouterAuxiliaryModel(state.settings.summaryModelName);
-                const summaryMeta = { provider: 'OpenRouter', model: summaryModel };
-                const summaryText = await this._callOpenRouterSummaryApi(originalText, summaryModel);
+            const provider = this.normalizeApiProvider(summaryConfig.provider);
+            if (provider === 'openrouter') {
+                const summaryText = await this._callOpenRouterSummaryApi(originalText, summaryConfig);
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+                return;
+            }
+            if (provider === 'zai') {
+                const summaryText = await this._callOpenAICompatibleSummaryApi(originalText, summaryConfig, 'Z.ai');
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+                return;
+            }
+            if (provider === 'bedrock') {
+                const summaryText = await this._callBedrockSummaryApi(originalText, summaryConfig);
                 this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
                 return;
             }
@@ -17868,15 +17950,19 @@ const appLogic = {
                 ]
             };
 
-            const summaryModel = state.settings.summaryModelName || state.settings.modelName;
+            const summaryModel = summaryConfig.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
+            const apiKey = summaryConfig.apiKey || state.settings.apiKey;
+            if (!apiKey) {
+                throw new Error("Gemini APIキーが設定されていません。");
+            }
             console.log("--- [要約API] リクエスト開始 ---");
-            console.log("使用モデル:", summaryModel);
+            console.log("使用モデル:", summaryModelLabel || summaryModel);
             console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
 
             const endpoint = `${GEMINI_API_BASE_URL}${summaryModel}:generateContent`;
             const response = await fetch(endpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.settings.apiKey },
+                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
                 body: JSON.stringify(requestBody),
             });
 
@@ -17914,22 +18000,23 @@ const appLogic = {
                 throw new Error(errorMessage);
             }
 
-            this._showSummaryDialog(summaryText, originalText.length);
+            this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
 
         } catch (error) {
             console.error("要約API呼び出し/処理中にエラー:", error);
             elements.summaryDialog.close();
-            uiUtils.showCustomAlert(`要約の生成に失敗しました: ${error.message}`);
+            const modelLine = summaryModelLabel ? `\n使用モデル: ${summaryModelLabel}` : '';
+            uiUtils.showCustomAlert(`要約の生成に失敗しました: ${error.message}${modelLine}`);
         }
     },
 
-    async _callOpenRouterSummaryApi(originalText, summaryModelName = '') {
-        const apiKey = state.settings.openrouterApiKey;
+    async _callOpenRouterSummaryApi(originalText, summaryConfig = {}) {
+        const apiKey = summaryConfig.apiKey || state.settings.openrouterApiKey;
         if (!apiKey) {
             throw new Error("OpenRouter APIキーが設定されていません。");
         }
 
-        const model = apiUtils.getOpenRouterAuxiliaryModel(summaryModelName);
+        const model = summaryConfig.modelName || apiUtils.getOpenRouterAuxiliaryModel(state.settings.summaryModelName);
         const systemPrompt = state.settings.summarySystemPrompt || 'あなたは会話履歴を簡潔に要約するアシスタントです。';
         const userContent = `【要約対象の会話履歴】\n${originalText}`;
         const requestBody = {
@@ -17949,10 +18036,10 @@ const appLogic = {
         };
 
         console.log("--- [OpenRouter要約API] リクエスト開始 ---");
-        console.log("使用モデル:", model);
+        console.log("使用モデル:", summaryConfig.name ? `${summaryConfig.name} / ${model}` : model);
         console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
 
-        const response = await fetch(OPENROUTER_API_BASE_URL, {
+        const response = await fetch(apiUtils.getOpenAICompatibleEndpoint(summaryConfig, OPENROUTER_API_BASE_URL), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -17998,6 +18085,119 @@ const appLogic = {
             throw new Error("OpenRouter APIから有効な要約結果が得られませんでした。");
         }
 
+        return summaryText;
+    },
+
+    async _callOpenAICompatibleSummaryApi(originalText, summaryConfig = {}, providerLabel = 'OpenAI互換API') {
+        const apiKey = summaryConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey;
+        if (!apiKey) {
+            throw new Error(`${providerLabel} APIキーが設定されていません。`);
+        }
+
+        const model = summaryConfig.modelName || state.settings.summaryModelName || DEFAULT_ZAI_MODEL;
+        const systemPrompt = state.settings.summarySystemPrompt || 'あなたは会話履歴を簡潔に要約するアシスタントです。';
+        const userContent = `【要約対象の会話履歴】\n${originalText}`;
+        const requestBody = {
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent }
+            ],
+            temperature: 0.3
+        };
+
+        console.log(`--- [${providerLabel}要約API] リクエスト開始 ---`);
+        console.log("使用モデル:", summaryConfig.name ? `${summaryConfig.name} / ${model}` : model);
+        console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
+
+        const response = await fetch(apiUtils.getOpenAICompatibleEndpoint(summaryConfig, ZAI_API_BASE_URL), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+            let errorBody = await response.text();
+            try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
+            console.error(`--- [${providerLabel}要約API] APIエラーレスポンス ---`);
+            console.error("ステータス:", response.status, response.statusText);
+            console.error("エラーレスポンスボディ:", errorBody);
+            throw new Error(errorBody?.error?.message || `${providerLabel} APIエラー: ${response.status}`);
+        }
+
+        const responseData = await response.json();
+        console.log(`--- [${providerLabel}要約API] 正常レスポンス ---`);
+        console.log("レスポンスボディ全体:", JSON.stringify(responseData, null, 2));
+
+        const messageContent = responseData.choices?.[0]?.message?.content;
+        let summaryText = '';
+        if (typeof messageContent === 'string') {
+            summaryText = messageContent;
+        } else if (Array.isArray(messageContent)) {
+            summaryText = messageContent
+                .map(part => {
+                    if (typeof part?.text === 'string') return part.text;
+                    if (typeof part?.content === 'string') return part.content;
+                    return '';
+                })
+                .filter(Boolean)
+                .join('\n');
+        }
+
+        summaryText = summaryText.trim();
+        if (!summaryText) {
+            throw new Error(`${providerLabel} APIから有効な要約結果が得られませんでした。`);
+        }
+        return summaryText;
+    },
+
+    async _callBedrockSummaryApi(originalText, summaryConfig = {}) {
+        const accessKey = summaryConfig.bedrockAccessKey || summaryConfig.apiKey || state.settings.bedrockAccessKey;
+        const secretKey = summaryConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+        const region = summaryConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+        if (!accessKey || !secretKey) {
+            throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
+        }
+        if (!window.BedrockRuntimeClient || !window.ConverseCommand) {
+            throw new Error("AWS Bedrock SDK が読み込まれていません。ページを再読み込みしてください。");
+        }
+
+        const model = summaryConfig.modelName || state.settings.summaryModelName || DEFAULT_BEDROCK_MODEL;
+        const systemPrompt = state.settings.summarySystemPrompt || 'あなたは会話履歴を簡潔に要約するアシスタントです。';
+        const userContent = `【要約対象の会話履歴】\n${originalText}`;
+        const requestBody = {
+            modelId: model,
+            system: [{ text: systemPrompt }],
+            messages: [{
+                role: 'user',
+                content: [{ text: userContent }]
+            }],
+            inferenceConfig: {
+                temperature: 0.3
+            }
+        };
+
+        console.log("--- [Bedrock要約API] リクエスト開始 ---");
+        console.log("使用モデル:", summaryConfig.name ? `${summaryConfig.name} / ${model}` : model);
+
+        const client = new window.BedrockRuntimeClient({
+            region,
+            credentials: {
+                accessKeyId: accessKey,
+                secretAccessKey: secretKey
+            }
+        });
+        const response = await client.send(new window.ConverseCommand(requestBody));
+        const summaryText = response?.output?.message?.content
+            ?.map(part => part?.text || '')
+            .join('')
+            .trim();
+        if (!summaryText) {
+            throw new Error("Bedrock APIから有効な要約結果が得られませんでした。");
+        }
         return summaryText;
     },
 
