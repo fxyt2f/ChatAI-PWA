@@ -534,24 +534,111 @@ body.dark-mode #chat-overlay {
 }
 
 /* --- System Prompt --- */
-.system-prompt-area {
-    padding: calc(var(--spacing-unit) * 1.5);
-    border: 1px solid var(--border-system);
+.system-prompt-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 10020;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(720px, calc(100vw - 32px));
+    max-height: min(760px, calc(100dvh - 32px));
+    padding: 18px;
+    box-sizing: border-box;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-primary);
     border-radius: var(--border-radius-md);
-    background-color: var(--bg-system-message);
-    color: var(--text-system);
-    transition: all var(--transition-duration) var(--transition-timing);
-    position: relative;
-    overflow: hidden;
-    max-height: 500px;
-    margin-top: 0;
-    margin-bottom: calc(var(--spacing-unit) * 2);
+    box-shadow: var(--shadow-4);
+    pointer-events: auto;
 }
-.system-prompt-area summary {
+.system-prompt-dialog[hidden] {
+    display: none;
+}
+.system-prompt-dialog-header,
+.system-prompt-dialog-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.system-prompt-dialog-title {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    font-size: 0.95rem;
     font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.system-prompt-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    margin: 0;
+    padding: 0;
+    color: var(--text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    box-shadow: none;
     cursor: pointer;
-    font-size: 0.875rem;
-    color: var(--text-system);
+    pointer-events: auto;
+}
+.system-prompt-close-btn:hover,
+.system-prompt-close-btn:focus-visible {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
+}
+.system-prompt-close-btn .material-symbols-outlined {
+    font-size: 20px;
+}
+.system-prompt-editor {
+    display: block;
+    width: 100%;
+    min-height: 360px;
+    max-height: min(560px, 64dvh);
+    margin: 0;
+    padding: 12px;
+    box-sizing: border-box;
+    color: var(--text-primary);
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-sm);
+    font: inherit;
+    line-height: 1.55;
+    resize: vertical;
+}
+.system-prompt-dialog-footer {
+    justify-content: space-between;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+.system-prompt-char-count,
+.system-prompt-save-status {
+    min-width: 0;
+}
+.system-prompt-save-status.is-error {
+    color: var(--text-error);
+}
+
+@media screen and (max-width: 600px) {
+    .system-prompt-dialog {
+        top: 50%;
+        left: 50%;
+        width: calc(100vw - 16px - var(--safe-left) - var(--safe-right));
+        max-height: min(640px, calc(100dvh - 16px));
+        padding: 12px;
+    }
+
+    .system-prompt-editor {
+        min-height: 320px;
+        max-height: min(500px, 62dvh);
+    }
 }
 
 /* --- Message Bubbles --- */
@@ -2662,8 +2749,16 @@ body.dark-mode .floating-action-panel .floating-action-button:disabled {
     background-color: rgba(255, 255, 255, 0.9); 
 }
 
+.floating-action-panel .floating-action-button.has-system-prompt {
+    color: var(--badge-color);
+}
+
 body.dark-mode .floating-action-panel .floating-action-button.active {
     background-color: rgba(60, 60, 60, 0.9);
+}
+
+body.dark-mode .floating-action-panel .floating-action-button.has-system-prompt {
+    color: var(--badge-color);
 }
 
 /* --- Chat Search (v1.29.0) --- */

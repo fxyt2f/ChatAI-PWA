@@ -43,6 +43,7 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 520;
 const EDIT_TEXTAREA_MIN_HEIGHT = 140;
 const EDIT_TEXTAREA_MAX_HEIGHT = 680;
 const EDIT_VIEWPORT_MAX_RATIO = 0.72;
+const SYSTEM_PROMPT_AUTOSAVE_DELAY_MS = 700;
 const MESSAGE_COLLAPSE_THRESHOLD = 1200;
 const MESSAGE_COLLAPSE_HEIGHT = 780;
 const MESSAGE_COLLAPSE_MIN_HEIGHT = 520;
@@ -126,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.2";
-const APP_CACHE_VERSION = "v1.32.2";
+const APP_VERSION = "1.32.3";
+const APP_CACHE_VERSION = "v1.32.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -389,11 +390,12 @@ try {
         noHistoryMessage: document.getElementById('no-history-message'),
         historyItemTemplate: document.querySelector('.js-history-item-template'),
         themeColorMeta: document.getElementById('theme-color-meta'),
-        systemPromptArea: document.getElementById('system-prompt-area'),
-        systemPromptDetails: document.getElementById('system-prompt-details'),
+        systemPromptOpenBtn: document.getElementById('system-prompt-open-btn'),
+        systemPromptDialog: document.getElementById('system-prompt-dialog'),
         systemPromptEditor: document.getElementById('system-prompt-editor'),
-        saveSystemPromptBtn: document.getElementById('save-system-prompt-btn'),
-        cancelSystemPromptBtn: document.getElementById('cancel-system-prompt-btn'),
+        systemPromptCloseBtn: document.getElementById('system-prompt-close-btn'),
+        systemPromptCharCount: document.getElementById('system-prompt-char-count'),
+        systemPromptSaveStatus: document.getElementById('system-prompt-save-status'),
         apiProviderSelect: document.getElementById('api-provider'),
         apiProviderRow: document.getElementById('api-provider-row'),
         basicApiConfigNameInput: document.getElementById('basic-api-config-name'),
@@ -831,6 +833,9 @@ Reason: [NGの場合の理由]`,
     abortController: null,
     editingMessageIndex: null,
     isEditingSystemPrompt: false,
+    systemPromptSaveTimer: 0,
+    systemPromptSaveStatus: 'saved',
+    systemPromptLastSaveError: null,
     touchStartX: 0,
     touchStartY: 0,
     touchEndX: 0,
@@ -3175,8 +3180,11 @@ const uiUtils = {
         this.updateCurrentChatSearchHighlight(true);
     },
 
-    openChatSearch() {
+    async openChatSearch() {
         if (!elements.chatSearchDialog) return;
+        if (state.isEditingSystemPrompt) {
+            await appLogic.closeSystemPromptDialog();
+        }
         state.chatSearch.isOpen = true;
         elements.chatSearchDialog.hidden = false;
         elements.chatSearchOpenBtn?.classList.add('active');
@@ -4773,7 +4781,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.chatLineHeightSelect) {
             elements.chatLineHeightSelect.value = String(uiUtils.getValidChatLineHeight(state.settings.chatLineHeight));
         }
-        elements.hideSystemPromptToggle.checked = state.settings.hideSystemPromptInChat;
+        elements.hideSystemPromptToggle.checked = !state.settings.hideSystemPromptInChat;
         elements.geminiEnableGroundingToggle.checked = state.settings.geminiEnableGrounding;
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
         elements.swipeNavigationToggle.checked = state.settings.enableSwipeNavigation;
@@ -5141,21 +5149,43 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // --- システムプロンプトUI更新 ---
     updateSystemPromptUI() {
-        elements.systemPromptEditor.value = state.currentSystemPrompt;
-        // 編集中でない場合、detailsタグを閉じる
-        if (!state.isEditingSystemPrompt) {
-            elements.systemPromptDetails.removeAttribute('open');
+        if (elements.systemPromptEditor && !state.isEditingSystemPrompt) {
+            elements.systemPromptEditor.value = state.currentSystemPrompt;
         }
-        // テキストエリアの高さを調整
-        this.adjustTextareaHeight(elements.systemPromptEditor, 200);
-        // 表示/非表示を制御
-        this.toggleSystemPromptVisibility();
+        this.updateSystemPromptButtonState();
+        this.updateSystemPromptCharCount();
+        this.updateSystemPromptSaveStatus(state.systemPromptSaveStatus || 'saved');
     },
-    // システムプロンプトエリアの表示/非表示を切り替え
+    // 互換用: チャット上部の常設エリアは廃止し、ボタン状態だけ更新する
     toggleSystemPromptVisibility() {
-        const shouldHide = state.settings.hideSystemPromptInChat;
-        elements.systemPromptArea.classList.toggle('hidden', shouldHide);
-        console.log(`システムプロンプト表示エリア ${shouldHide ? '非表示' : '表示'}`);
+        this.updateSystemPromptButtonState();
+        console.log('システムプロンプト表示はフローティングボタンへ移行済み');
+    },
+    updateSystemPromptButtonState() {
+        const hasPrompt = Boolean(String(state.currentSystemPrompt || '').trim());
+        elements.systemPromptOpenBtn?.classList.toggle('has-system-prompt', hasPrompt);
+        elements.systemPromptOpenBtn?.classList.toggle('active', state.isEditingSystemPrompt);
+        if (elements.systemPromptOpenBtn) {
+            const title = hasPrompt ? 'システムプロンプト（設定あり）' : 'システムプロンプト';
+            elements.systemPromptOpenBtn.title = title;
+            elements.systemPromptOpenBtn.setAttribute('aria-label', title);
+        }
+    },
+    updateSystemPromptCharCount() {
+        if (!elements.systemPromptCharCount || !elements.systemPromptEditor) return;
+        elements.systemPromptCharCount.textContent = `${elements.systemPromptEditor.value.length}文字`;
+    },
+    updateSystemPromptSaveStatus(status = 'saved') {
+        state.systemPromptSaveStatus = status;
+        if (!elements.systemPromptSaveStatus) return;
+        const labels = {
+            saved: '保存済み',
+            saving: '保存中…',
+            dirty: '未保存の変更があります',
+            error: '保存に失敗しました'
+        };
+        elements.systemPromptSaveStatus.textContent = labels[status] || labels.saved;
+        elements.systemPromptSaveStatus.classList.toggle('is-error', status === 'error');
     },
     // --------------------------------
 
@@ -5262,10 +5292,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.sendButton.disabled = false;
             elements.userInput.disabled = true;
             elements.attachFileBtn.disabled = true;
+            if (elements.systemPromptEditor) elements.systemPromptEditor.disabled = true;
             elements.loadingIndicator.classList.add('hidden');
             elements.loadingIndicator.removeAttribute('aria-live');
-            elements.systemPromptDetails.style.pointerEvents = 'none';
-            elements.systemPromptDetails.style.opacity = '0.7';
         } else {
             elements.sendButton.innerHTML = '<span class="material-symbols-outlined">send</span>';
             elements.sendButton.classList.remove('sending');
@@ -5273,10 +5302,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.sendButton.disabled = elements.userInput.value.trim() === '' && state.pendingAttachments.length === 0;
             elements.userInput.disabled = false;
             elements.attachFileBtn.disabled = false;
+            if (elements.systemPromptEditor) elements.systemPromptEditor.disabled = false;
             elements.loadingIndicator.classList.add('hidden');
             elements.loadingIndicator.removeAttribute('aria-live');
-            elements.systemPromptDetails.style.pointerEvents = '';
-            elements.systemPromptDetails.style.opacity = '';
         }
         this.scheduleComposerTextareaResize(true);
         this.updateGenerationStatusIndicator();
@@ -12957,8 +12985,14 @@ const appLogic = {
     
         // --- 画面遷移 ---
         uiUtils.setupChatTitleEditing();
-        elements.gotoHistoryBtn.addEventListener('click', () => uiUtils.showScreen('history'));
-        elements.gotoSettingsBtn.addEventListener('click', () => uiUtils.showScreen('settings'));
+        elements.gotoHistoryBtn.addEventListener('click', async () => {
+            if (state.isEditingSystemPrompt) await this.closeSystemPromptDialog();
+            uiUtils.showScreen('history');
+        });
+        elements.gotoSettingsBtn.addEventListener('click', async () => {
+            if (state.isEditingSystemPrompt) await this.closeSystemPromptDialog();
+            uiUtils.showScreen('settings');
+        });
         elements.backToChatFromHistoryBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
         elements.backToChatFromSettingsBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
     
@@ -12999,15 +13033,32 @@ const appLogic = {
         uiUtils.installComposerTextareaAutoResize();
     
         // --- システムプロンプト ---
-        elements.systemPromptDetails.addEventListener('toggle', (event) => {
-            if (event.target.open) {
-                this.startEditSystemPrompt();
-            } else if (state.isEditingSystemPrompt) {
-                this.cancelEditSystemPrompt();
+        elements.systemPromptOpenBtn?.addEventListener('click', () => {
+            if (state.isEditingSystemPrompt) {
+                this.closeSystemPromptDialog();
+            } else {
+                this.openSystemPromptDialog();
             }
         });
-        elements.saveSystemPromptBtn.addEventListener('click', () => this.saveCurrentSystemPrompt());
-        elements.cancelSystemPromptBtn.addEventListener('click', () => this.cancelEditSystemPrompt());
+        elements.systemPromptCloseBtn?.addEventListener('pointerdown', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.closeSystemPromptDialog();
+        });
+        elements.systemPromptCloseBtn?.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+        elements.systemPromptEditor?.addEventListener('input', () => this.handleSystemPromptInput());
+        elements.systemPromptEditor?.addEventListener('blur', () => {
+            if (state.isEditingSystemPrompt) this.saveCurrentSystemPrompt({ keepOpen: true });
+        });
+        elements.systemPromptEditor?.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                this.closeSystemPromptDialog();
+            }
+        });
     
         // --- プロファイルメニューの表示/非表示 ---
         elements.profileCardHeader.addEventListener('click', (e) => {
@@ -13454,7 +13505,7 @@ const appLogic = {
 
         setupLocalUiSettingSave(elements.chatFontSizeSelect, 'chatFontSize', 'change', () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
-        setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !!elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
+        setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
         setupLocalUiSettingSave(elements.floatingPanelBehaviorSelect, 'floatingPanelBehavior', 'change', () => elements.floatingPanelBehaviorSelect?.value || DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior, () => this.applyFloatingPanelBehavior());
     
         // --- OpenRouterモデル名テキストボックスのイベントリスナー ---
@@ -14161,9 +14212,9 @@ const appLogic = {
             const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
             this.cancelEditMessage(state.editingMessageIndex, msgEl);
         }
-        // システムプロンプト編集中なら破棄
+        // システムプロンプト編集中なら保存して閉じる
         if (state.isEditingSystemPrompt) {
-            this.cancelEditSystemPrompt();
+            await this.closeSystemPromptDialog();
         }
         // 保留中の添付ファイルがあれば破棄
         if (state.pendingAttachments.length > 0) {
@@ -14241,9 +14292,12 @@ const appLogic = {
             this.cancelEditMessage(state.editingMessageIndex, msgEl);
         }
         if (state.isEditingSystemPrompt) {
-            const confirmed = await uiUtils.showCustomConfirm("システムプロンプト編集中です。変更を破棄して別のチャットを読み込みますか？");
-            if (!confirmed) return;
-            this.cancelEditSystemPrompt();
+            const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
+            if (!saved) {
+                const confirmed = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したまま別のチャットを読み込みますか？");
+                if (!confirmed) return;
+            }
+            await this.closeSystemPromptDialog({ skipSave: true });
         }
         if (state.pendingAttachments.length > 0) {
             const confirmedAttach = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
@@ -14328,7 +14382,14 @@ const appLogic = {
         // 送信中・編集中・他チャット保存の確認 (loadChatと同様)
         if (state.isSending) { const conf = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？"); if (!conf) return; this.abortRequest(); }
         if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
-        if (state.isEditingSystemPrompt) { const conf = await uiUtils.showCustomConfirm("システムプロンプト編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return; this.cancelEditSystemPrompt(); }
+        if (state.isEditingSystemPrompt) {
+            const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
+            if (!saved) {
+                const conf = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したままチャットを複製しますか？");
+                if (!conf) return;
+            }
+            await this.closeSystemPromptDialog({ skipSave: true });
+        }
         if ((state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId && state.currentChatId !== id) { try { await dbUtils.saveChat(); } catch (error) { console.error("複製前の現チャット保存失敗:", error); const conf = await uiUtils.showCustomConfirm("現在のチャット保存に失敗しました。複製を続行しますか？"); if (!conf) return; } }
         // 保留中の添付ファイルがあれば破棄確認
         if (state.pendingAttachments.length > 0) {
@@ -15305,7 +15366,13 @@ const appLogic = {
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
-        if (state.isEditingSystemPrompt) { await uiUtils.showCustomAlert("システムプロンプトを編集中です。"); return; }
+        if (state.isEditingSystemPrompt) {
+            const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
+            if (!saved) {
+                await uiUtils.showCustomAlert("システムプロンプトの保存に失敗しました。入力内容は保持しています。");
+                return;
+            }
+        }
 
         const text = elements.userInput.value.trim();
         const attachmentsToSend = [...state.pendingAttachments];
@@ -15855,34 +15922,75 @@ const appLogic = {
 
     // --- システムプロンプト編集 ---
     startEditSystemPrompt() {
-        if (state.isSending) return; // 送信中は編集不可
+        this.openSystemPromptDialog();
+    },
+    openSystemPromptDialog() {
+        uiUtils.closeChatSearch?.({ restoreFocus: false });
         state.isEditingSystemPrompt = true;
-        elements.systemPromptEditor.value = state.currentSystemPrompt; // 現在の値で初期化
-        uiUtils.adjustTextareaHeight(elements.systemPromptEditor, 200);
-        elements.systemPromptEditor.focus();
+        clearTimeout(state.systemPromptSaveTimer);
+        state.systemPromptSaveTimer = 0;
+        if (elements.systemPromptEditor) {
+            elements.systemPromptEditor.value = state.currentSystemPrompt || '';
+            elements.systemPromptEditor.disabled = Boolean(state.isSending);
+            uiUtils.adjustTextareaHeight(elements.systemPromptEditor, 200);
+        }
+        if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = false;
+        this.updateSystemPromptCharCount();
+        this.updateSystemPromptSaveStatus('saved');
+        this.updateSystemPromptButtonState();
+        requestAnimationFrame(() => elements.systemPromptEditor?.focus());
         console.log("システムプロンプト編集開始");
     },
-    async saveCurrentSystemPrompt() {
-        const newPrompt = elements.systemPromptEditor.value.trim();
-        if (newPrompt !== state.currentSystemPrompt) {
-            state.currentSystemPrompt = newPrompt;
-            try {
-                await dbUtils.saveChat(); // 現在のチャットを保存 (SP含む)
-                await sleep(100);
-                console.log("システムプロンプト保存完了");
-            } catch (error) {
-                await uiUtils.showCustomAlert("システムプロンプトの保存に失敗しました。");
-            }
+    scheduleSystemPromptAutosave(delay = SYSTEM_PROMPT_AUTOSAVE_DELAY_MS) {
+        clearTimeout(state.systemPromptSaveTimer);
+        state.systemPromptSaveTimer = window.setTimeout(() => {
+            state.systemPromptSaveTimer = 0;
+            this.saveCurrentSystemPrompt({ keepOpen: true });
+        }, delay);
+    },
+    handleSystemPromptInput() {
+        this.updateSystemPromptCharCount();
+        this.updateSystemPromptSaveStatus('dirty');
+        this.scheduleSystemPromptAutosave();
+    },
+    async saveCurrentSystemPrompt({ keepOpen = true } = {}) {
+        clearTimeout(state.systemPromptSaveTimer);
+        state.systemPromptSaveTimer = 0;
+        const newPrompt = elements.systemPromptEditor ? elements.systemPromptEditor.value.trim() : state.currentSystemPrompt;
+        if (newPrompt === state.currentSystemPrompt && state.systemPromptSaveStatus !== 'error') {
+            this.updateSystemPromptSaveStatus('saved');
+            this.updateSystemPromptButtonState();
+            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
+            return true;
         }
+        state.currentSystemPrompt = newPrompt;
+        this.updateSystemPromptSaveStatus('saving');
+        this.updateSystemPromptButtonState();
+        try {
+            await dbUtils.saveChat();
+            this.updateSystemPromptSaveStatus('saved');
+            console.log("システムプロンプト保存完了");
+            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
+            return true;
+        } catch (error) {
+            state.systemPromptLastSaveError = error;
+            console.error("システムプロンプト保存エラー:", error);
+            this.updateSystemPromptSaveStatus('error');
+            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
+            return false;
+        }
+    },
+    async closeSystemPromptDialog({ skipSave = false } = {}) {
         state.isEditingSystemPrompt = false;
-        elements.systemPromptDetails.removeAttribute('open'); // detailsを閉じる
+        if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = true;
+        this.updateSystemPromptButtonState();
+        if (!skipSave) {
+            await this.saveCurrentSystemPrompt({ keepOpen: true });
+        }
+        console.log("システムプロンプト編集を閉じました");
     },
     cancelEditSystemPrompt() {
-        state.isEditingSystemPrompt = false;
-        elements.systemPromptEditor.value = state.currentSystemPrompt; // 元の値に戻す
-        elements.systemPromptDetails.removeAttribute('open'); // detailsを閉じる
-        uiUtils.adjustTextareaHeight(elements.systemPromptEditor, 200);
-        console.log("システムプロンプト編集キャンセル");
+        this.closeSystemPromptDialog();
     },
     // -----------------------------
 
