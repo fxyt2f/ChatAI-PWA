@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.31.8">
+    <link rel="stylesheet" href="./style.css?v=1.31.9">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.31.8" defer></script>
+    <script src="./dropbox.js?v=1.31.9" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.31.8" defer></script>
+    <script src="./app.js?v=1.31.9" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -297,16 +297,23 @@
 
                 <div class="settings-group">
                     <h3>基本設定</h3>
+                    <p class="settings-description model-ref-description">
+                        用途ごとに使用するモデルを選択します。表示は「API設定名 / モデル名」です。
+                    </p>
+                    <p class="settings-description">基本モデル: 通常のチャット応答に使用します。</p>
                     <label for="model-name" id="model-name-label">基本モデル:</label>
                     <select id="model-name" aria-label="基本モデル"></select>
+                    <p id="model-route-note" class="model-route-note hidden" aria-live="polite"></p>
 
                     <div class="settings-subsection basic-settings-section">
                         <label class="checkbox-label">
                             <input type="checkbox" id="enable-thought-translation">
                             思考プロセスを日本語に翻訳する
                         </label>
+                        <p class="settings-description">思考翻訳モデル: reasoning/thinking の翻訳に使用します。</p>
                         <label for="thought-translation-model">思考翻訳用モデル:</label>
                         <select id="thought-translation-model" aria-label="思考翻訳用モデル"></select>
+                        <p id="thought-translation-route-note" class="model-route-note hidden" aria-live="polite"></p>
                     </div>
 
                     <div class="settings-subsection basic-settings-section">
@@ -321,8 +328,10 @@
                         </p>
 
                         <div id="proofreading-options" class="hidden">
+                            <p class="settings-description">校正モデル: 校正・文章整形・推敲系処理に使用します。</p>
                             <label for="proofreading-model-name">校正モデル:</label>
                             <select id="proofreading-model-name" aria-label="校正モデル"></select>
+                            <p id="proofreading-route-note" class="model-route-note hidden" aria-live="polite"></p>
 
                             <label for="proofreading-system-instruction">校正用システムプロンプト:</label>
                             <textarea id="proofreading-system-instruction" placeholder="例: あなたはプロの編集者です。受け取った文章をより自然で分かりやすく校正してください。" aria-label="校正用システムプロンプト"></textarea>
@@ -338,8 +347,10 @@
                             <input type="checkbox" id="enable-summary-button-toggle">
                             チャット画面に要約ボタンを表示する
                         </label>
+                        <p class="settings-description">要約モデル: 履歴要約に使用します。</p>
                         <label for="summary-model-name">要約用モデル:</label>
                         <select id="summary-model-name" aria-label="要約用モデル"></select>
+                        <p id="summary-route-note" class="model-route-note hidden" aria-live="polite"></p>
                         <label for="summary-system-prompt">要約実行時のシステムプロンプト:</label>
                         <textarea id="summary-system-prompt" placeholder="要約を実行するAIへの指示を入力します。" aria-label="要約実行時のシステムプロンプト"></textarea>
                     </div>
@@ -996,6 +1007,9 @@
                     有効
                 </label>
             </div>
+            <p class="api-config-dialog-note">
+                API設定は、APIキー・接続先・このAPIで使えるモデル候補を管理します。用途別に使うモデルは、基本設定で選択します。
+            </p>
             <input type="hidden" id="api-config-id">
 
             <div class="api-config-fields">
@@ -1021,8 +1035,9 @@
                 <label for="api-config-additional-models">モデル候補</label>
                 <textarea id="api-config-additional-models" rows="5" placeholder="例: gemini-2.5-pro&#10;gemini-2.5-flash"></textarea>
                 <p class="api-config-inline-note">
-                    このAPI設定で選択肢に出すモデル名を、改行またはカンマ区切りで入力します。
+                    このAPI設定で選択肢に出すモデル名を登録します。基本モデル・思考翻訳モデル・要約モデル・校正モデルの候補として表示されます。
                 </p>
+                <p id="api-config-provider-note" class="api-config-provider-note hidden" aria-live="polite"></p>
 
             </div>
 

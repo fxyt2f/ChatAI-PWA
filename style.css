@@ -741,6 +741,33 @@ body.dark-mode #attach-file-btn {
     line-height: 1.5;
 }
 
+.api-config-dialog-note,
+.api-config-provider-note,
+.model-route-note {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.api-config-provider-note,
+.model-route-note {
+    padding: 6px 8px;
+    border: 1px solid var(--border-tertiary);
+    border-radius: var(--border-radius-sm);
+    background: var(--bg-tertiary);
+}
+
+.model-route-note.is-warning,
+.api-config-provider-note.is-warning {
+    color: var(--text-primary);
+    border-color: var(--accent-color);
+}
+
+.model-ref-description {
+    margin-top: -4px;
+}
+
 .api-config-basic-list {
     margin-top: 0;
     padding-top: 0;

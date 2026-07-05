@@ -126,8 +126,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.8";
-const APP_CACHE_VERSION = "v1.31.8";
+const APP_VERSION = "1.31.9";
+const APP_CACHE_VERSION = "v1.31.9";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -423,6 +423,7 @@ try {
         apiConfigBaseUrlInput: document.getElementById('api-config-base-url'),
         apiConfigDefaultModelInput: document.getElementById('api-config-default-model'),
         apiConfigAdditionalModelsTextarea: document.getElementById('api-config-additional-models'),
+        apiConfigProviderNote: document.getElementById('api-config-provider-note'),
         apiConfigEnabledCheckbox: document.getElementById('api-config-enabled'),
         saveApiConfigBtn: document.getElementById('save-api-config-btn'),
         cancelApiConfigBtn: document.getElementById('cancel-api-config-btn'),
@@ -535,6 +536,10 @@ try {
         messageOpacitySlider: document.getElementById('message-opacity-slider'),
         messageOpacityValue:  document.getElementById('message-opacity-value'),
         modelWarningMessage: document.getElementById('model-warning-message'),
+        modelRouteNote: document.getElementById('model-route-note'),
+        thoughtTranslationRouteNote: document.getElementById('thought-translation-route-note'),
+        proofreadingRouteNote: document.getElementById('proofreading-route-note'),
+        summaryRouteNote: document.getElementById('summary-route-note'),
         profileCardHeaderWrapper: document.getElementById('profile-card-header-wrapper'),
         profileCardHeader: document.getElementById('profile-card-header'),
         profileCardIconContainer: document.getElementById('profile-card-icon-container'),
@@ -4902,6 +4907,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         populateModelRefSelect(elements.thoughtTranslationModelSelect, 'thoughtTranslationModelRef', state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite');
         populateModelRefSelect(elements.proofreadingModelNameSelect, 'proofreadingModelRef', state.settings.proofreadingModelName || state.settings.modelName || DEFAULT_MODEL);
         populateModelRefSelect(elements.summaryModelNameSelect, 'summaryModelRef', state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL);
+        appLogic.updateModelRouteNotes();
 
         const geminiModels = (state.settings.additionalModels || '')
             .split(',')
@@ -6694,7 +6700,7 @@ const apiUtils = {
 
         const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || state.settings.apiKey) : state.settings.apiKey;
         if (!apiKey) {
-            throw new Error("Gemini APIキーが設定されていません。");
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'gemini', modelName: state.settings.modelName || DEFAULT_MODEL }, 'gemini'));
         }
         
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -7205,7 +7211,7 @@ const apiUtils = {
 
         const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey) : (state.settings.zaiApiKey || state.settings.apiKey);
         if (!apiKey) {
-            throw new Error("Z.ai APIキーが設定されていません。");
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'zai', modelName: state.settings.modelName || DEFAULT_ZAI_MODEL }, 'zai'));
         }
 
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -7410,7 +7416,7 @@ const apiUtils = {
 
         const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || state.settings.openrouterApiKey) : state.settings.openrouterApiKey;
         if (!apiKey) {
-            throw new Error("OpenRouter APIキーが設定されていません。");
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'openrouter', modelName: state.settings.modelName || DEFAULT_OPENROUTER_MODEL }, 'openrouter'));
         }
 
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -9025,6 +9031,80 @@ const appLogic = {
         return this.buildModelRefOptions();
     },
 
+    getModelRefDisplayLabel(modelRef = null, fallbackConfig = null) {
+        const apiConfigId = modelRef?.apiConfigId || fallbackConfig?.id || '';
+        const modelName = String(modelRef?.modelName || fallbackConfig?.modelName || fallbackConfig?.defaultModel || '').trim();
+        const config = apiConfigId ? this.getApiConfigById(apiConfigId) : fallbackConfig;
+        const configName = config?.name || fallbackConfig?.name || this.getProviderDisplayName(config?.provider || fallbackConfig?.provider || 'gemini');
+        if (!modelName) return configName || '';
+        return `${configName || 'API設定'} / ${modelName}`;
+    },
+
+    getSelectedModelRouteInfo(selectElement = null) {
+        const ref = this.decodeModelRefValue(selectElement?.value || '');
+        if (!ref) return null;
+        const config = this.getApiConfigById(ref.apiConfigId);
+        return {
+            ref,
+            config,
+            provider: this.normalizeApiProvider(config?.provider),
+            modelName: ref.modelName,
+            label: this.getModelRefDisplayLabel(ref)
+        };
+    },
+
+    getModelRouteNoticeText(routeInfo = null) {
+        if (!routeInfo?.ref) return '';
+        if (!routeInfo.config) {
+            return `参照切れ: ${routeInfo.ref.apiConfigId} / ${routeInfo.ref.modelName}。設定画面でモデルを選び直してください。`;
+        }
+        if (routeInfo.config.enabled === false) {
+            return `無効なAPI設定: ${routeInfo.label}。API設定を有効にするか、別のモデルを選択してください。`;
+        }
+        if (routeInfo.provider === 'openrouter') {
+            if (/^google\/gemini-/i.test(routeInfo.modelName)) {
+                return `${routeInfo.label} はOpenRouter経由で使用されます。Gemini API直とは料金やルーティングが異なる場合があります。`;
+            }
+            return `${routeInfo.label} はOpenRouter経由です。料金・ルーティングに注意してください。`;
+        }
+        if (routeInfo.provider === 'gemini') {
+            return `${routeInfo.label} はGemini API直で使用されます。OpenRouter経由のGeminiモデルとは別扱いです。`;
+        }
+        return '';
+    },
+
+    formatModelErrorMessage(baseMessage, configOrRef = null) {
+        const label = configOrRef?.ref
+            ? this.getModelRefDisplayLabel(configOrRef.ref, configOrRef)
+            : this.getModelRefDisplayLabel(configOrRef, configOrRef);
+        return label ? `${baseMessage}\n使用モデル: ${label}` : baseMessage;
+    },
+
+    getApiKeyMissingMessage(config = {}, fallbackProvider = 'gemini') {
+        const provider = this.normalizeApiProvider(config?.provider || fallbackProvider);
+        const providerName = this.getProviderDisplayName(provider);
+        return this.formatModelErrorMessage(`このAPI設定には${providerName} APIキーが設定されていません。\nAPI設定でAPIキーを入力してください。`, config);
+    },
+
+    updateModelRouteNote(selectElement, noteElement) {
+        if (!noteElement) return;
+        noteElement.textContent = '';
+        noteElement.dataset.tooltip = '';
+        noteElement.title = '';
+        noteElement.removeAttribute('aria-label');
+        noteElement.removeAttribute('role');
+        noteElement.tabIndex = -1;
+        noteElement.classList.remove('material-symbols-outlined', 'is-warning');
+        noteElement.classList.add('hidden');
+    },
+
+    updateModelRouteNotes() {
+        this.updateModelRouteNote(elements.modelNameSelect, elements.modelRouteNote);
+        this.updateModelRouteNote(elements.thoughtTranslationModelSelect, elements.thoughtTranslationRouteNote);
+        this.updateModelRouteNote(elements.proofreadingModelNameSelect, elements.proofreadingRouteNote);
+        this.updateModelRouteNote(elements.summaryModelNameSelect, elements.summaryRouteNote);
+    },
+
     findModelRefForLegacyModel(modelName = '', preferredApiConfigId = '') {
         const normalizedModelName = String(modelName || '').trim();
         const choices = this.getApiModelChoices();
@@ -9089,17 +9169,20 @@ const appLogic = {
             : '';
         const reasonMessage = {
             empty: `${usageLabel}が選択されていません。`,
-            apiConfigMissing: `${usageLabel}のAPI設定が見つかりません。`,
-            apiConfigDisabled: `${usageLabel}のAPI設定が無効です。`,
+            apiConfigMissing: `選択中の${usageLabel}が参照しているAPI設定が見つかりません。`,
+            apiConfigDisabled: `選択中の${usageLabel}が参照しているAPI設定は無効です。API設定を有効にするか、別のモデルを選択してください。`,
             modelNameMissing: `${usageLabel}のモデル名が空です。`,
-            modelNotInCandidates: `${usageLabel}のモデルがAPI設定のモデル候補にありません。`
+            modelNotInCandidates: `選択中の${usageLabel}はAPI設定のモデル候補にありません。`
         }[result.reason] || `${usageLabel}の設定が無効です。`;
+        const label = result.config
+            ? this.getModelRefDisplayLabel({ apiConfigId: result.apiConfigId, modelName: result.modelName }, result.config)
+            : '';
 
         return {
             ...result,
             usageKey,
             usageLabel,
-            message: `${reasonMessage}${detail}\n設定画面で${usageLabel}を選び直してください。`
+            message: `${reasonMessage}${label ? `\n使用モデル: ${label}` : detail}\n設定画面で${usageLabel}を選び直してください。`
         };
     },
 
@@ -9703,6 +9786,30 @@ const appLogic = {
         return '例: gemini-1.5-flash\ngemini-2.5-pro';
     },
 
+    getApiConfigProviderNote(provider = 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        if (normalizedProvider === 'openrouter') {
+            return 'OpenRouter経由で他社モデルを使う場合、各API直利用とは料金・ルーティング・挙動が異なる場合があります。';
+        }
+        if (normalizedProvider === 'gemini') {
+            return 'Gemini API直のモデル候補を登録します。OpenRouter経由のGeminiモデルとは別扱いです。';
+        }
+        if (normalizedProvider === 'zai') {
+            return 'Z.ai APIで利用するモデル候補を登録します。';
+        }
+        if (normalizedProvider === 'bedrock') {
+            return 'Amazon Bedrockで利用するモデルIDを登録します。リージョンや利用権限も確認してください。';
+        }
+        return '';
+    },
+
+    updateApiConfigProviderNote(provider = elements.apiConfigProviderSelect?.value || 'gemini') {
+        if (!elements.apiConfigProviderNote) return;
+        elements.apiConfigProviderNote.textContent = '';
+        elements.apiConfigProviderNote.classList.remove('is-warning');
+        elements.apiConfigProviderNote.classList.add('hidden');
+    },
+
     generateApiConfigId(provider = 'gemini') {
         const normalizedProvider = this.normalizeApiProvider(provider);
         const existingIds = new Set((state.apiConfigs || []).map(config => config.id));
@@ -9833,6 +9940,7 @@ const appLogic = {
         if (elements.apiConfigAdditionalModelsTextarea) {
             elements.apiConfigAdditionalModelsTextarea.placeholder = this.getApiConfigModelCandidatesPlaceholder(provider);
         }
+        this.updateApiConfigProviderNote(provider);
         const modelCandidates = config
             ? this.getApiConfigModelCandidates(config)
             : this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
@@ -9877,6 +9985,7 @@ const appLogic = {
         if (elements.apiConfigAdditionalModelsTextarea) {
             elements.apiConfigAdditionalModelsTextarea.placeholder = this.getApiConfigModelCandidatesPlaceholder(elements.apiConfigProviderSelect.value);
         }
+        this.updateApiConfigProviderNote(elements.apiConfigProviderSelect.value);
         const candidates = this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
         elements.apiConfigDefaultModelInput.value = candidates[0] || '';
         elements.apiConfigAdditionalModelsTextarea.value = this.joinModelCandidateList(candidates);
@@ -9913,11 +10022,13 @@ const appLogic = {
     collectApiConfigModelRefUsages(configId) {
         const usages = [];
         const seen = new Set();
+        const config = this.getApiConfigById(configId);
+        const apiConfigName = config?.name || this.getProviderDisplayName(config?.provider || 'gemini');
         const addUsage = ({ scope, profileName = null, usage, modelRefKey, modelName = '', apiConfigId = configId, legacy = false }) => {
             const key = `${scope}|${profileName || ''}|${usage}|${modelRefKey}|${modelName}|${apiConfigId}|${legacy}`;
             if (seen.has(key)) return;
             seen.add(key);
-            usages.push({ scope, profileName, usage, modelRefKey, modelName, apiConfigId, legacy });
+            usages.push({ scope, profileName, usage, modelRefKey, modelName, apiConfigId, apiConfigName, legacy });
         };
         const collectFromSettings = (settings = {}, scope = 'global', profileName = null) => {
             MODEL_REF_USAGE_KEYS.forEach(modelRefKey => {
@@ -9961,8 +10072,9 @@ const appLogic = {
                     ? '共通設定'
                     : (item.profileName ? `プロファイル「${item.profileName}」` : 'プロファイル');
                 const modelSuffix = item.modelName ? ` (${item.modelName})` : '';
+                const routeLabel = item.apiConfigName && item.modelName ? `: ${item.apiConfigName} / ${item.modelName}` : modelSuffix;
                 const legacySuffix = item.legacy ? ' [旧設定]' : '';
-                return `- ${item.usage}${modelSuffix} / ${scopeLabel}${legacySuffix}`;
+                return `- ${item.usage}${routeLabel} / ${scopeLabel}${legacySuffix}`;
             }).join('\n')
             : '- 使用箇所を特定できませんでした';
         return `${baseMessage}\n使用中:\n${usageLines}\n\n先に基本設定で別のモデルを選択してください。`;
@@ -13096,6 +13208,7 @@ const appLogic = {
                 event: 'change', 
                 onUpdate: () => {
                     uiUtils.updateModelWarningMessage();
+                    this.updateModelRouteNotes();
                     this.updateApiUsageUI(); // onUpdateに統合
                 },
                 getValue: () => {
@@ -13114,6 +13227,7 @@ const appLogic = {
             thoughtTranslationModel: {
                 element: elements.thoughtTranslationModelSelect,
                 event: 'change',
+                onUpdate: () => this.updateModelRouteNotes(),
                 getValue: () => {
                     const modelRef = this.decodeModelRefValue(elements.thoughtTranslationModelSelect?.value || '');
                     return modelRef?.modelName || '';
@@ -13169,6 +13283,7 @@ const appLogic = {
             proofreadingModelName: {
                 element: elements.proofreadingModelNameSelect,
                 event: 'change',
+                onUpdate: () => this.updateModelRouteNotes(),
                 getValue: () => {
                     const modelRef = this.decodeModelRefValue(elements.proofreadingModelNameSelect?.value || '');
                     return modelRef?.modelName || '';
@@ -13209,6 +13324,7 @@ const appLogic = {
             summaryModelName: {
                 element: elements.summaryModelNameSelect,
                 event: 'change',
+                onUpdate: () => this.updateModelRouteNotes(),
                 getValue: () => {
                     const modelRef = this.decodeModelRefValue(elements.summaryModelNameSelect?.value || '');
                     return modelRef?.modelName || '';
@@ -14615,7 +14731,7 @@ const appLogic = {
         if (provider === 'openrouter' || provider === 'zai') {
             const apiKey = proofreadingConfig.apiKey || (provider === 'openrouter' ? state.settings.openrouterApiKey : state.settings.zaiApiKey);
             if (!apiKey) {
-                throw new Error(`${this.getProviderDisplayName(provider)} APIキーが設定されていません。`);
+                throw new Error(this.getApiKeyMissingMessage(proofreadingConfig, provider));
             }
             const messages = [];
             if (systemPrompt.trim()) {
@@ -14720,7 +14836,7 @@ const appLogic = {
 
         const apiKey = proofreadingConfig.apiKey || state.settings.apiKey;
         if (!apiKey) {
-            throw new Error("Gemini APIキーが設定されていません。");
+            throw new Error(this.getApiKeyMissingMessage(proofreadingConfig, 'gemini'));
         }
 
         const endpoint = `${GEMINI_API_BASE_URL}${modelName}:generateContent`;
@@ -18347,7 +18463,7 @@ const appLogic = {
             const summaryModel = summaryConfig.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
             const apiKey = summaryConfig.apiKey || state.settings.apiKey;
             if (!apiKey) {
-                throw new Error("Gemini APIキーが設定されていません。");
+                throw new Error(this.getApiKeyMissingMessage(summaryConfig, 'gemini'));
             }
             console.log("--- [要約API] リクエスト開始 ---");
             console.log("使用モデル:", summaryModelLabel || summaryModel);
@@ -18407,7 +18523,7 @@ const appLogic = {
     async _callOpenRouterSummaryApi(originalText, summaryConfig = {}) {
         const apiKey = summaryConfig.apiKey || state.settings.openrouterApiKey;
         if (!apiKey) {
-            throw new Error("OpenRouter APIキーが設定されていません。");
+            throw new Error(this.getApiKeyMissingMessage(summaryConfig, 'openrouter'));
         }
 
         const model = summaryConfig.modelName || apiUtils.getOpenRouterAuxiliaryModel(state.settings.summaryModelName);
@@ -18485,7 +18601,7 @@ const appLogic = {
     async _callOpenAICompatibleSummaryApi(originalText, summaryConfig = {}, providerLabel = 'OpenAI互換API') {
         const apiKey = summaryConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey;
         if (!apiKey) {
-            throw new Error(`${providerLabel} APIキーが設定されていません。`);
+            throw new Error(this.getApiKeyMissingMessage(summaryConfig, summaryConfig.provider || 'zai'));
         }
 
         const model = summaryConfig.modelName || state.settings.summaryModelName || DEFAULT_ZAI_MODEL;
