@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.6";
-const APP_CACHE_VERSION = "v1.32.6";
+const APP_VERSION = "1.32.7";
+const APP_CACHE_VERSION = "v1.32.7";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -4707,22 +4707,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     applySettingsToUI() {
         // プロバイダーとAPIキーの設定（要素が存在する場合のみ）
         if (elements.apiProviderSelect) {
-            let provider = state.settings.apiProvider || 'gemini';
-            const isDebugOnlyProvider = provider === 'zai' || provider === 'openrouter' || provider === 'bedrock';
-            if (!state.settings.debugMode && isDebugOnlyProvider) {
-                provider = 'gemini';
-                state.settings.apiProvider = provider;
-                if (state.activeProfile && state.activeProfile.settings) {
-                    state.activeProfile.settings.apiProvider = provider;
-                    dbUtils.updateProfile(state.activeProfile)
-                        .then(() => appLogic.markAsDirtyAndSchedulePush('structural'))
-                        .catch(error => console.error("[Settings] APIプロバイダーの同期更新に失敗しました:", error));
-                }
-            }
+            const provider = state.settings.apiProvider || 'gemini';
             elements.apiProviderSelect.value = provider;
-            const shouldShowProviderSelect = state.settings.debugMode === true;
             if (elements.apiProviderRow) {
-                elements.apiProviderRow.classList.toggle('hidden', !shouldShowProviderSelect);
+                elements.apiProviderRow.classList.remove('hidden');
             }
             appLogic.updateProviderUI(provider);
             appLogic.updateModelOptions(provider);
@@ -7747,17 +7735,15 @@ const apiUtils = {
         // デバッグ情報を出力
         console.log(`[Bedrock Debug] Access Key存在: ${!!accessKey}, Secret Key存在: ${!!secretKey}, Region: ${region}`);
         console.log(`[Bedrock Debug] state.settings:`, {
-            bedrockAccessKey: accessKey ? `${accessKey.substring(0, 8)}...` : 'なし',
+            bedrockAccessKey: accessKey ? '設定済み' : 'なし',
             bedrockSecretKey: secretKey ? '設定済み' : 'なし',
             bedrockRegion: region
         });
         
         if (!accessKey || !secretKey) {
-            console.error('[Bedrock Debug] 認証情報が不足しています。elements確認:', {
-                bedrockAccessKeyInput: elements.bedrockAccessKeyInput,
-                bedrockSecretKeyInput: elements.bedrockSecretKeyInput,
+            console.error('[Bedrock Debug] 認証情報が不足しています。設定有無:', {
                 bedrockAccessKeyValue: elements.bedrockAccessKeyInput?.value ? '設定済み' : 'なし',
-                bedrockSecretKeyValue: elements.bedrockSecretKeyInput ? '存在する' : 'なし'
+                bedrockSecretKeyValue: elements.bedrockSecretKeyInput?.value ? '設定済み' : 'なし'
             });
             throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
         }
@@ -11947,24 +11933,6 @@ const appLogic = {
             elements.openrouterModelInputContainer.classList.toggle('hidden', !isOpenRouter);
         }
         
-        // デバッグモード専用プロバイダーのチェック
-        const isDebugOnlyProvider = isZai || isOpenRouter || isBedrock;
-        if (!state.settings.debugMode && isDebugOnlyProvider) {
-            // デバッグモードOFFならGeminiに戻す
-            state.settings.apiProvider = 'gemini';
-            if (state.activeProfile && state.activeProfile.settings) {
-                state.activeProfile.settings.apiProvider = 'gemini';
-                state.activeProfile.settings.apiConfigId = this.getDefaultApiConfigIdForProvider('gemini');
-                state.settings.apiConfigId = state.activeProfile.settings.apiConfigId;
-                dbUtils.updateProfile(state.activeProfile)
-                    .then(() => this.markAsDirtyAndSchedulePush('structural'))
-                    .catch(error => console.error("[Settings] APIプロバイダーの同期更新に失敗しました:", error));
-            }
-            this.updateProviderUI('gemini');
-            this.updateModelOptions('gemini');
-            uiUtils.showCustomAlert("デバッグモードを無効にしたため、APIプロバイダーをGeminiに戻しました。");
-        }
-        
         // プロバイダー固有の設定項目の表示/非表示
         // Gemini専用機能（グラウンディング、Function Callingなど）の表示制御は後で実装
     },
@@ -13291,26 +13259,6 @@ const appLogic = {
                 element: elements.apiProviderSelect, 
                 event: 'change',
                 onUpdate: (value) => {
-                    const isDebugOnlyProvider = value === 'zai' || value === 'openrouter' || value === 'bedrock';
-                    if (!state.settings.debugMode && isDebugOnlyProvider) {
-                        const fallbackProvider = 'gemini';
-                        state.settings.apiProvider = fallbackProvider;
-                        if (state.activeProfile && state.activeProfile.settings) {
-                            state.activeProfile.settings.apiProvider = fallbackProvider;
-                            dbUtils.updateProfile(state.activeProfile)
-                                .then(() => this.markAsDirtyAndSchedulePush('structural'))
-                                .catch(error => console.error("[Settings] デバッグモードOFF中にデバッグ専用プロバイダーが選択されましたがGeminiへ戻す際の保存に失敗しました:", error));
-                        }
-                        if (elements.apiProviderSelect) {
-                            elements.apiProviderSelect.value = fallbackProvider;
-                        }
-                        this.setActiveProfileApiConfigIdForProvider(fallbackProvider)
-                            .catch(error => console.error("[ApiConfig] Gemini既定API設定IDへの補正に失敗しました:", error));
-                        this.updateProviderUI(fallbackProvider);
-                        this.updateModelOptions(fallbackProvider);
-                        uiUtils.showCustomAlert("デバッグモードが無効のため、このプロバイダーは選択できません。Geminiに戻しました。");
-                        return;
-                    }
                     this.setActiveProfileApiConfigIdForProvider(value)
                         .catch(error => console.error("[ApiConfig] APIプロバイダー変更時のapiConfigId更新に失敗しました:", error));
                     this.updateProviderUI(value);
@@ -13368,32 +13316,12 @@ const appLogic = {
                 this.toggleDebugLogButtonVisibility(value);
 
                 if (elements.apiProviderRow) {
-                    elements.apiProviderRow.classList.toggle('hidden', !value);
+                    elements.apiProviderRow.classList.remove('hidden');
                 }
 
-                const isDebugOnlyProvider = state.settings.apiProvider === 'zai' || state.settings.apiProvider === 'openrouter' || state.settings.apiProvider === 'bedrock';
-                if (!value && isDebugOnlyProvider) {
-                    const fallbackProvider = 'gemini';
-                    state.settings.apiProvider = fallbackProvider;
-                    if (state.activeProfile && state.activeProfile.settings) {
-                        state.activeProfile.settings.apiProvider = fallbackProvider;
-                        dbUtils.updateProfile(state.activeProfile)
-                            .then(() => this.markAsDirtyAndSchedulePush('structural'))
-                            .catch(error => console.error("[Settings] デバッグモードOFF時のAPIプロバイダー更新に失敗しました:", error));
-                    }
-                    if (elements.apiProviderSelect) {
-                        elements.apiProviderSelect.value = fallbackProvider;
-                    }
-                    this.setActiveProfileApiConfigIdForProvider(fallbackProvider)
-                        .catch(error => console.error("[ApiConfig] デバッグモードOFF時のapiConfigId更新に失敗しました:", error));
-                    this.updateProviderUI(fallbackProvider);
-                    this.updateModelOptions(fallbackProvider);
-                    uiUtils.showCustomAlert("デバッグモードを無効にしたため、APIプロバイダーをGeminiに戻しました。");
-                } else if (value) {
-                    const provider = state.settings.apiProvider || 'gemini';
-                    this.updateProviderUI(provider);
-                    this.updateModelOptions(provider);
-                }
+                const provider = state.settings.apiProvider || 'gemini';
+                this.updateProviderUI(provider);
+                this.updateModelOptions(provider);
             }},
             fontFamily: { element: elements.fontFamilyInput, event: 'input', onUpdate: () => uiUtils.applyFontFamily() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
@@ -13948,9 +13876,9 @@ const appLogic = {
 
                 const authUrl = `https://www.dropbox.com/oauth2/authorize?client_id=${APP_KEY}&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&token_access_type=offline&code_challenge=${codeChallenge}&code_challenge_method=S256`;
 
-                console.log('[Dropbox OAuth] client_id / App key:', APP_KEY);
+                console.log('[Dropbox OAuth] App key configured:', Boolean(APP_KEY));
                 console.log('[Dropbox OAuth] redirect_uri:', REDIRECT_URI);
-                console.log('[Dropbox OAuth] authorize URL:', authUrl);
+                console.log('[Dropbox OAuth] authorize URL generated.');
 
                 await uiUtils.showCustomAlert(`Dropbox Redirect URI:\n${REDIRECT_URI}`);
 
