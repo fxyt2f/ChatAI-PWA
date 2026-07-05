@@ -1872,9 +1872,9 @@ body.dark-mode #chat-screen.drag-over::after {
 
 /* --- Profile Management Styles (Settings Screen) --- */
 #profile-management-group {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-primary);
-    padding-bottom: 12px;
+    background-color: var(--bg-primary);
+    border: none;
+    padding-bottom: calc(var(--spacing-unit) * 2);
 }
 
 #profile-management-group h3 {
