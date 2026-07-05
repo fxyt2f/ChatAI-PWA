@@ -116,7 +116,7 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
 const APP_VERSION = "1.31.5";
-const APP_CACHE_VERSION = "v1.31.5";
+const APP_CACHE_VERSION = "v1.31.5-fix1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -1263,6 +1263,7 @@ const dbUtils = {
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
                 thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
+                proofreadingModelInfo: msg.proofreadingModelInfo || null,
                 tool_calls: msg.tool_calls || null,
                 imageIds: msg.imageIds,
                 finishReason: msg.finishReason,
@@ -3268,6 +3269,16 @@ const uiUtils = {
         return `${label}: ${meta.provider} / ${meta.model}`;
     },
 
+    formatProofreadingModelInfoLabel(info) {
+        if (!info || typeof info !== 'object') return '';
+        const savedLabel = String(info.label || '').trim();
+        if (savedLabel && savedLabel.includes(' / ')) return `校正: ${savedLabel}`;
+        const apiConfigName = String(info.apiConfigName || '').trim();
+        const modelName = String(info.modelName || '').trim();
+        if (apiConfigName && modelName) return `校正: ${apiConfigName} / ${modelName}`;
+        return '';
+    },
+
     getExecutionProviderLabel(provider) {
         const rawProvider = String(provider || '').trim();
         const normalized = rawProvider.toLowerCase();
@@ -4004,6 +4015,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     executionMetaSpan.setAttribute('aria-label', executionTitle);
                 }
                 actionMetaDiv.appendChild(executionMetaSpan);
+            }
+
+            const proofreadingLabel = this.formatProofreadingModelInfoLabel(messageData?.proofreadingModelInfo);
+            if (proofreadingLabel) {
+                const proofreadingMetaSpan = document.createElement('span');
+                proofreadingMetaSpan.classList.add('tm-proofreading-meta');
+                proofreadingMetaSpan.textContent = proofreadingLabel;
+                proofreadingMetaSpan.title = proofreadingLabel;
+                proofreadingMetaSpan.setAttribute('aria-label', proofreadingLabel);
+                actionMetaDiv.appendChild(proofreadingMetaSpan);
             }
         }
         
@@ -9128,6 +9149,20 @@ const appLogic = {
             ref: modelRef?.apiConfigId && modelRef?.modelName
                 ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
                 : resolved.ref
+        };
+    },
+
+    createProofreadingModelInfo(proofreadingConfig = {}) {
+        const modelName = String(proofreadingConfig.modelName || '').trim();
+        const apiConfigName = String(proofreadingConfig.name || proofreadingConfig.apiConfigName || '').trim();
+        if (!modelName || !apiConfigName) return null;
+        return {
+            apiConfigId: proofreadingConfig.id || proofreadingConfig.ref?.apiConfigId || '',
+            apiConfigName,
+            provider: this.normalizeApiProvider(proofreadingConfig.provider),
+            modelName,
+            label: `${apiConfigName} / ${modelName}`,
+            appliedAt: Date.now()
         };
     },
 
@@ -14289,7 +14324,7 @@ const appLogic = {
         throw new Error("校正APIの応答に有効なコンテンツが含まれていません。");
     },
 
-    async proofreadText(textToProofread) {
+    async proofreadTextWithInfo(textToProofread) {
         console.log("--- 校正処理開始 ---");
         const {
             proofreadingSystemInstruction,
@@ -14346,7 +14381,10 @@ const appLogic = {
                     signal: state.abortController?.signal
                 });
                 console.log("--- 校正処理成功 ---");
-                return proofreadContent;
+                return {
+                    content: proofreadContent,
+                    modelInfo: this.createProofreadingModelInfo(proofreadingConfig)
+                };
 
             } catch (error) {
                 lastError = error;
@@ -14363,6 +14401,11 @@ const appLogic = {
 
         console.error("校正APIの最大リトライ回数に達しました。");
         throw lastError;
+    },
+
+    async proofreadText(textToProofread) {
+        const result = await this.proofreadTextWithInfo(textToProofread);
+        return result.content;
     },
 
     
@@ -14578,7 +14621,13 @@ const appLogic = {
                 if (lastTextResponse) {
                     try {
                         uiUtils.setLoadingIndicatorText('校正中...');
-                        lastTextResponse.content = await this.proofreadText(lastTextResponse.content);
+                        const proofreadingResult = await this.proofreadTextWithInfo(lastTextResponse.content);
+                        lastTextResponse.content = proofreadingResult.content;
+                        if (proofreadingResult.modelInfo) {
+                            lastTextResponse.proofreadingModelInfo = proofreadingResult.modelInfo;
+                        } else {
+                            delete lastTextResponse.proofreadingModelInfo;
+                        }
                     } catch (proofreadError) {
                         console.error("校正処理中にエラーが発生しました。校正前のテキストを使用します。", proofreadError);
                     }
