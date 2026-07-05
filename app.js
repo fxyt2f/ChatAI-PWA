@@ -55,6 +55,7 @@ const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
 const API_CONFIG_MIGRATION_KEY = 'apiConfigsMigratedV1310';
 const API_MODEL_REF_MIGRATION_KEY = 'apiModelRefsMigratedV1312';
+const API_MODEL_CANDIDATES_MIGRATION_KEY = 'apiModelCandidatesStabilizedV1317';
 const API_CONFIG_DEFAULT_IDS = {
     gemini: 'api_gemini_default',
     openrouter: 'api_openrouter_default',
@@ -77,7 +78,9 @@ const API_CONFIG_LEGACY_SYNC_KEYS = new Set([
     'bedrockRegion',
     'modelName',
     'additionalModels',
-    'additionalOpenRouterModels'
+    'additionalOpenRouterModels',
+    'additionalZaiModels',
+    'additionalBedrockModels'
 ]);
 const LIGHT_THEME_COLOR = '#1976d2';
 const DARK_THEME_COLOR = '#007aff';
@@ -115,8 +118,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.31.6";
-const APP_CACHE_VERSION = "v1.31.6";
+const APP_VERSION = "1.31.7";
+const APP_CACHE_VERSION = "v1.31.7";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -717,6 +720,8 @@ const state = {
         concatDummyModel: false,
         additionalModels: '',
         additionalOpenRouterModels: '',
+        additionalZaiModels: '',
+        additionalBedrockModels: '',
         enterToSend: true,
         historySortOrder: 'updatedAt',
         darkMode: false,
@@ -4857,16 +4862,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     updateUserModelOptions() {
         const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '') => {
             if (!selectElement) return;
-            const choices = appLogic.getApiModelChoices();
+            const currentRef = state.settings[refKey];
+            const choices = appLogic.buildModelRefOptions({
+                currentRefs: currentRef?.apiConfigId && currentRef?.modelName ? [currentRef] : []
+            });
             const effectiveRef = appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
             selectElement.innerHTML = '';
             choices.forEach(choice => {
                 const option = document.createElement('option');
                 option.value = choice.value;
                 option.textContent = choice.label;
+                option.title = choice.label;
                 option.dataset.apiConfigId = choice.apiConfigId;
                 option.dataset.provider = choice.provider;
                 option.dataset.modelName = choice.modelName;
+                if (choice.isUnavailable) {
+                    option.dataset.unavailable = 'true';
+                }
                 selectElement.appendChild(option);
             });
             if (effectiveRef) {
@@ -8874,17 +8886,30 @@ const appLogic = {
         return API_CONFIG_PROVIDER_NAMES[this.normalizeApiProvider(provider)] || API_CONFIG_PROVIDER_NAMES.gemini;
     },
 
+    normalizeModelCandidates(value = []) {
+        const values = [];
+        const collect = (item) => {
+            if (Array.isArray(item)) {
+                item.forEach(collect);
+                return;
+            }
+            if (item === null || item === undefined) return;
+            String(item)
+                .split(/[\n,]/)
+                .map(model => model.trim())
+                .filter(Boolean)
+                .forEach(model => values.push(model));
+        };
+        collect(value);
+        return [...new Set(values)];
+    },
+
     splitModelCandidateList(value = '') {
-        return [...new Set(String(value || '')
-            .split(/[\n,]/)
-            .map(model => model.trim())
-            .filter(Boolean))];
+        return this.normalizeModelCandidates(value);
     },
 
     joinModelCandidateList(models = []) {
-        return [...new Set((Array.isArray(models) ? models : [])
-            .map(model => String(model || '').trim())
-            .filter(Boolean))].join('\n');
+        return this.normalizeModelCandidates(models).join('\n');
     },
 
     encodeModelRefValue(ref = {}) {
@@ -8902,13 +8927,27 @@ const appLogic = {
     },
 
     getApiConfigModelCandidates(config = {}) {
-        return this.splitModelCandidateList([
+        return this.normalizeModelCandidates([
+            config.modelCandidates || [],
             config.defaultModel || '',
             config.additionalModels || ''
-        ].filter(Boolean).join('\n'));
+        ]);
     },
 
-    getApiModelChoices() {
+    getCurrentModelRefsForOptions() {
+        const refs = [];
+        const collect = (settings = {}) => {
+            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef', 'proofreadingModelRef'].forEach(key => {
+                const ref = settings?.[key];
+                if (ref?.apiConfigId && ref?.modelName) refs.push(ref);
+            });
+        };
+        collect(state.settings);
+        collect(state.activeProfile?.settings);
+        return refs;
+    },
+
+    buildModelRefOptions({ includeDisabled = false, currentRefs = [] } = {}) {
         let configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
         if (!configs.length) {
             configs = this.ensureDefaultApiConfigs(configs);
@@ -8916,30 +8955,62 @@ const appLogic = {
             state.settings.apiConfigs = configs;
         }
 
-        let choices = configs
-            .filter(config => config.enabled !== false)
+        const safeName = (config) => config?.name || this.getProviderDisplayName(config?.provider || 'gemini');
+        const seen = new Set();
+        const choices = configs
+            .filter(config => includeDisabled || config.enabled !== false)
             .flatMap(config => this.getApiConfigModelCandidates(config).map(modelName => ({
                 apiConfigId: config.id,
                 provider: config.provider,
-                apiConfigName: config.name,
+                apiConfigName: safeName(config),
                 modelName,
                 value: this.encodeModelRefValue({ apiConfigId: config.id, modelName }),
-                label: `${config.name} / ${modelName}`
-            })));
+                label: `${safeName(config)} / ${modelName}`,
+                disabled: config.enabled === false
+            })))
+            .filter(choice => {
+                const key = `${choice.apiConfigId}\n${choice.modelName}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+
+        (Array.isArray(currentRefs) ? currentRefs : []).forEach(ref => {
+            if (!ref?.apiConfigId || !ref?.modelName) return;
+            const key = `${ref.apiConfigId}\n${ref.modelName}`;
+            if (seen.has(key)) return;
+            const config = configs.find(item => item.id === ref.apiConfigId);
+            choices.push({
+                apiConfigId: ref.apiConfigId,
+                provider: config?.provider || 'gemini',
+                apiConfigName: config ? safeName(config) : '不明なAPI設定',
+                modelName: ref.modelName,
+                value: this.encodeModelRefValue(ref),
+                label: `${config ? safeName(config) : '不明なAPI設定'} / ${ref.modelName}${config?.enabled === false ? '（無効）' : config ? '' : '（参照切れ）'}`,
+                disabled: false,
+                isUnavailable: !config || config.enabled === false
+            });
+            seen.add(key);
+        });
 
         if (!choices.length) {
             const fallbackConfig = this.createLegacyApiConfig(state.settings.apiProvider || 'gemini', state.settings);
-            choices = this.getApiConfigModelCandidates(fallbackConfig).map(modelName => ({
+            return this.getApiConfigModelCandidates(fallbackConfig).map(modelName => ({
                 apiConfigId: fallbackConfig.id,
                 provider: fallbackConfig.provider,
-                apiConfigName: fallbackConfig.name,
+                apiConfigName: safeName(fallbackConfig),
                 modelName,
                 value: this.encodeModelRefValue({ apiConfigId: fallbackConfig.id, modelName }),
-                label: `${fallbackConfig.name} / ${modelName}`
+                label: `${safeName(fallbackConfig)} / ${modelName}`,
+                disabled: false
             }));
         }
 
         return choices;
+    },
+
+    getApiModelChoices() {
+        return this.buildModelRefOptions();
     },
 
     findModelRefForLegacyModel(modelName = '', preferredApiConfigId = '') {
@@ -8957,6 +9028,12 @@ const appLogic = {
 
     getEffectiveModelRef(refKey, legacyModelName = '', preferredApiConfigId = '') {
         const ref = state.settings[refKey];
+        if (ref?.apiConfigId && ref?.modelName) {
+            const config = this.getApiConfigById(ref.apiConfigId);
+            if (!config || this.getApiConfigModelCandidates(config).includes(ref.modelName)) {
+                return { apiConfigId: ref.apiConfigId, modelName: ref.modelName };
+            }
+        }
         const existing = ref?.apiConfigId && ref?.modelName
             ? this.getApiModelChoices().find(choice => choice.apiConfigId === ref.apiConfigId && choice.modelName === ref.modelName)
             : null;
@@ -9255,6 +9332,7 @@ const appLogic = {
             apiKey: '',
             baseUrl: '',
             defaultModel: '',
+            modelCandidates: [],
             additionalModels: '',
             enabled: true,
             createdAt: now,
@@ -9274,14 +9352,18 @@ const appLogic = {
             config.apiKey = sourceSettings.zaiApiKey || '';
             config.baseUrl = 'https://api.z.ai/api/paas/v4';
             config.defaultModel = sourceSettings.apiProvider === 'zai' ? (sourceSettings.modelName || DEFAULT_ZAI_MODEL) : DEFAULT_ZAI_MODEL;
+            config.additionalModels = sourceSettings.additionalZaiModels || '';
         } else if (normalizedProvider === 'bedrock') {
             config.apiKey = sourceSettings.bedrockAccessKey || '';
             config.defaultModel = sourceSettings.apiProvider === 'bedrock' ? (sourceSettings.modelName || '') : '';
+            config.additionalModels = sourceSettings.additionalBedrockModels || '';
             config.bedrockAccessKey = sourceSettings.bedrockAccessKey || '';
             config.bedrockSecretKey = sourceSettings.bedrockSecretKey || '';
             config.bedrockRegion = sourceSettings.bedrockRegion || DEFAULT_BEDROCK_REGION;
         }
 
+        config.modelCandidates = this.normalizeModelCandidates([config.defaultModel, config.additionalModels]);
+        config.additionalModels = this.joinModelCandidateList(config.modelCandidates);
         return config;
     },
 
@@ -9293,6 +9375,15 @@ const appLogic = {
             : this.getDefaultApiConfigIdForProvider(provider);
         const createdAt = Number.isFinite(Number(config.createdAt)) ? Number(config.createdAt) : Date.now();
         const updatedAt = Number.isFinite(Number(config.updatedAt)) ? Number(config.updatedAt) : createdAt;
+        const rawModelCandidates = this.normalizeModelCandidates([
+            config.modelCandidates || [],
+            config.defaultModel || '',
+            config.additionalModels || ''
+        ]);
+        const defaultModel = typeof config.defaultModel === 'string' && config.defaultModel.trim()
+            ? config.defaultModel.trim()
+            : (rawModelCandidates[0] || '');
+        const modelCandidates = this.normalizeModelCandidates([rawModelCandidates, defaultModel]);
         return {
             ...config,
             id,
@@ -9300,8 +9391,9 @@ const appLogic = {
             provider,
             apiKey: typeof config.apiKey === 'string' ? config.apiKey : '',
             baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : fallback.baseUrl,
-            defaultModel: typeof config.defaultModel === 'string' ? config.defaultModel : fallback.defaultModel,
-            additionalModels: typeof config.additionalModels === 'string' ? config.additionalModels : '',
+            defaultModel,
+            modelCandidates,
+            additionalModels: this.joinModelCandidateList(modelCandidates),
             enabled: config.enabled !== false,
             createdAt,
             updatedAt
@@ -9447,12 +9539,14 @@ const appLogic = {
             ...this.getApiConfigModelCandidates(previous),
             ...this.getApiConfigModelCandidates(legacyConfig)
         ]);
+        const normalizedCandidates = this.normalizeModelCandidates(mergedCandidates);
         const next = this.normalizeApiConfig({
             ...previous,
             apiKey: legacyConfig.apiKey,
             baseUrl: legacyConfig.baseUrl || previous.baseUrl,
             defaultModel: legacyConfig.defaultModel || previous.defaultModel,
-            additionalModels: mergedCandidates,
+            modelCandidates: normalizedCandidates,
+            additionalModels: this.joinModelCandidateList(normalizedCandidates),
             bedrockAccessKey: legacyConfig.bedrockAccessKey || previous.bedrockAccessKey,
             bedrockSecretKey: legacyConfig.bedrockSecretKey || previous.bedrockSecretKey,
             bedrockRegion: legacyConfig.bedrockRegion || previous.bedrockRegion,
@@ -9490,7 +9584,7 @@ const appLogic = {
                 name: 'Z.ai',
                 baseUrl: 'https://api.z.ai/api/paas/v4',
                 defaultModel: DEFAULT_ZAI_MODEL,
-                additionalModels: ''
+                additionalModels: state.settings.additionalZaiModels || ''
             };
         }
         if (normalizedProvider === 'bedrock') {
@@ -9498,7 +9592,7 @@ const appLogic = {
                 name: 'Amazon Bedrock',
                 baseUrl: '',
                 defaultModel: state.settings.apiProvider === 'bedrock' ? (state.settings.modelName || '') : '',
-                additionalModels: ''
+                additionalModels: state.settings.additionalBedrockModels || ''
             };
         }
         return {
@@ -9507,6 +9601,20 @@ const appLogic = {
             defaultModel: DEFAULT_MODEL,
             additionalModels: state.settings.additionalModels || ''
         };
+    },
+
+    getApiConfigModelCandidatesPlaceholder(provider = 'gemini') {
+        const normalizedProvider = this.normalizeApiProvider(provider);
+        if (normalizedProvider === 'openrouter') {
+            return '例: deepseek/deepseek-chat, google/gemini-2.5-pro, @preset/deepseek-official';
+        }
+        if (normalizedProvider === 'zai') {
+            return '例: glm-4.6\nglm-4.5';
+        }
+        if (normalizedProvider === 'bedrock') {
+            return '例: anthropic.claude-3-5-sonnet-20240620-v1:0';
+        }
+        return '例: gemini-1.5-flash\ngemini-2.5-pro';
     },
 
     generateApiConfigId(provider = 'gemini') {
@@ -9525,6 +9633,7 @@ const appLogic = {
             name: config.name,
             provider: config.provider,
             defaultModel: config.defaultModel,
+            modelCandidatesCount: this.getApiConfigModelCandidates(config).length,
             enabled: config.enabled
         };
     },
@@ -9635,6 +9744,9 @@ const appLogic = {
         elements.apiConfigProviderSelect.disabled = Boolean(config);
         elements.apiConfigApiKeyInput.value = config?.apiKey || '';
         elements.apiConfigBaseUrlInput.value = config?.baseUrl || defaults.baseUrl;
+        if (elements.apiConfigAdditionalModelsTextarea) {
+            elements.apiConfigAdditionalModelsTextarea.placeholder = this.getApiConfigModelCandidatesPlaceholder(provider);
+        }
         const modelCandidates = config
             ? this.getApiConfigModelCandidates(config)
             : this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
@@ -9676,6 +9788,9 @@ const appLogic = {
         const defaults = this.getApiConfigProviderDefaults(elements.apiConfigProviderSelect.value);
         elements.apiConfigNameInput.value = defaults.name;
         elements.apiConfigBaseUrlInput.value = defaults.baseUrl;
+        if (elements.apiConfigAdditionalModelsTextarea) {
+            elements.apiConfigAdditionalModelsTextarea.placeholder = this.getApiConfigModelCandidatesPlaceholder(elements.apiConfigProviderSelect.value);
+        }
         const candidates = this.splitModelCandidateList([defaults.defaultModel, defaults.additionalModels].filter(Boolean).join('\n'));
         elements.apiConfigDefaultModelInput.value = candidates[0] || '';
         elements.apiConfigAdditionalModelsTextarea.value = this.joinModelCandidateList(candidates);
@@ -9701,6 +9816,7 @@ const appLogic = {
             apiKey: (elements.apiConfigApiKeyInput?.value || '').trim(),
             baseUrl: (elements.apiConfigBaseUrlInput?.value || '').trim(),
             defaultModel: modelCandidates[0] || '',
+            modelCandidates,
             additionalModels: this.joinModelCandidateList(modelCandidates),
             enabled: Boolean(elements.apiConfigEnabledCheckbox?.checked),
             createdAt: existingConfig?.createdAt || now,
@@ -9733,10 +9849,12 @@ const appLogic = {
             if (state.settings.apiProvider === 'openrouter' && config.defaultModel) state.settings.modelName = config.defaultModel;
         } else if (provider === 'zai') {
             state.settings.zaiApiKey = config.apiKey || '';
+            state.settings.additionalZaiModels = config.additionalModels || '';
             if (state.settings.apiProvider === 'zai' && config.defaultModel) state.settings.modelName = config.defaultModel;
         } else if (provider === 'bedrock') {
             state.settings.bedrockAccessKey = config.apiKey || config.bedrockAccessKey || '';
             state.settings.bedrockRegion = config.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+            state.settings.additionalBedrockModels = config.additionalModels || '';
             if (state.settings.apiProvider === 'bedrock' && config.defaultModel) state.settings.modelName = config.defaultModel;
         }
 
@@ -9860,6 +9978,97 @@ const appLogic = {
         this.renderApiConfigList();
     },
 
+    collectLegacyModelCandidatesByProvider() {
+        const byProvider = {
+            gemini: [],
+            openrouter: [],
+            zai: [],
+            bedrock: []
+        };
+        const sources = this.collectLegacyApiConfigSources();
+        sources.forEach(settings => {
+            if (!settings) return;
+            byProvider.gemini.push(settings.additionalModels || '');
+            byProvider.openrouter.push(settings.additionalOpenRouterModels || '');
+            byProvider.zai.push(settings.additionalZaiModels || '');
+            byProvider.bedrock.push(settings.additionalBedrockModels || '');
+
+            const provider = this.normalizeApiProvider(settings.apiProvider || '');
+            if (settings.modelName && byProvider[provider]) {
+                byProvider[provider].push(settings.modelName);
+            }
+        });
+
+        Object.keys(byProvider).forEach(provider => {
+            byProvider[provider] = this.normalizeModelCandidates(byProvider[provider]);
+        });
+        return byProvider;
+    },
+
+    collectModelRefCandidatesByApiConfigId() {
+        const refsByConfigId = new Map();
+        const collect = (settings = {}) => {
+            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef', 'proofreadingModelRef'].forEach(key => {
+                const ref = settings?.[key];
+                if (!ref?.apiConfigId || !ref?.modelName) return;
+                if (!refsByConfigId.has(ref.apiConfigId)) {
+                    refsByConfigId.set(ref.apiConfigId, []);
+                }
+                refsByConfigId.get(ref.apiConfigId).push(ref.modelName);
+            });
+        };
+
+        collect(state.settings);
+        collect(state.activeProfile?.settings);
+        (state.profiles || []).forEach(profile => collect(profile?.settings));
+        return refsByConfigId;
+    },
+
+    async ensureApiModelCandidatesStabilityV1317() {
+        const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_CANDIDATES_MIGRATION_KEY))?.value === true;
+        const beforeConfigs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const configs = this.ensureDefaultApiConfigs(beforeConfigs);
+        const legacyByProvider = this.collectLegacyModelCandidatesByProvider();
+        const refsByConfigId = this.collectModelRefCandidatesByApiConfigId();
+
+        const nextConfigs = configs.map(config => {
+            const defaultId = this.getDefaultApiConfigIdForProvider(config.provider);
+            const legacyCandidates = config.id === defaultId ? (legacyByProvider[config.provider] || []) : [];
+            const refCandidates = refsByConfigId.get(config.id) || [];
+            const modelCandidates = this.normalizeModelCandidates([
+                this.getApiConfigModelCandidates(config),
+                legacyCandidates,
+                refCandidates
+            ]);
+            return this.normalizeApiConfig({
+                ...config,
+                modelCandidates,
+                additionalModels: this.joinModelCandidateList(modelCandidates),
+                defaultModel: config.defaultModel || modelCandidates[0] || '',
+                updatedAt: this.joinModelCandidateList(modelCandidates) !== this.joinModelCandidateList(this.getApiConfigModelCandidates(config))
+                    ? Date.now()
+                    : config.updatedAt
+            });
+        });
+
+        const changed = JSON.stringify(beforeConfigs) !== JSON.stringify(nextConfigs);
+        if (changed || !alreadyMigrated) {
+            await this.saveApiConfigs(nextConfigs);
+            this.syncActiveApiConfigState();
+            if (changed || !alreadyMigrated) {
+                this.markAsDirtyAndSchedulePush('structural');
+            }
+            console.log("[ApiConfigMigration] v1.31.7 モデル候補をAPI設定へ保存しました。", nextConfigs.map(config => this.getSanitizedApiConfigForLog(config)));
+        } else {
+            state.apiConfigs = nextConfigs;
+            state.settings.apiConfigs = nextConfigs;
+        }
+
+        if (!alreadyMigrated || changed) {
+            await dbUtils.saveSetting(API_MODEL_CANDIDATES_MIGRATION_KEY, true);
+        }
+    },
+
     async ensureModelRefsMigrationV1312() {
         const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_REF_MIGRATION_KEY))?.value === true;
         let changed = false;
@@ -9874,11 +10083,13 @@ const appLogic = {
                 ...this.getApiConfigModelCandidates(configs[index]),
                 ...this.getApiConfigModelCandidates(legacyConfig)
             ]);
+            const normalizedCandidates = this.normalizeModelCandidates(mergedCandidates);
             if (mergedCandidates !== configs[index].additionalModels) {
                 configs[index] = this.normalizeApiConfig({
                     ...configs[index],
-                    defaultModel: this.splitModelCandidateList(mergedCandidates)[0] || configs[index].defaultModel,
-                    additionalModels: mergedCandidates,
+                    defaultModel: normalizedCandidates[0] || configs[index].defaultModel,
+                    modelCandidates: normalizedCandidates,
+                    additionalModels: this.joinModelCandidateList(normalizedCandidates),
                     updatedAt: Date.now()
                 });
                 changed = true;
@@ -10654,6 +10865,7 @@ const appLogic = {
             this.applyActiveProfile();
             await this.ensureApiConfigsMigrationV1310();
             await this.ensureModelRefsMigrationV1312();
+            await this.ensureApiModelCandidatesStabilityV1317();
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
 
@@ -10879,7 +11091,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
