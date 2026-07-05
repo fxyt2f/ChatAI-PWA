@@ -2663,7 +2663,7 @@ body.header-auto-hide.header-force-show #chat-screen .app-header {
     left: max(16px, var(--safe-left));
     display: flex;
     gap: 8px;
-    z-index: 5;
+    z-index: 40;
     opacity: 0; /* 初期状態は非表示 */
     pointer-events: none; /* 非表示時はクリックできないように */
     transition: opacity 0.3s ease-in-out, top var(--transition-duration) var(--transition-timing);
@@ -2701,6 +2701,7 @@ body.header-auto-hide.header-force-show .floating-action-panel {
     justify-content: center;
     align-items: center;
     cursor: pointer;
+    pointer-events: auto;
     transition: all var(--transition-duration) var(--transition-timing);
     padding: 0;
 }

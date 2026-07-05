@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.3";
-const APP_CACHE_VERSION = "v1.32.3";
+const APP_VERSION = "1.32.4";
+const APP_CACHE_VERSION = "v1.32.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -13827,7 +13827,7 @@ const appLogic = {
             // 設定が 'on-click' でない場合は何もしない
             if (state.settings.floatingPanelBehavior !== 'on-click') return;
 
-            const interactiveElements = 'A, BUTTON, INPUT, TEXTAREA, SELECT, DETAILS, SUMMARY, IMG, PRE, CODE';
+            const interactiveElements = 'A, BUTTON, INPUT, TEXTAREA, SELECT, DETAILS, SUMMARY, IMG';
             // 操作可能な要素やパネル自体をクリックした場合は反応しない
             if (event.target.closest(interactiveElements) || event.target.closest('.floating-action-panel')) {
                 return;
@@ -13955,7 +13955,7 @@ const appLogic = {
             const mainContent = elements.chatScreen.querySelector('.main-content');
             mainContent.addEventListener('click', (event) => {
                 if (state.settings.headerAutoHide) {
-                    const interactiveElements = 'A, BUTTON, INPUT, TEXTAREA, SELECT, DETAILS, SUMMARY, IMG, PRE, CODE';
+                    const interactiveElements = 'A, BUTTON, INPUT, TEXTAREA, SELECT, DETAILS, SUMMARY, IMG';
                     if (!event.target.closest(interactiveElements)) {
                         clearTimeout(headerHideTimer);
                         const body = document.body;
