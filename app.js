@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.5";
-const APP_CACHE_VERSION = "v1.32.5";
+const APP_VERSION = "1.32.6";
+const APP_CACHE_VERSION = "v1.32.6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -626,6 +626,7 @@ try {
         progressDialog: document.getElementById('progressDialog'),
         progressMessage: document.getElementById('progress-message'),
         floatingActionPanel: document.getElementById('floating-action-panel'),
+        collapseAllMessagesBtn: document.getElementById('collapse-all-messages-btn'),
         scrollToTopBtn: document.getElementById('scroll-to-top-btn'),
         scrollToBottomBtn: document.getElementById('scroll-to-bottom-btn'),
         floatingPanelBehaviorSelect: document.getElementById('floating-panel-behavior'),
@@ -5583,7 +5584,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const collapseHeight = this.getResponsiveCollapseHeight();
         const storageKey = this.getMessageCollapseStorageKey(messageElement, contentElement);
-        const storedState = this.readMessageCollapseState(storageKey) || 'collapsed';
+        const storedState = this.readMessageCollapseState(storageKey) || 'expanded';
         const isTemporarilyExpandedForSearch =
             messageElement.dataset.chatSearchTemporarilyExpanded === 'true' ||
             messageElement.dataset.chatSearchTemporaryExpanded === 'true';
@@ -5597,6 +5598,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         button.disabled = false;
         this.updateMessageCollapseButton(messageElement);
         this.observeMessageContentForCollapse(contentElement);
+        this.updateCollapseAllMessagesButtonState();
     },
 
     applyMessageCollapseToAll(root = elements.messageContainer) {
@@ -5611,6 +5613,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         container.querySelectorAll?.('.message.user, .message.model')
             .forEach(message => messages.push(message));
         messages.forEach(message => this.applyMessageCollapse(message));
+        this.updateCollapseAllMessagesButtonState();
     },
 
     scheduleApplyMessageCollapse(root = elements.messageContainer) {
@@ -5651,7 +5654,63 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         messageElement.classList.toggle('tm-collapsed', willCollapse);
         this.writeMessageCollapseState(storageKey, willCollapse ? 'collapsed' : 'expanded');
         this.updateMessageCollapseButton(messageElement);
+        this.updateCollapseAllMessagesButtonState();
         requestAnimationFrame(() => this.keepMessageAboveComposer(messageElement));
+    },
+
+    getCollapsibleMessageElements() {
+        return Array.from(elements.messageContainer?.querySelectorAll?.('.message.user, .message.model') || [])
+            .filter(message => {
+                if (!message.isConnected || message.classList.contains('editing')) return false;
+                const contentElement = message.querySelector(':scope > .message-content');
+                return this.isMessageCollapseCandidate(message, contentElement);
+            });
+    },
+
+    updateCollapseAllMessagesButtonState() {
+        const button = elements.collapseAllMessagesBtn;
+        if (!button) return;
+
+        const messages = this.getCollapsibleMessageElements();
+        const canToggle = messages.length > 0;
+        const shouldExpand = canToggle && messages.every(message => message.classList.contains('tm-collapsed'));
+        const icon = button.querySelector('.material-symbols-outlined');
+        const title = shouldExpand ? '長文メッセージを一括展開' : '長文メッセージを一括折りたたみ';
+
+        button.disabled = !canToggle;
+        button.classList.toggle('active', canToggle && shouldExpand);
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        if (icon) icon.textContent = shouldExpand ? 'unfold_more' : 'unfold_less';
+    },
+
+    toggleAllMessageCollapse() {
+        const messages = this.getCollapsibleMessageElements();
+        if (messages.length === 0) {
+            this.updateCollapseAllMessagesButtonState();
+            return;
+        }
+
+        const shouldExpand = messages.every(message => message.classList.contains('tm-collapsed'));
+        messages.forEach(message => {
+            const contentElement = message.querySelector(':scope > .message-content');
+            const button = message.querySelector(':scope > .message-actions .tm-message-collapse-btn');
+            const storageKey = message.dataset.collapseStorageKey || this.getMessageCollapseStorageKey(message, contentElement);
+            delete message.dataset.chatSearchTemporarilyExpanded;
+            delete message.dataset.chatSearchTemporaryExpanded;
+            state.chatSearch.temporarilyExpandedMessages?.delete?.(message);
+            message.dataset.collapseStorageKey = storageKey;
+            message.classList.add('tm-collapsible');
+            message.style.setProperty('--message-collapse-height', `${this.getResponsiveCollapseHeight()}px`);
+            if (button) {
+                button.classList.remove('hidden');
+                button.disabled = false;
+            }
+            message.classList.toggle('tm-collapsed', !shouldExpand);
+            this.writeMessageCollapseState(storageKey, shouldExpand ? 'expanded' : 'collapsed');
+            this.updateMessageCollapseButton(message);
+        });
+        this.updateCollapseAllMessagesButtonState();
     },
 
     keepMessageAboveComposer(messageElement) {
@@ -13847,6 +13906,7 @@ const appLogic = {
         elements.floatingActionPanel.addEventListener('mouseenter', () => clearTimeout(state.panelFadeOutTimer));
         elements.floatingActionPanel.addEventListener('mouseleave', () => this.showActionPanel());
         
+        elements.collapseAllMessagesBtn.addEventListener('click', () => uiUtils.toggleAllMessageCollapse());
         elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
         elements.scrollToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
 
