@@ -351,10 +351,14 @@ body.dark-mode .new-chat-button {
     transform: translateX(0);
     z-index: 1;
 }
-/* --- Chat Screen --- */
+/* --- Background Image Screens --- */
 #chat-screen {
     position: relative;
     z-index: 0;
+}
+#chat-screen,
+#history-screen,
+#settings-screen {
     background-size: cover;
     background-position: center;
     /* background-imageプロパティを削除 */
@@ -363,7 +367,9 @@ body.dark-mode .new-chat-button {
 }
 
 /* 背景画像用の擬似要素を追加 */
-#chat-screen::before {
+#chat-screen::before,
+#history-screen::before,
+#settings-screen::before {
     content: '';
     position: absolute;
     inset: 0;
@@ -376,11 +382,33 @@ body.dark-mode .new-chat-button {
 }
 
 /* このクラスが付与されたら、擬似要素をフェードインさせる */
-#chat-screen.background-visible::before {
+#chat-screen.background-visible::before,
+#history-screen.background-visible::before,
+#settings-screen.background-visible::before {
     opacity: 1;
 }
 
+#history-screen::after,
+#settings-screen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-color: var(--bg-overlay-light);
+    opacity: 0;
+    transition: opacity 0.5s ease-in-out, background-color var(--transition-duration) var(--transition-timing);
+    z-index: 0;
+}
 
+#history-screen.background-visible::after,
+#settings-screen.background-visible::after {
+    opacity: var(--overlay-opacity-value, 0.75);
+}
+
+body.dark-mode #history-screen::after,
+body.dark-mode #settings-screen::after {
+    background-color: var(--bg-overlay-dark);
+}
 
 #chat-overlay {
     content: '';

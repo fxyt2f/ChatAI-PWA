@@ -126,8 +126,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.1";
-const APP_CACHE_VERSION = "v1.32.1";
+const APP_VERSION = "1.32.2";
+const APP_CACHE_VERSION = "v1.32.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -4346,6 +4346,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
+    getBackgroundScreens() {
+        return [elements.chatScreen, elements.historyScreen, elements.settingsScreen].filter(Boolean);
+    },
+
+    setBackgroundImageVisible(isVisible) {
+        this.getBackgroundScreens().forEach(screen => {
+            screen.classList.toggle('background-visible', Boolean(isVisible));
+        });
+    },
+
     parseColorToRgb(color) {
         if (typeof color !== 'string') return null;
         const trimmedColor = color.trim();
@@ -4651,17 +4661,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 state.backgroundImageUrl = URL.createObjectURL(blob);
                 const newUrl = `url("${state.backgroundImageUrl}")`;
                 
-                const chatScreen = elements.chatScreen;
-                const isAlreadyVisible = chatScreen.classList.contains('background-visible');
+                const backgroundScreens = this.getBackgroundScreens();
+                const isAlreadyVisible = backgroundScreens.some(screen => screen.classList.contains('background-visible'));
     
                 const switchImageAndFadeIn = () => {
                     document.documentElement.style.setProperty('--chat-background-image', newUrl);
-                    chatScreen.classList.add('background-visible');
+                    this.setBackgroundImageVisible(true);
                 };
     
                 if (isAlreadyVisible) {
-                    chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
-                    chatScreen.classList.remove('background-visible');
+                    elements.chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
+                    this.setBackgroundImageVisible(false);
                 } else {
                     switchImageAndFadeIn();
                 }
@@ -4670,11 +4680,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             } catch (e) {
     
                 console.error("背景画像のオブジェクトURL生成に失敗:", e);
-                elements.chatScreen.classList.remove('background-visible');
+                this.setBackgroundImageVisible(false);
                 document.documentElement.style.removeProperty('--chat-background-image');
             }
         } else {
-            elements.chatScreen.classList.remove('background-visible');
+            this.setBackgroundImageVisible(false);
             document.documentElement.style.removeProperty('--chat-background-image');
         }
         this.updateBackgroundSettingsUI(); // 設定画面のUIも更新
@@ -15693,7 +15703,7 @@ const appLogic = {
             state.settings.backgroundImageBlob = null;
 
             state.isTemporaryBackgroundActive = false;
-            elements.chatScreen.classList.remove('background-visible');
+            uiUtils.setBackgroundImageVisible(false);
             document.documentElement.style.removeProperty('--chat-background-image');
             uiUtils.updateBackgroundSettingsUI();
         } catch (error) {
@@ -17230,19 +17240,19 @@ const appLogic = {
         // 新しいURLをstateに保存
         state.backgroundImageUrl = url;
         
-        const chatScreen = elements.chatScreen;
-        const isAlreadyVisible = chatScreen.classList.contains('background-visible');
+        const backgroundScreens = uiUtils.getBackgroundScreens();
+        const isAlreadyVisible = backgroundScreens.some(screen => screen.classList.contains('background-visible'));
     
         // フェードアウト完了後に画像を設定してフェードインさせる処理
         const switchImageAndFadeIn = () => {
             document.documentElement.style.setProperty('--chat-background-image', `url("${url}")`);
-            chatScreen.classList.add('background-visible');
+            uiUtils.setBackgroundImageVisible(true);
         };
     
         if (isAlreadyVisible) {
             // 画像が表示されている場合：一度フェードアウトさせてから切り替える
-            chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
-            chatScreen.classList.remove('background-visible');
+            elements.chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
+            uiUtils.setBackgroundImageVisible(false);
         } else {
             // 画像がない場合：即座に切り替えてフェードイン
             switchImageAndFadeIn();
@@ -17288,7 +17298,8 @@ const appLogic = {
             await dbUtils.saveSetting('backgroundImageBlob', blob);
             state.settings.backgroundImageBlob = blob;
             state.backgroundImageUrl = URL.createObjectURL(blob);
-            document.documentElement.style.setProperty('--chat-background-image', `url(${state.backgroundImageUrl})`);
+            document.documentElement.style.setProperty('--chat-background-image', `url("${state.backgroundImageUrl}")`);
+            uiUtils.setBackgroundImageVisible(true);
             uiUtils.updateBackgroundSettingsUI();
             
             console.log("背景画像をURLから正常に更新しました。");
