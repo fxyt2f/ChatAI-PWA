@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.1";
-const APP_CACHE_VERSION = "v1.33.1";
+const APP_VERSION = "1.33.2";
+const APP_CACHE_VERSION = "v1.33.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -193,6 +193,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.2": [
+        "ユーザー・モデル各メッセージ下部に個別文章整形ボタンを追加しました。",
+        "フローティング文章整形ダイアログの現在設定を使って、対象メッセージだけを整形できるよう改善しました。",
+        "個別整形も変更履歴 / Undo / Redo と連携するよう調整しました。"
+    ],
     "1.33.1": [
         "文章整形の適用結果を変更履歴に記録するよう改善しました。",
         "文章整形で変更したメッセージをUndo/Redoできるよう連携しました。",
@@ -3974,6 +3979,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             copyButton.classList.add('tm-copy-message-btn');
             copyButton.onclick = () => appLogic.copyMessageText(messageDiv, copyButton);
             actionButtonsDiv.appendChild(copyButton);
+
+            if (!isSummarized && CHANGE_HISTORY_ROLES.has(role) && typeof content === 'string' && content.trim() !== '') {
+                const formatButton = document.createElement('button');
+                formatButton.innerHTML = '<span class="material-symbols-outlined">format_align_left</span>';
+                formatButton.title = 'このメッセージを文章整形';
+                formatButton.setAttribute('aria-label', 'このメッセージを文章整形');
+                formatButton.classList.add('tm-format-message-btn');
+                formatButton.disabled = Boolean(appLogic?.isGenerationBlockingActive?.() || state.editingMessageIndex !== null || state.isEditingSystemPrompt);
+                formatButton.onclick = () => appLogic.applyTextFormattingToMessage(index, role);
+                actionButtonsDiv.appendChild(formatButton);
+            }
 
             const undoButton = document.createElement('button');
             undoButton.innerHTML = '<span class="material-symbols-outlined">undo</span>';
@@ -18773,31 +18789,55 @@ const appLogic = {
         return rules ? `${base}（${rules}）` : base;
     },
 
-    async applyTextFormattingCandidates() {
-        const blockReason = this.getTextFormattingBlockReason();
-        if (blockReason) {
-            await uiUtils.showCustomAlert(blockReason);
-            return;
+    buildTextFormattingCandidateForMessage(index, role, options = this.getTextFormattingOptions()) {
+        const messageIndex = Number(index);
+        const message = state.currentMessages[messageIndex];
+        if (!Number.isInteger(messageIndex) || !message) return null;
+        if (!CHANGE_HISTORY_ROLES.has(role) || message.role !== role) return null;
+        if (message.isHidden || typeof message.content !== 'string' || message.content.trim() === '') return null;
+
+        const visibleMessage = this.getVisibleMessages().find(item => state.currentMessages.indexOf(item) === messageIndex);
+        if (!visibleMessage) return null;
+
+        const formatted = this.formatNovelText(message.content, options);
+        if (formatted === message.content) return null;
+        return {
+            index: messageIndex,
+            role,
+            label: `${role === 'user' ? 'ユーザー' : 'モデル'} #${messageIndex + 1}`,
+            expected: message.content,
+            formatted,
+            changeCount: this.countTextFormattingChanges(message.content, formatted),
+            beforePreview: this.truncateTextFormattingPreview(message.content),
+            afterPreview: this.truncateTextFormattingPreview(formatted)
+        };
+    },
+
+    async applyTextFormattingCandidateList(candidates, options = this.getTextFormattingOptions(), context = {}) {
+        const candidateList = Array.isArray(candidates) ? candidates : [];
+        const emptyMessage = context.emptyMessage || '現在の条件では変更される文章がありません。';
+        const staleMessage = context.staleMessage || '対象メッセージが変更されたため、整形を中止しました。プレビューを確認してください。';
+        const successMessage = context.successMessage || `${candidateList.length}件のメッセージを整形しました。`;
+        const historyFailureMessage = context.historyFailureMessage || `${candidateList.length}件のメッセージを整形しました（変更履歴の保存に失敗しました）。`;
+        const failureMessage = context.failureMessage || '文章整形の保存に失敗しました。入力内容は変更前の状態で再確認してください。';
+        const closeDialogOnSuccess = context.closeDialogOnSuccess !== false;
+        const clearPreviewCandidates = context.clearPreviewCandidates !== false;
+        const refreshPreviewOnMismatch = context.refreshPreviewOnMismatch !== false;
+
+        if (!candidateList.length) {
+            await uiUtils.showCustomAlert(emptyMessage);
+            return { success: false, reason: 'empty' };
         }
 
-        const candidates = state.textFormattingCandidates?.length
-            ? state.textFormattingCandidates
-            : this.buildTextFormattingCandidates();
-        if (!candidates.length) {
-            await uiUtils.showCustomAlert('現在の条件では変更される文章がありません。');
-            return;
-        }
-
-        const mismatched = candidates.find(candidate => state.currentMessages[candidate.index]?.content !== candidate.expected);
+        const mismatched = candidateList.find(candidate => state.currentMessages[candidate.index]?.content !== candidate.expected);
         if (mismatched) {
-            this.updateTextFormattingPreview();
-            await uiUtils.showCustomAlert('対象メッセージが変更されたため、整形を中止しました。プレビューを確認してください。');
-            return;
+            if (refreshPreviewOnMismatch) this.updateTextFormattingPreview();
+            await uiUtils.showCustomAlert(staleMessage);
+            return { success: false, reason: 'stale' };
         }
 
         const chatIdBeforeSave = state.currentChatId;
-        const options = this.getTextFormattingOptions();
-        const historyChanges = candidates.map(candidate => ({
+        const historyChanges = candidateList.map(candidate => ({
             index: candidate.index,
             role: candidate.role,
             before: candidate.expected,
@@ -18818,7 +18858,7 @@ const appLogic = {
                 change.siblingGroupId = visibleTarget.siblingGroupId;
             }
         });
-        const originals = candidates.map(candidate => ({
+        const originals = candidateList.map(candidate => ({
             index: candidate.index,
             content: state.currentMessages[candidate.index].content,
             timestamp: state.currentMessages[candidate.index].timestamp
@@ -18830,7 +18870,7 @@ const appLogic = {
             : null;
 
         try {
-            candidates.forEach(candidate => {
+            candidateList.forEach(candidate => {
                 const message = state.currentMessages[candidate.index];
                 message.content = candidate.formatted;
                 message.timestamp = Date.now();
@@ -18852,7 +18892,7 @@ const appLogic = {
                     timestamp: Date.now(),
                     query: '',
                     replacement: '',
-                    formatLabel: this.buildTextFormattingHistoryLabel(candidates, options),
+                    formatLabel: this.buildTextFormattingHistoryLabel(candidateList, options),
                     formatOptions,
                     target: formatOptions.target,
                     scope: 'chat',
@@ -18866,13 +18906,14 @@ const appLogic = {
             }
 
             uiUtils.renderChatMessages({ suppressMessageAnimation: true });
-            elements.textFormattingDialog?.close('confirm');
-            state.textFormattingCandidates = [];
+            if (closeDialogOnSuccess) elements.textFormattingDialog?.close('confirm');
+            if (clearPreviewCandidates) state.textFormattingCandidates = [];
             await this.updateChangeHistoryControls();
             await uiUtils.showCustomAlert(historySaved
-                ? `${candidates.length}件のメッセージを整形しました。`
-                : `${candidates.length}件のメッセージを整形しました（変更履歴の保存に失敗しました）。`
+                ? successMessage
+                : historyFailureMessage
             );
+            return { success: true, historySaved };
         } catch (error) {
             originals.forEach(original => {
                 if (state.currentMessages[original.index]) {
@@ -18882,8 +18923,48 @@ const appLogic = {
             });
             uiUtils.renderChatMessages({ suppressMessageAnimation: true });
             console.error('文章整形の保存に失敗しました:', error);
-            await uiUtils.showCustomAlert('文章整形の保存に失敗しました。入力内容は変更前の状態で再確認してください。');
+            await uiUtils.showCustomAlert(failureMessage);
+            return { success: false, reason: 'save_failed', error };
         }
+    },
+
+    async applyTextFormattingCandidates() {
+        const blockReason = this.getTextFormattingBlockReason();
+        if (blockReason) {
+            await uiUtils.showCustomAlert(blockReason);
+            return;
+        }
+
+        const candidates = state.textFormattingCandidates?.length
+            ? state.textFormattingCandidates
+            : this.buildTextFormattingCandidates();
+        await this.applyTextFormattingCandidateList(candidates, this.getTextFormattingOptions());
+    },
+
+    async applyTextFormattingToMessage(index, role) {
+        const blockReason = this.getTextFormattingBlockReason();
+        if (blockReason) {
+            await uiUtils.showCustomAlert(blockReason);
+            return;
+        }
+
+        const options = this.getTextFormattingOptions();
+        const candidate = this.buildTextFormattingCandidateForMessage(index, role, options);
+        if (!candidate) {
+            await uiUtils.showCustomAlert('このメッセージに変更はありません。');
+            return;
+        }
+
+        await this.applyTextFormattingCandidateList([candidate], options, {
+            emptyMessage: 'このメッセージに変更はありません。',
+            staleMessage: '対象メッセージが変更されたため、整形を中止しました。もう一度実行してください。',
+            successMessage: 'このメッセージを整形しました。',
+            historyFailureMessage: 'このメッセージを整形しました（変更履歴の保存に失敗しました）。',
+            failureMessage: '文章整形に失敗しました。',
+            closeDialogOnSuccess: false,
+            clearPreviewCandidates: false,
+            refreshPreviewOnMismatch: false
+        });
     },
 
     formatNovelText(text, options = {}) {
