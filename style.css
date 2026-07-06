@@ -465,39 +465,27 @@ body.dark-mode #chat-overlay {
 }
 
 #chat-screen .generation-status-indicator {
-    position: fixed;
-    left: 50%;
-    bottom: calc(var(--composer-height, 150px) + max(18px, var(--safe-bottom)));
-    transform: translateX(-50%) translateY(8px);
-    z-index: 45;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    min-height: 30px;
-    max-width: calc(100vw - 32px);
-    padding: 6px 12px;
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
-    border: 1px solid var(--border-primary);
-    border-radius: 999px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-    font-size: 12px;
-    line-height: 1;
-    white-space: nowrap;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition:
-        opacity 0.16s ease,
-        transform 0.16s ease,
-        visibility 0.16s ease;
+    display: none;
 }
 
-#chat-screen .generation-status-indicator.is-visible {
-    opacity: 1;
-    visibility: visible;
-    transform: translateX(-50%) translateY(0);
+#chat-screen .generation-placeholder {
+    opacity: 0.84;
+}
+
+#chat-screen .generation-placeholder .message-content {
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+}
+
+#chat-screen .generation-placeholder-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
 }
 
 #chat-screen .generation-status-dot {
@@ -524,10 +512,6 @@ body.dark-mode #chat-overlay {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    #chat-screen .generation-status-indicator {
-        transition: none;
-    }
-
     #chat-screen .generation-status-dot {
         animation: none;
         opacity: 0.8;

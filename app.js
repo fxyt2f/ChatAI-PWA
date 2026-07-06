@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.0";
-const APP_CACHE_VERSION = "v1.34.0";
+const APP_VERSION = "1.34.1";
+const APP_CACHE_VERSION = "v1.34.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -212,6 +212,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.1": [
+        "メッセージ送信中の「応答生成中」表示を、最新ユーザーメッセージ直下のモデル返信プレースホルダーとして表示するよう調整しました。",
+        "入力欄側ではなく会話ログ側の生成中表示として見えるよう、送信中レイアウトを改善しました。"
+    ],
     "1.34.0": [
         "メッセージ本文の段落下余白を設定画面から調整できるよう改善しました。",
         "フォントサイズ・行間に加えて、段落間隔も保存・復元できるよう対応しました。"
@@ -2060,6 +2064,30 @@ const uiUtils = {
         return stateGenerating || streamingDom;
     },
 
+    isGenerationPlaceholderMessage(message, index) {
+        if (!this.isResponseGenerationActive()) return false;
+        if (!message || message.role !== 'model') return false;
+        if (String(message.content || '').trim() !== '') return false;
+        return index === state.currentMessages.length - 1;
+    },
+
+    createGenerationPlaceholderContent() {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'generation-placeholder-content';
+        placeholder.setAttribute('aria-live', 'polite');
+
+        const dot = document.createElement('span');
+        dot.className = 'generation-status-dot';
+        dot.setAttribute('aria-hidden', 'true');
+
+        const text = document.createElement('span');
+        text.className = 'generation-status-text';
+        text.textContent = '応答生成中…';
+
+        placeholder.append(dot, text);
+        return placeholder;
+    },
+
     updateGenerationStatusIndicator() {
         const indicator = this.ensureGenerationStatusIndicator();
         const isActive = this.isResponseGenerationActive();
@@ -2068,24 +2096,9 @@ const uiUtils = {
         window.clearTimeout(generationStatusHideTimer);
         document.body?.classList.toggle('is-response-generating', isActive);
         chatScreen?.classList.toggle('is-response-generating', isActive);
-        indicator.classList.toggle('is-generating', isActive);
-
-        if (isActive) {
-            indicator.hidden = false;
-            requestAnimationFrame(() => {
-                if (this.isResponseGenerationActive()) {
-                    indicator.classList.add('is-visible');
-                }
-            });
-            return;
-        }
-
+        indicator.classList.remove('is-generating');
         indicator.classList.remove('is-visible');
-        generationStatusHideTimer = window.setTimeout(() => {
-            if (!this.isResponseGenerationActive()) {
-                indicator.hidden = true;
-            }
-        }, 180);
+        indicator.hidden = true;
     },
 
     supportsChatSearchHighlights() {
@@ -3530,7 +3543,8 @@ renderChatMessages(options = {}) {
             };
         }
         
-        const messageElement = uiUtils.createMessageElement(msg.role, msg.content, index, false, cascadeInfo, msg.attachments);
+        const isGenerationPlaceholder = uiUtils.isGenerationPlaceholderMessage(msg, index);
+        const messageElement = uiUtils.createMessageElement(msg.role, msg.content, index, isGenerationPlaceholder, cascadeInfo, msg.attachments);
         if (messageElement) {
             fragment.appendChild(messageElement);
         }
@@ -3592,6 +3606,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     const messageDiv = document.createElement('div');
     messageDiv.classList.add('message', role);
     messageDiv.dataset.index = index;
+    if (isStreamingPlaceholder) {
+        messageDiv.classList.add('generation-placeholder');
+    }
     messageDiv.dataset.messageIndex = String(index);
     messageDiv.dataset.role = role;
     
@@ -3734,7 +3751,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     else {
         try {
-            if (content && (role === 'model' || role === 'user')) {
+            if (isStreamingPlaceholder && role === 'model' && !String(content || '').trim()) {
+                contentDiv.appendChild(this.createGenerationPlaceholderContent());
+            } else if (content && (role === 'model' || role === 'user')) {
                  if (role === 'model' && !isStreamingPlaceholder && typeof marked !== 'undefined') {
                     contentDiv.innerHTML = marked.parse(content || '');
                 } else {
