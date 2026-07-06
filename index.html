@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.33.2">
+    <link rel="stylesheet" href="./style.css?v=1.33.3">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.33.2" defer></script>
+    <script src="./dropbox.js?v=1.33.3" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.33.2" defer></script>
+    <script src="./app.js?v=1.33.3" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -1213,6 +1213,21 @@
                         <input type="checkbox" id="text-format-normalize-ellipsis-dash" checked>
                         <span>三点リーダー・ダッシュを統一</span>
                     </label>
+                    <div class="text-formatting-subgroup" aria-label="読点リズム補正">
+                        <div class="text-formatting-subgroup-title">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="text-format-comma-rhythm">
+                                <span>読点リズム補正</span>
+                            </label>
+                            <select id="text-format-comma-level" aria-label="読点リズム補正レベル" disabled>
+                                <option value="1">レベル1</option>
+                                <option value="2">レベル2</option>
+                                <option value="3">レベル3</option>
+                                <option value="4" selected>レベル4</option>
+                            </select>
+                        </div>
+                        <p class="text-formatting-subgroup-note">読点が多すぎる箇所を控えめに整理します。プレビューで確認してください。</p>
+                    </div>
                     <div class="text-formatting-subgroup" aria-label="全角・半角を統一">
                         <div class="text-formatting-subgroup-title">
                             <label class="checkbox-label">

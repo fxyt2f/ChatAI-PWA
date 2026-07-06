@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.2";
-const APP_CACHE_VERSION = "v1.33.2";
+const APP_VERSION = "1.33.3";
+const APP_CACHE_VERSION = "v1.33.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -193,6 +193,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.3": [
+        "文章整形に読点リズム補正を追加しました。",
+        "読点補正のレベル1〜4を選べるよう調整しました。",
+        "一括整形・個別整形・変更履歴 / Undo / Redo に読点補正を連携しました。"
+    ],
     "1.33.2": [
         "ユーザー・モデル各メッセージ下部に個別文章整形ボタンを追加しました。",
         "フローティング文章整形ダイアログの現在設定を使って、対象メッセージだけを整形できるよう改善しました。",
@@ -653,6 +658,8 @@ try {
         textFormatTrimTrailing: document.getElementById('text-format-trim-trailing'),
         textFormatNormalizeBlanks: document.getElementById('text-format-normalize-blanks'),
         textFormatNormalizeEllipsisDash: document.getElementById('text-format-normalize-ellipsis-dash'),
+        textFormatCommaRhythm: document.getElementById('text-format-comma-rhythm'),
+        textFormatCommaLevel: document.getElementById('text-format-comma-level'),
         textFormatNormalizeWidth: document.getElementById('text-format-normalize-width'),
         textFormatWidthDirection: document.getElementById('text-format-width-direction'),
         textFormatNormalizeKatakana: document.getElementById('text-format-normalize-katakana'),
@@ -8147,9 +8154,36 @@ function normalizeChangeHistoryEntry(entry, chatId) {
     };
 }
 
+function isFullyDiscardedChangeHistoryEntry(entry) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    return changes.length > 0 && changes.every(change => change?.status === 'discarded');
+}
+
+function doChangeHistoryTargetsOverlap(leftChange, rightChange) {
+    if (!leftChange || !rightChange) return false;
+    if (Number(leftChange.index) !== Number(rightChange.index)) return false;
+    if (leftChange.role !== rightChange.role) return false;
+
+    const leftGroupId = leftChange.siblingGroupId || null;
+    const rightGroupId = rightChange.siblingGroupId || null;
+    if (leftGroupId || rightGroupId) {
+        if (leftGroupId !== rightGroupId) return false;
+    }
+
+    const leftCascadeIndex = leftChange.cascadeIndex ?? null;
+    const rightCascadeIndex = rightChange.cascadeIndex ?? null;
+    return leftCascadeIndex === rightCascadeIndex;
+}
+
+function shouldDiscardUndoneChangeForNewEntry(change, newEntry) {
+    if (change?.status !== 'undone') return false;
+    const newChanges = Array.isArray(newEntry?.changes) ? newEntry.changes : [];
+    return newChanges.some(newChange => doChangeHistoryTargetsOverlap(change, newChange));
+}
+
 function pruneChangeHistory(entries) {
     const pruned = Array.isArray(entries)
-        ? entries.filter(Boolean).slice(0, CHANGE_HISTORY_MAX_ENTRIES)
+        ? entries.filter(entry => entry && !isFullyDiscardedChangeHistoryEntry(entry)).slice(0, CHANGE_HISTORY_MAX_ENTRIES)
         : [];
 
     try {
@@ -8229,7 +8263,7 @@ async function appendChangeHistory(chatId, entry) {
     const invalidatedHistory = history.map(historyEntry => {
         const changes = Array.isArray(historyEntry.changes)
             ? historyEntry.changes.map(change => {
-                if (change.status !== 'undone') return change;
+                if (!shouldDiscardUndoneChangeForNewEntry(change, normalizedEntry)) return change;
                 return {
                     ...change,
                     status: 'discarded',
@@ -8393,6 +8427,37 @@ function findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIn
     return findLatestChangeForMessage(history, messageIndex, role, cascadeIndex, 'undone');
 }
 
+function getChangeHistoryStatusForDirection(direction) {
+    if (direction === 'undo') return 'applied';
+    if (direction === 'redo') return 'undone';
+    return '';
+}
+
+function getChangeHistoryEntryChangesForDirection(entry, direction) {
+    const targetStatus = getChangeHistoryStatusForDirection(direction);
+    if (!targetStatus || !Array.isArray(entry?.changes)) return [];
+    return entry.changes.filter(change => change?.status === targetStatus);
+}
+
+function hasChangeHistoryEntryChangesForDirection(entry, direction) {
+    return getChangeHistoryEntryChangesForDirection(entry, direction).length > 0;
+}
+
+function getChangeHistoryEntryDirectionTime(entry, direction) {
+    const changes = getChangeHistoryEntryChangesForDirection(entry, direction);
+    const changeTimeKey = direction === 'redo' ? 'undoneAt' : 'redoneAt';
+    const entryTimeKey = direction === 'redo' ? 'undoneAt' : 'redoneAt';
+    const changeTimes = changes
+        .map(change => normalizeChangeHistoryNullableTimestamp(change?.[changeTimeKey]))
+        .filter(time => time !== null);
+    const entryActionTime = normalizeChangeHistoryNullableTimestamp(entry?.[entryTimeKey]);
+    return Math.max(
+        normalizeChangeHistoryTimestamp(entry?.timestamp, 0),
+        entryActionTime || 0,
+        ...changeTimes
+    );
+}
+
 function validateHistoryChangeApplication(change, direction) {
     const target = getHistoryChangeTarget(change);
     if (!target) {
@@ -8433,10 +8498,10 @@ function validateHistoryEntryApplication(entry, direction) {
     if (!Array.isArray(entry.changes) || entry.changes.length === 0) {
         return { valid: false, reason: '対象履歴がありません', targets: [] };
     }
-    if (direction === 'undo' && entry.status !== 'applied') {
+    if (direction === 'undo' && !hasChangeHistoryEntryChangesForDirection(entry, direction)) {
         return { valid: false, reason: '元に戻せる変更がありません', targets: [] };
     }
-    if (direction === 'redo' && entry.status !== 'undone') {
+    if (direction === 'redo' && !hasChangeHistoryEntryChangesForDirection(entry, direction)) {
         return { valid: false, reason: 'やり直せる変更がありません', targets: [] };
     }
     if (direction !== 'undo' && direction !== 'redo') {
@@ -8444,7 +8509,7 @@ function validateHistoryEntryApplication(entry, direction) {
     }
 
     const targets = [];
-    for (const change of entry.changes) {
+    for (const change of getChangeHistoryEntryChangesForDirection(entry, direction)) {
         const target = getHistoryChangeTarget(change);
         if (!target) {
             return { valid: false, reason: '現在の本文が履歴と一致しないため操作できません', targets: [] };
@@ -8479,10 +8544,12 @@ function setHistoryChangeTargetContent(target, nextContent) {
 
 function updateChangeHistoryEntryStatus(history, targetEntry, direction) {
     const now = Date.now();
+    const targetStatus = getChangeHistoryStatusForDirection(direction);
     return history.map(entry => {
         if (!entry || entry.id !== targetEntry.id) return entry;
         const changes = Array.isArray(entry.changes)
             ? entry.changes.map(change => {
+                if (change.status !== targetStatus) return change;
                 if (direction === 'undo') {
                     return {
                         ...change,
@@ -8497,19 +8564,15 @@ function updateChangeHistoryEntryStatus(history, targetEntry, direction) {
                 };
             })
             : [];
-        if (direction === 'undo') {
-            return {
-                ...entry,
-                changes,
-                status: 'undone',
-                undoneAt: now
-            };
-        }
-        return {
+        const nextEntry = {
             ...entry,
             changes,
-            status: 'applied',
-            redoneAt: now
+        };
+        return {
+            ...nextEntry,
+            status: summarizeChangeHistoryEntryStatus(nextEntry),
+            undoneAt: direction === 'undo' ? now : entry.undoneAt,
+            redoneAt: direction === 'redo' ? now : entry.redoneAt
         };
     });
 }
@@ -8552,8 +8615,7 @@ function canApplyHistoryEntry(entry, messageMap, direction) {
     if (!entry || !Array.isArray(entry.changes)) return false;
     if (!(messageMap instanceof Map)) return false;
     if (!isUndoRedoChangeHistoryEntry(entry)) return false;
-    if (direction === 'undo' && entry.status !== 'applied') return false;
-    if (direction === 'redo' && entry.status !== 'undone') return false;
+    if (!hasChangeHistoryEntryChangesForDirection(entry, direction)) return false;
     if (direction !== 'undo' && direction !== 'redo') return false;
 
     return validateHistoryEntryApplication(entry, direction).valid;
@@ -8562,10 +8624,10 @@ function canApplyHistoryEntry(entry, messageMap, direction) {
 function getLatestAppliedHistoryEntry(history) {
     if (!Array.isArray(history)) return null;
     return history
-        .filter(entry => entry?.status === 'applied' && isUndoRedoChangeHistoryEntry(entry))
+        .filter(entry => isUndoRedoChangeHistoryEntry(entry) && hasChangeHistoryEntryChangesForDirection(entry, 'undo'))
         .reduce((latest, entry) => {
             if (!latest) return entry;
-            return normalizeChangeHistoryTimestamp(entry.timestamp, 0) > normalizeChangeHistoryTimestamp(latest.timestamp, 0)
+            return getChangeHistoryEntryDirectionTime(entry, 'undo') > getChangeHistoryEntryDirectionTime(latest, 'undo')
                 ? entry
                 : latest;
         }, null);
@@ -8574,11 +8636,11 @@ function getLatestAppliedHistoryEntry(history) {
 function getLatestUndoneHistoryEntry(history) {
     if (!Array.isArray(history)) return null;
     return history
-        .filter(entry => entry?.status === 'undone' && isUndoRedoChangeHistoryEntry(entry))
+        .filter(entry => isUndoRedoChangeHistoryEntry(entry) && hasChangeHistoryEntryChangesForDirection(entry, 'redo'))
         .reduce((latest, entry) => {
             if (!latest) return entry;
-            const entryTime = normalizeChangeHistoryNullableTimestamp(entry.undoneAt) || normalizeChangeHistoryTimestamp(entry.timestamp, 0);
-            const latestTime = normalizeChangeHistoryNullableTimestamp(latest.undoneAt) || normalizeChangeHistoryTimestamp(latest.timestamp, 0);
+            const entryTime = getChangeHistoryEntryDirectionTime(entry, 'redo');
+            const latestTime = getChangeHistoryEntryDirectionTime(latest, 'redo');
             return entryTime > latestTime ? entry : latest;
         }, null);
 }
@@ -8658,8 +8720,10 @@ const appLogic = {
                 const role = messageElement.classList.contains('model') ? 'model' : 'user';
                 const visibleMessage = visibleByIndex.get(messageIndex);
                 const cascadeIndex = visibleMessage?.cascadeIndex ?? null;
-                const canUndo = Boolean(findLatestAppliedChangeForMessage(history, messageIndex, role, cascadeIndex));
-                const canRedo = Boolean(findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIndex));
+                const undoTarget = findLatestAppliedChangeForMessage(history, messageIndex, role, cascadeIndex);
+                const redoTarget = findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIndex);
+                const canUndo = Boolean(undoTarget && validateHistoryChangeApplication(undoTarget.change, 'undo').valid);
+                const canRedo = Boolean(redoTarget && validateHistoryChangeApplication(redoTarget.change, 'redo').valid);
                 const undoButton = messageElement.querySelector(':scope > .message-actions .tm-message-undo-btn');
                 const redoButton = messageElement.querySelector(':scope > .message-actions .tm-message-redo-btn');
 
@@ -13915,15 +13979,18 @@ const appLogic = {
             elements.textFormatTrimTrailing,
             elements.textFormatNormalizeBlanks,
             elements.textFormatNormalizeEllipsisDash,
+            elements.textFormatCommaRhythm,
             elements.textFormatNormalizeWidth,
             elements.textFormatNormalizeKatakana,
             elements.textFormatNormalizeDigits,
             elements.textFormatNormalizeSymbols
         ].forEach(checkbox => checkbox?.addEventListener('change', () => {
             this.updateTextFormattingWidthControls();
+            this.updateTextFormattingCommaControls();
             this.updateTextFormattingPreview();
         }));
         elements.textFormatWidthDirection?.addEventListener('change', () => this.updateTextFormattingPreview());
+        elements.textFormatCommaLevel?.addEventListener('change', () => this.updateTextFormattingPreview());
         elements.textFormattingApplyBtn?.addEventListener('click', () => this.applyTextFormattingCandidates());
         elements.textFormattingCancelBtn?.addEventListener('click', () => elements.textFormattingDialog?.close('cancel'));
         elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
@@ -18555,6 +18622,11 @@ const appLogic = {
         }
     },
 
+    normalizeCommaRhythmLevel(value) {
+        const level = Number(value);
+        return Number.isInteger(level) && level >= 1 && level <= 4 ? level : 4;
+    },
+
     getTextFormattingOptions() {
         return {
             indentProse: Boolean(elements.textFormatIndentProse?.checked),
@@ -18563,6 +18635,8 @@ const appLogic = {
             trimTrailing: Boolean(elements.textFormatTrimTrailing?.checked),
             normalizeBlanks: Boolean(elements.textFormatNormalizeBlanks?.checked),
             normalizeEllipsisDash: Boolean(elements.textFormatNormalizeEllipsisDash?.checked),
+            commaRhythm: Boolean(elements.textFormatCommaRhythm?.checked),
+            commaRhythmLevel: this.normalizeCommaRhythmLevel(elements.textFormatCommaLevel?.value),
             normalizeWidth: Boolean(elements.textFormatNormalizeWidth?.checked),
             widthDirection: elements.textFormatWidthDirection?.value === 'half' ? 'half' : 'full',
             normalizeKatakana: Boolean(elements.textFormatNormalizeKatakana?.checked),
@@ -18581,6 +18655,12 @@ const appLogic = {
         ].forEach(control => {
             if (control) control.disabled = !enabled;
         });
+    },
+
+    updateTextFormattingCommaControls() {
+        if (elements.textFormatCommaLevel) {
+            elements.textFormatCommaLevel.disabled = !elements.textFormatCommaRhythm?.checked;
+        }
     },
 
     setTextFormattingTarget(target = 'model') {
@@ -18618,6 +18698,7 @@ const appLogic = {
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         this.updateTextFormattingTargetButtons();
         this.updateTextFormattingWidthControls();
+        this.updateTextFormattingCommaControls();
         this.updateTextFormattingPreview();
         if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
             elements.textFormattingDialog.showModal();
@@ -18745,6 +18826,7 @@ const appLogic = {
         if (options.boundaryBlank || options.compactDialogue || options.normalizeBlanks) labels.push('空行整理');
         if (options.trimTrailing) labels.push('行末空白削除');
         if (options.normalizeEllipsisDash) labels.push('三点リーダー・ダッシュ統一');
+        if (options.commaRhythm) labels.push(`読点補正Lv${this.normalizeCommaRhythmLevel(options.commaRhythmLevel)}`);
         if (options.normalizeWidth) {
             const widthTargets = [];
             if (options.normalizeKatakana) widthTargets.push('カタカナ');
@@ -18767,6 +18849,8 @@ const appLogic = {
             trimTrailing: Boolean(options.trimTrailing),
             normalizeBlanks: Boolean(options.normalizeBlanks),
             normalizeEllipsisDash: Boolean(options.normalizeEllipsisDash),
+            commaRhythm: Boolean(options.commaRhythm),
+            commaRhythmLevel: this.normalizeCommaRhythmLevel(options.commaRhythmLevel),
             normalizeWidth: Boolean(options.normalizeWidth),
             widthDirection: options.widthDirection === 'half' ? 'half' : 'full',
             normalizeKatakana: Boolean(options.normalizeKatakana),
@@ -18996,11 +19080,15 @@ const appLogic = {
                 return;
             }
 
-            const normalizedLine = this.normalizeTextFormattingLine(rawLine, options);
+            let normalizedLine = this.normalizeTextFormattingLine(rawLine, options);
             const content = normalizedLine.replace(/^[\s\u3000]+/, '');
             const isDialogue = this.isDialogueDepthActive(depth) || /^[「『（]/.test(content);
+            if (options.commaRhythm) {
+                normalizedLine = this.normalizeCommaRhythmLine(normalizedLine, options.commaRhythmLevel, { isDialogue });
+            }
+            const normalizedContent = normalizedLine.replace(/^[\s\u3000]+/, '');
             const formatted = options.indentProse
-                ? (isDialogue ? content : `　${content}`)
+                ? (isDialogue ? normalizedContent : `　${normalizedContent}`)
                 : normalizedLine;
 
             units.push({ text: formatted, type: isDialogue ? 'dialogue' : 'prose', blank: false });
@@ -19038,6 +19126,43 @@ const appLogic = {
         }
 
         return normalized;
+    },
+
+    normalizeCommaRhythmLine(line, levelValue = 4, { isDialogue = false } = {}) {
+        const level = this.normalizeCommaRhythmLevel(levelValue);
+        let normalized = String(line ?? '');
+
+        if (isDialogue) {
+            return level >= 4 ? this.normalizeShortQuoteCommaRhythm(normalized) : normalized;
+        }
+
+        const commaChar = normalized.includes(',') && !normalized.includes('、') ? ',' : '、';
+
+        if (level >= 1) {
+            normalized = normalized
+                .replace(/[、,]{2,}/g, commaChar)
+                .replace(/^([\s\u3000]*)[、,]+/, '$1')
+                .replace(/[、,]+([」』）\)\]\}])/g, '$1')
+                .replace(/[、,]+([。\.])/g, '$1');
+        }
+
+        if (level >= 2) {
+            normalized = normalized.replace(/([ぁ-んァ-ヶ一-龯]{1,6}[はがをにへ])[、,](?=[ぁ-んァ-ヶ一-龯「『（])/g, '$1');
+        }
+
+        if (level >= 3) {
+            normalized = normalized.replace(/(まだ|もう|ただ|ふと|すぐ|少し|そっと)[、,](?=[ぁ-んァ-ヶ一-龯「『（])/g, '$1');
+        }
+
+        if (level >= 4) {
+            normalized = this.normalizeShortQuoteCommaRhythm(normalized);
+        }
+
+        return normalized;
+    },
+
+    normalizeShortQuoteCommaRhythm(line) {
+        return String(line ?? '').replace(/([「『][^」』\n]{1,12}[」』]と)[、,](?=[ぁ-んァ-ヶ一-龯])/g, '$1');
     },
 
     convertKatakanaToHalfWidth(text) {

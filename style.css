@@ -1268,6 +1268,13 @@ body.dark-mode #settings-screen a:hover {
     margin-left: 28px;
 }
 
+.text-formatting-subgroup-note {
+    margin: -2px 0 8px 28px;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
 .text-formatting-preview {
     min-height: 0;
 }
