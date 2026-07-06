@@ -25,11 +25,14 @@ const DEFAULT_TOP_P = 0.95;
 const DEFAULT_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'; // デフォルトフォント
 const DEFAULT_CHAT_FONT_SIZE = 14;
 const DEFAULT_CHAT_LINE_HEIGHT = 1.5;
+const DEFAULT_CHAT_PARAGRAPH_MARGIN_BOTTOM = 0.8;
 const CHAT_FONT_SIZE_OPTIONS = [12, 13, 14, 15, 16, 18, 20, 22, 24];
 const CHAT_LINE_HEIGHT_OPTIONS = [1.2, 1.4, 1.5, 1.6, 1.8, 2.0, 2.2];
+const CHAT_PARAGRAPH_MARGIN_BOTTOM_OPTIONS = [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0];
 const DEFAULT_LOCAL_UI_SETTINGS = {
     chatFontSize: DEFAULT_CHAT_FONT_SIZE,
     chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
+    chatParagraphMarginBottom: DEFAULT_CHAT_PARAGRAPH_MARGIN_BOTTOM,
     hideSystemPromptInChat: false,
     floatingPanelBehavior: 'on-click',
     lastSeenReleaseVersion: ''
@@ -127,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.5";
-const APP_CACHE_VERSION = "v1.33.5";
+const APP_VERSION = "1.34.0";
+const APP_CACHE_VERSION = "v1.34.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -209,6 +212,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.0": [
+        "メッセージ本文の段落下余白を設定画面から調整できるよう改善しました。",
+        "フォントサイズ・行間に加えて、段落間隔も保存・復元できるよう対応しました。"
+    ],
     "1.33.5": [
         "メッセージ下の個別整形・個別置換ボタンが使える場面でグレーアウトする場合がある問題を修正しました。",
         "メッセージ下ボタンの有効/無効状態更新を整理しました。",
@@ -506,6 +513,7 @@ try {
         fontFamilyInput: document.getElementById('font-family-input'),
         chatFontSizeSelect: document.getElementById('chat-font-size-select'),
         chatLineHeightSelect: document.getElementById('chat-line-height-select'),
+        chatParagraphMarginBottomSelect: document.getElementById('chat-paragraph-margin-bottom-select'),
         hideSystemPromptToggle: document.getElementById('hide-system-prompt-toggle'),
         geminiEnableGroundingToggle: document.getElementById('gemini-enable-grounding-toggle'),
         geminiEnableFunctionCallingToggle: document.getElementById('gemini-enable-function-calling-toggle'),
@@ -4860,6 +4868,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.chatLineHeightSelect) {
             elements.chatLineHeightSelect.value = String(uiUtils.getValidChatLineHeight(state.settings.chatLineHeight));
         }
+        if (elements.chatParagraphMarginBottomSelect) {
+            elements.chatParagraphMarginBottomSelect.value = String(uiUtils.getValidChatParagraphMarginBottom(state.settings.chatParagraphMarginBottom));
+        }
         elements.hideSystemPromptToggle.checked = !state.settings.hideSystemPromptInChat;
         elements.geminiEnableGroundingToggle.checked = state.settings.geminiEnableGrounding;
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
@@ -5207,12 +5218,22 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return parsed;
     },
 
+    getValidChatParagraphMarginBottom(value) {
+        const parsed = Number.parseFloat(value);
+        if (!CHAT_PARAGRAPH_MARGIN_BOTTOM_OPTIONS.includes(parsed)) {
+            return DEFAULT_CHAT_PARAGRAPH_MARGIN_BOTTOM;
+        }
+        return parsed;
+    },
+
     applyChatTypography() {
         const fontSize = this.getValidChatFontSize(state.settings.chatFontSize);
         const lineHeight = this.getValidChatLineHeight(state.settings.chatLineHeight);
+        const paragraphMarginBottom = this.getValidChatParagraphMarginBottom(state.settings.chatParagraphMarginBottom);
 
         state.settings.chatFontSize = fontSize;
         state.settings.chatLineHeight = lineHeight;
+        state.settings.chatParagraphMarginBottom = paragraphMarginBottom;
 
         if (elements.chatFontSizeSelect) {
             elements.chatFontSizeSelect.value = String(fontSize);
@@ -5220,10 +5241,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.chatLineHeightSelect) {
             elements.chatLineHeightSelect.value = String(lineHeight);
         }
+        if (elements.chatParagraphMarginBottomSelect) {
+            elements.chatParagraphMarginBottomSelect.value = String(paragraphMarginBottom);
+        }
 
         document.documentElement.style.setProperty('--chat-font-size', `${fontSize}px`);
         document.documentElement.style.setProperty('--chat-line-height', String(lineHeight));
-        console.log(`チャット本文表示設定適用: font-size=${fontSize}px, line-height=${lineHeight}`);
+        document.documentElement.style.setProperty('--chat-paragraph-margin-bottom', `${paragraphMarginBottom}em`);
+        console.log(`チャット本文表示設定適用: font-size=${fontSize}px, line-height=${lineHeight}, paragraph-margin-bottom=${paragraphMarginBottom}em`);
     },
 
     // --- システムプロンプトUI更新 ---
@@ -10898,6 +10923,7 @@ const appLogic = {
         const localUiSettings = { ...DEFAULT_LOCAL_UI_SETTINGS };
         localUiSettings.chatFontSize = uiUtils.getValidChatFontSize(settings.chatFontSize);
         localUiSettings.chatLineHeight = uiUtils.getValidChatLineHeight(settings.chatLineHeight);
+        localUiSettings.chatParagraphMarginBottom = uiUtils.getValidChatParagraphMarginBottom(settings.chatParagraphMarginBottom);
         localUiSettings.hideSystemPromptInChat = typeof settings.hideSystemPromptInChat === 'boolean'
             ? settings.hideSystemPromptInChat
             : DEFAULT_LOCAL_UI_SETTINGS.hideSystemPromptInChat;
@@ -13731,6 +13757,7 @@ const appLogic = {
 
         setupLocalUiSettingSave(elements.chatFontSizeSelect, 'chatFontSize', 'change', () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
+        setupLocalUiSettingSave(elements.chatParagraphMarginBottomSelect, 'chatParagraphMarginBottom', 'change', () => uiUtils.getValidChatParagraphMarginBottom(elements.chatParagraphMarginBottomSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
         setupLocalUiSettingSave(elements.floatingPanelBehaviorSelect, 'floatingPanelBehavior', 'change', () => elements.floatingPanelBehaviorSelect?.value || DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior, () => this.applyFloatingPanelBehavior());
     
