@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.0";
-const APP_CACHE_VERSION = "v1.33.0";
+const APP_VERSION = "1.33.1";
+const APP_CACHE_VERSION = "v1.33.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -193,6 +193,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.1": [
+        "文章整形の適用結果を変更履歴に記録するよう改善しました。",
+        "文章整形で変更したメッセージをUndo/Redoできるよう連携しました。",
+        "複数メッセージをまとめて整形した場合も、1つの履歴として戻せるよう調整しました。"
+    ],
     "1.33.0": [
         "フローティングボタンに文章整形機能を追加しました。",
         "地の文の一字下げ、会話文との空行調整、会話文同士の空行詰めに対応しました。",
@@ -8027,6 +8032,25 @@ function normalizeChangeHistoryStatus(value, fallback = 'applied') {
     return CHANGE_HISTORY_STATUSES.has(value) ? value : fallback;
 }
 
+function normalizeChangeHistoryFormatOptions(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const normalized = {};
+    Object.entries(value).forEach(([key, optionValue]) => {
+        if (!/^[a-zA-Z0-9_-]+$/.test(String(key))) return;
+        if (typeof optionValue === 'boolean' || typeof optionValue === 'number') {
+            normalized[key] = optionValue;
+        } else if (typeof optionValue === 'string') {
+            normalized[key] = optionValue.slice(0, 120);
+        } else if (Array.isArray(optionValue)) {
+            normalized[key] = optionValue
+                .filter(item => ['string', 'number', 'boolean'].includes(typeof item))
+                .map(item => typeof item === 'string' ? item.slice(0, 120) : item)
+                .slice(0, 20);
+        }
+    });
+    return normalized;
+}
+
 function summarizeChangeHistoryEntryStatus(entry) {
     const changes = Array.isArray(entry?.changes) ? entry.changes : [];
     if (changes.length === 0) {
@@ -8092,6 +8116,7 @@ function normalizeChangeHistoryEntry(entry, chatId) {
         query: String(entry.query ?? ''),
         replacement: String(entry.replacement ?? ''),
         formatLabel: String(entry.formatLabel ?? ''),
+        formatOptions: normalizeChangeHistoryFormatOptions(entry.formatOptions),
         target: normalizeChangeHistoryTarget(entry.target, changes),
         scope: CHANGE_HISTORY_SCOPES.has(entry.scope) ? entry.scope : 'chat',
         targetMessageIndex: Number.isInteger(Number(entry.targetMessageIndex)) ? Number(entry.targetMessageIndex) : null,
@@ -8230,7 +8255,7 @@ function getCurrentMessageMapForHistory() {
 }
 
 function isUndoRedoChangeHistoryEntry(entry) {
-    return entry && (entry.type === 'edit' || entry.type === 'replace');
+    return entry && (entry.type === 'edit' || entry.type === 'replace' || entry.type === 'format');
 }
 
 function getCurrentVisibleMessagesForReplacePreview() {
@@ -18672,8 +18697,8 @@ const appLogic = {
             return true;
         };
 
-        const sourceEntries = state.currentMessages
-            .map((message, index) => ({ message, index }))
+        const sourceEntries = this.getVisibleMessages()
+            .map(message => ({ message, index: state.currentMessages.indexOf(message) }))
             .filter(({ message, index }) => isEligible(message, index));
 
         return sourceEntries.map(({ message, index }) => {
@@ -18690,6 +18715,62 @@ const appLogic = {
                 afterPreview: this.truncateTextFormattingPreview(formatted)
             };
         }).filter(Boolean);
+    },
+
+    getTextFormattingTargetLabel(target = state.textFormattingTarget) {
+        if (target === 'user') return 'ユーザー';
+        if (target === 'model') return 'モデル';
+        return '両方';
+    },
+
+    getTextFormattingRuleSummary(options = this.getTextFormattingOptions()) {
+        const labels = [];
+        if (options.indentProse) labels.push('一字下げ');
+        if (options.boundaryBlank || options.compactDialogue || options.normalizeBlanks) labels.push('空行整理');
+        if (options.trimTrailing) labels.push('行末空白削除');
+        if (options.normalizeEllipsisDash) labels.push('三点リーダー・ダッシュ統一');
+        if (options.normalizeWidth) {
+            const widthTargets = [];
+            if (options.normalizeKatakana) widthTargets.push('カタカナ');
+            if (options.normalizeDigits) widthTargets.push('数字');
+            if (options.normalizeSymbols) widthTargets.push('記号');
+            if (widthTargets.length > 0) {
+                labels.push(`${options.widthDirection === 'half' ? '半角' : '全角'}統一:${widthTargets.join('/')}`);
+            }
+        }
+        return labels;
+    },
+
+    buildTextFormattingHistoryOptions(options = this.getTextFormattingOptions()) {
+        return {
+            target: ['user', 'model', 'both'].includes(state.textFormattingTarget) ? state.textFormattingTarget : 'model',
+            targetLabel: this.getTextFormattingTargetLabel(),
+            indentProse: Boolean(options.indentProse),
+            boundaryBlank: Boolean(options.boundaryBlank),
+            compactDialogue: Boolean(options.compactDialogue),
+            trimTrailing: Boolean(options.trimTrailing),
+            normalizeBlanks: Boolean(options.normalizeBlanks),
+            normalizeEllipsisDash: Boolean(options.normalizeEllipsisDash),
+            normalizeWidth: Boolean(options.normalizeWidth),
+            widthDirection: options.widthDirection === 'half' ? 'half' : 'full',
+            normalizeKatakana: Boolean(options.normalizeKatakana),
+            normalizeDigits: Boolean(options.normalizeDigits),
+            normalizeSymbols: Boolean(options.normalizeSymbols),
+            summary: this.getTextFormattingRuleSummary(options)
+        };
+    },
+
+    buildTextFormattingHistoryLabel(candidates, options = this.getTextFormattingOptions()) {
+        const count = Array.isArray(candidates) ? candidates.length : 0;
+        const roles = new Set((candidates || []).map(candidate => candidate.role));
+        const targetLabel = roles.size === 1 && roles.has('user')
+            ? 'ユーザー'
+            : roles.size === 1 && roles.has('model')
+                ? 'モデル'
+                : '';
+        const rules = this.getTextFormattingRuleSummary(options).slice(0, 3).join('、');
+        const base = targetLabel ? `文章整形：${targetLabel} ${count}件` : `文章整形：${count}件`;
+        return rules ? `${base}（${rules}）` : base;
     },
 
     async applyTextFormattingCandidates() {
@@ -18714,24 +18795,89 @@ const appLogic = {
             return;
         }
 
+        const chatIdBeforeSave = state.currentChatId;
+        const options = this.getTextFormattingOptions();
+        const historyChanges = candidates.map(candidate => ({
+            index: candidate.index,
+            role: candidate.role,
+            before: candidate.expected,
+            after: candidate.formatted,
+            count: candidate.changeCount,
+            status: 'applied',
+            undoneAt: null,
+            redoneAt: null,
+            discardedAt: null
+        }));
+        const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
+        historyChanges.forEach(change => {
+            const visibleTarget = visibleMessages.find(message => message.index === change.index && message.role === change.role);
+            if (visibleTarget?.cascadeIndex !== null && visibleTarget?.cascadeIndex !== undefined) {
+                change.cascadeIndex = visibleTarget.cascadeIndex;
+            }
+            if (visibleTarget?.siblingGroupId) {
+                change.siblingGroupId = visibleTarget.siblingGroupId;
+            }
+        });
         const originals = candidates.map(candidate => ({
             index: candidate.index,
-            content: state.currentMessages[candidate.index].content
+            content: state.currentMessages[candidate.index].content,
+            timestamp: state.currentMessages[candidate.index].timestamp
         }));
+        const firstUserIndex = state.currentMessages.findIndex(message => message.role === 'user');
+        const firstUserChange = historyChanges.find(change => change.index === firstUserIndex && change.role === 'user');
+        const newTitleForSave = firstUserChange
+            ? String(firstUserChange.after || '').substring(0, 50) || '無題のチャット'
+            : null;
 
         try {
             candidates.forEach(candidate => {
-                state.currentMessages[candidate.index].content = candidate.formatted;
+                const message = state.currentMessages[candidate.index];
+                message.content = candidate.formatted;
+                message.timestamp = Date.now();
             });
-            await dbUtils.saveChat();
+            const savedChatId = await dbUtils.saveChat(newTitleForSave);
+            if (newTitleForSave) {
+                uiUtils.updateChatTitle(newTitleForSave);
+            }
+
+            const chatIdForHistory = savedChatId || state.currentChatId || chatIdBeforeSave;
+            let historySaved = false;
+            if (hasChangeHistoryChatId(chatIdForHistory)) {
+                const formatOptions = this.buildTextFormattingHistoryOptions(options);
+                const historyResult = await appendChangeHistory(chatIdForHistory, {
+                    id: createChangeHistoryId(),
+                    chatId: chatIdForHistory,
+                    type: 'format',
+                    status: 'applied',
+                    timestamp: Date.now(),
+                    query: '',
+                    replacement: '',
+                    formatLabel: this.buildTextFormattingHistoryLabel(candidates, options),
+                    formatOptions,
+                    target: formatOptions.target,
+                    scope: 'chat',
+                    useRegex: false,
+                    caseSensitive: false,
+                    messageCount: historyChanges.length,
+                    occurrenceCount: historyChanges.reduce((sum, change) => sum + change.count, 0),
+                    changes: historyChanges
+                });
+                historySaved = Boolean(historyResult.saved);
+            }
+
             uiUtils.renderChatMessages({ suppressMessageAnimation: true });
             elements.textFormattingDialog?.close('confirm');
             state.textFormattingCandidates = [];
-            await uiUtils.showCustomAlert(`${candidates.length}件のメッセージを整形しました。`);
+            await this.updateChangeHistoryControls();
+            await uiUtils.showCustomAlert(historySaved
+                ? `${candidates.length}件のメッセージを整形しました。`
+                : `${candidates.length}件のメッセージを整形しました（変更履歴の保存に失敗しました）。`
+            );
         } catch (error) {
             originals.forEach(original => {
                 if (state.currentMessages[original.index]) {
                     state.currentMessages[original.index].content = original.content;
+                    state.currentMessages[original.index].timestamp = original.timestamp;
                 }
             });
             uiUtils.renderChatMessages({ suppressMessageAnimation: true });
