@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.4";
-const APP_CACHE_VERSION = "v1.33.4";
+const APP_VERSION = "1.33.5";
+const APP_CACHE_VERSION = "v1.33.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -209,6 +209,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.5": [
+        "メッセージ下の個別整形・個別置換ボタンが使える場面でグレーアウトする場合がある問題を修正しました。",
+        "メッセージ下ボタンの有効/無効状態更新を整理しました。",
+        "送信完了・編集終了・整形/置換/Undo/Redo後にボタン状態が正しく復帰するよう改善しました。"
+    ],
     "1.33.4": [
         "文章整形ダイアログの設定を保存・復元できるよう改善しました。",
         "文章整形UIのグループ構成、状態表示、プレビュー表示を整理しました。",
@@ -2809,6 +2814,12 @@ const uiUtils = {
         }
 
         const index = Number(messageIndex);
+        const availability = appLogic?.canRunMessageTextAction?.(index, role);
+        if (!availability?.canRun) {
+            await this.showCustomAlert(availability?.reason || 'このメッセージは置換できません。');
+            appLogic?.updateMessageActionButtonStates?.();
+            return;
+        }
         const targetMessage = getCurrentVisibleMessagesForReplacePreview()
             .find(message => message.index === index && message.role === role);
         if (!targetMessage) {
@@ -4016,7 +4027,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 formatButton.title = 'このメッセージを文章整形';
                 formatButton.setAttribute('aria-label', 'このメッセージを文章整形');
                 formatButton.classList.add('tm-format-message-btn');
-                formatButton.disabled = Boolean(appLogic?.isGenerationBlockingActive?.() || state.editingMessageIndex !== null || state.isEditingSystemPrompt);
+                formatButton.disabled = !appLogic?.canRunMessageTextAction?.(index, role, messageDiv)?.canRun;
                 formatButton.onclick = () => appLogic.applyTextFormattingToMessage(index, role);
                 actionButtonsDiv.appendChild(formatButton);
             }
@@ -4055,7 +4066,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 replaceButton.title = 'このメッセージを置換';
                 replaceButton.setAttribute('aria-label', 'このメッセージを置換');
                 replaceButton.classList.add('tm-replace-message-btn');
-                replaceButton.disabled = Boolean(appLogic?.isGenerationBlockingActive?.() || state.editingMessageIndex !== null);
+                replaceButton.disabled = !appLogic?.canRunMessageTextAction?.(index, role, messageDiv)?.canRun;
                 replaceButton.onclick = () => uiUtils.openReplacePreviewForMessage(index, role);
                 actionButtonsDiv.appendChild(replaceButton);
             }
@@ -5341,6 +5352,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             state.currentScreen = screenName;
             if (screenName === 'chat') {
                 this.scheduleComposerTextareaResize(true);
+                appLogic.updateMessageActionButtonStates();
+                void appLogic.updateChangeHistoryControls();
             }
             const endTime = performance.now();
             resolve();
@@ -8713,7 +8726,71 @@ const appLogic = {
         });
     },
 
+    isMessageTextActionBusy() {
+        return Boolean(
+            state.isApplyingChangeHistory ||
+            state.isSending ||
+            this.isGenerationBlockingActive() ||
+            state.editingMessageIndex !== null ||
+            state.isEditingSystemPrompt
+        );
+    },
+
+    resolveMessageActionTarget(messageIndex, role, messageElement = null) {
+        const index = Number(messageIndex);
+        const normalizedRole = CHANGE_HISTORY_ROLES.has(role)
+            ? role
+            : messageElement?.classList?.contains('model')
+                ? 'model'
+                : messageElement?.classList?.contains('user')
+                    ? 'user'
+                    : '';
+        if (!Number.isInteger(index) || index < 0 || !CHANGE_HISTORY_ROLES.has(normalizedRole)) {
+            return null;
+        }
+        const message = state.currentMessages?.[index];
+        if (!message || message.role !== normalizedRole) return null;
+        return { index, role: normalizedRole, message };
+    },
+
+    canRunMessageTextAction(messageIndex, role, messageElement = null) {
+        const target = this.resolveMessageActionTarget(messageIndex, role, messageElement);
+        if (!target) return { canRun: false, reason: '対象メッセージが見つかりません' };
+        if (state.currentScreen !== 'chat') return { canRun: false, reason: 'チャット画面以外では実行できません' };
+        if (this.isMessageTextActionBusy()) return { canRun: false, reason: '処理中または編集中です' };
+        if (target.message.isHidden) return { canRun: false, reason: '非表示メッセージです' };
+        if (typeof target.message.content !== 'string' || target.message.content.trim() === '') {
+            return { canRun: false, reason: '本文が空です' };
+        }
+        if (messageElement) {
+            if (messageElement.classList.contains('editing')) return { canRun: false, reason: '編集中です' };
+            if (messageElement.id?.startsWith('streaming-message-')) return { canRun: false, reason: '生成中です' };
+            if (messageElement.querySelector('[id^="streaming-content-"]')) return { canRun: false, reason: '生成中です' };
+        }
+        return { canRun: true, reason: '', target };
+    },
+
+    updateMessageActionButtonStates() {
+        elements.messageContainer?.querySelectorAll?.('.message.user, .message.model')?.forEach(messageElement => {
+            const index = Number(messageElement.dataset.index);
+            const role = messageElement.classList.contains('model') ? 'model' : 'user';
+            const canRun = this.canRunMessageTextAction(index, role, messageElement).canRun;
+            const formatButton = messageElement.querySelector(':scope > .message-actions .tm-format-message-btn');
+            const replaceButton = messageElement.querySelector(':scope > .message-actions .tm-replace-message-btn');
+
+            if (formatButton) {
+                formatButton.disabled = !canRun;
+                formatButton.setAttribute('aria-disabled', String(!canRun));
+            }
+            if (replaceButton) {
+                replaceButton.disabled = !canRun;
+                replaceButton.setAttribute('aria-disabled', String(!canRun));
+            }
+        });
+    },
+
     async updateChangeHistoryControls() {
+        this.updateMessageActionButtonStates();
         const undoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-undo-btn') || []);
         const redoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-redo-btn') || []);
         const setAllDisabled = (buttons, disabled) => {
@@ -16101,6 +16178,7 @@ const appLogic = {
     openSystemPromptDialog() {
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         state.isEditingSystemPrompt = true;
+        void this.updateChangeHistoryControls();
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
         if (elements.systemPromptEditor) {
@@ -16158,6 +16236,7 @@ const appLogic = {
         state.isEditingSystemPrompt = false;
         if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = true;
         this.updateSystemPromptButtonState();
+        void this.updateChangeHistoryControls();
         if (!skipSave) {
             await this.saveCurrentSystemPrompt({ keepOpen: true });
         }
@@ -16369,6 +16448,7 @@ const appLogic = {
 
         const rawContent = message.content;
         state.editingMessageIndex = index;
+        void this.updateChangeHistoryControls();
 
         const contentDiv = messageElement.querySelector('.message-content');
         const editArea = messageElement.querySelector('.message-edit-area');
@@ -16644,6 +16724,7 @@ const appLogic = {
           } else if (state.editingMessageIndex === index) {
               state.editingMessageIndex = null;
               console.log("編集キャンセル: 要素が見つかりませんでしたがインデックスをリセット:", index);
+              void this.updateChangeHistoryControls();
           }
     },
     // 編集UIを終了する共通処理
@@ -16670,6 +16751,7 @@ const appLogic = {
         }
 
         uiUtils.scheduleChatSearch(false);
+        void this.updateChangeHistoryControls();
         elements.userInput?.focus?.();
     },
 
@@ -18805,6 +18887,7 @@ const appLogic = {
 
     getTextFormattingBlockReason() {
         if (state.isSending) return '送信中は文章整形を実行できません。';
+        if (state.isApplyingChangeHistory) return '変更履歴の処理中は文章整形を実行できません。';
         if (state.editingMessageIndex !== null) return 'メッセージ編集中は文章整形を実行できません。';
         if (state.isEditingSystemPrompt) return 'システムプロンプト編集中は文章整形を実行できません。';
         return '';
@@ -19172,6 +19255,13 @@ const appLogic = {
         const blockReason = this.getTextFormattingBlockReason();
         if (blockReason) {
             await uiUtils.showCustomAlert(blockReason);
+            return;
+        }
+
+        const availability = this.canRunMessageTextAction(index, role);
+        if (!availability.canRun) {
+            await uiUtils.showCustomAlert(availability.reason || 'このメッセージは文章整形できません。');
+            this.updateMessageActionButtonStates();
             return;
         }
 
