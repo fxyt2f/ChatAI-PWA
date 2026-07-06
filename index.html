@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.32.7">
+    <link rel="stylesheet" href="./style.css?v=1.33.0">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.32.7" defer></script>
+    <script src="./dropbox.js?v=1.33.0" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.32.7" defer></script>
+    <script src="./app.js?v=1.33.0" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -76,6 +76,9 @@
                 </button>
                 <button id="chat-search-open-btn" class="floating-action-button" title="チャット内を検索" aria-label="チャット内を検索">
                     <span class="material-symbols-outlined">search</span>
+                </button>
+                <button id="text-formatting-btn" class="floating-action-button" title="文章整形" aria-label="文章整形">
+                    <span class="material-symbols-outlined">format_align_left</span>
                 </button>
                 <button id="collapse-all-messages-btn" class="floating-action-button" title="長文メッセージを一括折りたたみ" aria-label="長文メッセージを一括折りたたみ" disabled>
                     <span class="material-symbols-outlined">unfold_less</span>
@@ -1169,6 +1172,82 @@
                     <button id="summary-regenerate-btn" value="regenerate">再生成</button>
                     <button id="summary-confirm-btn" value="confirm" class="dialog-ok-btn">決定</button>
                 </div>
+            </div>
+        </dialog>
+
+        <!-- Text Formatting Dialog -->
+        <dialog id="textFormattingDialog" class="custom-dialog text-formatting-dialog">
+            <h3 class="dialog-title">文章を整形</h3>
+            <div class="dialog-content text-formatting-body">
+                <div class="text-formatting-field">
+                    <span>対象</span>
+                    <div id="text-formatting-target" class="text-formatting-segmented" role="radiogroup" aria-label="文章整形の対象">
+                        <button type="button" class="text-formatting-segment" data-target="user" role="radio" aria-checked="false">ユーザー</button>
+                        <button type="button" class="text-formatting-segment is-active" data-target="model" role="radio" aria-checked="true">モデル</button>
+                        <button type="button" class="text-formatting-segment" data-target="both" role="radio" aria-checked="false">両方</button>
+                    </div>
+                </div>
+                <fieldset class="text-formatting-rules">
+                    <legend>整形ルール</legend>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-indent-prose" checked>
+                        <span>地の文を一字下げ</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-boundary-blank" checked>
+                        <span>地の文と会話文の間を一行空ける</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-compact-dialogue" checked>
+                        <span>会話文同士の空行を詰める</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-trim-trailing" checked>
+                        <span>行末空白を削除</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-normalize-blanks" checked>
+                        <span>連続空行を整理</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="text-format-normalize-ellipsis-dash" checked>
+                        <span>三点リーダー・ダッシュを統一</span>
+                    </label>
+                    <div class="text-formatting-subgroup" aria-label="全角・半角を統一">
+                        <div class="text-formatting-subgroup-title">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="text-format-normalize-width" checked>
+                                <span>全角・半角を統一</span>
+                            </label>
+                            <select id="text-format-width-direction" aria-label="全角・半角の統一方向">
+                                <option value="full" selected>全角</option>
+                                <option value="half">半角</option>
+                            </select>
+                        </div>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="text-format-normalize-katakana" checked>
+                            <span>カタカナ</span>
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="text-format-normalize-digits" checked>
+                            <span>数字</span>
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="text-format-normalize-symbols" checked>
+                            <span>記号</span>
+                        </label>
+                    </div>
+                </fieldset>
+                <section class="text-formatting-preview" aria-live="polite">
+                    <h4>プレビュー</h4>
+                    <p id="text-formatting-preview-summary" class="text-formatting-preview-summary">対象を確認しています。</p>
+                    <div id="text-formatting-preview-list" class="text-formatting-preview-list"></div>
+                    <p id="text-formatting-status" class="text-formatting-status"></p>
+                </section>
+            </div>
+            <div class="dialog-actions text-formatting-actions">
+                <button id="text-formatting-cancel-btn" value="cancel" class="dialog-cancel-btn">キャンセル</button>
+                <button id="text-formatting-apply-btn" value="confirm" class="dialog-ok-btn">整形を適用</button>
             </div>
         </dialog>
 

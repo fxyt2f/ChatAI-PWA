@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.32.7";
-const APP_CACHE_VERSION = "v1.32.7";
+const APP_VERSION = "1.33.0";
+const APP_CACHE_VERSION = "v1.33.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -193,6 +193,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.0": [
+        "フローティングボタンに文章整形機能を追加しました。",
+        "地の文の一字下げ、会話文との空行調整、会話文同士の空行詰めに対応しました。",
+        "行末空白削除、連続空行整理、三点リーダー・ダッシュ統一、全角・半角統一に対応しました。",
+        "対象をユーザー、モデル、両方のSegmentedControlで切り替え、適用前に対象件数とプレビューを確認できるようにしました。"
+    ],
     "1.12": [
         "ユーザー追加モデル対応を全面強化。思考プロセス翻訳、校正、要約、画像品質チェック、プロンプト改善の各機能で、ユーザーが追加したモデルを選択可能に。",
         "「追加モデル (カンマ区切り):」入力後、ページリロード不要で全モデル選択セレクターに即座に反映されるよう改善。",
@@ -627,6 +633,26 @@ try {
         progressMessage: document.getElementById('progress-message'),
         floatingActionPanel: document.getElementById('floating-action-panel'),
         collapseAllMessagesBtn: document.getElementById('collapse-all-messages-btn'),
+        textFormattingBtn: document.getElementById('text-formatting-btn'),
+        textFormattingDialog: document.getElementById('textFormattingDialog'),
+        textFormattingTargetGroup: document.getElementById('text-formatting-target'),
+        textFormattingTargetButtons: Array.from(document.querySelectorAll('#text-formatting-target .text-formatting-segment')),
+        textFormatIndentProse: document.getElementById('text-format-indent-prose'),
+        textFormatBoundaryBlank: document.getElementById('text-format-boundary-blank'),
+        textFormatCompactDialogue: document.getElementById('text-format-compact-dialogue'),
+        textFormatTrimTrailing: document.getElementById('text-format-trim-trailing'),
+        textFormatNormalizeBlanks: document.getElementById('text-format-normalize-blanks'),
+        textFormatNormalizeEllipsisDash: document.getElementById('text-format-normalize-ellipsis-dash'),
+        textFormatNormalizeWidth: document.getElementById('text-format-normalize-width'),
+        textFormatWidthDirection: document.getElementById('text-format-width-direction'),
+        textFormatNormalizeKatakana: document.getElementById('text-format-normalize-katakana'),
+        textFormatNormalizeDigits: document.getElementById('text-format-normalize-digits'),
+        textFormatNormalizeSymbols: document.getElementById('text-format-normalize-symbols'),
+        textFormattingPreviewSummary: document.getElementById('text-formatting-preview-summary'),
+        textFormattingPreviewList: document.getElementById('text-formatting-preview-list'),
+        textFormattingStatus: document.getElementById('text-formatting-status'),
+        textFormattingApplyBtn: document.getElementById('text-formatting-apply-btn'),
+        textFormattingCancelBtn: document.getElementById('text-formatting-cancel-btn'),
         scrollToTopBtn: document.getElementById('scroll-to-top-btn'),
         scrollToBottomBtn: document.getElementById('scroll-to-bottom-btn'),
         floatingPanelBehaviorSelect: document.getElementById('floating-panel-behavior'),
@@ -837,6 +863,8 @@ Reason: [NGの場合の理由]`,
     systemPromptSaveTimer: 0,
     systemPromptSaveStatus: 'saved',
     systemPromptLastSaveError: null,
+    textFormattingCandidates: [],
+    textFormattingTarget: 'model',
     touchStartX: 0,
     touchStartY: 0,
     touchEndX: 0,
@@ -13835,6 +13863,28 @@ const appLogic = {
         elements.floatingActionPanel.addEventListener('mouseleave', () => this.showActionPanel());
         
         elements.collapseAllMessagesBtn.addEventListener('click', () => uiUtils.toggleAllMessageCollapse());
+        elements.textFormattingBtn?.addEventListener('click', () => this.openTextFormattingDialog());
+        elements.textFormattingTargetButtons?.forEach(button => {
+            button.addEventListener('click', () => this.setTextFormattingTarget(button.dataset.target || 'model'));
+        });
+        [
+            elements.textFormatIndentProse,
+            elements.textFormatBoundaryBlank,
+            elements.textFormatCompactDialogue,
+            elements.textFormatTrimTrailing,
+            elements.textFormatNormalizeBlanks,
+            elements.textFormatNormalizeEllipsisDash,
+            elements.textFormatNormalizeWidth,
+            elements.textFormatNormalizeKatakana,
+            elements.textFormatNormalizeDigits,
+            elements.textFormatNormalizeSymbols
+        ].forEach(checkbox => checkbox?.addEventListener('change', () => {
+            this.updateTextFormattingWidthControls();
+            this.updateTextFormattingPreview();
+        }));
+        elements.textFormatWidthDirection?.addEventListener('change', () => this.updateTextFormattingPreview());
+        elements.textFormattingApplyBtn?.addEventListener('click', () => this.applyTextFormattingCandidates());
+        elements.textFormattingCancelBtn?.addEventListener('click', () => elements.textFormattingDialog?.close('cancel'));
         elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
         elements.scrollToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
 
@@ -18462,6 +18512,470 @@ const appLogic = {
             // on-clickの場合は、最初は非表示にしておく
             panel.classList.remove('visible');
         }
+    },
+
+    getTextFormattingOptions() {
+        return {
+            indentProse: Boolean(elements.textFormatIndentProse?.checked),
+            boundaryBlank: Boolean(elements.textFormatBoundaryBlank?.checked),
+            compactDialogue: Boolean(elements.textFormatCompactDialogue?.checked),
+            trimTrailing: Boolean(elements.textFormatTrimTrailing?.checked),
+            normalizeBlanks: Boolean(elements.textFormatNormalizeBlanks?.checked),
+            normalizeEllipsisDash: Boolean(elements.textFormatNormalizeEllipsisDash?.checked),
+            normalizeWidth: Boolean(elements.textFormatNormalizeWidth?.checked),
+            widthDirection: elements.textFormatWidthDirection?.value === 'half' ? 'half' : 'full',
+            normalizeKatakana: Boolean(elements.textFormatNormalizeKatakana?.checked),
+            normalizeDigits: Boolean(elements.textFormatNormalizeDigits?.checked),
+            normalizeSymbols: Boolean(elements.textFormatNormalizeSymbols?.checked)
+        };
+    },
+
+    updateTextFormattingWidthControls() {
+        const enabled = Boolean(elements.textFormatNormalizeWidth?.checked);
+        [
+            elements.textFormatWidthDirection,
+            elements.textFormatNormalizeKatakana,
+            elements.textFormatNormalizeDigits,
+            elements.textFormatNormalizeSymbols
+        ].forEach(control => {
+            if (control) control.disabled = !enabled;
+        });
+    },
+
+    setTextFormattingTarget(target = 'model') {
+        const normalizedTarget = ['user', 'model', 'both'].includes(target) ? target : 'model';
+        state.textFormattingTarget = normalizedTarget;
+        this.updateTextFormattingTargetButtons();
+        this.updateTextFormattingPreview();
+    },
+
+    updateTextFormattingTargetButtons() {
+        const target = ['user', 'model', 'both'].includes(state.textFormattingTarget)
+            ? state.textFormattingTarget
+            : 'model';
+        elements.textFormattingTargetButtons?.forEach(button => {
+            const isActive = button.dataset.target === target;
+            button.classList.toggle('is-active', isActive);
+            button.setAttribute('aria-checked', String(isActive));
+        });
+    },
+
+    getTextFormattingBlockReason() {
+        if (state.isSending) return '送信中は文章整形を実行できません。';
+        if (state.editingMessageIndex !== null) return 'メッセージ編集中は文章整形を実行できません。';
+        if (state.isEditingSystemPrompt) return 'システムプロンプト編集中は文章整形を実行できません。';
+        return '';
+    },
+
+    openTextFormattingDialog() {
+        const blockReason = this.getTextFormattingBlockReason();
+        if (blockReason) {
+            uiUtils.showCustomAlert(blockReason);
+            return;
+        }
+
+        uiUtils.closeChatSearch?.({ restoreFocus: false });
+        this.updateTextFormattingTargetButtons();
+        this.updateTextFormattingWidthControls();
+        this.updateTextFormattingPreview();
+        if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
+            elements.textFormattingDialog.showModal();
+        }
+        requestAnimationFrame(() => {
+            const activeTargetButton = elements.textFormattingTargetButtons?.find(button => button.classList.contains('is-active'));
+            activeTargetButton?.focus();
+        });
+    },
+
+    updateTextFormattingPreview() {
+        const blockReason = this.getTextFormattingBlockReason();
+        const candidates = blockReason ? [] : this.buildTextFormattingCandidates();
+        state.textFormattingCandidates = candidates;
+
+        if (elements.textFormattingPreviewList) {
+            elements.textFormattingPreviewList.textContent = '';
+        }
+        if (elements.textFormattingStatus) {
+            elements.textFormattingStatus.textContent = blockReason;
+            elements.textFormattingStatus.classList.toggle('is-error', Boolean(blockReason));
+        }
+
+        if (blockReason) {
+            if (elements.textFormattingPreviewSummary) elements.textFormattingPreviewSummary.textContent = blockReason;
+            if (elements.textFormattingApplyBtn) elements.textFormattingApplyBtn.disabled = true;
+            return;
+        }
+
+        const totalChanges = candidates.reduce((sum, candidate) => sum + candidate.changeCount, 0);
+        if (elements.textFormattingPreviewSummary) {
+            elements.textFormattingPreviewSummary.textContent = candidates.length > 0
+                ? `${candidates.length}件のメッセージ、${totalChanges}箇所を変更します。`
+                : '現在の条件では変更される文章がありません。';
+        }
+        if (elements.textFormattingApplyBtn) {
+            elements.textFormattingApplyBtn.disabled = candidates.length === 0;
+        }
+
+        const previewList = elements.textFormattingPreviewList;
+        if (!previewList) return;
+
+        candidates.slice(0, 6).forEach(candidate => {
+            const card = document.createElement('div');
+            card.className = 'text-formatting-preview-card';
+
+            const meta = document.createElement('div');
+            meta.className = 'text-formatting-preview-meta';
+            meta.textContent = `${candidate.label} / ${candidate.changeCount}箇所`;
+            card.appendChild(meta);
+
+            const diff = document.createElement('div');
+            diff.className = 'text-formatting-preview-diff';
+
+            const before = document.createElement('div');
+            before.className = 'text-formatting-preview-before';
+            before.textContent = `変更前: ${candidate.beforePreview}`;
+            diff.appendChild(before);
+
+            const after = document.createElement('div');
+            after.className = 'text-formatting-preview-after';
+            after.textContent = `変更後: ${candidate.afterPreview}`;
+            diff.appendChild(after);
+
+            card.appendChild(diff);
+            previewList.appendChild(card);
+        });
+
+        if (candidates.length > 6) {
+            const omitted = document.createElement('div');
+            omitted.className = 'text-formatting-status';
+            omitted.textContent = `ほか ${candidates.length - 6} 件`;
+            previewList.appendChild(omitted);
+        }
+    },
+
+    buildTextFormattingCandidates() {
+        const target = ['user', 'model', 'both'].includes(state.textFormattingTarget)
+            ? state.textFormattingTarget
+            : 'model';
+        const options = this.getTextFormattingOptions();
+        const summaryEnd = Number.isFinite(state.currentSummarizedContext?.summaryRange?.end)
+            ? state.currentSummarizedContext.summaryRange.end
+            : -1;
+
+        const isEligible = (message, index) => {
+            if (!message || message.isHidden) return false;
+            if (index < summaryEnd) return false;
+            if (!['user', 'model'].includes(message.role)) return false;
+            if (target === 'model' && message.role !== 'model') return false;
+            if (target === 'user' && message.role !== 'user') return false;
+            if (typeof message.content !== 'string' || message.content.trim() === '') return false;
+            return true;
+        };
+
+        const sourceEntries = state.currentMessages
+            .map((message, index) => ({ message, index }))
+            .filter(({ message, index }) => isEligible(message, index));
+
+        return sourceEntries.map(({ message, index }) => {
+            const formatted = this.formatNovelText(message.content, options);
+            if (formatted === message.content) return null;
+            return {
+                index,
+                role: message.role,
+                label: `${message.role === 'user' ? 'ユーザー' : 'モデル'} #${index + 1}`,
+                expected: message.content,
+                formatted,
+                changeCount: this.countTextFormattingChanges(message.content, formatted),
+                beforePreview: this.truncateTextFormattingPreview(message.content),
+                afterPreview: this.truncateTextFormattingPreview(formatted)
+            };
+        }).filter(Boolean);
+    },
+
+    async applyTextFormattingCandidates() {
+        const blockReason = this.getTextFormattingBlockReason();
+        if (blockReason) {
+            await uiUtils.showCustomAlert(blockReason);
+            return;
+        }
+
+        const candidates = state.textFormattingCandidates?.length
+            ? state.textFormattingCandidates
+            : this.buildTextFormattingCandidates();
+        if (!candidates.length) {
+            await uiUtils.showCustomAlert('現在の条件では変更される文章がありません。');
+            return;
+        }
+
+        const mismatched = candidates.find(candidate => state.currentMessages[candidate.index]?.content !== candidate.expected);
+        if (mismatched) {
+            this.updateTextFormattingPreview();
+            await uiUtils.showCustomAlert('対象メッセージが変更されたため、整形を中止しました。プレビューを確認してください。');
+            return;
+        }
+
+        const originals = candidates.map(candidate => ({
+            index: candidate.index,
+            content: state.currentMessages[candidate.index].content
+        }));
+
+        try {
+            candidates.forEach(candidate => {
+                state.currentMessages[candidate.index].content = candidate.formatted;
+            });
+            await dbUtils.saveChat();
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            elements.textFormattingDialog?.close('confirm');
+            state.textFormattingCandidates = [];
+            await uiUtils.showCustomAlert(`${candidates.length}件のメッセージを整形しました。`);
+        } catch (error) {
+            originals.forEach(original => {
+                if (state.currentMessages[original.index]) {
+                    state.currentMessages[original.index].content = original.content;
+                }
+            });
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true });
+            console.error('文章整形の保存に失敗しました:', error);
+            await uiUtils.showCustomAlert('文章整形の保存に失敗しました。入力内容は変更前の状態で再確認してください。');
+        }
+    },
+
+    formatNovelText(text, options = {}) {
+        if (typeof text !== 'string' || text.length === 0) return text;
+
+        const lines = text.replace(/\r\n?/g, '\n').split('\n');
+        const units = [];
+        const depth = { corner: 0, double: 0, paren: 0 };
+        let inFence = false;
+
+        lines.forEach(line => {
+            const rawLine = options.trimTrailing ? line.replace(/[ \t]+$/g, '') : line;
+            const fenceLine = /^\s*(```|~~~)/.test(rawLine);
+            const isFenceContent = inFence || fenceLine;
+
+            if (isFenceContent) {
+                units.push({ text: rawLine, type: 'protected', blank: false });
+                if (fenceLine) inFence = !inFence;
+                return;
+            }
+
+            if (rawLine.trim() === '') {
+                units.push({ text: '', type: 'blank', blank: true });
+                return;
+            }
+
+            if (this.isProtectedFormattingLine(rawLine)) {
+                units.push({ text: rawLine, type: 'protected', blank: false });
+                return;
+            }
+
+            const normalizedLine = this.normalizeTextFormattingLine(rawLine, options);
+            const content = normalizedLine.replace(/^[\s\u3000]+/, '');
+            const isDialogue = this.isDialogueDepthActive(depth) || /^[「『（]/.test(content);
+            const formatted = options.indentProse
+                ? (isDialogue ? content : `　${content}`)
+                : normalizedLine;
+
+            units.push({ text: formatted, type: isDialogue ? 'dialogue' : 'prose', blank: false });
+            this.updateDialogueDepth(normalizedLine, depth);
+        });
+
+        return this.applyTextFormattingBlankRules(units, options);
+    },
+
+    normalizeTextFormattingLine(line, options = {}) {
+        let normalized = line;
+
+        if (options.normalizeEllipsisDash) {
+            normalized = normalized
+                .replace(/(?:\.{3,}|…+|・・・+)/g, '……')
+                .replace(/(?:-{2,}|―+|—+|─+)/g, '――');
+        }
+
+        if (options.normalizeWidth) {
+            if (options.normalizeKatakana) {
+                normalized = options.widthDirection === 'half'
+                    ? this.convertKatakanaToHalfWidth(normalized)
+                    : normalized.replace(/[\uFF66-\uFF9D][\uFF9E\uFF9F]?/g, match => match.normalize('NFKC'));
+            }
+
+            if (options.normalizeDigits) {
+                normalized = options.widthDirection === 'half'
+                    ? normalized.replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+                    : normalized.replace(/[0-9]/g, char => String.fromCharCode(char.charCodeAt(0) + 0xFEE0));
+            }
+
+            if (options.normalizeSymbols) {
+                normalized = this.normalizeSymbolWidth(normalized, options.widthDirection);
+            }
+        }
+
+        return normalized;
+    },
+
+    convertKatakanaToHalfWidth(text) {
+        const kanaMap = {
+            'ァ': 'ｧ', 'ィ': 'ｨ', 'ゥ': 'ｩ', 'ェ': 'ｪ', 'ォ': 'ｫ',
+            'ャ': 'ｬ', 'ュ': 'ｭ', 'ョ': 'ｮ', 'ッ': 'ｯ', 'ー': 'ｰ',
+            'ア': 'ｱ', 'イ': 'ｲ', 'ウ': 'ｳ', 'エ': 'ｴ', 'オ': 'ｵ',
+            'カ': 'ｶ', 'キ': 'ｷ', 'ク': 'ｸ', 'ケ': 'ｹ', 'コ': 'ｺ',
+            'サ': 'ｻ', 'シ': 'ｼ', 'ス': 'ｽ', 'セ': 'ｾ', 'ソ': 'ｿ',
+            'タ': 'ﾀ', 'チ': 'ﾁ', 'ツ': 'ﾂ', 'テ': 'ﾃ', 'ト': 'ﾄ',
+            'ナ': 'ﾅ', 'ニ': 'ﾆ', 'ヌ': 'ﾇ', 'ネ': 'ﾈ', 'ノ': 'ﾉ',
+            'ハ': 'ﾊ', 'ヒ': 'ﾋ', 'フ': 'ﾌ', 'ヘ': 'ﾍ', 'ホ': 'ﾎ',
+            'マ': 'ﾏ', 'ミ': 'ﾐ', 'ム': 'ﾑ', 'メ': 'ﾒ', 'モ': 'ﾓ',
+            'ヤ': 'ﾔ', 'ユ': 'ﾕ', 'ヨ': 'ﾖ',
+            'ラ': 'ﾗ', 'リ': 'ﾘ', 'ル': 'ﾙ', 'レ': 'ﾚ', 'ロ': 'ﾛ',
+            'ワ': 'ﾜ', 'ヲ': 'ｦ', 'ン': 'ﾝ',
+            'ガ': 'ｶﾞ', 'ギ': 'ｷﾞ', 'グ': 'ｸﾞ', 'ゲ': 'ｹﾞ', 'ゴ': 'ｺﾞ',
+            'ザ': 'ｻﾞ', 'ジ': 'ｼﾞ', 'ズ': 'ｽﾞ', 'ゼ': 'ｾﾞ', 'ゾ': 'ｿﾞ',
+            'ダ': 'ﾀﾞ', 'ヂ': 'ﾁﾞ', 'ヅ': 'ﾂﾞ', 'デ': 'ﾃﾞ', 'ド': 'ﾄﾞ',
+            'バ': 'ﾊﾞ', 'ビ': 'ﾋﾞ', 'ブ': 'ﾌﾞ', 'ベ': 'ﾍﾞ', 'ボ': 'ﾎﾞ',
+            'パ': 'ﾊﾟ', 'ピ': 'ﾋﾟ', 'プ': 'ﾌﾟ', 'ペ': 'ﾍﾟ', 'ポ': 'ﾎﾟ',
+            'ヴ': 'ｳﾞ'
+        };
+        return text.replace(/[ァ-ヴー]/g, char => kanaMap[char] || char);
+    },
+
+    normalizeSymbolWidth(text, direction = 'full') {
+        const toFullMap = {
+            ',': '、',
+            '.': '。',
+            '!': '！',
+            '?': '？',
+            ':': '：',
+            ';': '；',
+            '(': '（',
+            ')': '）',
+            '[': '［',
+            ']': '］',
+            '{': '｛',
+            '}': '｝',
+            '<': '＜',
+            '>': '＞',
+            '"': '”',
+            "'": '’',
+            '~': '〜',
+            '｡': '。',
+            '､': '、',
+            '｢': '「',
+            '｣': '」',
+            '･': '・'
+        };
+        const toHalfMap = {
+            '、': ',',
+            '。': '.',
+            '！': '!',
+            '？': '?',
+            '：': ':',
+            '；': ';',
+            '（': '(',
+            '）': ')',
+            '［': '[',
+            '］': ']',
+            '｛': '{',
+            '｝': '}',
+            '＜': '<',
+            '＞': '>',
+            '”': '"',
+            '’': "'",
+            '〜': '~',
+            '「': '｢',
+            '」': '｣',
+            '・': '･'
+        };
+        if (direction === 'half') {
+            return text.replace(/[、。！？：；（）［］｛｝＜＞”’〜「」・]/g, char => toHalfMap[char] || char);
+        }
+        return text.replace(/[,\.!\?:;\(\)\[\]\{\}<>"'~｡､｢｣･]/g, char => toFullMap[char] || char);
+    },
+
+    isProtectedFormattingLine(line) {
+        const trimmed = line.trim();
+        if (/^(#{1,6}\s|>\s?|[-+*]\s|\d+[.)]\s)/.test(trimmed)) return true;
+        if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) return true;
+        if (/^\|.*\|$/.test(trimmed)) return true;
+        if (/^<\/?[a-zA-Z][^>]*>$/.test(trimmed)) return true;
+        return false;
+    },
+
+    isDialogueDepthActive(depth) {
+        return depth.corner > 0 || depth.double > 0 || depth.paren > 0;
+    },
+
+    updateDialogueDepth(line, depth) {
+        for (const char of line) {
+            if (char === '「') depth.corner++;
+            else if (char === '」') depth.corner = Math.max(0, depth.corner - 1);
+            else if (char === '『') depth.double++;
+            else if (char === '』') depth.double = Math.max(0, depth.double - 1);
+            else if (char === '（') depth.paren++;
+            else if (char === '）') depth.paren = Math.max(0, depth.paren - 1);
+        }
+    },
+
+    applyTextFormattingBlankRules(units, options = {}) {
+        const output = [];
+        let pendingBlankCount = 0;
+        let previousContentType = null;
+
+        const flushBlanks = (nextType) => {
+            if (previousContentType === null) {
+                pendingBlankCount = 0;
+                return;
+            }
+
+            let blankCount = pendingBlankCount;
+            const isProseDialogueBoundary = [previousContentType, nextType].includes('prose')
+                && [previousContentType, nextType].includes('dialogue');
+
+            if (options.boundaryBlank && isProseDialogueBoundary) {
+                blankCount = 1;
+            } else if (options.compactDialogue && previousContentType === 'dialogue' && nextType === 'dialogue') {
+                blankCount = 0;
+            } else if (options.normalizeBlanks) {
+                blankCount = Math.min(blankCount, 2);
+            }
+
+            for (let i = 0; i < blankCount; i++) output.push('');
+            pendingBlankCount = 0;
+        };
+
+        units.forEach(unit => {
+            if (unit.blank) {
+                pendingBlankCount++;
+                return;
+            }
+
+            flushBlanks(unit.type);
+            output.push(unit.text);
+            previousContentType = unit.type;
+        });
+
+        if (options.normalizeBlanks && pendingBlankCount > 0 && output.length > 0) {
+            for (let i = 0; i < Math.min(pendingBlankCount, 2); i++) output.push('');
+        } else if (!options.normalizeBlanks && pendingBlankCount > 0 && output.length > 0) {
+            for (let i = 0; i < pendingBlankCount; i++) output.push('');
+        }
+
+        return output.join('\n');
+    },
+
+    countTextFormattingChanges(beforeText, afterText) {
+        const beforeLines = beforeText.split(/\r\n?|\n/);
+        const afterLines = afterText.split(/\r\n?|\n/);
+        const length = Math.max(beforeLines.length, afterLines.length);
+        let count = 0;
+        for (let i = 0; i < length; i++) {
+            if ((beforeLines[i] ?? '') !== (afterLines[i] ?? '')) count++;
+        }
+        return Math.max(1, count);
+    },
+
+    truncateTextFormattingPreview(text, maxLength = 140) {
+        const normalized = String(text || '').replace(/\s*\n+\s*/g, ' / ').trim();
+        if (normalized.length <= maxLength) return normalized || '(空)';
+        return `${normalized.slice(0, maxLength - 1)}…`;
     },
 
     async startSummaryProcess() {

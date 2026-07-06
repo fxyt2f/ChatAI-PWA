@@ -1157,6 +1157,183 @@ body.dark-mode #settings-screen a:hover {
     flex: 0 0 auto;
 }
 
+.custom-dialog.text-formatting-dialog {
+    width: min(760px, calc(100vw - 32px));
+    max-height: min(760px, calc(100dvh - 32px));
+    flex-direction: column;
+}
+
+.custom-dialog.text-formatting-dialog[open] {
+    display: flex;
+}
+
+.text-formatting-body {
+    display: grid;
+    gap: 14px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.text-formatting-field {
+    display: grid;
+    gap: 6px;
+    font-weight: 700;
+}
+
+.text-formatting-rules {
+    margin: 0;
+    padding: 12px;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-md);
+    background: var(--bg-secondary);
+}
+
+.text-formatting-rules legend {
+    padding: 0 6px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.text-formatting-segmented {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: hidden;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-md);
+    background: var(--bg-primary);
+}
+
+.text-formatting-segment {
+    min-width: 0;
+    min-height: 36px;
+    padding: 6px 10px;
+    color: var(--text-primary);
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border-primary);
+    border-radius: 0;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.text-formatting-segment:last-child {
+    border-right: none;
+}
+
+.text-formatting-segment:hover {
+    background: var(--bg-tertiary);
+}
+
+.text-formatting-segment.is-active {
+    color: #ffffff;
+    background: var(--bg-button);
+}
+
+.text-formatting-subgroup {
+    margin-top: 6px;
+    padding: 4px 0 0;
+}
+
+.text-formatting-subgroup-title {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.text-formatting-subgroup-title .checkbox-label {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin-bottom: 0;
+}
+
+.text-formatting-subgroup-title select {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 5.5em;
+    min-height: 30px;
+    padding: 3px 8px;
+    font: inherit;
+    font-size: inherit;
+}
+
+.text-formatting-subgroup > .checkbox-label {
+    margin-left: 28px;
+}
+
+.text-formatting-preview {
+    min-height: 0;
+}
+
+.text-formatting-preview h4 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+
+.text-formatting-preview-summary,
+.text-formatting-status {
+    margin: 0 0 8px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.text-formatting-status.is-error {
+    color: #b42318;
+}
+
+.text-formatting-preview-list {
+    display: grid;
+    gap: 8px;
+}
+
+.text-formatting-preview-card {
+    min-width: 0;
+    padding: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-md);
+}
+
+.text-formatting-preview-meta {
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.text-formatting-preview-diff {
+    display: grid;
+    gap: 4px;
+    font-size: 0.86rem;
+    line-height: 1.45;
+}
+
+.text-formatting-preview-before,
+.text-formatting-preview-after {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.text-formatting-preview-before {
+    color: var(--text-secondary);
+}
+
+.text-formatting-preview-after {
+    color: var(--text-primary);
+}
+
+.text-formatting-actions {
+    flex: 0 0 auto;
+}
+
 @media screen and (max-width: 600px) {
     .api-config-card {
         grid-template-columns: minmax(0, 1fr) auto;
