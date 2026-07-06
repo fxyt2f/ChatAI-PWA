@@ -127,8 +127,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.33.3";
-const APP_CACHE_VERSION = "v1.33.3";
+const APP_VERSION = "1.33.4";
+const APP_CACHE_VERSION = "v1.33.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -147,6 +147,22 @@ const CHANGE_HISTORY_MAX_SERIALIZED_LENGTH = 2_000_000;
 const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
+const DEFAULT_TEXT_FORMATTING_SETTINGS = {
+    target: 'model',
+    indentProse: true,
+    boundaryBlank: true,
+    compactDialogue: true,
+    trimTrailing: true,
+    normalizeBlanks: true,
+    normalizeEllipsisDash: true,
+    commaRhythm: false,
+    commaRhythmLevel: 4,
+    normalizeWidth: true,
+    widthDirection: 'full',
+    normalizeKatakana: true,
+    normalizeDigits: true,
+    normalizeSymbols: true
+};
 let inputDraftSaveTimer = 0;
 let inputDraftDropboxSaveTimer = 0;
 let inputDraftRestoreTimer = 0;
@@ -193,6 +209,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.33.4": [
+        "文章整形ダイアログの設定を保存・復元できるよう改善しました。",
+        "文章整形UIのグループ構成、状態表示、プレビュー表示を整理しました。",
+        "スマホ幅での文章整形ダイアログと個別整形ボタンの表示を調整しました。",
+        "一括整形・個別整形で共通設定を安定して扱えるよう最適化しました。"
+    ],
     "1.33.3": [
         "文章整形に読点リズム補正を追加しました。",
         "読点補正のレベル1〜4を選べるよう調整しました。",
@@ -881,7 +903,8 @@ Reason: [NGの場合の理由]`,
     systemPromptSaveStatus: 'saved',
     systemPromptLastSaveError: null,
     textFormattingCandidates: [],
-    textFormattingTarget: 'model',
+    textFormattingSettings: { ...DEFAULT_TEXT_FORMATTING_SETTINGS },
+    textFormattingTarget: DEFAULT_TEXT_FORMATTING_SETTINGS.target,
     touchStartX: 0,
     touchStartY: 0,
     touchEndX: 0,
@@ -11304,6 +11327,11 @@ const appLogic = {
             this.applyLocalUiSettingsToEffectiveSettings();
             console.log("[GlobalSettings] 端末ごとのUI設定を読み込みました:", state.localUiSettings);
 
+            const storedTextFormattingSettings = await dbUtils.getSetting('textFormattingSettings');
+            state.textFormattingSettings = this.normalizeTextFormattingSettings(storedTextFormattingSettings?.value || {});
+            state.textFormattingTarget = state.textFormattingSettings.target;
+            console.log("[TextFormatting] 保存済み文章整形設定を読み込みました:", state.textFormattingSettings);
+
             const storedGlobalOtherSettings = await dbUtils.getSetting('globalOtherSettings');
             state.globalOtherSettings = this.normalizeGlobalOtherSettings(storedGlobalOtherSettings?.value || {});
             this.applyGlobalOtherSettingsToEffectiveSettings();
@@ -11420,6 +11448,7 @@ const appLogic = {
             this.syncActiveApiConfigState();
 
             uiUtils.applySettingsToUI(); 
+            this.applyTextFormattingSettingsToUI(state.textFormattingSettings);
             uiUtils.updateProfileCardUI();
             this.renderApiConfigList();
 
@@ -13972,6 +14001,9 @@ const appLogic = {
         elements.textFormattingTargetButtons?.forEach(button => {
             button.addEventListener('click', () => this.setTextFormattingTarget(button.dataset.target || 'model'));
         });
+        const onTextFormattingSettingsChanged = () => {
+            this.syncTextFormattingSettingsFromUI({ save: true, refreshPreview: true });
+        };
         [
             elements.textFormatIndentProse,
             elements.textFormatBoundaryBlank,
@@ -13984,13 +14016,9 @@ const appLogic = {
             elements.textFormatNormalizeKatakana,
             elements.textFormatNormalizeDigits,
             elements.textFormatNormalizeSymbols
-        ].forEach(checkbox => checkbox?.addEventListener('change', () => {
-            this.updateTextFormattingWidthControls();
-            this.updateTextFormattingCommaControls();
-            this.updateTextFormattingPreview();
-        }));
-        elements.textFormatWidthDirection?.addEventListener('change', () => this.updateTextFormattingPreview());
-        elements.textFormatCommaLevel?.addEventListener('change', () => this.updateTextFormattingPreview());
+        ].forEach(checkbox => checkbox?.addEventListener('change', onTextFormattingSettingsChanged));
+        elements.textFormatWidthDirection?.addEventListener('change', onTextFormattingSettingsChanged);
+        elements.textFormatCommaLevel?.addEventListener('change', onTextFormattingSettingsChanged);
         elements.textFormattingApplyBtn?.addEventListener('click', () => this.applyTextFormattingCandidates());
         elements.textFormattingCancelBtn?.addEventListener('click', () => elements.textFormattingDialog?.close('cancel'));
         elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
@@ -18627,22 +18655,113 @@ const appLogic = {
         return Number.isInteger(level) && level >= 1 && level <= 4 ? level : 4;
     },
 
+    normalizeTextFormattingTarget(target) {
+        return ['user', 'model', 'both'].includes(target) ? target : DEFAULT_TEXT_FORMATTING_SETTINGS.target;
+    },
+
+    normalizeTextFormattingSettings(rawSettings = {}) {
+        const raw = rawSettings && typeof rawSettings === 'object' ? rawSettings : {};
+        const normalized = { ...DEFAULT_TEXT_FORMATTING_SETTINGS };
+        normalized.target = this.normalizeTextFormattingTarget(raw.target);
+        [
+            'indentProse',
+            'boundaryBlank',
+            'compactDialogue',
+            'trimTrailing',
+            'normalizeBlanks',
+            'normalizeEllipsisDash',
+            'commaRhythm',
+            'normalizeWidth',
+            'normalizeKatakana',
+            'normalizeDigits',
+            'normalizeSymbols'
+        ].forEach(key => {
+            if (raw[key] !== undefined) normalized[key] = raw[key] === true;
+        });
+        normalized.commaRhythmLevel = this.normalizeCommaRhythmLevel(raw.commaRhythmLevel);
+        normalized.widthDirection = raw.widthDirection === 'half' ? 'half' : 'full';
+        return normalized;
+    },
+
+    readTextFormattingSettingsFromUI() {
+        return this.normalizeTextFormattingSettings({
+            target: state.textFormattingTarget,
+            indentProse: elements.textFormatIndentProse?.checked,
+            boundaryBlank: elements.textFormatBoundaryBlank?.checked,
+            compactDialogue: elements.textFormatCompactDialogue?.checked,
+            trimTrailing: elements.textFormatTrimTrailing?.checked,
+            normalizeBlanks: elements.textFormatNormalizeBlanks?.checked,
+            normalizeEllipsisDash: elements.textFormatNormalizeEllipsisDash?.checked,
+            commaRhythm: elements.textFormatCommaRhythm?.checked,
+            commaRhythmLevel: elements.textFormatCommaLevel?.value,
+            normalizeWidth: elements.textFormatNormalizeWidth?.checked,
+            widthDirection: elements.textFormatWidthDirection?.value,
+            normalizeKatakana: elements.textFormatNormalizeKatakana?.checked,
+            normalizeDigits: elements.textFormatNormalizeDigits?.checked,
+            normalizeSymbols: elements.textFormatNormalizeSymbols?.checked
+        });
+    },
+
+    applyTextFormattingSettingsToUI(settings = state.textFormattingSettings) {
+        const normalized = this.normalizeTextFormattingSettings(settings);
+        state.textFormattingSettings = normalized;
+        state.textFormattingTarget = normalized.target;
+
+        if (elements.textFormatIndentProse) elements.textFormatIndentProse.checked = normalized.indentProse;
+        if (elements.textFormatBoundaryBlank) elements.textFormatBoundaryBlank.checked = normalized.boundaryBlank;
+        if (elements.textFormatCompactDialogue) elements.textFormatCompactDialogue.checked = normalized.compactDialogue;
+        if (elements.textFormatTrimTrailing) elements.textFormatTrimTrailing.checked = normalized.trimTrailing;
+        if (elements.textFormatNormalizeBlanks) elements.textFormatNormalizeBlanks.checked = normalized.normalizeBlanks;
+        if (elements.textFormatNormalizeEllipsisDash) elements.textFormatNormalizeEllipsisDash.checked = normalized.normalizeEllipsisDash;
+        if (elements.textFormatCommaRhythm) elements.textFormatCommaRhythm.checked = normalized.commaRhythm;
+        if (elements.textFormatCommaLevel) elements.textFormatCommaLevel.value = String(normalized.commaRhythmLevel);
+        if (elements.textFormatNormalizeWidth) elements.textFormatNormalizeWidth.checked = normalized.normalizeWidth;
+        if (elements.textFormatWidthDirection) elements.textFormatWidthDirection.value = normalized.widthDirection;
+        if (elements.textFormatNormalizeKatakana) elements.textFormatNormalizeKatakana.checked = normalized.normalizeKatakana;
+        if (elements.textFormatNormalizeDigits) elements.textFormatNormalizeDigits.checked = normalized.normalizeDigits;
+        if (elements.textFormatNormalizeSymbols) elements.textFormatNormalizeSymbols.checked = normalized.normalizeSymbols;
+
+        this.updateTextFormattingTargetButtons();
+        this.updateTextFormattingWidthControls();
+        this.updateTextFormattingCommaControls();
+    },
+
+    async saveTextFormattingSettings(settings = state.textFormattingSettings) {
+        const normalized = this.normalizeTextFormattingSettings(settings);
+        state.textFormattingSettings = normalized;
+        state.textFormattingTarget = normalized.target;
+        try {
+            await dbUtils.saveSetting('textFormattingSettings', normalized);
+        } catch (error) {
+            console.warn('[TextFormatting] 設定の保存に失敗しました:', error);
+        }
+        return normalized;
+    },
+
+    syncTextFormattingSettingsFromUI({ save = true, refreshPreview = true } = {}) {
+        const settings = this.readTextFormattingSettingsFromUI();
+        state.textFormattingSettings = settings;
+        state.textFormattingTarget = settings.target;
+        this.updateTextFormattingTargetButtons();
+        this.updateTextFormattingWidthControls();
+        this.updateTextFormattingCommaControls();
+        if (save) {
+            this.saveTextFormattingSettings(settings);
+        }
+        if (refreshPreview && elements.textFormattingDialog?.open) {
+            this.updateTextFormattingPreview();
+        }
+        return settings;
+    },
+
+    getTextFormattingSettings() {
+        state.textFormattingSettings = this.normalizeTextFormattingSettings(state.textFormattingSettings);
+        state.textFormattingTarget = state.textFormattingSettings.target;
+        return state.textFormattingSettings;
+    },
+
     getTextFormattingOptions() {
-        return {
-            indentProse: Boolean(elements.textFormatIndentProse?.checked),
-            boundaryBlank: Boolean(elements.textFormatBoundaryBlank?.checked),
-            compactDialogue: Boolean(elements.textFormatCompactDialogue?.checked),
-            trimTrailing: Boolean(elements.textFormatTrimTrailing?.checked),
-            normalizeBlanks: Boolean(elements.textFormatNormalizeBlanks?.checked),
-            normalizeEllipsisDash: Boolean(elements.textFormatNormalizeEllipsisDash?.checked),
-            commaRhythm: Boolean(elements.textFormatCommaRhythm?.checked),
-            commaRhythmLevel: this.normalizeCommaRhythmLevel(elements.textFormatCommaLevel?.value),
-            normalizeWidth: Boolean(elements.textFormatNormalizeWidth?.checked),
-            widthDirection: elements.textFormatWidthDirection?.value === 'half' ? 'half' : 'full',
-            normalizeKatakana: Boolean(elements.textFormatNormalizeKatakana?.checked),
-            normalizeDigits: Boolean(elements.textFormatNormalizeDigits?.checked),
-            normalizeSymbols: Boolean(elements.textFormatNormalizeSymbols?.checked)
-        };
+        return this.getTextFormattingSettings();
     },
 
     updateTextFormattingWidthControls() {
@@ -18664,16 +18783,19 @@ const appLogic = {
     },
 
     setTextFormattingTarget(target = 'model') {
-        const normalizedTarget = ['user', 'model', 'both'].includes(target) ? target : 'model';
+        const normalizedTarget = this.normalizeTextFormattingTarget(target);
         state.textFormattingTarget = normalizedTarget;
+        state.textFormattingSettings = this.normalizeTextFormattingSettings({
+            ...state.textFormattingSettings,
+            target: normalizedTarget
+        });
         this.updateTextFormattingTargetButtons();
+        this.saveTextFormattingSettings(state.textFormattingSettings);
         this.updateTextFormattingPreview();
     },
 
     updateTextFormattingTargetButtons() {
-        const target = ['user', 'model', 'both'].includes(state.textFormattingTarget)
-            ? state.textFormattingTarget
-            : 'model';
+        const target = this.normalizeTextFormattingTarget(state.textFormattingTarget);
         elements.textFormattingTargetButtons?.forEach(button => {
             const isActive = button.dataset.target === target;
             button.classList.toggle('is-active', isActive);
@@ -18696,9 +18818,7 @@ const appLogic = {
         }
 
         uiUtils.closeChatSearch?.({ restoreFocus: false });
-        this.updateTextFormattingTargetButtons();
-        this.updateTextFormattingWidthControls();
-        this.updateTextFormattingCommaControls();
+        this.applyTextFormattingSettingsToUI(state.textFormattingSettings);
         this.updateTextFormattingPreview();
         if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
             elements.textFormattingDialog.showModal();
@@ -18729,10 +18849,16 @@ const appLogic = {
         }
 
         const totalChanges = candidates.reduce((sum, candidate) => sum + candidate.changeCount, 0);
+        const userCount = candidates.filter(candidate => candidate.role === 'user').length;
+        const modelCount = candidates.filter(candidate => candidate.role === 'model').length;
+        const roleSummary = [
+            userCount ? `ユーザー${userCount}件` : '',
+            modelCount ? `モデル${modelCount}件` : ''
+        ].filter(Boolean).join(' / ');
         if (elements.textFormattingPreviewSummary) {
             elements.textFormattingPreviewSummary.textContent = candidates.length > 0
-                ? `${candidates.length}件のメッセージ、${totalChanges}箇所を変更します。`
-                : '現在の条件では変更される文章がありません。';
+                ? `変更対象: ${candidates.length}件（${roleSummary}）、変更箇所: ${totalChanges}箇所`
+                : '変更はありません。';
         }
         if (elements.textFormattingApplyBtn) {
             elements.textFormattingApplyBtn.disabled = candidates.length === 0;
@@ -18747,7 +18873,13 @@ const appLogic = {
 
             const meta = document.createElement('div');
             meta.className = 'text-formatting-preview-meta';
-            meta.textContent = `${candidate.label} / ${candidate.changeCount}箇所`;
+            const targetBadge = document.createElement('span');
+            targetBadge.className = 'text-formatting-preview-target';
+            targetBadge.textContent = '適用対象';
+            meta.appendChild(targetBadge);
+            const metaText = document.createElement('span');
+            metaText.textContent = `${candidate.label} / ${candidate.changeCount}箇所`;
+            meta.appendChild(metaText);
             card.appendChild(meta);
 
             const diff = document.createElement('div');
@@ -18776,10 +18908,8 @@ const appLogic = {
     },
 
     buildTextFormattingCandidates() {
-        const target = ['user', 'model', 'both'].includes(state.textFormattingTarget)
-            ? state.textFormattingTarget
-            : 'model';
         const options = this.getTextFormattingOptions();
+        const target = this.normalizeTextFormattingTarget(options.target);
         const summaryEnd = Number.isFinite(state.currentSummarizedContext?.summaryRange?.end)
             ? state.currentSummarizedContext.summaryRange.end
             : -1;
@@ -18840,9 +18970,10 @@ const appLogic = {
     },
 
     buildTextFormattingHistoryOptions(options = this.getTextFormattingOptions()) {
+        const target = this.normalizeTextFormattingTarget(options.target || state.textFormattingTarget);
         return {
-            target: ['user', 'model', 'both'].includes(state.textFormattingTarget) ? state.textFormattingTarget : 'model',
-            targetLabel: this.getTextFormattingTargetLabel(),
+            target,
+            targetLabel: this.getTextFormattingTargetLabel(target),
             indentProse: Boolean(options.indentProse),
             boundaryBlank: Boolean(options.boundaryBlank),
             compactDialogue: Boolean(options.compactDialogue),
@@ -18858,6 +18989,13 @@ const appLogic = {
             normalizeSymbols: Boolean(options.normalizeSymbols),
             summary: this.getTextFormattingRuleSummary(options)
         };
+    },
+
+    getTextFormattingCandidateTarget(candidates = []) {
+        const roles = new Set((Array.isArray(candidates) ? candidates : []).map(candidate => candidate?.role).filter(Boolean));
+        if (roles.size === 1 && roles.has('user')) return 'user';
+        if (roles.size === 1 && roles.has('model')) return 'model';
+        return 'both';
     },
 
     buildTextFormattingHistoryLabel(candidates, options = this.getTextFormattingOptions()) {
@@ -18967,7 +19105,12 @@ const appLogic = {
             const chatIdForHistory = savedChatId || state.currentChatId || chatIdBeforeSave;
             let historySaved = false;
             if (hasChangeHistoryChatId(chatIdForHistory)) {
-                const formatOptions = this.buildTextFormattingHistoryOptions(options);
+                const historyTarget = this.getTextFormattingCandidateTarget(candidateList);
+                const formatOptions = {
+                    ...this.buildTextFormattingHistoryOptions(options),
+                    target: historyTarget,
+                    targetLabel: this.getTextFormattingTargetLabel(historyTarget)
+                };
                 const historyResult = await appendChangeHistory(chatIdForHistory, {
                     id: createChangeHistoryId(),
                     chatId: chatIdForHistory,

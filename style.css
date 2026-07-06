@@ -1159,7 +1159,7 @@ body.dark-mode #settings-screen a:hover {
 
 .custom-dialog.text-formatting-dialog {
     width: min(760px, calc(100vw - 32px));
-    max-height: min(760px, calc(100dvh - 32px));
+    max-height: min(780px, calc(100dvh - 32px));
     flex-direction: column;
 }
 
@@ -1193,6 +1193,18 @@ body.dark-mode #settings-screen a:hover {
     padding: 0 6px;
     color: var(--text-secondary);
     font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.text-formatting-rule-group {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.text-formatting-rule-heading {
+    color: var(--text-secondary);
+    font-size: 0.88rem;
     font-weight: 700;
 }
 
@@ -1298,6 +1310,9 @@ body.dark-mode #settings-screen a:hover {
 .text-formatting-preview-list {
     display: grid;
     gap: 8px;
+    max-height: min(280px, 34dvh);
+    overflow-y: auto;
+    padding-right: 2px;
 }
 
 .text-formatting-preview-card {
@@ -1309,10 +1324,26 @@ body.dark-mode #settings-screen a:hover {
 }
 
 .text-formatting-preview-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
     margin-bottom: 6px;
     color: var(--text-secondary);
     font-size: 0.82rem;
     font-weight: 700;
+}
+
+.text-formatting-preview-target {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 1px 7px;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 999px;
+    font-size: 0.78rem;
 }
 
 .text-formatting-preview-diff {
@@ -1324,9 +1355,10 @@ body.dark-mode #settings-screen a:hover {
 
 .text-formatting-preview-before,
 .text-formatting-preview-after {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-height: 4.6em;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .text-formatting-preview-before {
@@ -1339,6 +1371,56 @@ body.dark-mode #settings-screen a:hover {
 
 .text-formatting-actions {
     flex: 0 0 auto;
+}
+
+@media screen and (max-width: 600px) {
+    .custom-dialog.text-formatting-dialog {
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        max-height: calc(100dvh - 16px);
+        padding: 12px;
+    }
+
+    .text-formatting-body {
+        gap: 10px;
+        padding-right: 0;
+    }
+
+    .text-formatting-field {
+        gap: 8px;
+    }
+
+    .text-formatting-rules {
+        padding: 10px;
+    }
+
+    .text-formatting-subgroup-title {
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 6px;
+    }
+
+    .text-formatting-subgroup-title select {
+        min-height: 30px;
+        max-width: 100%;
+    }
+
+    .text-formatting-subgroup > .checkbox-label,
+    .text-formatting-subgroup-note {
+        margin-left: 22px;
+    }
+
+    .text-formatting-preview-list {
+        max-height: min(240px, 30dvh);
+    }
+
+    .text-formatting-preview-card {
+        padding: 8px;
+    }
+
+    .text-formatting-actions {
+        gap: 8px;
+    }
 }
 
 @media screen and (max-width: 600px) {
