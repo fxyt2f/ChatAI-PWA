@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.1";
-const APP_CACHE_VERSION = "v1.34.1";
+const APP_VERSION = "1.34.2";
+const APP_CACHE_VERSION = "v1.34.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -212,6 +212,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.2": [
+        "Undoを複数回実行した後にRedoできなくなる場合がある問題を修正しました。",
+        "変更履歴から現在本文に適用可能なUndo/Redo対象を選ぶよう改善しました。",
+        "メッセージ下部コピーと編集画面のMarkdownコピーで、本文先頭の空白を保持するよう修正しました。"
+    ],
     "1.34.1": [
         "メッセージ送信中の「応答生成中」表示を、最新ユーザーメッセージ直下のモデル返信プレースホルダーとして表示するよう調整しました。",
         "入力欄側ではなく会話ログ側の生成中表示として見えるよう、送信中レイアウトを改善しました。"
@@ -8507,6 +8512,34 @@ function findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIn
     return findLatestChangeForMessage(history, messageIndex, role, cascadeIndex, 'undone');
 }
 
+function findLatestApplicableChangeForMessage(history, messageIndex, role, cascadeIndex = null, direction) {
+    if (!Array.isArray(history)) return null;
+    const targetStatus = getChangeHistoryStatusForDirection(direction);
+    if (!targetStatus) return null;
+
+    const candidates = [];
+    for (let entryIndex = 0; entryIndex < history.length; entryIndex += 1) {
+        const entry = history[entryIndex];
+        if (!isUndoRedoChangeHistoryEntry(entry)) continue;
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        for (let changeIndex = 0; changeIndex < changes.length; changeIndex += 1) {
+            const change = changes[changeIndex];
+            if (change.status !== targetStatus) continue;
+            if (!doesHistoryChangeMatchMessage(change, messageIndex, role, cascadeIndex)) continue;
+            candidates.push({ entry, entryIndex, change, changeIndex });
+        }
+    }
+
+    candidates.sort((left, right) => {
+        const rightTime = getChangeHistoryEntryDirectionTime(right.entry, direction);
+        const leftTime = getChangeHistoryEntryDirectionTime(left.entry, direction);
+        if (rightTime !== leftTime) return rightTime - leftTime;
+        return left.entryIndex - right.entryIndex;
+    });
+
+    return candidates.find(candidate => validateHistoryChangeApplication(candidate.change, direction).valid) || null;
+}
+
 function getChangeHistoryStatusForDirection(direction) {
     if (direction === 'undo') return 'applied';
     if (direction === 'redo') return 'undone';
@@ -8725,6 +8758,14 @@ function getLatestUndoneHistoryEntry(history) {
         }, null);
 }
 
+function getLatestApplicableHistoryEntry(history, direction) {
+    if (!Array.isArray(history)) return null;
+    return history
+        .filter(entry => isUndoRedoChangeHistoryEntry(entry) && hasChangeHistoryEntryChangesForDirection(entry, direction))
+        .sort((left, right) => getChangeHistoryEntryDirectionTime(right, direction) - getChangeHistoryEntryDirectionTime(left, direction))
+        .find(entry => validateHistoryEntryApplication(entry, direction).valid) || null;
+}
+
 // --- アプリケーションロジック (appLogic) ---
 const appLogic = {
     _setupEventListenersCallCount: 0,
@@ -8864,10 +8905,10 @@ const appLogic = {
                 const role = messageElement.classList.contains('model') ? 'model' : 'user';
                 const visibleMessage = visibleByIndex.get(messageIndex);
                 const cascadeIndex = visibleMessage?.cascadeIndex ?? null;
-                const undoTarget = findLatestAppliedChangeForMessage(history, messageIndex, role, cascadeIndex);
-                const redoTarget = findLatestUndoneChangeForMessage(history, messageIndex, role, cascadeIndex);
-                const canUndo = Boolean(undoTarget && validateHistoryChangeApplication(undoTarget.change, 'undo').valid);
-                const canRedo = Boolean(redoTarget && validateHistoryChangeApplication(redoTarget.change, 'redo').valid);
+                const undoTarget = findLatestApplicableChangeForMessage(history, messageIndex, role, cascadeIndex, 'undo');
+                const redoTarget = findLatestApplicableChangeForMessage(history, messageIndex, role, cascadeIndex, 'redo');
+                const canUndo = Boolean(undoTarget);
+                const canRedo = Boolean(redoTarget);
                 const undoButton = messageElement.querySelector(':scope > .message-actions .tm-message-undo-btn');
                 const redoButton = messageElement.querySelector(':scope > .message-actions .tm-message-redo-btn');
 
@@ -8909,9 +8950,13 @@ const appLogic = {
         const chatId = state.currentChatId;
         const history = await loadChangeHistory(chatId, true);
         const cascadeIndex = visibleTarget.cascadeIndex ?? null;
-        const changeTarget = isUndo
-            ? findLatestAppliedChangeForMessage(history, visibleTarget.index, visibleTarget.role, cascadeIndex)
-            : findLatestUndoneChangeForMessage(history, visibleTarget.index, visibleTarget.role, cascadeIndex);
+        const changeTarget = findLatestApplicableChangeForMessage(
+            history,
+            visibleTarget.index,
+            visibleTarget.role,
+            cascadeIndex,
+            direction
+        );
         const noTargetMessage = isUndo
             ? 'このメッセージに元に戻せる変更がありません'
             : 'このメッセージにやり直せる変更がありません';
@@ -9019,9 +9064,7 @@ const appLogic = {
 
         const chatId = state.currentChatId;
         const history = await loadChangeHistory(chatId, true);
-        const entry = isUndo
-            ? getLatestAppliedHistoryEntry(history)
-            : getLatestUndoneHistoryEntry(history);
+        const entry = getLatestApplicableHistoryEntry(history, direction);
         const noEntryMessage = isUndo ? '元に戻せる変更がありません' : 'やり直せる変更がありません';
 
         if (!entry) {
@@ -16308,7 +16351,13 @@ const appLogic = {
         if (!source) return '';
 
         if (source instanceof HTMLTextAreaElement) {
-            return source.value.trim();
+            return source.value;
+        }
+
+        const messageIndex = Number(messageElement?.dataset?.index);
+        const message = Number.isInteger(messageIndex) ? state.currentMessages?.[messageIndex] : null;
+        if (message && CHANGE_HISTORY_ROLES.has(message.role) && typeof message.content === 'string') {
+            return message.content;
         }
 
         const clone = source.cloneNode(true);
@@ -16347,8 +16396,7 @@ const appLogic = {
         const text = (clone.innerText || clone.textContent || '')
             .replace(/\u00a0/g, ' ')
             .replace(/[ \t]+\n/g, '\n')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
+            .replace(/\n{3,}/g, '\n\n');
 
         sandbox.remove();
         return text;
