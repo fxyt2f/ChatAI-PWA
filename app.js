@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.2";
-const APP_CACHE_VERSION = "v1.34.2";
+const APP_VERSION = "1.34.3";
+const APP_CACHE_VERSION = "v1.34.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -212,6 +212,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.3": [
+        "チャット内システムプロンプトの変更が通常送信に反映されるか調査しました。",
+        "チャット内システムプロンプト編集後、次回送信で最新値を使うよう調整しました。",
+        "Gemini直API / OpenRouter等の送信処理でチャット内システムプロンプトの扱いを確認しました。"
+    ],
     "1.34.2": [
         "Undoを複数回実行した後にRedoできなくなる場合がある問題を修正しました。",
         "変更履歴から現在本文に適用可能なUndo/Redo対象を選ぶよう改善しました。",
@@ -1044,6 +1049,33 @@ function formatFileSize(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = false) {
+    if (typeof value === 'string') {
+        if (parentKey === 'data' && value.length > 100) {
+            return value.substring(0, 50) + '...[省略]...' + value.substring(value.length - 20);
+        }
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map(item => sanitizeApiRequestBodyForLog(item, parentKey, inSystemField));
+    }
+    if (value instanceof Uint8Array) return value;
+    if (!value || typeof value !== 'object') return value;
+
+    const sanitized = {};
+    Object.entries(value).forEach(([key, entryValue]) => {
+        const nextInSystemField = inSystemField || key === 'systemInstruction' || key === 'system' || value.role === 'system';
+        const isSystemContent = value.role === 'system' && key === 'content' && typeof entryValue === 'string';
+        const isGeminiSystemText = key === 'text' && typeof entryValue === 'string' && inSystemField;
+        if (isSystemContent || isGeminiSystemText) {
+            sanitized[key] = `[system prompt omitted; length=${entryValue.length}]`;
+            return;
+        }
+        sanitized[key] = sanitizeApiRequestBodyForLog(entryValue, key, nextInSystemField);
+    });
+    return sanitized;
 }
 
 
@@ -5276,9 +5308,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     // --- システムプロンプトUI更新 ---
+    getSystemPromptEditorElement() {
+        return document.getElementById('system-prompt-editor') || elements.systemPromptEditor;
+    },
+    getSystemPromptCharCountElement() {
+        return document.getElementById('system-prompt-char-count') || elements.systemPromptCharCount;
+    },
+    getSystemPromptSaveStatusElement() {
+        return document.getElementById('system-prompt-save-status') || elements.systemPromptSaveStatus;
+    },
     updateSystemPromptUI() {
-        if (elements.systemPromptEditor && !state.isEditingSystemPrompt) {
-            elements.systemPromptEditor.value = state.currentSystemPrompt;
+        const editor = uiUtils.getSystemPromptEditorElement();
+        if (editor && !state.isEditingSystemPrompt) {
+            editor.value = state.currentSystemPrompt;
         }
         this.updateSystemPromptButtonState();
         this.updateSystemPromptCharCount();
@@ -5300,20 +5342,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
     updateSystemPromptCharCount() {
-        if (!elements.systemPromptCharCount || !elements.systemPromptEditor) return;
-        elements.systemPromptCharCount.textContent = `${elements.systemPromptEditor.value.length}文字`;
+        const charCount = this.getSystemPromptCharCountElement();
+        const editor = uiUtils.getSystemPromptEditorElement();
+        if (!charCount || !editor) return;
+        charCount.textContent = `${editor.value.length}文字`;
     },
     updateSystemPromptSaveStatus(status = 'saved') {
         state.systemPromptSaveStatus = status;
-        if (!elements.systemPromptSaveStatus) return;
+        const saveStatus = this.getSystemPromptSaveStatusElement();
+        if (!saveStatus) return;
         const labels = {
             saved: '保存済み',
             saving: '保存中…',
             dirty: '未保存の変更があります',
             error: '保存に失敗しました'
         };
-        elements.systemPromptSaveStatus.textContent = labels[status] || labels.saved;
-        elements.systemPromptSaveStatus.classList.toggle('is-error', status === 'error');
+        saveStatus.textContent = labels[status] || labels.saved;
+        saveStatus.classList.toggle('is-error', status === 'error');
     },
     // --------------------------------
 
@@ -7016,12 +7061,7 @@ const apiUtils = {
             }
         }
 
-        console.log("Geminiへの送信データ:", JSON.stringify(requestBody, (key, value) => {
-            if (key === 'data' && typeof value === 'string' && value.length > 100) {
-                return value.substring(0, 50) + '...[省略]...' + value.substring(value.length - 20);
-            }
-            return value;
-        }, 2));
+        console.log("Geminiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         console.log("ターゲットエンドポイント:", endpoint);
 
         try {
@@ -7518,12 +7558,7 @@ const apiUtils = {
             }
         }
 
-        console.log("Z.aiへの送信データ:", JSON.stringify(requestBody, (key, value) => {
-            if (key === 'data' && typeof value === 'string' && value.length > 100) {
-                return value.substring(0, 50) + '...[省略]...' + value.substring(value.length - 20);
-            }
-            return value;
-        }, 2));
+        console.log("Z.aiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         
         // メッセージ構造の詳細をログ出力（デバッグ用）
         if (requestBody.messages && requestBody.messages.length > 0) {
@@ -7540,7 +7575,9 @@ const apiUtils = {
                 // contentの存在を常に表示（空文字列でも）
                 if ('content' in msg) {
                     if (typeof msg.content === 'string') {
-                        if (msg.content === '') {
+                        if (msg.role === 'system') {
+                            info.content_preview = `[system prompt omitted; length=${msg.content.length}]`;
+                        } else if (msg.content === '') {
                             info.content = '""'; // 空文字列を明示
                         } else {
                             info.content_preview = msg.content.substring(0, 50) + '...';
@@ -7729,12 +7766,7 @@ const apiUtils = {
             }
         }
 
-        console.log("OpenRouterへの送信データ:", JSON.stringify(requestBody, (key, value) => {
-            if (key === 'data' && typeof value === 'string' && value.length > 100) {
-                return value.substring(0, 50) + '...[省略]...' + value.substring(value.length - 20);
-            }
-            return value;
-        }, 2));
+        console.log("OpenRouterへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         
         // メッセージ構造の詳細をログ出力（デバッグ用）
         if (requestBody.messages && requestBody.messages.length > 0) {
@@ -7751,7 +7783,9 @@ const apiUtils = {
                 // contentの存在を常に表示（空文字列でも）
                 if ('content' in msg) {
                     if (typeof msg.content === 'string') {
-                        if (msg.content === '') {
+                        if (msg.role === 'system') {
+                            info.content_preview = `[system prompt omitted; length=${msg.content.length}]`;
+                        } else if (msg.content === '') {
                             info.content = '""'; // 空文字列を明示
                         } else {
                             info.content_preview = msg.content.substring(0, 50) + '...';
@@ -7982,7 +8016,7 @@ const apiUtils = {
                 }
             }
 
-            console.log("Amazon Bedrockへの送信データ:", JSON.stringify(requestBody, (key, value) => {
+            console.log("Amazon Bedrockへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), (key, value) => {
                 if (key === 'bytes' && value instanceof Uint8Array) {
                     return `[Uint8Array: ${value.length} bytes]`;
                 }
@@ -8043,7 +8077,7 @@ function updateCurrentSystemPrompt() {
     }
 
     // ログ出力は関数の最後に移動
-    console.log(`システムプロンプトを更新しました。Provider: ${provider}, Current Prompt: "${state.currentSystemPrompt.substring(0, 30)}..."`);
+    console.log(`システムプロンプトを更新しました。Provider: ${provider}, length=${state.currentSystemPrompt.length}`);
 }
 
 /**
@@ -13403,10 +13437,16 @@ const appLogic = {
             event.preventDefault();
             event.stopPropagation();
         });
-        elements.systemPromptEditor?.addEventListener('input', () => this.handleSystemPromptInput());
-        elements.systemPromptEditor?.addEventListener('blur', () => {
-            if (state.isEditingSystemPrompt) this.saveCurrentSystemPrompt({ keepOpen: true });
-        });
+        document.addEventListener('input', (event) => {
+            if (event.target?.id === 'system-prompt-editor') {
+                this.handleSystemPromptInput();
+            }
+        }, true);
+        document.addEventListener('blur', (event) => {
+            if (event.target?.id === 'system-prompt-editor' && state.isEditingSystemPrompt) {
+                this.saveCurrentSystemPrompt({ keepOpen: true });
+            }
+        }, true);
         elements.systemPromptEditor?.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
                 event.preventDefault();
@@ -16270,16 +16310,17 @@ const appLogic = {
         void this.updateChangeHistoryControls();
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
-        if (elements.systemPromptEditor) {
-            elements.systemPromptEditor.value = state.currentSystemPrompt || '';
-            elements.systemPromptEditor.disabled = Boolean(state.isSending);
-            uiUtils.adjustTextareaHeight(elements.systemPromptEditor, 200);
+        const editor = uiUtils.getSystemPromptEditorElement();
+        if (editor) {
+            editor.value = state.currentSystemPrompt || '';
+            editor.disabled = Boolean(state.isSending);
+            uiUtils.adjustTextareaHeight(editor, 200);
         }
         if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = false;
-        this.updateSystemPromptCharCount();
-        this.updateSystemPromptSaveStatus('saved');
-        this.updateSystemPromptButtonState();
-        requestAnimationFrame(() => elements.systemPromptEditor?.focus());
+        uiUtils.updateSystemPromptCharCount();
+        uiUtils.updateSystemPromptSaveStatus('saved');
+        uiUtils.updateSystemPromptButtonState();
+        requestAnimationFrame(() => uiUtils.getSystemPromptEditorElement()?.focus());
         console.log("システムプロンプト編集開始");
     },
     scheduleSystemPromptAutosave(delay = SYSTEM_PROMPT_AUTOSAVE_DELAY_MS) {
@@ -16290,33 +16331,39 @@ const appLogic = {
         }, delay);
     },
     handleSystemPromptInput() {
-        this.updateSystemPromptCharCount();
-        this.updateSystemPromptSaveStatus('dirty');
+        const editor = uiUtils.getSystemPromptEditorElement();
+        if (editor) {
+            state.currentSystemPrompt = editor.value.trim();
+        }
+        uiUtils.updateSystemPromptCharCount();
+        uiUtils.updateSystemPromptButtonState();
+        uiUtils.updateSystemPromptSaveStatus('dirty');
         this.scheduleSystemPromptAutosave();
     },
     async saveCurrentSystemPrompt({ keepOpen = true } = {}) {
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
-        const newPrompt = elements.systemPromptEditor ? elements.systemPromptEditor.value.trim() : state.currentSystemPrompt;
-        if (newPrompt === state.currentSystemPrompt && state.systemPromptSaveStatus !== 'error') {
-            this.updateSystemPromptSaveStatus('saved');
-            this.updateSystemPromptButtonState();
+        const editor = uiUtils.getSystemPromptEditorElement();
+        const newPrompt = editor ? editor.value.trim() : state.currentSystemPrompt;
+        if (newPrompt === state.currentSystemPrompt && state.systemPromptSaveStatus === 'saved') {
+            uiUtils.updateSystemPromptSaveStatus('saved');
+            uiUtils.updateSystemPromptButtonState();
             if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
             return true;
         }
         state.currentSystemPrompt = newPrompt;
-        this.updateSystemPromptSaveStatus('saving');
-        this.updateSystemPromptButtonState();
+        uiUtils.updateSystemPromptSaveStatus('saving');
+        uiUtils.updateSystemPromptButtonState();
         try {
             await dbUtils.saveChat();
-            this.updateSystemPromptSaveStatus('saved');
+            uiUtils.updateSystemPromptSaveStatus('saved');
             console.log("システムプロンプト保存完了");
             if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
             return true;
         } catch (error) {
             state.systemPromptLastSaveError = error;
             console.error("システムプロンプト保存エラー:", error);
-            this.updateSystemPromptSaveStatus('error');
+            uiUtils.updateSystemPromptSaveStatus('error');
             if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
             return false;
         }
@@ -16324,7 +16371,7 @@ const appLogic = {
     async closeSystemPromptDialog({ skipSave = false } = {}) {
         state.isEditingSystemPrompt = false;
         if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = true;
-        this.updateSystemPromptButtonState();
+        uiUtils.updateSystemPromptButtonState();
         void this.updateChangeHistoryControls();
         if (!skipSave) {
             await this.saveCurrentSystemPrompt({ keepOpen: true });
@@ -19767,7 +19814,7 @@ const appLogic = {
             }
             console.log("--- [要約API] リクエスト開始 ---");
             console.log("使用モデル:", summaryModelLabel || summaryModel);
-            console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
+            console.log("リクエストボディ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
 
             const endpoint = `${GEMINI_API_BASE_URL}${summaryModel}:generateContent`;
             const response = await fetch(endpoint, {
@@ -19847,7 +19894,7 @@ const appLogic = {
 
         console.log("--- [OpenRouter要約API] リクエスト開始 ---");
         console.log("使用モデル:", summaryConfig.name ? `${summaryConfig.name} / ${model}` : model);
-        console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
+        console.log("リクエストボディ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
 
         const response = await fetch(apiUtils.getOpenAICompatibleEndpoint(summaryConfig, OPENROUTER_API_BASE_URL), {
             method: 'POST',
@@ -19918,7 +19965,7 @@ const appLogic = {
 
         console.log(`--- [${providerLabel}要約API] リクエスト開始 ---`);
         console.log("使用モデル:", summaryConfig.name ? `${summaryConfig.name} / ${model}` : model);
-        console.log("リクエストボディ:", JSON.stringify(requestBody, null, 2));
+        console.log("リクエストボディ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
 
         const response = await fetch(apiUtils.getOpenAICompatibleEndpoint(summaryConfig, ZAI_API_BASE_URL), {
             method: 'POST',
