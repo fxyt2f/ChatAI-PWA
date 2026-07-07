@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.3";
-const APP_CACHE_VERSION = "v1.34.3";
+const APP_VERSION = "1.34.4";
+const APP_CACHE_VERSION = "v1.34.4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -212,6 +212,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.4": [
+        "文章整形ダイアログの対象ボタン順序を「モデル」「ユーザー」「両方」に変更しました。",
+        "文章整形ダイアログ内から変更履歴のUndo/Redoを実行できるようにしました。"
+    ],
     "1.34.3": [
         "チャット内システムプロンプトの変更が通常送信に反映されるか調査しました。",
         "チャット内システムプロンプト編集後、次回送信で最新値を使うよう調整しました。",
@@ -719,6 +723,8 @@ try {
         textFormattingStatus: document.getElementById('text-formatting-status'),
         textFormattingApplyBtn: document.getElementById('text-formatting-apply-btn'),
         textFormattingCancelBtn: document.getElementById('text-formatting-cancel-btn'),
+        textFormattingUndoBtn: document.getElementById('text-formatting-undo-btn'),
+        textFormattingRedoBtn: document.getElementById('text-formatting-redo-btn'),
         scrollToTopBtn: document.getElementById('scroll-to-top-btn'),
         scrollToBottomBtn: document.getElementById('scroll-to-bottom-btn'),
         floatingPanelBehaviorSelect: document.getElementById('floating-panel-behavior'),
@@ -8912,6 +8918,8 @@ const appLogic = {
         this.updateMessageActionButtonStates();
         const undoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-undo-btn') || []);
         const redoButtons = Array.from(elements.messageContainer?.querySelectorAll?.('.tm-message-redo-btn') || []);
+        const textFormattingUndoBtn = elements.textFormattingUndoBtn;
+        const textFormattingRedoBtn = elements.textFormattingRedoBtn;
         const setAllDisabled = (buttons, disabled) => {
             buttons.forEach(button => {
                 button.disabled = disabled;
@@ -8927,10 +8935,17 @@ const appLogic = {
 
         setAllDisabled(undoButtons, true);
         setAllDisabled(redoButtons, true);
+        if (textFormattingUndoBtn) textFormattingUndoBtn.disabled = true;
+        if (textFormattingRedoBtn) textFormattingRedoBtn.disabled = true;
         if (disabledBase) return;
 
         try {
             const history = await loadChangeHistory(state.currentChatId);
+            const undoEntry = getLatestApplicableHistoryEntry(history, 'undo');
+            const redoEntry = getLatestApplicableHistoryEntry(history, 'redo');
+            if (textFormattingUndoBtn) textFormattingUndoBtn.disabled = !undoEntry;
+            if (textFormattingRedoBtn) textFormattingRedoBtn.disabled = !redoEntry;
+
             const visibleMessages = getCurrentVisibleMessagesForReplacePreview();
             const visibleByIndex = new Map(visibleMessages.map(message => [message.index, message]));
 
@@ -9168,6 +9183,22 @@ const appLogic = {
 
     async redoLatestChangeHistoryEntry() {
         await this.applyChangeHistoryEntry('redo');
+    },
+
+    async undoFromTextFormattingDialog() {
+        await this.applyChangeHistoryEntry('undo');
+        if (elements.textFormattingDialog?.open) {
+            this.updateTextFormattingPreview();
+            await this.updateChangeHistoryControls();
+        }
+    },
+
+    async redoFromTextFormattingDialog() {
+        await this.applyChangeHistoryEntry('redo');
+        if (elements.textFormattingDialog?.open) {
+            this.updateTextFormattingPreview();
+            await this.updateChangeHistoryControls();
+        }
     },
 
     resolveExecutionModelName(provider) {
@@ -14226,6 +14257,8 @@ const appLogic = {
         elements.textFormatWidthDirection?.addEventListener('change', onTextFormattingSettingsChanged);
         elements.textFormatCommaLevel?.addEventListener('change', onTextFormattingSettingsChanged);
         elements.textFormattingApplyBtn?.addEventListener('click', () => this.applyTextFormattingCandidates());
+        elements.textFormattingUndoBtn?.addEventListener('click', () => this.undoFromTextFormattingDialog());
+        elements.textFormattingRedoBtn?.addEventListener('click', () => this.redoFromTextFormattingDialog());
         elements.textFormattingCancelBtn?.addEventListener('click', () => elements.textFormattingDialog?.close('cancel'));
         elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
         elements.scrollToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
@@ -19044,6 +19077,7 @@ const appLogic = {
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         this.applyTextFormattingSettingsToUI(state.textFormattingSettings);
         this.updateTextFormattingPreview();
+        void this.updateChangeHistoryControls();
         if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
             elements.textFormattingDialog.showModal();
         }
@@ -19087,6 +19121,7 @@ const appLogic = {
         if (elements.textFormattingApplyBtn) {
             elements.textFormattingApplyBtn.disabled = candidates.length === 0;
         }
+        void this.updateChangeHistoryControls();
 
         const previewList = elements.textFormattingPreviewList;
         if (!previewList) return;

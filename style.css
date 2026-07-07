@@ -1356,6 +1356,36 @@ body.dark-mode #settings-screen a:hover {
 
 .text-formatting-actions {
     flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+.text-formatting-actions .dialog-secondary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 36px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--border-radius-sm);
+    font: inherit;
+    cursor: pointer;
+}
+
+.text-formatting-actions .dialog-secondary-btn:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+}
+
+.text-formatting-actions .dialog-secondary-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.text-formatting-actions .dialog-secondary-btn .material-symbols-outlined {
+    font-size: 1.15rem;
+    line-height: 1;
 }
 
 @media screen and (max-width: 600px) {
@@ -1405,6 +1435,10 @@ body.dark-mode #settings-screen a:hover {
 
     .text-formatting-actions {
         gap: 8px;
+    }
+
+    .text-formatting-actions .dialog-secondary-btn {
+        flex: 1 1 calc(50% - 4px);
     }
 }
 
