@@ -48,9 +48,9 @@ const EDIT_TEXTAREA_MAX_HEIGHT = 680;
 const EDIT_VIEWPORT_MAX_RATIO = 0.72;
 const SYSTEM_PROMPT_AUTOSAVE_DELAY_MS = 700;
 const MESSAGE_COLLAPSE_THRESHOLD = 1200;
-const MESSAGE_COLLAPSE_HEIGHT = 710;
-const MESSAGE_COLLAPSE_MIN_HEIGHT = 480;
-const MESSAGE_COLLAPSE_VIEWPORT_RATIO = 0.56;
+const MESSAGE_COLLAPSE_HEIGHT = 780;
+const MESSAGE_COLLAPSE_MIN_HEIGHT = 520;
+const MESSAGE_COLLAPSE_VIEWPORT_RATIO = 0.62;
 const MESSAGE_COLLAPSE_STORAGE_PREFIX = 'chatai-pwa-message-collapse:';
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.6-beta4";
-const APP_CACHE_VERSION = "v1.34.6-beta4";
+const APP_VERSION = "1.34.6-beta5";
+const APP_CACHE_VERSION = "v1.34.6-beta5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -216,6 +216,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.6-beta5": [
+        "個別折りたたみボタンと一括開閉機能が動作しない問題を修正しました。",
+        "一括開閉処理を個別ボタンの表示状態から独立化しました。",
+        "折りたたみ時の表示構造を正常動作していた状態へ復旧しました。"
+    ],
     "1.34.6-beta4": [
         "個別折りたたみボタンの右下sticky構造を再設計しました。",
         "本文、入力欄、メッセージ下部操作との重なりを防止しました。",
@@ -3838,10 +3843,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
              const pre = document.createElement('pre'); pre.textContent = content; contentDiv.innerHTML = ''; contentDiv.appendChild(pre);
         }
     }
-    const messageMainScope = document.createElement('div');
-    messageMainScope.classList.add('message-main-scope');
-    messageMainScope.appendChild(contentDiv);
-    messageDiv.appendChild(messageMainScope);
+    messageDiv.appendChild(contentDiv);
             
     const imagePlaceholderRegex = /<p>\[IMAGE_HERE\]<\/p>|\[IMAGE_HERE\]/g;
     if (role === 'model' && messageData && messageData.imageIds && messageData.imageIds.length > 0) {
@@ -4071,24 +4073,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     }
 
-    const collapseOverlay = document.createElement('div');
-    collapseOverlay.classList.add('tm-message-collapse-overlay-track');
-    const collapseHost = document.createElement('div');
-    collapseHost.classList.add('tm-message-collapse-sticky-host');
-    const collapseButton = document.createElement('button');
-    collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
-    collapseButton.title = '全文を表示';
-    collapseButton.setAttribute('aria-label', '全文を表示');
-    collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
-    collapseButton.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.toggleMessageCollapse(messageDiv);
-    };
-    collapseHost.appendChild(collapseButton);
-    collapseOverlay.appendChild(collapseHost);
-    messageMainScope.appendChild(collapseOverlay);
-
     const editArea = document.createElement('div');
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
@@ -4168,6 +4152,18 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             redoButton.disabled = true;
             redoButton.onclick = () => appLogic.redoLatestChangeForMessage(index, role);
             actionButtonsDiv.appendChild(redoButton);
+
+            const collapseButton = document.createElement('button');
+            collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
+            collapseButton.title = '全文を表示';
+            collapseButton.setAttribute('aria-label', '全文を表示');
+            collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
+            collapseButton.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.toggleMessageCollapse(messageDiv);
+            };
+            actionButtonsDiv.appendChild(collapseButton);
 
         }
 
@@ -5770,63 +5766,27 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     getMessageCollapseButton(messageElement) {
-        return messageElement?.querySelector(':scope > .message-main-scope > .tm-message-collapse-overlay-track .tm-message-collapse-btn');
+        return messageElement?.querySelector(':scope > .message-actions .tm-message-collapse-btn');
     },
 
     calculateMessageCollapseStickyTop() {
-        const scrollContainer = elements.chatScreen?.querySelector?.('.main-content');
-        if (!scrollContainer) return 8;
-
-        const scrollRect = scrollContainer.getBoundingClientRect();
-        const composer = this.getComposerElement?.();
-        const composerRect = composer?.getBoundingClientRect?.();
-        const controlSize = 40;
-        const gap = 12;
-        const visibleBottom = Math.min(
-            scrollRect.bottom,
-            composerRect?.top || scrollRect.bottom
-        );
-
-        return Math.max(8, Math.round(visibleBottom - scrollRect.top - controlSize - gap));
+        return 8;
     },
 
     updateMessageCollapseStickyTop() {
-        const chatScreen = elements.chatScreen;
-        if (!chatScreen) return;
-        chatScreen.style.setProperty('--message-collapse-sticky-top', `${this.calculateMessageCollapseStickyTop()}px`);
+        // beta5では右下stickyを無効化し、従来の下部ボタンで機能復旧を優先する。
     },
 
     scheduleMessageCollapseStickyTopUpdate() {
-        cancelAnimationFrame(messageCollapseStickyFrame);
-        messageCollapseStickyFrame = requestAnimationFrame(() => {
-            messageCollapseStickyFrame = 0;
-            this.updateMessageCollapseStickyTop();
-        });
+        // no-op
     },
 
     installMessageCollapseStickyObservers() {
-        if (messageCollapseStickyResizeObserver || typeof ResizeObserver === 'undefined') {
-            this.scheduleMessageCollapseStickyTopUpdate();
-            return;
-        }
-
-        messageCollapseStickyResizeObserver = new ResizeObserver(() => {
-            this.scheduleMessageCollapseStickyTopUpdate();
-        });
-        [
-            elements.chatScreen?.querySelector?.('.main-content'),
-            this.getComposerElement?.()
-        ].filter(Boolean).forEach(element => messageCollapseStickyResizeObserver.observe(element));
-
-        this.scheduleMessageCollapseStickyTopUpdate();
+        // no-op
     },
 
     installMessageCollapseStickyEventListeners() {
-        if (messageCollapseStickyEventsInstalled) return;
-        messageCollapseStickyEventsInstalled = true;
-        window.addEventListener('resize', () => this.scheduleMessageCollapseStickyTopUpdate());
-        window.addEventListener('orientationchange', () => this.scheduleMessageCollapseStickyTopUpdate());
-        window.visualViewport?.addEventListener?.('resize', () => this.scheduleMessageCollapseStickyTopUpdate());
+        // no-op
     },
 
     updateMessageCollapseButton(messageElement) {
@@ -5839,6 +5799,38 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (icon) icon.textContent = isCollapsed ? 'unfold_more' : 'unfold_less';
         button.title = title;
         button.setAttribute('aria-label', title);
+    },
+
+    setMessageCollapsed(messageElement, collapsed, { persist = true, keepVisible = true } = {}) {
+        if (!messageElement || !messageElement.isConnected) return false;
+        const contentElement = messageElement.querySelector(':scope > .message-content');
+        if (!this.isMessageCollapseCandidate(messageElement, contentElement)) {
+            this.resetMessageCollapseState(messageElement);
+            return false;
+        }
+
+        const storageKey = messageElement.dataset.collapseStorageKey || this.getMessageCollapseStorageKey(messageElement, contentElement);
+        delete messageElement.dataset.chatSearchTemporarilyExpanded;
+        delete messageElement.dataset.chatSearchTemporaryExpanded;
+        state.chatSearch.temporarilyExpandedMessages?.delete?.(messageElement);
+        messageElement.dataset.collapseStorageKey = storageKey;
+        messageElement.classList.add('tm-collapsible');
+        messageElement.classList.toggle('tm-collapsed', Boolean(collapsed));
+        messageElement.style.setProperty('--message-collapse-height', `${this.getResponsiveCollapseHeight()}px`);
+
+        const button = this.getMessageCollapseButton(messageElement);
+        if (button) {
+            button.classList.remove('hidden');
+            button.disabled = false;
+        }
+        if (persist) {
+            this.writeMessageCollapseState(storageKey, collapsed ? 'collapsed' : 'expanded');
+        }
+        this.updateMessageCollapseButton(messageElement);
+        if (keepVisible) {
+            requestAnimationFrame(() => this.keepMessageAboveComposer(messageElement));
+        }
+        return true;
     },
 
     resetMessageCollapseState(messageElement) {
@@ -5860,7 +5852,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!messageElement || !messageElement.isConnected) return;
         const contentElement = messageElement.querySelector(':scope > .message-content');
         const button = this.getMessageCollapseButton(messageElement);
-        if (!contentElement || !button || !this.isMessageCollapseCandidate(messageElement, contentElement)) {
+        if (!contentElement || !this.isMessageCollapseCandidate(messageElement, contentElement)) {
             this.resetMessageCollapseState(messageElement);
             return;
         }
@@ -5877,8 +5869,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         messageElement.classList.add('tm-collapsible');
         messageElement.classList.toggle('tm-collapsed', shouldCollapse);
         messageElement.style.setProperty('--message-collapse-height', `${collapseHeight}px`);
-        button.classList.remove('hidden');
-        button.disabled = false;
+        if (button) {
+            button.classList.remove('hidden');
+            button.disabled = false;
+        }
         this.updateMessageCollapseButton(messageElement);
         this.observeMessageContentForCollapse(contentElement);
         this.updateCollapseAllMessagesButtonState();
@@ -5927,18 +5921,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     toggleMessageCollapse(messageElement) {
         if (!messageElement) return;
-        const contentElement = messageElement.querySelector(':scope > .message-content');
-        const storageKey = messageElement.dataset.collapseStorageKey || this.getMessageCollapseStorageKey(messageElement, contentElement);
         const willCollapse = !messageElement.classList.contains('tm-collapsed');
 
-        delete messageElement.dataset.chatSearchTemporarilyExpanded;
-        delete messageElement.dataset.chatSearchTemporaryExpanded;
-        state.chatSearch.temporarilyExpandedMessages?.delete?.(messageElement);
-        messageElement.classList.toggle('tm-collapsed', willCollapse);
-        this.writeMessageCollapseState(storageKey, willCollapse ? 'collapsed' : 'expanded');
-        this.updateMessageCollapseButton(messageElement);
+        this.setMessageCollapsed(messageElement, willCollapse);
         this.updateCollapseAllMessagesButtonState();
-        requestAnimationFrame(() => this.keepMessageAboveComposer(messageElement));
     },
 
     getCollapsibleMessageElements() {
@@ -5976,22 +5962,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const shouldExpand = messages.every(message => message.classList.contains('tm-collapsed'));
         messages.forEach(message => {
-            const contentElement = message.querySelector(':scope > .message-content');
-            const button = this.getMessageCollapseButton(message);
-            const storageKey = message.dataset.collapseStorageKey || this.getMessageCollapseStorageKey(message, contentElement);
-            delete message.dataset.chatSearchTemporarilyExpanded;
-            delete message.dataset.chatSearchTemporaryExpanded;
-            state.chatSearch.temporarilyExpandedMessages?.delete?.(message);
-            message.dataset.collapseStorageKey = storageKey;
-            message.classList.add('tm-collapsible');
-            message.style.setProperty('--message-collapse-height', `${this.getResponsiveCollapseHeight()}px`);
-            if (button) {
-                button.classList.remove('hidden');
-                button.disabled = false;
-            }
-            message.classList.toggle('tm-collapsed', !shouldExpand);
-            this.writeMessageCollapseState(storageKey, shouldExpand ? 'expanded' : 'collapsed');
-            this.updateMessageCollapseButton(message);
+            this.setMessageCollapsed(message, !shouldExpand, { keepVisible: false });
         });
         this.updateCollapseAllMessagesButtonState();
     },
@@ -14323,7 +14294,6 @@ const appLogic = {
             // 操作可能な要素やパネル自体をクリックした場合は反応しない
             if (event.target.closest(interactiveElements) ||
                 event.target.closest('.floating-action-panel') ||
-                event.target.closest('.tm-message-collapse-overlay-track') ||
                 event.target.closest('.tm-message-collapse-btn'))
             {
                 return;
