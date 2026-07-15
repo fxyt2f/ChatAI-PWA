@@ -4336,6 +4336,7 @@ body.dark-mode #sd-test-connection-btn {
     --message-collapse-control-size: 40px;
     --message-collapse-control-offset: 3px;
     --message-collapse-sticky-top: 8px;
+    --message-collapse-sticky-top-mobile: 8px;
     --message-collapse-control-opacity: 0.12;
     --message-collapse-control-hover-opacity: 0.9;
     --message-collapse-control-collapsed-opacity: 0.16;
@@ -4416,15 +4417,6 @@ body.dark-mode #sd-test-connection-btn {
     opacity: var(--message-collapse-control-collapsed-opacity, 0.16);
 }
 
-#chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn,
-#chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
-    color: var(--text-primary);
-    background-color: rgba(255, 255, 255, 0.68);
-    border-color: rgba(255, 255, 255, 0.46);
-    box-shadow: var(--shadow-2);
-    opacity: var(--message-collapse-control-hover-opacity, 0.9);
-}
-
 #chat-screen .message .tm-message-collapse-btn:hover:not(:disabled),
 #chat-screen .message .tm-message-collapse-btn:focus-visible {
     color: #ffffff;
@@ -4442,18 +4434,64 @@ body.dark-mode #chat-screen .message .tm-message-collapse-btn {
     border-color: rgba(255, 255, 255, 0.08);
 }
 
-body.dark-mode #chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn,
-body.dark-mode #chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
-    color: var(--text-primary);
-    background-color: rgba(40, 40, 40, 0.72);
-    border-color: rgba(255, 255, 255, 0.16);
-}
-
 body.dark-mode #chat-screen .message .tm-message-collapse-btn:hover:not(:disabled),
 body.dark-mode #chat-screen .message .tm-message-collapse-btn:focus-visible {
     color: #ffffff;
     background-color: var(--bg-button-action-hover);
     border-color: color-mix(in srgb, var(--bg-button-action-hover) 72%, transparent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    #chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn {
+        color: var(--text-primary);
+        background-color: rgba(255, 255, 255, 0.68);
+        border-color: rgba(255, 255, 255, 0.46);
+        box-shadow: var(--shadow-2);
+        opacity: var(--message-collapse-control-hover-opacity, 0.9);
+    }
+
+    body.dark-mode #chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn {
+        color: var(--text-primary);
+        background-color: rgba(40, 40, 40, 0.72);
+        border-color: rgba(255, 255, 255, 0.16);
+    }
+}
+
+@media (hover: none) and (pointer: coarse) {
+    #chat-screen .message .tm-message-collapse-overlay {
+        top: var(--message-collapse-sticky-top-mobile, 8px);
+    }
+
+    #chat-screen .message .tm-message-collapse-btn {
+        opacity: 0.08;
+        pointer-events: none;
+    }
+
+    #chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-btn {
+        opacity: 0.1;
+    }
+
+    #chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
+        color: var(--text-primary);
+        background-color: rgba(255, 255, 255, 0.68);
+        border-color: rgba(255, 255, 255, 0.46);
+        box-shadow: var(--shadow-2);
+        opacity: 0.9;
+        pointer-events: auto;
+    }
+
+    body.dark-mode #chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
+        color: var(--text-primary);
+        background-color: rgba(40, 40, 40, 0.72);
+        border-color: rgba(255, 255, 255, 0.16);
+    }
+
+    body.chat-search-open #chat-screen .message .tm-message-collapse-btn,
+    body:has(.custom-dialog[open]) #chat-screen .message .tm-message-collapse-btn,
+    body:has(#system-prompt-dialog:not([hidden])) #chat-screen .message .tm-message-collapse-btn {
+        opacity: 0;
+        pointer-events: none;
+    }
 }
 
 #chat-screen .message.tm-collapsible.tm-collapsed .message-content {
