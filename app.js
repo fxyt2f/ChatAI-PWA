@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.4";
-const APP_CACHE_VERSION = "v1.34.4";
+const APP_VERSION = "1.34.5-beta1";
+const APP_CACHE_VERSION = "v1.34.5-beta1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -155,6 +155,7 @@ const DEFAULT_TEXT_FORMATTING_SETTINGS = {
     indentProse: true,
     boundaryBlank: true,
     compactDialogue: true,
+    closeNarrativeGap: false,
     trimTrailing: true,
     normalizeBlanks: true,
     normalizeEllipsisDash: true,
@@ -212,6 +213,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.5-beta1": [
+        "文章整形に「地の文同士の空行を詰める」を追加しました。",
+        "文章整形プレビューをメッセージ全文ではなく変更行中心で表示するよう改善しました。",
+        "ダイアログ下部までスクロールした際、プレビューが表示可能領域を広く使うよう調整しました。",
+        "空行の追加・削除をプレビュー上で確認しやすい表示に改善しました。"
+    ],
     "1.34.4": [
         "文章整形ダイアログの対象ボタン順序を「モデル」「ユーザー」「両方」に変更しました。",
         "文章整形ダイアログ内から変更履歴のUndo/Redoを実行できるようにしました。"
@@ -708,6 +715,7 @@ try {
         textFormatIndentProse: document.getElementById('text-format-indent-prose'),
         textFormatBoundaryBlank: document.getElementById('text-format-boundary-blank'),
         textFormatCompactDialogue: document.getElementById('text-format-compact-dialogue'),
+        textFormatCloseNarrativeGap: document.getElementById('text-format-close-narrative-gap'),
         textFormatTrimTrailing: document.getElementById('text-format-trim-trailing'),
         textFormatNormalizeBlanks: document.getElementById('text-format-normalize-blanks'),
         textFormatNormalizeEllipsisDash: document.getElementById('text-format-normalize-ellipsis-dash'),
@@ -14245,6 +14253,7 @@ const appLogic = {
             elements.textFormatIndentProse,
             elements.textFormatBoundaryBlank,
             elements.textFormatCompactDialogue,
+            elements.textFormatCloseNarrativeGap,
             elements.textFormatTrimTrailing,
             elements.textFormatNormalizeBlanks,
             elements.textFormatNormalizeEllipsisDash,
@@ -18923,6 +18932,7 @@ const appLogic = {
             'indentProse',
             'boundaryBlank',
             'compactDialogue',
+            'closeNarrativeGap',
             'trimTrailing',
             'normalizeBlanks',
             'normalizeEllipsisDash',
@@ -18945,6 +18955,7 @@ const appLogic = {
             indentProse: elements.textFormatIndentProse?.checked,
             boundaryBlank: elements.textFormatBoundaryBlank?.checked,
             compactDialogue: elements.textFormatCompactDialogue?.checked,
+            closeNarrativeGap: elements.textFormatCloseNarrativeGap?.checked,
             trimTrailing: elements.textFormatTrimTrailing?.checked,
             normalizeBlanks: elements.textFormatNormalizeBlanks?.checked,
             normalizeEllipsisDash: elements.textFormatNormalizeEllipsisDash?.checked,
@@ -18966,6 +18977,7 @@ const appLogic = {
         if (elements.textFormatIndentProse) elements.textFormatIndentProse.checked = normalized.indentProse;
         if (elements.textFormatBoundaryBlank) elements.textFormatBoundaryBlank.checked = normalized.boundaryBlank;
         if (elements.textFormatCompactDialogue) elements.textFormatCompactDialogue.checked = normalized.compactDialogue;
+        if (elements.textFormatCloseNarrativeGap) elements.textFormatCloseNarrativeGap.checked = normalized.closeNarrativeGap;
         if (elements.textFormatTrimTrailing) elements.textFormatTrimTrailing.checked = normalized.trimTrailing;
         if (elements.textFormatNormalizeBlanks) elements.textFormatNormalizeBlanks.checked = normalized.normalizeBlanks;
         if (elements.textFormatNormalizeEllipsisDash) elements.textFormatNormalizeEllipsisDash.checked = normalized.normalizeEllipsisDash;
@@ -19141,19 +19153,7 @@ const appLogic = {
             meta.appendChild(metaText);
             card.appendChild(meta);
 
-            const diff = document.createElement('div');
-            diff.className = 'text-formatting-preview-diff';
-
-            const before = document.createElement('div');
-            before.className = 'text-formatting-preview-before';
-            before.textContent = `変更前: ${candidate.beforePreview}`;
-            diff.appendChild(before);
-
-            const after = document.createElement('div');
-            after.className = 'text-formatting-preview-after';
-            after.textContent = `変更後: ${candidate.afterPreview}`;
-            diff.appendChild(after);
-
+            const diff = this.createTextFormattingPreviewDiffElement(candidate);
             card.appendChild(diff);
             previewList.appendChild(card);
         });
@@ -19197,8 +19197,7 @@ const appLogic = {
                 expected: message.content,
                 formatted,
                 changeCount: this.countTextFormattingChanges(message.content, formatted),
-                beforePreview: this.truncateTextFormattingPreview(message.content),
-                afterPreview: this.truncateTextFormattingPreview(formatted)
+                diffHunks: this.buildTextFormattingLineDiffHunks(message.content, formatted)
             };
         }).filter(Boolean);
     },
@@ -19215,6 +19214,7 @@ const appLogic = {
         if (options.boundaryBlank || options.compactDialogue || options.normalizeBlanks) labels.push('空行整理');
         if (options.trimTrailing) labels.push('行末空白削除');
         if (options.normalizeEllipsisDash) labels.push('三点リーダー・ダッシュ統一');
+        if (options.closeNarrativeGap) labels.push('地の文空行');
         if (options.commaRhythm) labels.push(`読点補正Lv${this.normalizeCommaRhythmLevel(options.commaRhythmLevel)}`);
         if (options.normalizeWidth) {
             const widthTargets = [];
@@ -19236,6 +19236,7 @@ const appLogic = {
             indentProse: Boolean(options.indentProse),
             boundaryBlank: Boolean(options.boundaryBlank),
             compactDialogue: Boolean(options.compactDialogue),
+            closeNarrativeGap: Boolean(options.closeNarrativeGap),
             trimTrailing: Boolean(options.trimTrailing),
             normalizeBlanks: Boolean(options.normalizeBlanks),
             normalizeEllipsisDash: Boolean(options.normalizeEllipsisDash),
@@ -19289,8 +19290,7 @@ const appLogic = {
             expected: message.content,
             formatted,
             changeCount: this.countTextFormattingChanges(message.content, formatted),
-            beforePreview: this.truncateTextFormattingPreview(message.content),
-            afterPreview: this.truncateTextFormattingPreview(formatted)
+            diffHunks: this.buildTextFormattingLineDiffHunks(message.content, formatted)
         };
     },
 
@@ -19657,6 +19657,7 @@ const appLogic = {
         if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) return true;
         if (/^\|.*\|$/.test(trimmed)) return true;
         if (/^<\/?[a-zA-Z][^>]*>$/.test(trimmed)) return true;
+        if (/^[◇◆□■△▲▽▼＊*・･\s\u3000]{3,}$/.test(trimmed)) return true;
         return false;
     },
 
@@ -19694,6 +19695,8 @@ const appLogic = {
                 blankCount = 1;
             } else if (options.compactDialogue && previousContentType === 'dialogue' && nextType === 'dialogue') {
                 blankCount = 0;
+            } else if (options.closeNarrativeGap && previousContentType === 'prose' && nextType === 'prose') {
+                blankCount = 0;
             } else if (options.normalizeBlanks) {
                 blankCount = Math.min(blankCount, 2);
             }
@@ -19722,14 +19725,164 @@ const appLogic = {
         return output.join('\n');
     },
 
-    countTextFormattingChanges(beforeText, afterText) {
-        const beforeLines = beforeText.split(/\r\n?|\n/);
-        const afterLines = afterText.split(/\r\n?|\n/);
-        const length = Math.max(beforeLines.length, afterLines.length);
-        let count = 0;
-        for (let i = 0; i < length; i++) {
-            if ((beforeLines[i] ?? '') !== (afterLines[i] ?? '')) count++;
+    splitTextFormattingLines(text) {
+        return String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+    },
+
+    buildTextFormattingLineDiffOps(beforeText, afterText) {
+        const beforeLines = this.splitTextFormattingLines(beforeText);
+        const afterLines = this.splitTextFormattingLines(afterText);
+        const maxMatrixSize = 90000;
+
+        if (beforeLines.length * afterLines.length > maxMatrixSize) {
+            return this.buildTextFormattingSimpleLineDiffOps(beforeLines, afterLines);
         }
+
+        const dp = Array.from({ length: beforeLines.length + 1 }, () => Array(afterLines.length + 1).fill(0));
+        for (let i = beforeLines.length - 1; i >= 0; i--) {
+            for (let j = afterLines.length - 1; j >= 0; j--) {
+                dp[i][j] = beforeLines[i] === afterLines[j]
+                    ? dp[i + 1][j + 1] + 1
+                    : Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+
+        const ops = [];
+        let i = 0;
+        let j = 0;
+        while (i < beforeLines.length && j < afterLines.length) {
+            if (beforeLines[i] === afterLines[j]) {
+                ops.push({ type: 'equal', before: beforeLines[i], after: afterLines[j] });
+                i++;
+                j++;
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                ops.push({ type: 'delete', before: beforeLines[i] });
+                i++;
+            } else {
+                ops.push({ type: 'add', after: afterLines[j] });
+                j++;
+            }
+        }
+        while (i < beforeLines.length) {
+            ops.push({ type: 'delete', before: beforeLines[i] });
+            i++;
+        }
+        while (j < afterLines.length) {
+            ops.push({ type: 'add', after: afterLines[j] });
+            j++;
+        }
+        return ops;
+    },
+
+    buildTextFormattingSimpleLineDiffOps(beforeLines, afterLines) {
+        let start = 0;
+        while (start < beforeLines.length && start < afterLines.length && beforeLines[start] === afterLines[start]) {
+            start++;
+        }
+
+        let beforeEnd = beforeLines.length - 1;
+        let afterEnd = afterLines.length - 1;
+        while (beforeEnd >= start && afterEnd >= start && beforeLines[beforeEnd] === afterLines[afterEnd]) {
+            beforeEnd--;
+            afterEnd--;
+        }
+
+        const ops = [];
+        beforeLines.slice(0, start).forEach(line => ops.push({ type: 'equal', before: line, after: line }));
+        for (let i = start; i <= beforeEnd; i++) ops.push({ type: 'delete', before: beforeLines[i] });
+        for (let i = start; i <= afterEnd; i++) ops.push({ type: 'add', after: afterLines[i] });
+        beforeLines.slice(beforeEnd + 1).forEach(line => ops.push({ type: 'equal', before: line, after: line }));
+        return ops;
+    },
+
+    buildTextFormattingLineDiffHunks(beforeText, afterText, contextSize = 1) {
+        const ops = this.buildTextFormattingLineDiffOps(beforeText, afterText);
+        const changedIndexes = ops
+            .map((op, index) => op.type === 'equal' ? -1 : index)
+            .filter(index => index >= 0);
+        if (changedIndexes.length === 0) return [];
+
+        const ranges = [];
+        changedIndexes.forEach(index => {
+            const start = Math.max(0, index - contextSize);
+            const end = Math.min(ops.length - 1, index + contextSize);
+            const last = ranges[ranges.length - 1];
+            if (last && start <= last.end + 1) {
+                last.end = Math.max(last.end, end);
+            } else {
+                ranges.push({ start, end });
+            }
+        });
+
+        return ranges.slice(0, 6).map(range => {
+            const hunkOps = ops.slice(range.start, range.end + 1);
+            return {
+                beforeLines: hunkOps
+                    .filter(op => op.type === 'equal' || op.type === 'delete')
+                    .map(op => op.before ?? ''),
+                afterLines: hunkOps
+                    .filter(op => op.type === 'equal' || op.type === 'add')
+                    .map(op => op.after ?? ''),
+                changeCount: hunkOps.filter(op => op.type !== 'equal').length
+            };
+        });
+    },
+
+    createTextFormattingPreviewDiffElement(candidate) {
+        const diff = document.createElement('div');
+        diff.className = 'text-formatting-preview-diff';
+
+        const hunks = Array.isArray(candidate.diffHunks) && candidate.diffHunks.length > 0
+            ? candidate.diffHunks
+            : this.buildTextFormattingLineDiffHunks(candidate.expected, candidate.formatted);
+
+        hunks.forEach((hunk, index) => {
+            const hunkElement = document.createElement('div');
+            hunkElement.className = 'text-formatting-preview-hunk';
+
+            const hunkTitle = document.createElement('div');
+            hunkTitle.className = 'text-formatting-preview-hunk-title';
+            hunkTitle.textContent = `変更箇所 ${index + 1}`;
+            hunkElement.appendChild(hunkTitle);
+
+            hunkElement.appendChild(this.createTextFormattingPreviewLineBlock('変更前', hunk.beforeLines, 'before'));
+            hunkElement.appendChild(this.createTextFormattingPreviewLineBlock('変更後', hunk.afterLines, 'after'));
+            diff.appendChild(hunkElement);
+        });
+
+        return diff;
+    },
+
+    createTextFormattingPreviewLineBlock(label, lines, type) {
+        const block = document.createElement('div');
+        block.className = `text-formatting-preview-${type}`;
+
+        const labelElement = document.createElement('div');
+        labelElement.className = 'text-formatting-preview-block-label';
+        labelElement.textContent = label;
+        block.appendChild(labelElement);
+
+        const lineList = document.createElement('div');
+        lineList.className = 'text-formatting-preview-lines';
+        (Array.isArray(lines) && lines.length > 0 ? lines : ['']).forEach(line => {
+            const lineElement = document.createElement('div');
+            lineElement.className = 'text-formatting-preview-line';
+            if (line === '') {
+                lineElement.classList.add('is-blank');
+                lineElement.textContent = '［空行］';
+            } else {
+                lineElement.textContent = line;
+            }
+            lineList.appendChild(lineElement);
+        });
+        block.appendChild(lineList);
+        return block;
+    },
+
+    countTextFormattingChanges(beforeText, afterText) {
+        const count = this.buildTextFormattingLineDiffOps(beforeText, afterText)
+            .filter(op => op.type !== 'equal')
+            .length;
         return Math.max(1, count);
     },
 

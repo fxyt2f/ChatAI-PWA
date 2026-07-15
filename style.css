@@ -1274,6 +1274,9 @@ body.dark-mode #settings-screen a:hover {
 
 .text-formatting-preview {
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: min(620px, calc(100dvh - 190px));
 }
 
 .text-formatting-preview h4 {
@@ -1295,8 +1298,8 @@ body.dark-mode #settings-screen a:hover {
 .text-formatting-preview-list {
     display: grid;
     gap: 8px;
-    max-height: min(280px, 34dvh);
-    overflow-y: auto;
+    align-content: start;
+    overflow: visible;
     padding-right: 2px;
 }
 
@@ -1333,17 +1336,31 @@ body.dark-mode #settings-screen a:hover {
 
 .text-formatting-preview-diff {
     display: grid;
-    gap: 4px;
+    gap: 10px;
     font-size: 0.86rem;
     line-height: 1.45;
 }
 
+.text-formatting-preview-hunk {
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-tertiary);
+    border-radius: var(--border-radius-sm);
+}
+
+.text-formatting-preview-hunk-title,
+.text-formatting-preview-block-label {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
 .text-formatting-preview-before,
 .text-formatting-preview-after {
-    max-height: 4.6em;
-    overflow: auto;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    display: grid;
+    gap: 4px;
 }
 
 .text-formatting-preview-before {
@@ -1354,9 +1371,35 @@ body.dark-mode #settings-screen a:hover {
     color: var(--text-primary);
 }
 
+.text-formatting-preview-lines {
+    display: grid;
+    gap: 2px;
+}
+
+.text-formatting-preview-line {
+    min-height: 1.45em;
+    padding: 2px 6px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+}
+
+.text-formatting-preview-line.is-blank {
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px dashed var(--border-primary);
+}
+
 .text-formatting-actions {
     flex: 0 0 auto;
     flex-wrap: wrap;
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    padding-top: 10px;
+    padding-bottom: max(0px, env(safe-area-inset-bottom));
+    background: var(--bg-primary);
 }
 
 .text-formatting-actions .dialog-secondary-btn {
@@ -1426,7 +1469,7 @@ body.dark-mode #settings-screen a:hover {
     }
 
     .text-formatting-preview-list {
-        max-height: min(240px, 30dvh);
+        overflow: visible;
     }
 
     .text-formatting-preview-card {
