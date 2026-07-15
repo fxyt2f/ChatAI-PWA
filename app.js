@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.5-beta2";
-const APP_CACHE_VERSION = "v1.34.5-beta2";
+const APP_VERSION = "1.34.5";
+const APP_CACHE_VERSION = "v1.34.5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -213,17 +213,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
-    "1.34.5-beta2": [
-        "文章整形ダイアログからプレビュー機能を削除しました。",
-        "文章整形を設定後すぐに適用できるシンプルな操作へ変更しました。",
-        "プレビュー専用の変更行表示・空行マーカー・差分生成処理を整理しました。",
-        "「地の文同士の空行を詰める」やUndo/Redoなど既存の整形機能は維持しました。"
-    ],
-    "1.34.5-beta1": [
-        "文章整形に「地の文同士の空行を詰める」を追加しました。",
-        "文章整形プレビューをメッセージ全文ではなく変更行中心で表示するよう改善しました。",
-        "ダイアログ下部までスクロールした際、プレビューが表示可能領域を広く使うよう調整しました。",
-        "空行の追加・削除をプレビュー上で確認しやすい表示に改善しました。"
+    "1.34.5": [
+        "文章整形に「地の文同士の空行を詰める」設定を追加しました。",
+        "文章整形ダイアログからプレビュー表示を削除し、設定から直接適用する操作へ整理しました。",
+        "文章整形後も既存の変更履歴とUndo/Redoを利用できるよう維持しました。"
     ],
     "1.34.4": [
         "文章整形ダイアログの対象ボタン順序を「モデル」「ユーザー」「両方」に変更しました。",
