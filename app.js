@@ -214,9 +214,8 @@ const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
     "1.34.6-beta1": [
-        "メッセージ個別の折りたたみボタンを右上のオーバーレイ表示へ試験変更しました。",
-        "フローティングボタンと同じ大きさの半透明な丸型デザインを採用しました。",
-        "PCのマウスオーバーとスマホのタップによる強調表示に対応しました。",
+        "メッセージ個別の折りたたみボタンを、メッセージ領域内で画面上部に残るオーバーレイ表示へ試験変更しました。",
+        "非操作時は透明度を高くし、マウスオーバーやタップ時に半透明の丸型ボタンとして表示するよう調整しました。",
         "折りたたみ時の表示高さを小幅に調整しました。"
     ],
     "1.34.5": [
@@ -4057,7 +4056,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     collapseButton.title = '全文を表示';
     collapseButton.setAttribute('aria-label', '全文を表示');
     collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
-    collapseButton.onclick = () => this.toggleMessageCollapse(messageDiv);
+    collapseButton.onclick = (event) => {
+        event.stopPropagation();
+        this.toggleMessageCollapse(messageDiv);
+    };
     collapseOverlay.appendChild(collapseButton);
     messageDiv.insertBefore(collapseOverlay, contentDiv);
 
@@ -5762,6 +5764,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 }
             });
         messageElement.classList.add('tm-collapse-touch-visible');
+    },
+
+    clearMessageCollapseTouchVisibility() {
+        elements.messageContainer
+            ?.querySelectorAll?.('.message.tm-collapse-touch-visible')
+            .forEach(message => message.classList.remove('tm-collapse-touch-visible'));
     },
 
     updateMessageCollapseButton(messageElement) {
@@ -14249,6 +14257,10 @@ const appLogic = {
 
         // クリックイベントをトグル方式に変更
         mainContent.addEventListener('click', (event) => {
+            if (!event.target.closest('#chat-screen .message')) {
+                uiUtils.clearMessageCollapseTouchVisibility();
+            }
+
             // 設定が 'on-click' でない場合は何もしない
             if (state.settings.floatingPanelBehavior !== 'on-click') return;
 
