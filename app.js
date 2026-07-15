@@ -48,9 +48,9 @@ const EDIT_TEXTAREA_MAX_HEIGHT = 680;
 const EDIT_VIEWPORT_MAX_RATIO = 0.72;
 const SYSTEM_PROMPT_AUTOSAVE_DELAY_MS = 700;
 const MESSAGE_COLLAPSE_THRESHOLD = 1200;
-const MESSAGE_COLLAPSE_HEIGHT = 780;
-const MESSAGE_COLLAPSE_MIN_HEIGHT = 520;
-const MESSAGE_COLLAPSE_VIEWPORT_RATIO = 0.62;
+const MESSAGE_COLLAPSE_HEIGHT = 710;
+const MESSAGE_COLLAPSE_MIN_HEIGHT = 480;
+const MESSAGE_COLLAPSE_VIEWPORT_RATIO = 0.56;
 const MESSAGE_COLLAPSE_STORAGE_PREFIX = 'chatai-pwa-message-collapse:';
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.5";
-const APP_CACHE_VERSION = "v1.34.5";
+const APP_VERSION = "1.34.6-beta1";
+const APP_CACHE_VERSION = "v1.34.6-beta1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -213,6 +213,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.6-beta1": [
+        "メッセージ個別の折りたたみボタンを右上のオーバーレイ表示へ試験変更しました。",
+        "フローティングボタンと同じ大きさの半透明な丸型デザインを採用しました。",
+        "PCのマウスオーバーとスマホのタップによる強調表示に対応しました。",
+        "折りたたみ時の表示高さを小幅に調整しました。"
+    ],
     "1.34.5": [
         "文章整形に「地の文同士の空行を詰める」設定を追加しました。",
         "文章整形ダイアログからプレビュー表示を削除し、設定から直接適用する操作へ整理しました。",
@@ -4044,6 +4050,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     }
 
+    const collapseOverlay = document.createElement('div');
+    collapseOverlay.classList.add('tm-message-collapse-overlay');
+    const collapseButton = document.createElement('button');
+    collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
+    collapseButton.title = '全文を表示';
+    collapseButton.setAttribute('aria-label', '全文を表示');
+    collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
+    collapseButton.onclick = () => this.toggleMessageCollapse(messageDiv);
+    collapseOverlay.appendChild(collapseButton);
+    messageDiv.insertBefore(collapseOverlay, contentDiv);
+
     const editArea = document.createElement('div');
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
@@ -4124,13 +4141,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             redoButton.onclick = () => appLogic.redoLatestChangeForMessage(index, role);
             actionButtonsDiv.appendChild(redoButton);
 
-            const collapseButton = document.createElement('button');
-            collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
-            collapseButton.title = '全文を表示';
-            collapseButton.setAttribute('aria-label', '全文を表示');
-            collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
-            collapseButton.onclick = () => this.toggleMessageCollapse(messageDiv);
-            actionButtonsDiv.appendChild(collapseButton);
         }
 
         if (!isSummarized) {
@@ -4229,6 +4239,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (actionsDiv.hasChildNodes()) {
             messageDiv.appendChild(actionsDiv);
         }
+    }
+
+    if (!isStreamingPlaceholder && (role === 'user' || role === 'model')) {
+        messageDiv.addEventListener('click', (event) => this.revealMessageCollapseControl(messageDiv, event));
     }
 
     if (isStreamingPlaceholder) {
@@ -5730,8 +5744,28 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return contentElement.scrollHeight > MESSAGE_COLLAPSE_THRESHOLD;
     },
 
+    getMessageCollapseButton(messageElement) {
+        return messageElement?.querySelector(':scope > .tm-message-collapse-overlay .tm-message-collapse-btn');
+    },
+
+    revealMessageCollapseControl(messageElement, event = null) {
+        if (!messageElement?.classList?.contains('tm-collapsible')) return;
+        if (event?.target?.closest?.('a, button, input, textarea, select, details, summary, .message-actions, .message-cascade-controls, .tm-message-collapse-overlay, .message-edit-area, pre, code')) {
+            return;
+        }
+
+        elements.messageContainer
+            ?.querySelectorAll?.('.message.tm-collapse-touch-visible')
+            .forEach(message => {
+                if (message !== messageElement) {
+                    message.classList.remove('tm-collapse-touch-visible');
+                }
+            });
+        messageElement.classList.add('tm-collapse-touch-visible');
+    },
+
     updateMessageCollapseButton(messageElement) {
-        const button = messageElement?.querySelector(':scope > .message-actions .tm-message-collapse-btn');
+        const button = this.getMessageCollapseButton(messageElement);
         if (!button) return;
         const icon = button.querySelector('.material-symbols-outlined');
         const isCollapsed = messageElement.classList.contains('tm-collapsed');
@@ -5750,7 +5784,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         delete messageElement.dataset.chatSearchTemporarilyExpanded;
         delete messageElement.dataset.chatSearchTemporaryExpanded;
         state.chatSearch.temporarilyExpandedMessages?.delete?.(messageElement);
-        const button = messageElement.querySelector(':scope > .message-actions .tm-message-collapse-btn');
+        messageElement.classList.remove('tm-collapse-touch-visible');
+        const button = this.getMessageCollapseButton(messageElement);
         if (button) {
             button.classList.add('hidden');
             button.disabled = true;
@@ -5760,7 +5795,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     applyMessageCollapse(messageElement) {
         if (!messageElement || !messageElement.isConnected) return;
         const contentElement = messageElement.querySelector(':scope > .message-content');
-        const button = messageElement.querySelector(':scope > .message-actions .tm-message-collapse-btn');
+        const button = this.getMessageCollapseButton(messageElement);
         if (!contentElement || !button || !this.isMessageCollapseCandidate(messageElement, contentElement)) {
             this.resetMessageCollapseState(messageElement);
             return;
@@ -5878,7 +5913,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const shouldExpand = messages.every(message => message.classList.contains('tm-collapsed'));
         messages.forEach(message => {
             const contentElement = message.querySelector(':scope > .message-content');
-            const button = message.querySelector(':scope > .message-actions .tm-message-collapse-btn');
+            const button = this.getMessageCollapseButton(message);
             const storageKey = message.dataset.collapseStorageKey || this.getMessageCollapseStorageKey(message, contentElement);
             delete message.dataset.chatSearchTemporarilyExpanded;
             delete message.dataset.chatSearchTemporaryExpanded;
