@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.6-beta2";
-const APP_CACHE_VERSION = "v1.34.6-beta2";
+const APP_VERSION = "1.34.6-beta3";
+const APP_CACHE_VERSION = "v1.34.6-beta3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -216,6 +216,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.6-beta3": [
+        "個別折りたたみボタンをメッセージ領域内の右下表示へ変更しました。",
+        "PC・スマホとも常時薄く表示し、ボタン操作時だけ見やすくなるデザインへ整理しました。",
+        "個別ボタン操作時にヘッダーやフローティングボタンが反応しないよう調整しました。"
+    ],
     "1.34.6-beta2": [
         "スマホで個別折りたたみボタンのタップ表示と透明化を切り替えられるように修正しました。",
         "ヘッダーやフローティングボタンを避けるよう、スマホのsticky表示位置を調整しました。",
@@ -2173,7 +2178,7 @@ const uiUtils = {
         document.body?.classList.toggle('chat-search-open', Boolean(isOpen));
         elements.chatScreen?.classList.toggle('chat-search-open', Boolean(isOpen));
         elements.chatSearchOpenBtn?.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-        this.scheduleMobileMessageCollapseStickyTopUpdate();
+        this.scheduleMessageCollapseStickyTopUpdate();
     },
 
     setChatSearchStatus(message = '', isError = false) {
@@ -4066,11 +4071,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     collapseButton.setAttribute('aria-label', '全文を表示');
     collapseButton.classList.add('tm-message-collapse-btn', 'hidden');
     collapseButton.onclick = (event) => {
+        event.preventDefault();
         event.stopPropagation();
         this.toggleMessageCollapse(messageDiv);
     };
     collapseOverlay.appendChild(collapseButton);
-    messageDiv.insertBefore(collapseOverlay, contentDiv);
+    contentDiv.insertBefore(collapseOverlay, contentDiv.firstChild);
 
     const editArea = document.createElement('div');
     editArea.classList.add('message-edit-area', 'hidden');
@@ -4250,10 +4256,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (actionsDiv.hasChildNodes()) {
             messageDiv.appendChild(actionsDiv);
         }
-    }
-
-    if (!isStreamingPlaceholder && (role === 'user' || role === 'model')) {
-        messageDiv.addEventListener('click', (event) => this.revealMessageCollapseControl(messageDiv, event));
     }
 
     if (isStreamingPlaceholder) {
@@ -5481,7 +5483,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             state.currentScreen = screenName;
             if (screenName === 'chat') {
                 this.scheduleComposerTextareaResize(true);
-                this.scheduleMobileMessageCollapseStickyTopUpdate();
+                this.scheduleMessageCollapseStickyTopUpdate();
                 appLogic.updateMessageActionButtonStates();
                 void appLogic.updateChangeHistoryControls();
             }
@@ -5757,135 +5759,63 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     getMessageCollapseButton(messageElement) {
-        return messageElement?.querySelector(':scope > .tm-message-collapse-overlay .tm-message-collapse-btn');
+        return messageElement?.querySelector(':scope > .message-content > .tm-message-collapse-overlay .tm-message-collapse-btn');
     },
 
-    isTouchCollapseControlMode() {
-        return Boolean(window.matchMedia?.('(hover: none) and (pointer: coarse)')?.matches);
-    },
-
-    isMessageCollapseTouchExcludedTarget(target) {
-        if (!target?.closest) return false;
-        return Boolean(target.closest([
-            'button',
-            'a',
-            'input',
-            'textarea',
-            'select',
-            'option',
-            'label',
-            'summary',
-            'details',
-            'pre',
-            'code',
-            '.message-actions',
-            '.message-cascade-controls',
-            '.tm-message-collapse-overlay',
-            '.message-edit-area',
-            '.attachment-details',
-            '.attachment-list',
-            '.thought-summary-details',
-            '.function-call-details',
-            '.search-result-link',
-            '.chat-search-dialog',
-            '.floating-action-panel'
-        ].join(', ')));
-    },
-
-    revealMessageCollapseControl(messageElement, event = null) {
-        if (!this.isTouchCollapseControlMode()) return;
-        if (!messageElement?.classList?.contains('tm-collapsible')) return;
-        const selection = window.getSelection?.();
-        if (selection && !selection.isCollapsed) return;
-        if (event && this.isMessageCollapseTouchExcludedTarget(event.target)) {
-            return;
-        }
-
-        const wasVisible = messageElement.classList.contains('tm-collapse-touch-visible');
-        elements.messageContainer
-            ?.querySelectorAll?.('.message.tm-collapse-touch-visible')
-            .forEach(message => {
-                if (message !== messageElement) {
-                    message.classList.remove('tm-collapse-touch-visible');
-                }
-            });
-        messageElement.classList.toggle('tm-collapse-touch-visible', !wasVisible);
-    },
-
-    clearMessageCollapseTouchVisibility() {
-        elements.messageContainer
-            ?.querySelectorAll?.('.message.tm-collapse-touch-visible')
-            .forEach(message => message.classList.remove('tm-collapse-touch-visible'));
-    },
-
-    calculateMobileMessageCollapseStickyTop() {
+    calculateMessageCollapseStickyTop() {
         const scrollContainer = elements.chatScreen?.querySelector?.('.main-content');
         if (!scrollContainer) return 8;
 
         const scrollRect = scrollContainer.getBoundingClientRect();
-        const header = elements.chatScreen?.querySelector?.('.app-header');
-        const floatingPanel = elements.floatingActionPanel;
-        const headerRect = header?.getBoundingClientRect?.();
-        const floatingRect = floatingPanel?.getBoundingClientRect?.();
-        const floatingStyle = floatingPanel ? window.getComputedStyle(floatingPanel) : null;
-        const isFloatingBlocking =
-            floatingPanel &&
-            floatingStyle?.display !== 'none' &&
-            floatingStyle?.visibility !== 'hidden' &&
-            floatingPanel.classList.contains('visible');
-        const safeTop = Math.max(0, Math.round(window.visualViewport?.offsetTop || 0));
-        const gap = 8;
-        const blockingBottom = Math.max(
-            scrollRect.top,
-            headerRect?.bottom || scrollRect.top,
-            isFloatingBlocking ? (floatingRect?.bottom || scrollRect.top) : scrollRect.top
+        const composer = this.getComposerElement?.();
+        const composerRect = composer?.getBoundingClientRect?.();
+        const controlSize = 40;
+        const gap = 16;
+        const visibleBottom = Math.min(
+            scrollRect.bottom,
+            composerRect?.top || scrollRect.bottom
         );
 
-        return Math.max(0, Math.round(blockingBottom - scrollRect.top + safeTop + gap));
+        return Math.max(8, Math.round(visibleBottom - scrollRect.top - controlSize - gap));
     },
 
-    updateMobileMessageCollapseStickyTop() {
+    updateMessageCollapseStickyTop() {
         const chatScreen = elements.chatScreen;
         if (!chatScreen) return;
-        const top = this.isTouchCollapseControlMode()
-            ? this.calculateMobileMessageCollapseStickyTop()
-            : 8;
-        chatScreen.style.setProperty('--message-collapse-sticky-top-mobile', `${top}px`);
+        chatScreen.style.setProperty('--message-collapse-sticky-top', `${this.calculateMessageCollapseStickyTop()}px`);
     },
 
-    scheduleMobileMessageCollapseStickyTopUpdate() {
+    scheduleMessageCollapseStickyTopUpdate() {
         cancelAnimationFrame(messageCollapseStickyFrame);
         messageCollapseStickyFrame = requestAnimationFrame(() => {
             messageCollapseStickyFrame = 0;
-            this.updateMobileMessageCollapseStickyTop();
+            this.updateMessageCollapseStickyTop();
         });
     },
 
     installMessageCollapseStickyObservers() {
         if (messageCollapseStickyResizeObserver || typeof ResizeObserver === 'undefined') {
-            this.scheduleMobileMessageCollapseStickyTopUpdate();
+            this.scheduleMessageCollapseStickyTopUpdate();
             return;
         }
 
         messageCollapseStickyResizeObserver = new ResizeObserver(() => {
-            this.scheduleMobileMessageCollapseStickyTopUpdate();
+            this.scheduleMessageCollapseStickyTopUpdate();
         });
         [
             elements.chatScreen?.querySelector?.('.main-content'),
-            elements.chatScreen?.querySelector?.('.app-header'),
-            elements.floatingActionPanel
+            this.getComposerElement?.()
         ].filter(Boolean).forEach(element => messageCollapseStickyResizeObserver.observe(element));
 
-        this.scheduleMobileMessageCollapseStickyTopUpdate();
+        this.scheduleMessageCollapseStickyTopUpdate();
     },
 
     installMessageCollapseStickyEventListeners() {
         if (messageCollapseStickyEventsInstalled) return;
         messageCollapseStickyEventsInstalled = true;
-        window.addEventListener('resize', () => this.scheduleMobileMessageCollapseStickyTopUpdate());
-        window.addEventListener('orientationchange', () => this.scheduleMobileMessageCollapseStickyTopUpdate());
-        window.visualViewport?.addEventListener?.('resize', () => this.scheduleMobileMessageCollapseStickyTopUpdate());
-        window.visualViewport?.addEventListener?.('scroll', () => this.scheduleMobileMessageCollapseStickyTopUpdate());
+        window.addEventListener('resize', () => this.scheduleMessageCollapseStickyTopUpdate());
+        window.addEventListener('orientationchange', () => this.scheduleMessageCollapseStickyTopUpdate());
+        window.visualViewport?.addEventListener?.('resize', () => this.scheduleMessageCollapseStickyTopUpdate());
     },
 
     updateMessageCollapseButton(messageElement) {
@@ -5908,7 +5838,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         delete messageElement.dataset.chatSearchTemporarilyExpanded;
         delete messageElement.dataset.chatSearchTemporaryExpanded;
         state.chatSearch.temporarilyExpandedMessages?.delete?.(messageElement);
-        messageElement.classList.remove('tm-collapse-touch-visible');
         const button = this.getMessageCollapseButton(messageElement);
         if (button) {
             button.classList.add('hidden');
@@ -12832,7 +12761,7 @@ const appLogic = {
             }
             if (shouldUpdateGenerationStatus) {
                 uiUtils.updateGenerationStatusIndicator();
-                uiUtils.scheduleMobileMessageCollapseStickyTopUpdate();
+                uiUtils.scheduleMessageCollapseStickyTopUpdate();
             }
             if (shouldRefreshChatSearch) {
                 uiUtils.scheduleChatSearch(false);
@@ -14376,16 +14305,15 @@ const appLogic = {
 
         // クリックイベントをトグル方式に変更
         mainContent.addEventListener('click', (event) => {
-            if (!event.target.closest('#chat-screen .message')) {
-                uiUtils.clearMessageCollapseTouchVisibility();
-            }
-
             // 設定が 'on-click' でない場合は何もしない
             if (state.settings.floatingPanelBehavior !== 'on-click') return;
 
             const interactiveElements = 'A, BUTTON, INPUT, TEXTAREA, SELECT, DETAILS, SUMMARY, IMG';
             // 操作可能な要素やパネル自体をクリックした場合は反応しない
-            if (event.target.closest(interactiveElements) || event.target.closest('.floating-action-panel')) {
+            if (event.target.closest(interactiveElements) ||
+                event.target.closest('.floating-action-panel') ||
+                event.target.closest('.tm-message-collapse-overlay'))
+            {
                 return;
             }
 
@@ -14394,7 +14322,7 @@ const appLogic = {
             if (panel.classList.contains('visible')) {
                 clearTimeout(state.panelFadeOutTimer);
                 panel.classList.remove('visible');
-                uiUtils.scheduleMobileMessageCollapseStickyTopUpdate();
+                uiUtils.scheduleMessageCollapseStickyTopUpdate();
             } else {
                 // パネルが非表示の場合は、表示する (既存のロジックを呼び出す)
                 this.showActionPanel();
@@ -19076,7 +19004,7 @@ const appLogic = {
             // on-clickの場合は、最初は非表示にしておく
             panel.classList.remove('visible');
         }
-        uiUtils.scheduleMobileMessageCollapseStickyTopUpdate();
+        uiUtils.scheduleMessageCollapseStickyTopUpdate();
     },
 
     normalizeCommaRhythmLevel(value) {
@@ -20300,10 +20228,10 @@ const appLogic = {
         // 'on-click' の場合の挙動
         clearTimeout(state.panelFadeOutTimer);
         panel.classList.add('visible');
-        uiUtils.scheduleMobileMessageCollapseStickyTopUpdate();
+        uiUtils.scheduleMessageCollapseStickyTopUpdate();
         state.panelFadeOutTimer = setTimeout(() => {
             panel.classList.remove('visible');
-            uiUtils.scheduleMobileMessageCollapseStickyTopUpdate();
+            uiUtils.scheduleMessageCollapseStickyTopUpdate();
         }, 5000); // 5秒後にフェードアウト
     },
 

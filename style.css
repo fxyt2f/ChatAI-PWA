@@ -4334,12 +4334,10 @@ body.dark-mode #sd-test-connection-btn {
 #chat-screen .message.tm-collapsible {
     --message-collapse-fade-height: 140px;
     --message-collapse-control-size: 40px;
-    --message-collapse-control-offset: 3px;
-    --message-collapse-sticky-top: 8px;
-    --message-collapse-sticky-top-mobile: 8px;
-    --message-collapse-control-opacity: 0.12;
-    --message-collapse-control-hover-opacity: 0.9;
-    --message-collapse-control-collapsed-opacity: 0.16;
+    --message-collapse-control-offset: 4px;
+    --message-collapse-sticky-top: calc(100dvh - var(--composer-height, 160px) - 56px);
+    --message-collapse-control-opacity: 0.14;
+    --message-collapse-control-hover-opacity: 0.78;
 }
 
 #chat-screen .message.tm-collapsible .message-content {
@@ -4348,23 +4346,26 @@ body.dark-mode #sd-test-connection-btn {
 
 #chat-screen .message .tm-message-collapse-overlay {
     position: sticky;
-    top: var(--message-collapse-sticky-top, 8px);
+    top: var(--message-collapse-sticky-top, calc(100dvh - var(--composer-height, 160px) - 56px));
+    right: var(--message-collapse-control-offset, 4px);
     display: flex;
     justify-content: flex-end;
-    align-items: flex-start;
-    width: 100%;
-    height: 0;
-    margin: 0;
+    align-items: center;
+    width: var(--message-collapse-control-size, 40px);
+    height: var(--message-collapse-control-size, 40px);
+    margin: 0 0 calc(-1 * var(--message-collapse-control-size, 40px)) auto;
     padding: 0;
     box-sizing: border-box;
     pointer-events: none;
     z-index: 4;
 }
 
-#chat-screen .message.user .tm-message-collapse-overlay {
-    width: min(var(--content-max-width, 760px), calc(100vw - 32px));
-    max-width: calc(100vw - 32px);
-    margin-left: calc(100% - min(var(--content-max-width, 760px), calc(100vw - 32px)));
+#chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-overlay {
+    position: absolute;
+    top: auto;
+    right: var(--message-collapse-control-offset, 4px);
+    bottom: var(--message-collapse-control-offset, 4px);
+    margin: 0;
 }
 
 #chat-screen .message .tm-message-collapse-btn {
@@ -4375,7 +4376,7 @@ body.dark-mode #sd-test-connection-btn {
     height: var(--message-collapse-control-size, 32px);
     min-width: var(--message-collapse-control-size, 32px);
     min-height: var(--message-collapse-control-size, 32px);
-    margin: var(--message-collapse-control-offset, 3px) var(--message-collapse-control-offset, 3px) 0 0;
+    margin: 0;
     padding: 0;
     border: none;
     border-radius: 50%;
@@ -4414,18 +4415,47 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 #chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-btn {
-    opacity: var(--message-collapse-control-collapsed-opacity, 0.16);
+    opacity: var(--message-collapse-control-opacity, 0.14);
+}
+
+#chat-screen .message.user .tm-message-collapse-btn {
+    color: var(--user-message-fg, #ffffff);
+    background-color: color-mix(in srgb, var(--user-message-bg, #1976d2) 68%, transparent);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 34%, transparent);
+    opacity: 0.42;
 }
 
 #chat-screen .message .tm-message-collapse-btn:hover:not(:disabled),
 #chat-screen .message .tm-message-collapse-btn:focus-visible {
+    color: var(--text-primary);
+    background-color: rgba(255, 255, 255, 0.58);
+    border-color: rgba(255, 255, 255, 0.38);
+    box-shadow: var(--shadow-2);
+    opacity: var(--message-collapse-control-hover-opacity, 0.78);
+    outline: 0;
+}
+
+#chat-screen .message.user .tm-message-collapse-btn:hover:not(:disabled),
+#chat-screen .message.user .tm-message-collapse-btn:focus-visible {
+    color: var(--user-message-fg, #ffffff);
+    background-color: color-mix(in srgb, var(--user-message-bg, #1976d2) 86%, transparent);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 52%, transparent);
+    opacity: 0.82;
+}
+
+#chat-screen .message .tm-message-collapse-btn:active:not(:disabled) {
     color: #ffffff;
     background-color: var(--bg-button-action);
     border-color: color-mix(in srgb, var(--bg-button-action) 72%, transparent);
     box-shadow: var(--shadow-3);
     opacity: 1;
-    transform: scale(1.04);
-    outline: 0;
+    transform: scale(1.03);
+}
+
+#chat-screen .message.user .tm-message-collapse-btn:active:not(:disabled) {
+    color: var(--user-message-fg, #ffffff);
+    background-color: var(--user-message-bg, #1976d2);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 60%, transparent);
 }
 
 body.dark-mode #chat-screen .message .tm-message-collapse-btn {
@@ -4436,89 +4466,65 @@ body.dark-mode #chat-screen .message .tm-message-collapse-btn {
 
 body.dark-mode #chat-screen .message .tm-message-collapse-btn:hover:not(:disabled),
 body.dark-mode #chat-screen .message .tm-message-collapse-btn:focus-visible {
+    color: var(--text-primary);
+    background-color: rgba(40, 40, 40, 0.62);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+body.dark-mode #chat-screen .message .tm-message-collapse-btn:active:not(:disabled) {
     color: #ffffff;
     background-color: var(--bg-button-action-hover);
     border-color: color-mix(in srgb, var(--bg-button-action-hover) 72%, transparent);
 }
 
-@media (hover: hover) and (pointer: fine) {
-    #chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn {
-        color: var(--text-primary);
-        background-color: rgba(255, 255, 255, 0.68);
-        border-color: rgba(255, 255, 255, 0.46);
-        box-shadow: var(--shadow-2);
-        opacity: var(--message-collapse-control-hover-opacity, 0.9);
-    }
-
-    body.dark-mode #chat-screen .message.tm-collapsible:hover .tm-message-collapse-btn {
-        color: var(--text-primary);
-        background-color: rgba(40, 40, 40, 0.72);
-        border-color: rgba(255, 255, 255, 0.16);
-    }
+body.dark-mode #chat-screen .message.user .tm-message-collapse-btn {
+    color: var(--user-message-fg, #ffffff);
+    background-color: color-mix(in srgb, var(--user-message-bg, #1976d2) 62%, transparent);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 30%, transparent);
 }
 
-@media (hover: none) and (pointer: coarse) {
-    #chat-screen .message .tm-message-collapse-overlay {
-        top: var(--message-collapse-sticky-top-mobile, 8px);
-    }
+body.dark-mode #chat-screen .message.user .tm-message-collapse-btn:hover:not(:disabled),
+body.dark-mode #chat-screen .message.user .tm-message-collapse-btn:focus-visible {
+    color: var(--user-message-fg, #ffffff);
+    background-color: color-mix(in srgb, var(--user-message-bg, #1976d2) 82%, transparent);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 48%, transparent);
+}
 
-    #chat-screen .message .tm-message-collapse-btn {
-        opacity: 0.08;
-        pointer-events: none;
-    }
-
-    #chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-btn {
-        opacity: 0.1;
-    }
-
-    #chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
-        color: var(--text-primary);
-        background-color: rgba(255, 255, 255, 0.68);
-        border-color: rgba(255, 255, 255, 0.46);
-        box-shadow: var(--shadow-2);
-        opacity: 0.9;
-        pointer-events: auto;
-    }
-
-    body.dark-mode #chat-screen .message.tm-collapsible.tm-collapse-touch-visible .tm-message-collapse-btn {
-        color: var(--text-primary);
-        background-color: rgba(40, 40, 40, 0.72);
-        border-color: rgba(255, 255, 255, 0.16);
-    }
-
-    body.chat-search-open #chat-screen .message .tm-message-collapse-btn,
-    body:has(.custom-dialog[open]) #chat-screen .message .tm-message-collapse-btn,
-    body:has(#system-prompt-dialog:not([hidden])) #chat-screen .message .tm-message-collapse-btn {
-        opacity: 0;
-        pointer-events: none;
-    }
+body.dark-mode #chat-screen .message.user .tm-message-collapse-btn:active:not(:disabled) {
+    color: var(--user-message-fg, #ffffff);
+    background-color: var(--user-message-bg, #1976d2);
+    border-color: color-mix(in srgb, var(--user-message-fg, #ffffff) 58%, transparent);
 }
 
 #chat-screen .message.tm-collapsible.tm-collapsed .message-content {
     max-height: var(--message-collapse-height, 780px);
     overflow: hidden;
-    -webkit-mask-image: linear-gradient(
-        to bottom,
-        #000 0,
-        #000 calc(100% - var(--message-collapse-fade-height, 140px)),
-        transparent 100%
-    );
-    mask-image: linear-gradient(
-        to bottom,
-        #000 0,
-        #000 calc(100% - var(--message-collapse-fade-height, 140px)),
-        transparent 100%
-    );
-    -webkit-mask-size: 100% 100%;
-    mask-size: 100% 100%;
-    -webkit-mask-repeat: no-repeat;
-    mask-repeat: no-repeat;
 }
 
 #chat-screen .message.tm-collapsible:not(.tm-collapsed) .message-content,
 #chat-screen .message:not(.tm-collapsible) .message-content {
     -webkit-mask-image: none;
     mask-image: none;
+}
+
+#chat-screen .message.tm-collapsible.tm-collapsed .message-content::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: var(--message-collapse-fade-height, 140px);
+    background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0));
+    pointer-events: none;
+    z-index: 3;
+}
+
+#chat-screen .message.user.tm-collapsible.tm-collapsed .message-content::after {
+    background: linear-gradient(
+        to bottom,
+        transparent,
+        color-mix(in srgb, var(--user-message-bg, #1976d2) calc(var(--message-bubble-opacity, 1) * 100%), transparent)
+    );
 }
 
 #chat-screen .message.editing {
