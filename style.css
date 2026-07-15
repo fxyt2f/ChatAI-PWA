@@ -4333,38 +4333,66 @@ body.dark-mode #sd-test-connection-btn {
 
 #chat-screen .message.tm-collapsible {
     --message-collapse-fade-height: 140px;
-    --message-collapse-control-size: 40px;
-    --message-collapse-control-offset: 4px;
-    --message-collapse-sticky-top: calc(100dvh - var(--composer-height, 160px) - 56px);
+    --message-collapse-button-size: 40px;
+    --message-collapse-control-size: var(--message-collapse-button-size);
+    --message-collapse-right-gap: 4px;
+    --message-collapse-bottom-gap: 12px;
+    --message-collapse-actions-gap: 12px;
+    --message-collapse-sticky-top: calc(100dvh - var(--composer-height, 160px) - var(--message-collapse-button-size) - var(--message-collapse-bottom-gap));
     --message-collapse-control-opacity: 0.14;
     --message-collapse-control-hover-opacity: 0.78;
 }
 
-#chat-screen .message.tm-collapsible .message-content {
+#chat-screen .message .message-main-scope {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+#chat-screen .message .message-content,
+#chat-screen .message .tm-message-collapse-overlay-track {
+    grid-area: 1 / 1;
+    min-width: 0;
+}
+
+#chat-screen .message .message-content {
     position: relative;
 }
 
-#chat-screen .message .tm-message-collapse-overlay {
-    position: sticky;
-    top: var(--message-collapse-sticky-top, calc(100dvh - var(--composer-height, 160px) - 56px));
-    right: var(--message-collapse-control-offset, 4px);
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    width: var(--message-collapse-control-size, 40px);
-    height: var(--message-collapse-control-size, 40px);
-    margin: 0 0 calc(-1 * var(--message-collapse-control-size, 40px)) auto;
-    padding: 0;
+#chat-screen .message .tm-message-collapse-overlay-track {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    justify-items: end;
+    align-items: start;
+    padding: 0 var(--message-collapse-right-gap, 4px)
+        calc(var(--message-collapse-button-size, 40px) + var(--message-collapse-actions-gap, 12px)) 0;
     box-sizing: border-box;
     pointer-events: none;
     z-index: 4;
 }
 
-#chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-overlay {
+#chat-screen .message .tm-message-collapse-sticky-host {
+    position: sticky;
+    top: var(--message-collapse-sticky-top, calc(100dvh - var(--composer-height, 160px) - var(--message-collapse-button-size, 40px) - var(--message-collapse-bottom-gap, 12px)));
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    width: var(--message-collapse-button-size, 40px);
+    height: var(--message-collapse-button-size, 40px);
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 1;
+}
+
+#chat-screen .message.tm-collapsible.tm-collapsed .tm-message-collapse-sticky-host {
     position: absolute;
     top: auto;
-    right: var(--message-collapse-control-offset, 4px);
-    bottom: var(--message-collapse-control-offset, 4px);
+    right: var(--message-collapse-right-gap, 4px);
+    bottom: var(--message-collapse-actions-gap, 12px);
     margin: 0;
 }
 
@@ -4993,14 +5021,14 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
 #chat-screen .message.editing:hover .message-actions,
 #chat-screen .message.editing .message-cascade-controls,
 #chat-screen .message.editing:hover .message-cascade-controls,
-#chat-screen .message.editing .tm-message-collapse-overlay,
-#chat-screen .message.editing:hover .tm-message-collapse-overlay,
+#chat-screen .message.editing .tm-message-collapse-overlay-track,
+#chat-screen .message.editing:hover .tm-message-collapse-overlay-track,
 #chat-screen .message:has([id^="streaming-content-"]) .message-actions,
 #chat-screen .message:has([id^="streaming-content-"]) .message-cascade-controls,
-#chat-screen .message:has([id^="streaming-content-"]) .tm-message-collapse-overlay,
+#chat-screen .message:has([id^="streaming-content-"]) .tm-message-collapse-overlay-track,
 #chat-screen .message[id^="streaming-message-"] .message-actions,
 #chat-screen .message[id^="streaming-message-"] .message-cascade-controls,
-#chat-screen .message[id^="streaming-message-"] .tm-message-collapse-overlay {
+#chat-screen .message[id^="streaming-message-"] .tm-message-collapse-overlay-track {
     display: none !important;
     opacity: 0;
     visibility: hidden;

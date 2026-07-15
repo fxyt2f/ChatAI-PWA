@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.6-beta3";
-const APP_CACHE_VERSION = "v1.34.6-beta3";
+const APP_VERSION = "1.34.6-beta4";
+const APP_CACHE_VERSION = "v1.34.6-beta4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -216,6 +216,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.6-beta4": [
+        "個別折りたたみボタンの右下sticky構造を再設計しました。",
+        "本文、入力欄、メッセージ下部操作との重なりを防止しました。",
+        "折りたたみ時の表示崩れを修正しました。"
+    ],
     "1.34.6-beta3": [
         "個別折りたたみボタンをメッセージ領域内の右下表示へ変更しました。",
         "PC・スマホとも常時薄く表示し、ボタン操作時だけ見やすくなるデザインへ整理しました。",
@@ -3833,7 +3838,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
              const pre = document.createElement('pre'); pre.textContent = content; contentDiv.innerHTML = ''; contentDiv.appendChild(pre);
         }
     }
-    messageDiv.appendChild(contentDiv);
+    const messageMainScope = document.createElement('div');
+    messageMainScope.classList.add('message-main-scope');
+    messageMainScope.appendChild(contentDiv);
+    messageDiv.appendChild(messageMainScope);
             
     const imagePlaceholderRegex = /<p>\[IMAGE_HERE\]<\/p>|\[IMAGE_HERE\]/g;
     if (role === 'model' && messageData && messageData.imageIds && messageData.imageIds.length > 0) {
@@ -4064,7 +4072,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     }
 
     const collapseOverlay = document.createElement('div');
-    collapseOverlay.classList.add('tm-message-collapse-overlay');
+    collapseOverlay.classList.add('tm-message-collapse-overlay-track');
+    const collapseHost = document.createElement('div');
+    collapseHost.classList.add('tm-message-collapse-sticky-host');
     const collapseButton = document.createElement('button');
     collapseButton.innerHTML = '<span class="material-symbols-outlined">unfold_more</span>';
     collapseButton.title = '全文を表示';
@@ -4075,8 +4085,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         event.stopPropagation();
         this.toggleMessageCollapse(messageDiv);
     };
-    collapseOverlay.appendChild(collapseButton);
-    contentDiv.insertBefore(collapseOverlay, contentDiv.firstChild);
+    collapseHost.appendChild(collapseButton);
+    collapseOverlay.appendChild(collapseHost);
+    messageMainScope.appendChild(collapseOverlay);
 
     const editArea = document.createElement('div');
     editArea.classList.add('message-edit-area', 'hidden');
@@ -5759,7 +5770,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     getMessageCollapseButton(messageElement) {
-        return messageElement?.querySelector(':scope > .message-content > .tm-message-collapse-overlay .tm-message-collapse-btn');
+        return messageElement?.querySelector(':scope > .message-main-scope > .tm-message-collapse-overlay-track .tm-message-collapse-btn');
     },
 
     calculateMessageCollapseStickyTop() {
@@ -5770,7 +5781,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const composer = this.getComposerElement?.();
         const composerRect = composer?.getBoundingClientRect?.();
         const controlSize = 40;
-        const gap = 16;
+        const gap = 12;
         const visibleBottom = Math.min(
             scrollRect.bottom,
             composerRect?.top || scrollRect.bottom
@@ -14312,7 +14323,8 @@ const appLogic = {
             // 操作可能な要素やパネル自体をクリックした場合は反応しない
             if (event.target.closest(interactiveElements) ||
                 event.target.closest('.floating-action-panel') ||
-                event.target.closest('.tm-message-collapse-overlay'))
+                event.target.closest('.tm-message-collapse-overlay-track') ||
+                event.target.closest('.tm-message-collapse-btn'))
             {
                 return;
             }
