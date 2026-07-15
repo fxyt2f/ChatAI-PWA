@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.5-beta1";
-const APP_CACHE_VERSION = "v1.34.5-beta1";
+const APP_VERSION = "1.34.5-beta2";
+const APP_CACHE_VERSION = "v1.34.5-beta2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -213,6 +213,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.5-beta2": [
+        "文章整形ダイアログからプレビュー機能を削除しました。",
+        "文章整形を設定後すぐに適用できるシンプルな操作へ変更しました。",
+        "プレビュー専用の変更行表示・空行マーカー・差分生成処理を整理しました。",
+        "「地の文同士の空行を詰める」やUndo/Redoなど既存の整形機能は維持しました。"
+    ],
     "1.34.5-beta1": [
         "文章整形に「地の文同士の空行を詰める」を追加しました。",
         "文章整形プレビューをメッセージ全文ではなく変更行中心で表示するよう改善しました。",
@@ -726,8 +732,6 @@ try {
         textFormatNormalizeKatakana: document.getElementById('text-format-normalize-katakana'),
         textFormatNormalizeDigits: document.getElementById('text-format-normalize-digits'),
         textFormatNormalizeSymbols: document.getElementById('text-format-normalize-symbols'),
-        textFormattingPreviewSummary: document.getElementById('text-formatting-preview-summary'),
-        textFormattingPreviewList: document.getElementById('text-formatting-preview-list'),
         textFormattingStatus: document.getElementById('text-formatting-status'),
         textFormattingApplyBtn: document.getElementById('text-formatting-apply-btn'),
         textFormattingCancelBtn: document.getElementById('text-formatting-cancel-btn'),
@@ -943,7 +947,6 @@ Reason: [NGの場合の理由]`,
     systemPromptSaveTimer: 0,
     systemPromptSaveStatus: 'saved',
     systemPromptLastSaveError: null,
-    textFormattingCandidates: [],
     textFormattingSettings: { ...DEFAULT_TEXT_FORMATTING_SETTINGS },
     textFormattingTarget: DEFAULT_TEXT_FORMATTING_SETTINGS.target,
     touchStartX: 0,
@@ -9196,7 +9199,7 @@ const appLogic = {
     async undoFromTextFormattingDialog() {
         await this.applyChangeHistoryEntry('undo');
         if (elements.textFormattingDialog?.open) {
-            this.updateTextFormattingPreview();
+            this.updateTextFormattingDialogStatus();
             await this.updateChangeHistoryControls();
         }
     },
@@ -9204,7 +9207,7 @@ const appLogic = {
     async redoFromTextFormattingDialog() {
         await this.applyChangeHistoryEntry('redo');
         if (elements.textFormattingDialog?.open) {
-            this.updateTextFormattingPreview();
+            this.updateTextFormattingDialogStatus();
             await this.updateChangeHistoryControls();
         }
     },
@@ -14247,7 +14250,7 @@ const appLogic = {
             button.addEventListener('click', () => this.setTextFormattingTarget(button.dataset.target || 'model'));
         });
         const onTextFormattingSettingsChanged = () => {
-            this.syncTextFormattingSettingsFromUI({ save: true, refreshPreview: true });
+            this.syncTextFormattingSettingsFromUI({ save: true });
         };
         [
             elements.textFormatIndentProse,
@@ -19006,18 +19009,16 @@ const appLogic = {
         return normalized;
     },
 
-    syncTextFormattingSettingsFromUI({ save = true, refreshPreview = true } = {}) {
+    syncTextFormattingSettingsFromUI({ save = true } = {}) {
         const settings = this.readTextFormattingSettingsFromUI();
         state.textFormattingSettings = settings;
         state.textFormattingTarget = settings.target;
         this.updateTextFormattingTargetButtons();
         this.updateTextFormattingWidthControls();
         this.updateTextFormattingCommaControls();
+        this.updateTextFormattingDialogStatus();
         if (save) {
             this.saveTextFormattingSettings(settings);
-        }
-        if (refreshPreview && elements.textFormattingDialog?.open) {
-            this.updateTextFormattingPreview();
         }
         return settings;
     },
@@ -19059,7 +19060,7 @@ const appLogic = {
         });
         this.updateTextFormattingTargetButtons();
         this.saveTextFormattingSettings(state.textFormattingSettings);
-        this.updateTextFormattingPreview();
+        this.updateTextFormattingDialogStatus();
     },
 
     updateTextFormattingTargetButtons() {
@@ -19088,7 +19089,7 @@ const appLogic = {
 
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         this.applyTextFormattingSettingsToUI(state.textFormattingSettings);
-        this.updateTextFormattingPreview();
+        this.updateTextFormattingDialogStatus();
         void this.updateChangeHistoryControls();
         if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
             elements.textFormattingDialog.showModal();
@@ -19099,71 +19100,16 @@ const appLogic = {
         });
     },
 
-    updateTextFormattingPreview() {
+    updateTextFormattingDialogStatus(message = '', isError = false) {
         const blockReason = this.getTextFormattingBlockReason();
-        const candidates = blockReason ? [] : this.buildTextFormattingCandidates();
-        state.textFormattingCandidates = candidates;
-
-        if (elements.textFormattingPreviewList) {
-            elements.textFormattingPreviewList.textContent = '';
-        }
         if (elements.textFormattingStatus) {
-            elements.textFormattingStatus.textContent = blockReason;
-            elements.textFormattingStatus.classList.toggle('is-error', Boolean(blockReason));
-        }
-
-        if (blockReason) {
-            if (elements.textFormattingPreviewSummary) elements.textFormattingPreviewSummary.textContent = blockReason;
-            if (elements.textFormattingApplyBtn) elements.textFormattingApplyBtn.disabled = true;
-            return;
-        }
-
-        const totalChanges = candidates.reduce((sum, candidate) => sum + candidate.changeCount, 0);
-        const userCount = candidates.filter(candidate => candidate.role === 'user').length;
-        const modelCount = candidates.filter(candidate => candidate.role === 'model').length;
-        const roleSummary = [
-            userCount ? `ユーザー${userCount}件` : '',
-            modelCount ? `モデル${modelCount}件` : ''
-        ].filter(Boolean).join(' / ');
-        if (elements.textFormattingPreviewSummary) {
-            elements.textFormattingPreviewSummary.textContent = candidates.length > 0
-                ? `変更対象: ${candidates.length}件（${roleSummary}）、変更箇所: ${totalChanges}箇所`
-                : '変更はありません。';
+            elements.textFormattingStatus.textContent = blockReason || message || '';
+            elements.textFormattingStatus.classList.toggle('is-error', Boolean(blockReason || isError));
         }
         if (elements.textFormattingApplyBtn) {
-            elements.textFormattingApplyBtn.disabled = candidates.length === 0;
+            elements.textFormattingApplyBtn.disabled = Boolean(blockReason);
         }
         void this.updateChangeHistoryControls();
-
-        const previewList = elements.textFormattingPreviewList;
-        if (!previewList) return;
-
-        candidates.slice(0, 6).forEach(candidate => {
-            const card = document.createElement('div');
-            card.className = 'text-formatting-preview-card';
-
-            const meta = document.createElement('div');
-            meta.className = 'text-formatting-preview-meta';
-            const targetBadge = document.createElement('span');
-            targetBadge.className = 'text-formatting-preview-target';
-            targetBadge.textContent = '適用対象';
-            meta.appendChild(targetBadge);
-            const metaText = document.createElement('span');
-            metaText.textContent = `${candidate.label} / ${candidate.changeCount}箇所`;
-            meta.appendChild(metaText);
-            card.appendChild(meta);
-
-            const diff = this.createTextFormattingPreviewDiffElement(candidate);
-            card.appendChild(diff);
-            previewList.appendChild(card);
-        });
-
-        if (candidates.length > 6) {
-            const omitted = document.createElement('div');
-            omitted.className = 'text-formatting-status';
-            omitted.textContent = `ほか ${candidates.length - 6} 件`;
-            previewList.appendChild(omitted);
-        }
     },
 
     buildTextFormattingCandidates() {
@@ -19196,8 +19142,7 @@ const appLogic = {
                 label: `${message.role === 'user' ? 'ユーザー' : 'モデル'} #${index + 1}`,
                 expected: message.content,
                 formatted,
-                changeCount: this.countTextFormattingChanges(message.content, formatted),
-                diffHunks: this.buildTextFormattingLineDiffHunks(message.content, formatted)
+                changeCount: this.countTextFormattingChanges(message.content, formatted)
             };
         }).filter(Boolean);
     },
@@ -19289,31 +19234,29 @@ const appLogic = {
             label: `${role === 'user' ? 'ユーザー' : 'モデル'} #${messageIndex + 1}`,
             expected: message.content,
             formatted,
-            changeCount: this.countTextFormattingChanges(message.content, formatted),
-            diffHunks: this.buildTextFormattingLineDiffHunks(message.content, formatted)
+            changeCount: this.countTextFormattingChanges(message.content, formatted)
         };
     },
 
     async applyTextFormattingCandidateList(candidates, options = this.getTextFormattingOptions(), context = {}) {
         const candidateList = Array.isArray(candidates) ? candidates : [];
         const emptyMessage = context.emptyMessage || '現在の条件では変更される文章がありません。';
-        const staleMessage = context.staleMessage || '対象メッセージが変更されたため、整形を中止しました。プレビューを確認してください。';
+        const staleMessage = context.staleMessage || '対象メッセージが変更されたため、整形を中止しました。もう一度実行してください。';
         const successMessage = context.successMessage || `${candidateList.length}件のメッセージを整形しました。`;
         const historyFailureMessage = context.historyFailureMessage || `${candidateList.length}件のメッセージを整形しました（変更履歴の保存に失敗しました）。`;
         const failureMessage = context.failureMessage || '文章整形の保存に失敗しました。入力内容は変更前の状態で再確認してください。';
         const closeDialogOnSuccess = context.closeDialogOnSuccess !== false;
-        const clearPreviewCandidates = context.clearPreviewCandidates !== false;
-        const refreshPreviewOnMismatch = context.refreshPreviewOnMismatch !== false;
 
         if (!candidateList.length) {
             await uiUtils.showCustomAlert(emptyMessage);
+            this.updateTextFormattingDialogStatus('変更はありません。');
             return { success: false, reason: 'empty' };
         }
 
         const mismatched = candidateList.find(candidate => state.currentMessages[candidate.index]?.content !== candidate.expected);
         if (mismatched) {
-            if (refreshPreviewOnMismatch) this.updateTextFormattingPreview();
             await uiUtils.showCustomAlert(staleMessage);
+            this.updateTextFormattingDialogStatus(staleMessage, true);
             return { success: false, reason: 'stale' };
         }
 
@@ -19393,8 +19336,8 @@ const appLogic = {
 
             uiUtils.renderChatMessages({ suppressMessageAnimation: true });
             if (closeDialogOnSuccess) elements.textFormattingDialog?.close('confirm');
-            if (clearPreviewCandidates) state.textFormattingCandidates = [];
             await this.updateChangeHistoryControls();
+            this.updateTextFormattingDialogStatus(historySaved ? successMessage : historyFailureMessage, !historySaved);
             await uiUtils.showCustomAlert(historySaved
                 ? successMessage
                 : historyFailureMessage
@@ -19421,10 +19364,10 @@ const appLogic = {
             return;
         }
 
-        const candidates = state.textFormattingCandidates?.length
-            ? state.textFormattingCandidates
-            : this.buildTextFormattingCandidates();
-        await this.applyTextFormattingCandidateList(candidates, this.getTextFormattingOptions());
+        const candidates = this.buildTextFormattingCandidates();
+        await this.applyTextFormattingCandidateList(candidates, this.getTextFormattingOptions(), {
+            emptyMessage: '変更はありません。'
+        });
     },
 
     async applyTextFormattingToMessage(index, role) {
@@ -19454,9 +19397,7 @@ const appLogic = {
             successMessage: 'このメッセージを整形しました。',
             historyFailureMessage: 'このメッセージを整形しました（変更履歴の保存に失敗しました）。',
             failureMessage: '文章整形に失敗しました。',
-            closeDialogOnSuccess: false,
-            clearPreviewCandidates: false,
-            refreshPreviewOnMismatch: false
+            closeDialogOnSuccess: false
         });
     },
 
@@ -19725,171 +19666,15 @@ const appLogic = {
         return output.join('\n');
     },
 
-    splitTextFormattingLines(text) {
-        return String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-    },
-
-    buildTextFormattingLineDiffOps(beforeText, afterText) {
-        const beforeLines = this.splitTextFormattingLines(beforeText);
-        const afterLines = this.splitTextFormattingLines(afterText);
-        const maxMatrixSize = 90000;
-
-        if (beforeLines.length * afterLines.length > maxMatrixSize) {
-            return this.buildTextFormattingSimpleLineDiffOps(beforeLines, afterLines);
-        }
-
-        const dp = Array.from({ length: beforeLines.length + 1 }, () => Array(afterLines.length + 1).fill(0));
-        for (let i = beforeLines.length - 1; i >= 0; i--) {
-            for (let j = afterLines.length - 1; j >= 0; j--) {
-                dp[i][j] = beforeLines[i] === afterLines[j]
-                    ? dp[i + 1][j + 1] + 1
-                    : Math.max(dp[i + 1][j], dp[i][j + 1]);
-            }
-        }
-
-        const ops = [];
-        let i = 0;
-        let j = 0;
-        while (i < beforeLines.length && j < afterLines.length) {
-            if (beforeLines[i] === afterLines[j]) {
-                ops.push({ type: 'equal', before: beforeLines[i], after: afterLines[j] });
-                i++;
-                j++;
-            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-                ops.push({ type: 'delete', before: beforeLines[i] });
-                i++;
-            } else {
-                ops.push({ type: 'add', after: afterLines[j] });
-                j++;
-            }
-        }
-        while (i < beforeLines.length) {
-            ops.push({ type: 'delete', before: beforeLines[i] });
-            i++;
-        }
-        while (j < afterLines.length) {
-            ops.push({ type: 'add', after: afterLines[j] });
-            j++;
-        }
-        return ops;
-    },
-
-    buildTextFormattingSimpleLineDiffOps(beforeLines, afterLines) {
-        let start = 0;
-        while (start < beforeLines.length && start < afterLines.length && beforeLines[start] === afterLines[start]) {
-            start++;
-        }
-
-        let beforeEnd = beforeLines.length - 1;
-        let afterEnd = afterLines.length - 1;
-        while (beforeEnd >= start && afterEnd >= start && beforeLines[beforeEnd] === afterLines[afterEnd]) {
-            beforeEnd--;
-            afterEnd--;
-        }
-
-        const ops = [];
-        beforeLines.slice(0, start).forEach(line => ops.push({ type: 'equal', before: line, after: line }));
-        for (let i = start; i <= beforeEnd; i++) ops.push({ type: 'delete', before: beforeLines[i] });
-        for (let i = start; i <= afterEnd; i++) ops.push({ type: 'add', after: afterLines[i] });
-        beforeLines.slice(beforeEnd + 1).forEach(line => ops.push({ type: 'equal', before: line, after: line }));
-        return ops;
-    },
-
-    buildTextFormattingLineDiffHunks(beforeText, afterText, contextSize = 1) {
-        const ops = this.buildTextFormattingLineDiffOps(beforeText, afterText);
-        const changedIndexes = ops
-            .map((op, index) => op.type === 'equal' ? -1 : index)
-            .filter(index => index >= 0);
-        if (changedIndexes.length === 0) return [];
-
-        const ranges = [];
-        changedIndexes.forEach(index => {
-            const start = Math.max(0, index - contextSize);
-            const end = Math.min(ops.length - 1, index + contextSize);
-            const last = ranges[ranges.length - 1];
-            if (last && start <= last.end + 1) {
-                last.end = Math.max(last.end, end);
-            } else {
-                ranges.push({ start, end });
-            }
-        });
-
-        return ranges.slice(0, 6).map(range => {
-            const hunkOps = ops.slice(range.start, range.end + 1);
-            return {
-                beforeLines: hunkOps
-                    .filter(op => op.type === 'equal' || op.type === 'delete')
-                    .map(op => op.before ?? ''),
-                afterLines: hunkOps
-                    .filter(op => op.type === 'equal' || op.type === 'add')
-                    .map(op => op.after ?? ''),
-                changeCount: hunkOps.filter(op => op.type !== 'equal').length
-            };
-        });
-    },
-
-    createTextFormattingPreviewDiffElement(candidate) {
-        const diff = document.createElement('div');
-        diff.className = 'text-formatting-preview-diff';
-
-        const hunks = Array.isArray(candidate.diffHunks) && candidate.diffHunks.length > 0
-            ? candidate.diffHunks
-            : this.buildTextFormattingLineDiffHunks(candidate.expected, candidate.formatted);
-
-        hunks.forEach((hunk, index) => {
-            const hunkElement = document.createElement('div');
-            hunkElement.className = 'text-formatting-preview-hunk';
-
-            const hunkTitle = document.createElement('div');
-            hunkTitle.className = 'text-formatting-preview-hunk-title';
-            hunkTitle.textContent = `変更箇所 ${index + 1}`;
-            hunkElement.appendChild(hunkTitle);
-
-            hunkElement.appendChild(this.createTextFormattingPreviewLineBlock('変更前', hunk.beforeLines, 'before'));
-            hunkElement.appendChild(this.createTextFormattingPreviewLineBlock('変更後', hunk.afterLines, 'after'));
-            diff.appendChild(hunkElement);
-        });
-
-        return diff;
-    },
-
-    createTextFormattingPreviewLineBlock(label, lines, type) {
-        const block = document.createElement('div');
-        block.className = `text-formatting-preview-${type}`;
-
-        const labelElement = document.createElement('div');
-        labelElement.className = 'text-formatting-preview-block-label';
-        labelElement.textContent = label;
-        block.appendChild(labelElement);
-
-        const lineList = document.createElement('div');
-        lineList.className = 'text-formatting-preview-lines';
-        (Array.isArray(lines) && lines.length > 0 ? lines : ['']).forEach(line => {
-            const lineElement = document.createElement('div');
-            lineElement.className = 'text-formatting-preview-line';
-            if (line === '') {
-                lineElement.classList.add('is-blank');
-                lineElement.textContent = '［空行］';
-            } else {
-                lineElement.textContent = line;
-            }
-            lineList.appendChild(lineElement);
-        });
-        block.appendChild(lineList);
-        return block;
-    },
-
     countTextFormattingChanges(beforeText, afterText) {
-        const count = this.buildTextFormattingLineDiffOps(beforeText, afterText)
-            .filter(op => op.type !== 'equal')
-            .length;
+        const beforeLines = String(beforeText ?? '').split(/\r\n?|\n/);
+        const afterLines = String(afterText ?? '').split(/\r\n?|\n/);
+        const length = Math.max(beforeLines.length, afterLines.length);
+        let count = 0;
+        for (let i = 0; i < length; i++) {
+            if ((beforeLines[i] ?? '') !== (afterLines[i] ?? '')) count++;
+        }
         return Math.max(1, count);
-    },
-
-    truncateTextFormattingPreview(text, maxLength = 140) {
-        const normalized = String(text || '').replace(/\s*\n+\s*/g, ' / ').trim();
-        if (normalized.length <= maxLength) return normalized || '(空)';
-        return `${normalized.slice(0, maxLength - 1)}…`;
     },
 
     async startSummaryProcess() {
