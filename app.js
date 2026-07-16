@@ -145,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.7-beta3";
-const APP_CACHE_VERSION = "v1.34.7-beta3";
+const APP_VERSION = "1.34.7-beta4";
+const APP_CACHE_VERSION = "v1.34.7-beta4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -231,6 +231,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.7-beta4": [
+        "メッセージを折りたたむ際に画面が一瞬揺れる問題を修正しました。",
+        "スクロール位置補正のタイミングと多重実行を整理しました。",
+        "折りたたみ前後の表示位置を滑らかに維持するよう改善しました。"
+    ],
     "1.34.7-beta3": [
         "メッセージの折りたたみ時に表示位置が大きく移動する問題を修正しました。",
         "個別折りたたみでは操作したボタン付近、一括開閉では閲覧中のメッセージ位置を維持するよう調整しました。",
@@ -1014,6 +1019,7 @@ Reason: [NGの場合の理由]`,
         scrollTop: 0
     },
     suppressAutoScrollForCollapse: false,
+    collapseScrollAdjustmentId: 0,
     textFormattingSettings: { ...DEFAULT_TEXT_FORMATTING_SETTINGS },
     textFormattingTarget: DEFAULT_TEXT_FORMATTING_SETTINGS.target,
     touchStartX: 0,
@@ -5995,29 +6001,39 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         };
     },
 
-    requestCollapseScrollAdjustment(callback) {
+    beginCollapseScrollAdjustment() {
         state.suppressAutoScrollForCollapse = true;
+        state.collapseScrollAdjustmentId += 1;
+        return state.collapseScrollAdjustmentId;
+    },
+
+    finishCollapseScrollAdjustment(operationId) {
+        if (operationId !== state.collapseScrollAdjustmentId) return;
+        state.suppressAutoScrollForCollapse = false;
+        this.updateScrollButtonsState?.();
+    },
+
+    requestCollapseResidualAdjustment(operationId, callback) {
         requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                try {
-                    callback?.();
-                } finally {
-                    state.suppressAutoScrollForCollapse = false;
-                    this.updateScrollButtonsState?.();
-                }
-            });
+            if (operationId !== state.collapseScrollAdjustmentId) return;
+            try {
+                callback?.();
+            } finally {
+                this.finishCollapseScrollAdjustment(operationId);
+            }
         });
     },
 
-    restoreElementScrollAnchor(anchorSnapshot, resolveAnchor = null) {
-        if (!anchorSnapshot?.scrollContainer) return;
+    restoreElementScrollAnchor(anchorSnapshot, resolveAnchor = null, threshold = 1) {
+        if (!anchorSnapshot?.scrollContainer) return 0;
         const scrollContainer = anchorSnapshot.scrollContainer;
         const anchorElement = resolveAnchor?.() || anchorSnapshot.anchorElement;
-        if (!anchorElement?.isConnected) return;
+        if (!anchorElement?.isConnected) return 0;
         const afterTop = anchorElement.getBoundingClientRect().top;
         const delta = afterTop - anchorSnapshot.beforeTop;
-        if (!Number.isFinite(delta) || Math.abs(delta) < 1) return;
+        if (!Number.isFinite(delta) || Math.abs(delta) <= threshold) return 0;
         scrollContainer.scrollTop = this.clampScrollTop(scrollContainer, scrollContainer.scrollTop + delta);
+        return delta;
     },
 
     captureTopVisibleMessageAnchor() {
@@ -6052,16 +6068,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return elements.messageContainer?.querySelector?.(selector) || null;
     },
 
-    scrollMessageStartIntoViewAfterExpand(messageElement) {
+    scrollMessageStartIntoViewAfterExpand(messageElement, threshold = 1) {
         const scrollContainer = this.getChatScrollContainer();
-        if (!scrollContainer || !messageElement?.isConnected) return;
+        if (!scrollContainer || !messageElement?.isConnected) return 0;
         const contentElement = messageElement.querySelector(':scope > .message-content') || messageElement;
         const containerRect = scrollContainer.getBoundingClientRect();
         const contentRect = contentElement.getBoundingClientRect();
         const topClearance = 12;
         const currentOffset = contentRect.top - containerRect.top;
         const nextScrollTop = scrollContainer.scrollTop + currentOffset - topClearance;
+        const delta = this.clampScrollTop(scrollContainer, nextScrollTop) - scrollContainer.scrollTop;
+        if (!Number.isFinite(delta) || Math.abs(delta) <= threshold) return 0;
         scrollContainer.scrollTop = this.clampScrollTop(scrollContainer, nextScrollTop);
+        return delta;
     },
 
     toggleMessageCollapse(messageElement) {
@@ -6072,17 +6091,24 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             ? this.captureElementScrollAnchor(this.getMessageCollapseAnchor(messageElement, button))
             : null;
 
-        state.suppressAutoScrollForCollapse = true;
-        this.setMessageCollapsed(messageElement, willCollapse, { keepVisible: false });
-        this.updateCollapseAllMessagesButtonState();
-
-        this.requestCollapseScrollAdjustment(() => {
+        const operationId = this.beginCollapseScrollAdjustment();
+        try {
+            this.setMessageCollapsed(messageElement, willCollapse, { keepVisible: false });
+            this.updateCollapseAllMessagesButtonState();
             if (willCollapse) {
                 this.restoreElementScrollAnchor(anchorSnapshot, () => this.getMessageCollapseAnchor(messageElement, button));
             } else {
                 this.scrollMessageStartIntoViewAfterExpand(messageElement);
             }
-        });
+        } finally {
+            this.requestCollapseResidualAdjustment(operationId, () => {
+                if (willCollapse) {
+                    this.restoreElementScrollAnchor(anchorSnapshot, () => this.getMessageCollapseAnchor(messageElement, button));
+                } else {
+                    this.scrollMessageStartIntoViewAfterExpand(messageElement);
+                }
+            });
+        }
     },
 
     getCollapsibleMessageElements() {
@@ -6120,14 +6146,18 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const anchorSnapshot = this.captureTopVisibleMessageAnchor();
         const shouldExpand = messages.every(message => message.classList.contains('tm-collapsed'));
-        state.suppressAutoScrollForCollapse = true;
-        messages.forEach(message => {
-            this.setMessageCollapsed(message, !shouldExpand, { keepVisible: false });
-        });
-        this.updateCollapseAllMessagesButtonState();
-        this.requestCollapseScrollAdjustment(() => {
+        const operationId = this.beginCollapseScrollAdjustment();
+        try {
+            messages.forEach(message => {
+                this.setMessageCollapsed(message, !shouldExpand, { keepVisible: false });
+            });
+            this.updateCollapseAllMessagesButtonState();
             this.restoreElementScrollAnchor(anchorSnapshot, () => this.resolveMessageAnchorElement(anchorSnapshot));
-        });
+        } finally {
+            this.requestCollapseResidualAdjustment(operationId, () => {
+                this.restoreElementScrollAnchor(anchorSnapshot, () => this.resolveMessageAnchorElement(anchorSnapshot));
+            });
+        }
     },
 
     keepMessageAboveComposer(messageElement) {
