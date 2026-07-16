@@ -145,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.7-beta1";
-const APP_CACHE_VERSION = "v1.34.7-beta1";
+const APP_VERSION = "1.34.7-beta2";
+const APP_CACHE_VERSION = "v1.34.7-beta2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -231,6 +231,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.7-beta2": [
+        "スマホでメッセージを画面全体を使って編集できるように変更しました。",
+        "編集中のキャンセル、コピー、保存を常に操作しやすい上部配置へ変更しました。",
+        "PCのインライン編集では、キャンセルを左、コピーと保存を右へ配置しました。"
+    ],
     "1.34.7-beta1": [
         "「その他設定」をブラウザごとに保存する設定へ変更しました。",
         "履歴のソート順、アプリのフォント、表示・操作設定をプロファイル切替やDropbox同期から分離しました。",
@@ -995,6 +1000,14 @@ Reason: [NGの場合の理由]`,
     systemPromptSaveTimer: 0,
     systemPromptSaveStatus: 'saved',
     systemPromptLastSaveError: null,
+    mobileMessageEditor: {
+        element: null,
+        index: null,
+        messageElement: null,
+        textarea: null,
+        previousFocus: null,
+        scrollTop: 0
+    },
     textFormattingSettings: { ...DEFAULT_TEXT_FORMATTING_SETTINGS },
     textFormattingTarget: DEFAULT_TEXT_FORMATTING_SETTINGS.target,
     touchStartX: 0,
@@ -16725,6 +16738,123 @@ const appLogic = {
         }
     },
 
+    shouldUseMobileMessageEditor() {
+        return window.matchMedia?.('(max-width: 600px)')?.matches === true;
+    },
+
+    getMobileMessageEditorElement() {
+        if (state.mobileMessageEditor.element?.isConnected) {
+            return state.mobileMessageEditor.element;
+        }
+
+        const editor = document.createElement('div');
+        editor.id = 'mobile-message-editor';
+        editor.className = 'mobile-message-editor hidden';
+        editor.setAttribute('role', 'dialog');
+        editor.setAttribute('aria-modal', 'true');
+        editor.setAttribute('aria-label', 'メッセージを編集');
+
+        const header = document.createElement('div');
+        header.className = 'mobile-message-editor-header message-edit-actions';
+
+        const leftActions = document.createElement('div');
+        leftActions.className = 'message-edit-actions-left';
+        const rightActions = document.createElement('div');
+        rightActions.className = 'message-edit-actions-right';
+
+        const cancelButton = document.createElement('button');
+        cancelButton.type = 'button';
+        cancelButton.textContent = 'キャンセル';
+        cancelButton.className = 'cancel-edit-btn';
+
+        const copyButton = document.createElement('button');
+        copyButton.type = 'button';
+        copyButton.textContent = 'コピー';
+        copyButton.className = 'tm-edit-markdown-copy-btn';
+
+        const saveButton = document.createElement('button');
+        saveButton.type = 'button';
+        saveButton.textContent = '保存';
+        saveButton.className = 'save-edit-btn';
+
+        leftActions.appendChild(cancelButton);
+        rightActions.appendChild(copyButton);
+        rightActions.appendChild(saveButton);
+        header.appendChild(leftActions);
+        header.appendChild(rightActions);
+
+        const body = document.createElement('div');
+        body.className = 'mobile-message-editor-body';
+        const textarea = document.createElement('textarea');
+        textarea.className = 'edit-textarea mobile-message-editor-textarea';
+        textarea.setAttribute('aria-label', 'メッセージ本文を編集');
+        textarea.spellcheck = true;
+        body.appendChild(textarea);
+
+        editor.appendChild(header);
+        editor.appendChild(body);
+        document.body.appendChild(editor);
+
+        state.mobileMessageEditor.element = editor;
+        state.mobileMessageEditor.textarea = textarea;
+        return editor;
+    },
+
+    openMobileMessageEditor(index, messageElement, rawContent) {
+        const editor = this.getMobileMessageEditorElement();
+        const textarea = editor.querySelector('.mobile-message-editor-textarea');
+        const cancelButton = editor.querySelector('.cancel-edit-btn');
+        const copyButton = editor.querySelector('.tm-edit-markdown-copy-btn');
+        const saveButton = editor.querySelector('.save-edit-btn');
+
+        state.mobileMessageEditor.index = index;
+        state.mobileMessageEditor.messageElement = messageElement;
+        state.mobileMessageEditor.textarea = textarea;
+        state.mobileMessageEditor.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        state.mobileMessageEditor.scrollTop = elements.messageContainer?.scrollTop || 0;
+
+        textarea.value = rawContent;
+        cancelButton.onclick = () => this.cancelEditMessage(index, messageElement);
+        copyButton.onclick = () => this.copyEditTextareaMarkdown(textarea, copyButton);
+        saveButton.onclick = () => this.saveEditMessage(index, messageElement, textarea);
+
+        editor.classList.remove('hidden');
+        document.body.classList.add('mobile-message-editor-open');
+        requestAnimationFrame(() => {
+            textarea.focus({ preventScroll: true });
+            uiUtils.scheduleClearInitialEditTextareaFullSelection(textarea);
+        });
+    },
+
+    closeMobileMessageEditor(index = null) {
+        const editor = state.mobileMessageEditor.element;
+        if (!editor || editor.classList.contains('hidden')) return;
+        if (index !== null && state.mobileMessageEditor.index !== index) return;
+
+        editor.classList.add('hidden');
+        document.body.classList.remove('mobile-message-editor-open');
+
+        const textarea = state.mobileMessageEditor.textarea;
+        if (textarea) textarea.value = '';
+        editor.querySelectorAll('button').forEach(button => {
+            button.onclick = null;
+            button.classList.remove('tm-copied');
+        });
+
+        const scrollTop = state.mobileMessageEditor.scrollTop;
+        if (elements.messageContainer && Number.isFinite(scrollTop)) {
+            requestAnimationFrame(() => {
+                elements.messageContainer.scrollTop = scrollTop;
+            });
+        }
+
+        state.mobileMessageEditor.index = null;
+        state.mobileMessageEditor.messageElement = null;
+        state.mobileMessageEditor.textarea = null;
+        state.mobileMessageEditor.previousFocus = null;
+        state.mobileMessageEditor.scrollTop = 0;
+    },
+
     isGenerationBlockingActive() {
         return Boolean(uiUtils.isResponseGenerationActive?.());
     },
@@ -16762,7 +16892,11 @@ const appLogic = {
             return;
         }
         if (state.editingMessageIndex === index) {
-            messageElement.querySelector('.edit-textarea')?.focus();
+            if (this.shouldUseMobileMessageEditor()) {
+                state.mobileMessageEditor.textarea?.focus?.({ preventScroll: true });
+            } else {
+                messageElement.querySelector('.edit-textarea')?.focus();
+            }
             return;
         }
 
@@ -16772,6 +16906,14 @@ const appLogic = {
         const rawContent = message.content;
         state.editingMessageIndex = index;
         void this.updateChangeHistoryControls();
+
+        if (this.shouldUseMobileMessageEditor()) {
+            messageElement.classList.add('editing');
+            this.openMobileMessageEditor(index, messageElement, rawContent);
+            const endTime = performance.now();
+            console.log(`[PERF_DEBUG] startEditMessage モバイル全画面編集を開始 (所要時間: ${endTime - startTime}ms)`);
+            return;
+        }
 
         const contentDiv = messageElement.querySelector('.message-content');
         const editArea = messageElement.querySelector('.message-edit-area');
@@ -16804,9 +16946,15 @@ const appLogic = {
         cancelButton.type = 'button';
         cancelButton.onclick = () => this.cancelEditMessage(index, messageElement);
 
-        actionsDiv.appendChild(copyButton);
-        actionsDiv.appendChild(saveButton);
-        actionsDiv.appendChild(cancelButton);
+        const leftActions = document.createElement('div');
+        leftActions.classList.add('message-edit-actions-left');
+        const rightActions = document.createElement('div');
+        rightActions.classList.add('message-edit-actions-right');
+        leftActions.appendChild(cancelButton);
+        rightActions.appendChild(copyButton);
+        rightActions.appendChild(saveButton);
+        actionsDiv.appendChild(leftActions);
+        actionsDiv.appendChild(rightActions);
         editArea.appendChild(textarea);
         editArea.appendChild(actionsDiv);
 
@@ -16826,9 +16974,9 @@ const appLogic = {
 
 
     // メッセージ編集を保存
-    async saveEditMessage(index, messageElement) {
+    async saveEditMessage(index, messageElement, textareaOverride = null) {
         if (await this.guardGenerationMutableAction()) return;
-        const textarea = messageElement.querySelector('.edit-textarea');
+        const textarea = textareaOverride || messageElement.querySelector('.edit-textarea');
         if (!textarea) {
             this.cancelEditMessage(index, messageElement);
             return;
@@ -17073,9 +17221,12 @@ const appLogic = {
             console.log("編集終了:", index);
         }
 
+        this.closeMobileMessageEditor(index);
         uiUtils.scheduleChatSearch(false);
         void this.updateChangeHistoryControls();
-        elements.userInput?.focus?.();
+        if (!this.shouldUseMobileMessageEditor()) {
+            elements.userInput?.focus?.();
+        }
     },
 
     // メッセージを削除 (会話ターン全体)

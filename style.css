@@ -4428,7 +4428,7 @@ body.dark-mode #sd-test-connection-btn {
 
 #chat-screen .message-edit-actions {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
@@ -4436,7 +4436,24 @@ body.dark-mode #sd-test-connection-btn {
     margin-top: 10px;
 }
 
-#chat-screen .message-edit-actions button {
+#chat-screen .message-edit-actions-left,
+#chat-screen .message-edit-actions-right,
+.mobile-message-editor .message-edit-actions-left,
+.mobile-message-editor .message-edit-actions-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+#chat-screen .message-edit-actions-right,
+.mobile-message-editor .message-edit-actions-right {
+    justify-content: flex-end;
+    margin-left: auto;
+}
+
+#chat-screen .message-edit-actions button,
+.mobile-message-editor .message-edit-actions button {
     width: auto;
     min-width: 72px;
     height: 36px;
@@ -4446,50 +4463,144 @@ body.dark-mode #sd-test-connection-btn {
     box-shadow: none;
 }
 
-#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn,
+.mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn {
     color: #ffffff;
     background-color: #a4c7d5;
     border: 1px solid #a4c7d5;
 }
 
-#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover,
+.mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn:hover {
     color: #ffffff;
     background-color: #92b8c8;
     border-color: #92b8c8;
 }
 
-#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
+#chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied,
+.mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
     color: #ffffff;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
 }
 
-body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn {
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn,
+body.dark-mode .mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn {
     color: #000000;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
 }
 
-body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover {
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn:hover,
+body.dark-mode .mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn:hover {
     color: #000000;
     background-color: #92b8c8;
     border-color: #92b8c8;
 }
 
-body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
+body.dark-mode #chat-screen .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied,
+body.dark-mode .mobile-message-editor .message-edit-actions .tm-edit-markdown-copy-btn.tm-copied {
     color: #000000;
     background-color: #a4c7d5;
     border-color: #a4c7d5;
 }
 
 #chat-screen .message-edit-actions .save-edit-btn,
-#chat-screen .message-edit-actions .cancel-edit-btn {
+#chat-screen .message-edit-actions .cancel-edit-btn,
+.mobile-message-editor .message-edit-actions .save-edit-btn,
+.mobile-message-editor .message-edit-actions .cancel-edit-btn {
     color: #ffffff;
 }
 
 body.dark-mode #chat-screen .message-edit-actions .save-edit-btn,
-body.dark-mode #chat-screen .message-edit-actions .cancel-edit-btn {
+body.dark-mode #chat-screen .message-edit-actions .cancel-edit-btn,
+body.dark-mode .mobile-message-editor .message-edit-actions .save-edit-btn,
+body.dark-mode .mobile-message-editor .message-edit-actions .cancel-edit-btn {
     color: #000000;
+}
+
+body.mobile-message-editor-open .app-container {
+    pointer-events: none;
+}
+
+.mobile-message-editor {
+    position: fixed;
+    inset: 0;
+    z-index: 10030;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    box-sizing: border-box;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    pointer-events: auto;
+}
+
+.mobile-message-editor.hidden {
+    display: none;
+}
+
+.mobile-message-editor-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    margin: 0;
+    padding:
+        calc(env(safe-area-inset-top, 0px) + 8px)
+        calc(env(safe-area-inset-right, 0px) + 10px)
+        8px
+        calc(env(safe-area-inset-left, 0px) + 10px);
+    box-sizing: border-box;
+    background-color: var(--bg-primary);
+    border-bottom: 1px solid var(--border-primary);
+    box-shadow: var(--shadow-1);
+}
+
+.mobile-message-editor-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    padding:
+        10px
+        calc(env(safe-area-inset-right, 0px) + 10px)
+        calc(env(safe-area-inset-bottom, 0px) + 10px)
+        calc(env(safe-area-inset-left, 0px) + 10px);
+    box-sizing: border-box;
+    background-color: var(--bg-primary);
+}
+
+.mobile-message-editor .mobile-message-editor-textarea {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 12px;
+    box-sizing: border-box;
+    font-family: var(--font-family);
+    font-size: var(--chat-font-size);
+    line-height: var(--chat-line-height);
+    color: var(--text-primary);
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    outline: 0;
+    resize: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.mobile-message-editor .mobile-message-editor-textarea:focus {
+    border-color: var(--bg-button);
+    outline: 2px solid color-mix(in srgb, var(--bg-button) 28%, transparent);
+    outline-offset: 0;
 }
 
 #chat-screen .message-actions {
