@@ -130,8 +130,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.6-beta5";
-const APP_CACHE_VERSION = "v1.34.6-beta5";
+const APP_VERSION = "1.34.6";
+const APP_CACHE_VERSION = "v1.34.6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -216,6 +216,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.6": [
+        "メッセージの個別・一括折りたたみ処理を安定化しました。",
+        "一括開閉処理を個別ボタンの表示状態から独立させ、再描画時の動作を改善しました。",
+        "折りたたみ時の表示と長文判定を安定した構造へ整理しました。"
+    ],
     "1.34.6-beta5": [
         "個別折りたたみボタンと一括開閉機能が動作しない問題を修正しました。",
         "一括開閉処理を個別ボタンの表示状態から独立化しました。",
