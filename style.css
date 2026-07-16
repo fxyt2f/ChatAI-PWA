@@ -840,6 +840,23 @@ body.dark-mode #attach-file-btn {
     padding-bottom: var(--spacing-unit);
 }
 
+.settings-heading-inline {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: calc(var(--spacing-unit) * 2);
+    border-bottom: 1px solid var(--border-primary);
+    padding-bottom: var(--spacing-unit);
+}
+
+.settings-heading-inline h3,
+.settings-heading-inline .settings-description {
+    margin: 0;
+    border-bottom: 0;
+    padding-bottom: 0;
+}
+
 .api-config-help {
     margin: 0 0 calc(var(--spacing-unit) * 1.5);
     color: var(--text-secondary);
