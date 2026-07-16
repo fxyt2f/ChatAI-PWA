@@ -145,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.7";
-const APP_CACHE_VERSION = "v1.34.7";
+const APP_VERSION = "1.35.0-beta1";
+const APP_CACHE_VERSION = "v1.35.0-beta1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -231,6 +231,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta1": [
+        "履歴からチャットを開く際の確認・画面遷移処理を安定化しました。",
+        "今後の履歴画面とサイドバー再設計に向けて、チャット操作と履歴更新処理を整理しました。"
+    ],
     "1.34.7": [
         "「その他設定」をブラウザごとの保存へ変更し、プロファイル切替やDropbox同期から分離しました。",
         "スマホのメッセージ編集を全画面化し、長文を編集しやすい表示へ改善しました。",
@@ -1760,6 +1764,43 @@ const dbUtils = {
         });
     },
 
+    // 将来の履歴サイドバー向けに、指定件数へ達した時点でカーソル走査を終了する。
+    // chatsストアのレコード全体を返すため、各件にはメッセージや添付情報も含まれる。
+    async getRecentChats(sortBy = 'updatedAt', limit = 30) {
+        await this.openDB();
+        const normalizedSortBy = sortBy === 'createdAt' ? 'createdAt' : 'updatedAt';
+        const numericLimit = Number(limit);
+        if (!Number.isFinite(numericLimit) || numericLimit <= 0) return [];
+        const normalizedLimit = Math.floor(numericLimit);
+        if (normalizedLimit === 0) return [];
+
+        return new Promise((resolve, reject) => {
+            const store = this._getStore(CHATS_STORE);
+            const indexName = normalizedSortBy === 'createdAt' ? CHAT_CREATEDAT_INDEX : CHAT_UPDATEDAT_INDEX;
+            const source = store.indexNames.contains(indexName) ? store.index(indexName) : store;
+            if (source === store) {
+                console.error(`インデックス "${indexName}" が見つかりません。主キー順でフォールバックします。`);
+            }
+
+            const request = source.openCursor(null, 'prev');
+            const chats = [];
+            request.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (!cursor || chats.length >= normalizedLimit) {
+                    resolve(chats);
+                    return;
+                }
+                chats.push(cursor.value);
+                if (chats.length >= normalizedLimit) {
+                    resolve(chats);
+                    return;
+                }
+                cursor.continue();
+            };
+            request.onerror = (event) => reject(`直近チャット取得エラー (${normalizedSortBy}順): ${event.target.error}`);
+        });
+    },
+
     // 指定IDのチャットを削除
     async deleteChat(id) {
         await this.openDB();
@@ -2158,6 +2199,33 @@ const dbUtils = {
             throw error;
         }
     },
+};
+
+// 履歴画面と将来の履歴サイドバーが共有する、単一の一覧更新通知。
+const chatListChangeController = {
+    subscribers: new Set(),
+
+    subscribe(listener) {
+        if (typeof listener !== 'function') return () => {};
+        this.subscribers.add(listener);
+        return () => this.subscribers.delete(listener);
+    },
+
+    async notify(detail = {}) {
+        const normalizedDetail = {
+            type: typeof detail.type === 'string' ? detail.type : 'update',
+            chatId: detail.chatId ?? null,
+            ...detail
+        };
+        const results = await Promise.allSettled(
+            [...this.subscribers].map(listener => Promise.resolve().then(() => listener(normalizedDetail)))
+        );
+        results.forEach(result => {
+            if (result.status === 'rejected') {
+                console.error('[ChatListChange] 購読処理に失敗しました:', result.reason);
+            }
+        });
+    }
 };
 
 // --- UIユーティリティ (uiUtils) ---
@@ -4469,19 +4537,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         state.isSavingChatTitle = true;
         input.disabled = true;
         try {
-            await dbUtils.updateChatTitleDb(state.currentChatId, nextTitle);
+            await chatHistoryActions.rename(state.currentChatId, nextTitle);
             input.dataset.cancelled = 'true';
             input.remove();
             state.isEditingChatTitle = false;
             state.isSavingChatTitle = false;
             elements.chatTitle.hidden = false;
-            this.updateChatTitle(nextTitle);
-
-            const titleElement = elements.historyList?.querySelector?.(`.history-item[data-chat-id="${state.currentChatId}"] .history-item-title`);
-            if (titleElement) {
-                titleElement.textContent = nextTitle;
-                titleElement.title = nextTitle;
-            }
             await this.showCustomAlert('タイトルを保存しました。');
         } catch (error) {
             console.error('タイトル保存エラー:', error);
@@ -4550,15 +4611,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
                     li.onclick = async (event) => {
                         if (!event.target.closest('.history-item-actions button')) {
-                            const screenTransitionPromise = uiUtils.showScreen('chat');
-                            const loadChatPromise = appLogic.loadChat(chat.id);
-                            await Promise.all([screenTransitionPromise, loadChatPromise]);
+                            await chatHistoryActions.open(chat.id, { source: 'history' });
                         }
                     };
                     li.querySelector('.js-edit-title-btn').onclick = (e) => { e.stopPropagation(); appLogic.editHistoryTitle(chat.id, titleEl); };
-                    li.querySelector('.js-export-btn').onclick = (e) => { e.stopPropagation(); appLogic.exportChat(chat.id, titleText); };
-                    li.querySelector('.js-duplicate-btn').onclick = (e) => { e.stopPropagation(); appLogic.duplicateChat(chat.id); };
-                    li.querySelector('.js-delete-btn').onclick = (e) => { e.stopPropagation(); appLogic.confirmDeleteChat(chat.id, titleText); };
+                    li.querySelector('.js-export-btn').onclick = (e) => { e.stopPropagation(); chatHistoryActions.export(chat.id, { title: titleText }); };
+                    li.querySelector('.js-duplicate-btn').onclick = (e) => { e.stopPropagation(); chatHistoryActions.duplicate(chat.id); };
+                    li.querySelector('.js-delete-btn').onclick = (e) => { e.stopPropagation(); chatHistoryActions.delete(chat.id, { title: titleText }); };
 
                     elements.historyList.appendChild(li);
                 });
@@ -14753,7 +14812,7 @@ const appLogic = {
                         }
                         this.markAsDirtyAndSchedulePush('structural');
                         await uiUtils.showCustomAlert(`${chatsToDelete.length}件の古いチャットを削除しました。`);
-                        await uiUtils.renderHistoryList(); // リストを再描画
+                        await chatListChangeController.notify({ type: 'delete', chatId: null, bulk: true });
                     } catch (error) {
                         console.error("古いチャットの一括削除エラー:", error);
                         await uiUtils.showCustomAlert(`削除中にエラーが発生しました: ${error.message}`);
@@ -15006,110 +15065,121 @@ const appLogic = {
     },
 
 
-    // app.js の appLogic オブジェクト内
-    async loadChat(id) {
-        this.flushInputDraft();
-        state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
-        const loadChatStartTime = performance.now();
-        state.syncMessageCounter = 0;
+    // チャットの切り替え準備と読み込み。成功するまでは現在のstateを破壊しない。
+    async loadChat(id, options = {}) {
+        const normalizedId = chatHistoryActions.normalizeChatId(id);
+        if (normalizedId === null) {
+            await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
+            return { ok: false, notFound: true, reason: 'invalid-chat-id' };
+        }
 
-        state.currentMessages = [];
+        const shouldAbortSending = state.isSending;
+        const editingMessageIndex = state.editingMessageIndex;
+        const shouldCloseSystemPrompt = state.isEditingSystemPrompt;
+        const shouldDiscardAttachments = state.pendingAttachments.length > 0;
 
-        if (state.isSending) {
+        if (shouldAbortSending) {
             const confirmed = await uiUtils.showCustomConfirm("送信中です。中断して別のチャットを読み込みますか？");
-            if (!confirmed) return;
-            this.abortRequest();
+            if (!confirmed) return { ok: false, cancelled: true, reason: 'sending' };
         }
-        if (state.editingMessageIndex !== null) {
+        if (editingMessageIndex !== null) {
             const confirmed = await uiUtils.showCustomConfirm("編集中です。変更を破棄して別のチャットを読み込みますか？");
-            if (!confirmed) return;
-            const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
-            this.cancelEditMessage(state.editingMessageIndex, msgEl);
+            if (!confirmed) return { ok: false, cancelled: true, reason: 'message-edit' };
         }
-        if (state.isEditingSystemPrompt) {
+        if (shouldCloseSystemPrompt) {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
             if (!saved) {
                 const confirmed = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したまま別のチャットを読み込みますか？");
-                if (!confirmed) return;
+                if (!confirmed) return { ok: false, cancelled: true, reason: 'system-prompt' };
             }
+        }
+        if (shouldDiscardAttachments) {
+            const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
+            if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
+        }
+
+        let chat;
+        try {
+            chat = await dbUtils.getChat(normalizedId);
+        } catch (error) {
+            console.error(`チャット ${normalizedId} の読み込みに失敗しました:`, error);
+            await uiUtils.showCustomAlert(`チャットの読み込みエラー: ${error}`);
+            return { ok: false, error, reason: 'load-error' };
+        }
+        if (!chat) {
+            console.warn(`チャット ${normalizedId} が見つかりませんでした。`);
+            await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
+            return { ok: false, notFound: true, reason: 'not-found' };
+        }
+
+        const nextMessages = chat.messages?.map(msg => ({
+            ...msg,
+            attachments: msg.attachments || []
+        })) || [];
+        let needsSave = false;
+        const groupIds = new Set(nextMessages.filter(m => m.siblingGroupId).map(m => m.siblingGroupId));
+        groupIds.forEach(gid => {
+            const siblings = nextMessages.filter(m => m.siblingGroupId === gid);
+            const selected = siblings.filter(m => m.isSelected);
+            if (selected.length === 0 && siblings.length > 0) {
+                siblings[siblings.length - 1].isSelected = true;
+                needsSave = true;
+            } else if (selected.length > 1) {
+                selected.slice(0, -1).forEach(m => m.isSelected = false);
+                needsSave = true;
+            }
+        });
+
+        // ここから先は対象チャットの読み込み成功後にだけ実行する。
+        this.flushInputDraft();
+        if (shouldAbortSending) this.abortRequest();
+        if (editingMessageIndex !== null) {
+            const messageElement = state.mobileMessageEditor.messageElement
+                || elements.messageContainer.querySelector(`.message[data-index="${editingMessageIndex}"]`);
+            this.cancelEditMessage(editingMessageIndex, messageElement);
+        }
+        if (shouldCloseSystemPrompt) {
             await this.closeSystemPromptDialog({ skipSave: true });
         }
-        if (state.pendingAttachments.length > 0) {
-            const confirmedAttach = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
-            if (!confirmedAttach) return;
+        if (shouldDiscardAttachments) {
             state.pendingAttachments = [];
             uiUtils.updateAttachmentBadgeVisibility();
         }
-
         uiUtils.closeChatSearch({ restoreFocus: false });
 
-        try {
-            const dbGetStartTime = performance.now();
-            const chat = await dbUtils.getChat(id);
-            const dbGetEndTime = performance.now();
-            
-            if (chat) {
-                state.currentChatId = chat.id;
-                state.currentMessages = chat.messages?.map(msg => ({
-                    ...msg,
-                    attachments: msg.attachments || []
-                })) || [];
-                
-                state.currentPersistentMemory = chat.persistentMemory || {};
-                state.currentSummarizedContext = chat.summarizedContext || null;
-                // チャットごとのメモリ有効状態を読み込む (未定義ならtrue)
-                state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
-                this.toggleMemoryIconVisibility();
+        state.pendingCascadeResponses = null;
+        state.syncMessageCounter = 0;
+        state.currentChatId = chat.id;
+        state.currentMessages = nextMessages;
+        state.currentPersistentMemory = chat.persistentMemory || {};
+        state.currentSummarizedContext = chat.summarizedContext || null;
+        state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
+        state.currentSystemPrompt = chat.systemPrompt !== undefined ? chat.systemPrompt : state.settings.systemPrompt;
+        state.pendingAttachments = [];
 
-                this.updateCharacterProfileButtonVisibility();
+        this.toggleMemoryIconVisibility();
+        this.updateCharacterProfileButtonVisibility();
+        uiUtils.updateChatTitle(chat.title);
+        uiUtils.updateSystemPromptUI();
+        uiUtils.renderChatMessages();
+        elements.userInput.value = '';
+        uiUtils.adjustTextareaHeight();
+        uiUtils.setSendingState(false);
+        this.scheduleInputDraftRestore(0, true);
 
-                let needsSave = false;
-                const groupIds = new Set(state.currentMessages.filter(m => m.siblingGroupId).map(m => m.siblingGroupId));
-                groupIds.forEach(gid => {
-                    const siblings = state.currentMessages.filter(m => m.siblingGroupId === gid);
-                    const selected = siblings.filter(m => m.isSelected);
-                    if (selected.length === 0 && siblings.length > 0) {
-                        siblings[siblings.length - 1].isSelected = true;
-                        needsSave = true;
-                    } else if (selected.length > 1) {
-                        selected.slice(0, -1).forEach(m => m.isSelected = false);
-                        needsSave = true;
-                    }
-                });
-                
-                state.currentSystemPrompt = chat.systemPrompt !== undefined ? chat.systemPrompt : state.settings.systemPrompt;
-                state.pendingAttachments = [];
-                
-                uiUtils.updateChatTitle(chat.title);
-                uiUtils.updateSystemPromptUI();
-                
-                const renderStartTime = performance.now();
-                uiUtils.renderChatMessages();
-                const renderEndTime = performance.now();
-                
-                this.scrollToBottom();
-
-                elements.userInput.value = '';
-                uiUtils.adjustTextareaHeight();
-                uiUtils.setSendingState(false);
-                this.scheduleInputDraftRestore(0, true);
-
-                if (needsSave) {
-                    console.log("読み込み時に isSelected を正規化しました。DBに保存します。");
-                    await dbUtils.saveChat();
-                }
-
-            } else {
-                await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
-                this.startNewChat();
-                uiUtils.showScreen('chat');
-            }
-        } catch (error) {
-            await uiUtils.showCustomAlert(`チャットの読み込みエラー: ${error}`);
-            this.startNewChat();
-
+        if (options.scrollAfterLoad !== false) {
+            this.scrollToBottom();
         }
-        const loadChatEndTime = performance.now();
+        if (needsSave) {
+            console.log("読み込み時に isSelected を正規化しました。DBに保存します。");
+            try {
+                await dbUtils.saveChat();
+            } catch (error) {
+                console.error("読み込み後のisSelected正規化保存に失敗しました:", error);
+            }
+        }
+
+        return { ok: true, chatId: chat.id, chat };
     },
 
     // チャットを複製
@@ -15189,17 +15259,14 @@ const appLogic = {
                 });
                 this.markAsDirtyAndSchedulePush(true);
                 console.log("チャット複製完了:", id, "->", newChatId);
-                // 履歴画面が表示されていればリストを更新、そうでなければアラート表示
-                if (state.currentScreen === 'history') { // stateで判定
-                    uiUtils.renderHistoryList();
-                } else {
-                    await uiUtils.showCustomAlert(`チャット「${newTitle}」を複製しました。`);
-                }
+                return { ok: true, chatId: newChatId, title: newTitle };
             } else {
                 await uiUtils.showCustomAlert("複製元のチャットが見つかりません。");
+                return { ok: false, notFound: true };
             }
         } catch (error) {
             await uiUtils.showCustomAlert(`チャット複製エラー: ${error}`);
+            return { ok: false, error };
         }
     },
 
@@ -15453,41 +15520,26 @@ const appLogic = {
 
     // チャット削除の確認と実行 (メッセージペア全体)
     async confirmDeleteChat(id, title) {
-         const confirmed = await uiUtils.showCustomConfirm(`「${title || 'この履歴'}」を削除しますか？`);
-         if (confirmed) {
-            const isDeletingCurrent = state.currentChatId === id;
-            const currentScreenBeforeDelete = state.currentScreen;
+        const confirmed = await uiUtils.showCustomConfirm(`「${title || 'この履歴'}」を削除しますか？`);
+        if (!confirmed) return { ok: false, cancelled: true };
 
-            try {
-                // 1. DBから削除
-                await dbUtils.deleteChat(id);
-                console.log("チャット削除:", id);
+        const isDeletingCurrent = state.currentChatId === id;
+        try {
+            // DB削除と画像参照確認、Dropbox dirty化は既存処理へ委譲する。
+            await dbUtils.deleteChat(id);
+            console.log("チャット削除:", id);
 
-                // 2. 表示中チャット削除なら内部状態リセット
-                if (isDeletingCurrent) {
-                    console.log("表示中のチャットが削除されたため、内部状態を新規チャットにリセット。");
-                    this.startNewChat(); // pendingAttachments もクリアされる
-                }
-
-                // 3. 履歴画面での操作ならリストUI更新 & 状態リセット判定
-                if (currentScreenBeforeDelete === 'history') {
-                    console.log("履歴画面での操作のため、リストUIを更新します。");
-                    await uiUtils.renderHistoryList(); // リストUIを更新
-                    const listIsEmpty = elements.historyList.querySelectorAll('.history-item:not(.js-history-item-template)').length === 0;
-
-                    // リストが空になった場合、内部状態をリセットする（念のため）
-                    if (listIsEmpty) {
-                        console.log("履歴リストが空になりました。");
-                        if (!isDeletingCurrent) {
-                            this.startNewChat();
-                        }
-                    }
-                }
-
-            } catch (error) {
-                await uiUtils.showCustomAlert(`チャット削除エラー: ${error}`);
-                uiUtils.setSendingState(false); // エラー時も送信状態解除
+            if (isDeletingCurrent) {
+                console.log("表示中のチャットが削除されたため、新規チャット画面へ移動します。");
+                this.startNewChat();
+                await uiUtils.showScreen('chat');
             }
+
+            return { ok: true, chatId: id, wasCurrent: isDeletingCurrent };
+        } catch (error) {
+            console.error(`チャット ${id} の削除に失敗しました:`, error);
+            await uiUtils.showCustomAlert(`チャット削除エラー: ${error}`);
+            return { ok: false, error };
         }
     },
 
@@ -15502,17 +15554,7 @@ const appLogic = {
         if (newTitle !== '' && trimmedTitle !== '' && trimmedTitle !== currentTitle) {
             const finalTitle = trimmedTitle.substring(0, 100); // 100文字に制限
             try {
-                await dbUtils.updateChatTitleDb(chatId, finalTitle); // DB更新
-                // UI更新
-                titleElement.textContent = finalTitle;
-                titleElement.title = finalTitle; // ホバータイトルも更新
-                // 更新日時も更新表示
-                const dateElement = titleElement.closest('.history-item')?.querySelector('.updated-date');
-                if(dateElement) dateElement.textContent = `更新: ${uiUtils.formatDate(Date.now())}`;
-                // 現在表示中のチャットのタイトルが変更されたら、ヘッダーも更新
-                if (state.currentChatId === chatId) {
-                    uiUtils.updateChatTitle(finalTitle);
-                }
+                await chatHistoryActions.rename(chatId, finalTitle);
             } catch (error) {
                 await uiUtils.showCustomAlert(`タイトル更新エラー: ${error}`);
             }
@@ -16349,7 +16391,7 @@ const appLogic = {
                 console.log("履歴インポート成功:", newChatId);
                 elements.progressDialog.close();
                 await uiUtils.showCustomAlert(`履歴「${newChatData.title}」をインポートしました。`);
-                uiUtils.renderHistoryList();
+                await chatListChangeController.notify({ type: 'import', chatId: newChatId, title: newChatData.title });
 
             } catch (error) {
                 console.error("履歴インポート処理エラー:", error);
@@ -21470,6 +21512,122 @@ const appLogic = {
 
 }; // appLogic終了
 
+// 現行履歴画面と将来の履歴サイドバーが共有する、既存処理の薄い入口。
+const chatHistoryActions = {
+    normalizeChatId(chatId) {
+        if (chatId === null || chatId === undefined || chatId === '') return null;
+        if (typeof chatId === 'string' && /^\d+$/.test(chatId.trim())) {
+            const numericId = Number(chatId);
+            return Number.isSafeInteger(numericId) ? numericId : null;
+        }
+        if (typeof chatId === 'number') {
+            return Number.isSafeInteger(chatId) ? chatId : null;
+        }
+        return typeof chatId === 'string' && chatId.trim() ? chatId.trim() : null;
+    },
+
+    async open(chatId, options = {}) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) {
+            await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
+            return { ok: false, notFound: true, reason: 'invalid-chat-id' };
+        }
+
+        const result = await appLogic.loadChat(normalizedId, { scrollAfterLoad: false });
+        if (!result.ok) return result;
+
+        if (options.transition !== false) {
+            await uiUtils.showScreen('chat');
+        }
+        if (options.scroll !== false) {
+            appLogic.scrollToBottom();
+        }
+        return result;
+    },
+
+    async rename(chatId, title) {
+        const normalizedId = this.normalizeChatId(chatId);
+        const normalizedTitle = uiUtils.normalizeChatTitleText(title, '');
+        if (normalizedId === null) throw new Error('チャットIDが無効です。');
+        if (!normalizedTitle) throw new Error('タイトルが空です。');
+
+        await dbUtils.updateChatTitleDb(normalizedId, normalizedTitle);
+        if (state.currentChatId === normalizedId) {
+            uiUtils.updateChatTitle(normalizedTitle);
+        }
+        await chatListChangeController.notify({
+            type: 'rename',
+            chatId: normalizedId,
+            title: normalizedTitle,
+            updatedAt: Date.now()
+        });
+        return { ok: true, chatId: normalizedId, title: normalizedTitle };
+    },
+
+    export(chatId, options = {}) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) return Promise.resolve({ ok: false, notFound: true });
+        return appLogic.exportChat(normalizedId, options.title);
+    },
+
+    async duplicate(chatId) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) {
+            await uiUtils.showCustomAlert("複製元のチャットが見つかりません。");
+            return { ok: false, notFound: true };
+        }
+        const result = await appLogic.duplicateChat(normalizedId);
+        if (!result?.ok) return result || { ok: false };
+
+        await chatListChangeController.notify({
+            type: 'duplicate',
+            chatId: result.chatId,
+            sourceChatId: normalizedId,
+            title: result.title
+        });
+        if (state.currentScreen !== 'history') {
+            await uiUtils.showCustomAlert(`チャット「${result.title}」を複製しました。`);
+        }
+        return result;
+    },
+
+    async delete(chatId, options = {}) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) {
+            await uiUtils.showCustomAlert("削除対象のチャットが見つかりません。");
+            return { ok: false, notFound: true };
+        }
+        const result = await appLogic.confirmDeleteChat(normalizedId, options.title);
+        if (!result.ok) return result;
+
+        await chatListChangeController.notify({
+            type: 'delete',
+            chatId: normalizedId,
+            wasCurrent: result.wasCurrent
+        });
+        return result;
+    }
+};
+
+// 現行履歴画面の購読は一度だけ登録する。renameは従来どおり該当行だけ更新する。
+chatListChangeController.subscribe(async detail => {
+    if (state.currentScreen !== 'history') return;
+    if (detail.type === 'rename') {
+        const item = [...elements.historyList.querySelectorAll('.history-item:not(.js-history-item-template)')]
+            .find(historyItem => historyItem.dataset.chatId === String(detail.chatId));
+        const titleElement = item?.querySelector('.history-item-title');
+        if (titleElement) {
+            titleElement.textContent = detail.title;
+            titleElement.title = detail.title;
+            const dateElement = item.querySelector('.updated-date');
+            if (dateElement) dateElement.textContent = `更新: ${uiUtils.formatDate(detail.updatedAt)}`;
+            return;
+        }
+    }
+    await uiUtils.renderHistoryList();
+});
+
 window.appLogic = appLogic;
 window.state = state;
 window.dbUtils = dbUtils;
+window.chatHistoryActions = chatHistoryActions;
