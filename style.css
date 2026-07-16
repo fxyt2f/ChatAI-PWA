@@ -1580,30 +1580,6 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
         justify-self: end;
     }
 }
-.local-ui-settings-section {
-    margin: 12px 0 16px;
-    padding: 10px 12px;
-    border: 1px solid var(--border-primary);
-    border-radius: var(--border-radius-md);
-    background-color: var(--bg-secondary);
-}
-.local-ui-settings-title {
-    font-weight: 600;
-    margin-bottom: 4px;
-    color: var(--text-primary);
-}
-.local-ui-settings-help {
-    font-size: 0.85em;
-    color: var(--text-secondary);
-    margin: 0 0 8px;
-    line-height: 1.4;
-}
-.local-ui-settings-section > label:not(.checkbox-label) {
-    margin-top: 8px;
-}
-.local-ui-checkbox {
-    margin-top: 8px;
-}
 .chat-display-settings-row {
     display: flex;
     gap: 12px;

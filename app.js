@@ -34,9 +34,32 @@ const DEFAULT_LOCAL_UI_SETTINGS = {
     chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
     chatParagraphMarginBottom: DEFAULT_CHAT_PARAGRAPH_MARGIN_BOTTOM,
     hideSystemPromptInChat: false,
+    enterToSend: true,
+    enableWideMode: true,
+    autoScroll: true,
+    enableSwipeNavigation: false,
+    headerAutoHide: false,
+    historySortOrder: 'updatedAt',
+    fontFamily: '',
+    debugMode: false,
     floatingPanelBehavior: 'on-click',
     lastSeenReleaseVersion: ''
 };
+const LOCAL_OTHER_SETTING_KEYS = [
+    'chatFontSize',
+    'chatLineHeight',
+    'chatParagraphMarginBottom',
+    'hideSystemPromptInChat',
+    'floatingPanelBehavior',
+    'enterToSend',
+    'enableWideMode',
+    'autoScroll',
+    'enableSwipeNavigation',
+    'headerAutoHide',
+    'historySortOrder',
+    'fontFamily',
+    'debugMode'
+];
 const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
 const CHAT_TITLE_MAX_LENGTH = 100;
@@ -105,16 +128,8 @@ const DEFAULT_SEND_BUTTON_COLOR = '#1976d2';
 const DEFAULT_OTHER_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
 const DEFAULT_GLOBAL_OTHER_SETTINGS = {
-    enterToSend: true,
-    enableWideMode: true,
-    autoScroll: true,
-    enableSwipeNavigation: false,
-    headerAutoHide: false,
-    historySortOrder: 'updatedAt',
-    fontFamily: '',
     additionalModels: '',
-    additionalOpenRouterModels: '',
-    debugMode: false
+    additionalOpenRouterModels: ''
 };
 const GLOBAL_OTHER_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_OTHER_SETTINGS);
 const DEFAULT_GLOBAL_THEME_SETTINGS = {
@@ -130,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.6";
-const APP_CACHE_VERSION = "v1.34.6";
+const APP_VERSION = "1.34.7-beta1";
+const APP_CACHE_VERSION = "v1.34.7-beta1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -216,6 +231,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.7-beta1": [
+        "「その他設定」をブラウザごとに保存する設定へ変更しました。",
+        "履歴のソート順、アプリのフォント、表示・操作設定をプロファイル切替やDropbox同期から分離しました。",
+        "既存の設定値を初回移行時に引き継ぐよう対応しました。",
+        "ローカル設定の案内表示を「その他設定」全体へ統合しました。"
+    ],
     "1.34.6": [
         "メッセージの個別・一括折りたたみ処理を安定化しました。",
         "一括開閉処理を個別ボタンの表示状態から独立させ、再描画時の動作を改善しました。",
@@ -955,6 +976,7 @@ Reason: [NGの場合の理由]`,
         debugMode: false,
     },
     localUiSettings: { ...DEFAULT_LOCAL_UI_SETTINGS },
+    localUiSettingsStoredKeys: new Set(),
     globalOtherSettings: { ...DEFAULT_GLOBAL_OTHER_SETTINGS },
     globalThemeSettings: { ...DEFAULT_GLOBAL_THEME_SETTINGS },
     themeSettingsProfileScoped: false,
@@ -10969,16 +10991,8 @@ const appLogic = {
 
     normalizeGlobalOtherSettings(settings = {}) {
         const normalized = { ...DEFAULT_GLOBAL_OTHER_SETTINGS };
-        normalized.enterToSend = typeof settings.enterToSend === 'boolean' ? settings.enterToSend : DEFAULT_GLOBAL_OTHER_SETTINGS.enterToSend;
-        normalized.enableWideMode = typeof settings.enableWideMode === 'boolean' ? settings.enableWideMode : DEFAULT_GLOBAL_OTHER_SETTINGS.enableWideMode;
-        normalized.autoScroll = typeof settings.autoScroll === 'boolean' ? settings.autoScroll : DEFAULT_GLOBAL_OTHER_SETTINGS.autoScroll;
-        normalized.enableSwipeNavigation = typeof settings.enableSwipeNavigation === 'boolean' ? settings.enableSwipeNavigation : DEFAULT_GLOBAL_OTHER_SETTINGS.enableSwipeNavigation;
-        normalized.headerAutoHide = typeof settings.headerAutoHide === 'boolean' ? settings.headerAutoHide : DEFAULT_GLOBAL_OTHER_SETTINGS.headerAutoHide;
-        normalized.historySortOrder = ['updatedAt', 'createdAt'].includes(settings.historySortOrder) ? settings.historySortOrder : DEFAULT_GLOBAL_OTHER_SETTINGS.historySortOrder;
-        normalized.fontFamily = typeof settings.fontFamily === 'string' ? settings.fontFamily : DEFAULT_GLOBAL_OTHER_SETTINGS.fontFamily;
         normalized.additionalModels = typeof settings.additionalModels === 'string' ? settings.additionalModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalModels;
         normalized.additionalOpenRouterModels = typeof settings.additionalOpenRouterModels === 'string' ? settings.additionalOpenRouterModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalOpenRouterModels;
-        normalized.debugMode = typeof settings.debugMode === 'boolean' ? settings.debugMode : DEFAULT_GLOBAL_OTHER_SETTINGS.debugMode;
         return normalized;
     },
 
@@ -11133,6 +11147,17 @@ const appLogic = {
         localUiSettings.hideSystemPromptInChat = typeof settings.hideSystemPromptInChat === 'boolean'
             ? settings.hideSystemPromptInChat
             : DEFAULT_LOCAL_UI_SETTINGS.hideSystemPromptInChat;
+        ['enterToSend', 'enableWideMode', 'autoScroll', 'enableSwipeNavigation', 'headerAutoHide', 'debugMode'].forEach(key => {
+            localUiSettings[key] = typeof settings[key] === 'boolean'
+                ? settings[key]
+                : DEFAULT_LOCAL_UI_SETTINGS[key];
+        });
+        localUiSettings.historySortOrder = ['updatedAt', 'createdAt'].includes(settings.historySortOrder)
+            ? settings.historySortOrder
+            : DEFAULT_LOCAL_UI_SETTINGS.historySortOrder;
+        localUiSettings.fontFamily = typeof settings.fontFamily === 'string'
+            ? settings.fontFamily
+            : DEFAULT_LOCAL_UI_SETTINGS.fontFamily;
         localUiSettings.floatingPanelBehavior = FLOATING_PANEL_BEHAVIOR_OPTIONS.includes(settings.floatingPanelBehavior)
             ? settings.floatingPanelBehavior
             : DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior;
@@ -11154,6 +11179,7 @@ const appLogic = {
         state.localUiSettings = this.normalizeLocalUiSettings(state.localUiSettings);
         this.applyLocalUiSettingsToEffectiveSettings();
         state.hasSavedLocalUiSettings = true;
+        state.localUiSettingsStoredKeys = new Set(LOCAL_UI_SETTING_KEYS);
         await dbUtils.saveSetting('localUiSettings', state.localUiSettings);
     },
 
@@ -11163,6 +11189,10 @@ const appLogic = {
             ...state.localUiSettings,
             [key]: value
         });
+        if (!(state.localUiSettingsStoredKeys instanceof Set)) {
+            state.localUiSettingsStoredKeys = new Set();
+        }
+        state.localUiSettingsStoredKeys.add(key);
         await this.saveLocalUiSettings();
     },
 
@@ -11631,8 +11661,31 @@ const appLogic = {
             }
 
             const storedLocalUiSettings = await dbUtils.getSetting('localUiSettings');
-            state.hasSavedLocalUiSettings = !!storedLocalUiSettings?.value;
-            state.localUiSettings = this.normalizeLocalUiSettings(storedLocalUiSettings?.value || {});
+            const storedGlobalOtherSettings = await dbUtils.getSetting('globalOtherSettings');
+            const rawLocalUiSettings = storedLocalUiSettings?.value && typeof storedLocalUiSettings.value === 'object'
+                ? storedLocalUiSettings.value
+                : {};
+            const rawGlobalOtherSettings = storedGlobalOtherSettings?.value && typeof storedGlobalOtherSettings.value === 'object'
+                ? storedGlobalOtherSettings.value
+                : {};
+            const hasOwnSetting = (settings, key) => Object.prototype.hasOwnProperty.call(settings, key);
+            const globalOtherSettingsHadLocalKeys = LOCAL_OTHER_SETTING_KEYS.some(key => hasOwnSetting(rawGlobalOtherSettings, key));
+            const migratedLocalUiSettings = { ...rawLocalUiSettings };
+            let migratedLocalUiSettingsChanged = false;
+            state.localUiSettingsStoredKeys = new Set(Object.keys(rawLocalUiSettings));
+            LOCAL_OTHER_SETTING_KEYS.forEach(key => {
+                if (hasOwnSetting(rawLocalUiSettings, key)) return;
+                if (!hasOwnSetting(rawGlobalOtherSettings, key)) return;
+                migratedLocalUiSettings[key] = rawGlobalOtherSettings[key];
+                state.localUiSettingsStoredKeys.add(key);
+                migratedLocalUiSettingsChanged = true;
+            });
+            state.hasSavedLocalUiSettings = !!storedLocalUiSettings?.value || migratedLocalUiSettingsChanged;
+            state.localUiSettings = this.normalizeLocalUiSettings(migratedLocalUiSettings);
+            if (migratedLocalUiSettingsChanged) {
+                await dbUtils.saveSetting('localUiSettings', state.localUiSettings);
+                console.log("[LocalUI] 旧グローバル設定からブラウザごとのその他設定へ移行しました:", LOCAL_OTHER_SETTING_KEYS);
+            }
             this.applyLocalUiSettingsToEffectiveSettings();
             console.log("[GlobalSettings] 端末ごとのUI設定を読み込みました:", state.localUiSettings);
 
@@ -11641,9 +11694,13 @@ const appLogic = {
             state.textFormattingTarget = state.textFormattingSettings.target;
             console.log("[TextFormatting] 保存済み文章整形設定を読み込みました:", state.textFormattingSettings);
 
-            const storedGlobalOtherSettings = await dbUtils.getSetting('globalOtherSettings');
-            state.globalOtherSettings = this.normalizeGlobalOtherSettings(storedGlobalOtherSettings?.value || {});
+            state.globalOtherSettings = this.normalizeGlobalOtherSettings(rawGlobalOtherSettings);
+            if (globalOtherSettingsHadLocalKeys) {
+                await dbUtils.saveSetting('globalOtherSettings', state.globalOtherSettings);
+                console.log("[GlobalSettings] 端末ローカル化した設定をグローバルその他設定から除外しました。");
+            }
             this.applyGlobalOtherSettingsToEffectiveSettings();
+            this.applyLocalUiSettingsToEffectiveSettings();
 
             const storedGlobalThemeSettings = await dbUtils.getSetting('globalThemeSettings');
             state.globalThemeSettings = this.normalizeGlobalThemeSettings(storedGlobalThemeSettings?.value || {});
@@ -11730,20 +11787,25 @@ const appLogic = {
                 this.migrateSettingsScopeFromProfile(loadedProfileSettings);
             }
 
-            if (!state.hasSavedLocalUiSettings) {
+            const hasOwnProfileSetting = (settings, key) => Object.prototype.hasOwnProperty.call(settings, key);
+            const missingLocalUiSettings = LOCAL_UI_SETTING_KEYS.filter(key => !state.localUiSettingsStoredKeys?.has(key));
+            if (missingLocalUiSettings.length > 0) {
                 const migratedLocalUiSettings = {};
-                LOCAL_UI_SETTING_KEYS.forEach(key => {
-                    if (loadedProfileSettings[key] !== undefined) {
+                missingLocalUiSettings.forEach(key => {
+                    if (hasOwnProfileSetting(loadedProfileSettings, key)) {
                         migratedLocalUiSettings[key] = loadedProfileSettings[key];
+                        state.localUiSettingsStoredKeys.add(key);
                     }
                 });
                 state.localUiSettings = this.normalizeLocalUiSettings({
                     ...state.localUiSettings,
                     ...migratedLocalUiSettings
                 });
-                state.hasSavedLocalUiSettings = true;
-                dbUtils.saveSetting('localUiSettings', state.localUiSettings)
-                    .catch(error => console.error("[LocalUI] 旧プロファイル設定からの移行保存に失敗しました:", error));
+                if (Object.keys(migratedLocalUiSettings).length > 0) {
+                    state.hasSavedLocalUiSettings = true;
+                    dbUtils.saveSetting('localUiSettings', state.localUiSettings)
+                        .catch(error => console.error("[LocalUI] 旧プロファイル設定からの移行保存に失敗しました:", error));
+                }
             }
             state.activeProfile.settings = this.getSharedProfileSettings(loadedProfileSettings);
 
@@ -11931,10 +11993,10 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'historySortOrder', 'fontFamily', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
         const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
-        const booleanKeys = ['enterToSend', 'darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableSwipeNavigation', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'autoScroll', 'enableWideMode', 'enableSummaryButton'];
+        const booleanKeys = ['darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'enableSummaryButton'];
         
         settings.systemPrompt = elements.systemPromptDefaultTextarea.value.trim();
         settings.fixedRetryDelaySeconds = parseFloat(elements.fixedRetryDelayInput.value) || null;
@@ -13785,26 +13847,10 @@ const appLogic = {
             dummyModel: { element: elements.dummyModelInput, event: 'input' },
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
-            enterToSend: { element: elements.enterToSendCheckbox, event: 'change' },
-            historySortOrder: { element: elements.historySortOrderSelect, event: 'change' },
             themeSettingsProfileScoped: { element: elements.themeSettingsProfileScopedToggle, event: 'change' },
             darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },
-            debugMode: { element: elements.debugModeToggle, event: 'change', onUpdate: (value) => {
-                DebugLogger.init();
-                this.toggleDebugLogButtonVisibility(value);
-
-                if (elements.apiProviderRow) {
-                    elements.apiProviderRow.classList.remove('hidden');
-                }
-
-                const provider = state.settings.apiProvider || 'gemini';
-                this.updateProviderUI(provider);
-                this.updateModelOptions(provider);
-            }},
-            fontFamily: { element: elements.fontFamilyInput, event: 'input', onUpdate: () => uiUtils.applyFontFamily() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
-            enableSwipeNavigation: { element: elements.swipeNavigationToggle, event: 'change' },
             enableProofreading: { element: elements.enableProofreadingCheckbox, event: 'change' },
             proofreadingModelName: {
                 element: elements.proofreadingModelNameSelect,
@@ -13841,11 +13887,8 @@ const appLogic = {
             userMessageColor: { element: elements.userMessageColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             allowPromptUiChanges: { element: document.getElementById('allow-prompt-ui-changes'), event: 'change' },
             forceFunctionCalling: { element: elements.forceFunctionCallingToggle, event: 'change' },
-            autoScroll: { element: elements.autoScrollToggle, event: 'change' },
-            enableWideMode: { element: elements.enableWideModeToggle, event: 'change', onUpdate: () => this.applyWideMode() },
             enableMemory: { element: elements.enableMemoryToggle, event: 'change', onUpdate: (value) => this.toggleMemoryOptions(value) },
             memoryAutoSaveInterval: { element: elements.memoryAutoSaveIntervalSelect, event: 'change' },
-            headerAutoHide: { element: elements.headerAutoHideToggle, event: 'change', onUpdate: (value) => document.body.classList.toggle('header-auto-hide', value) },
             dropboxSyncFrequency: { element: elements.dropboxSyncFrequencySelect, event: 'change' },
             summaryModelName: {
                 element: elements.summaryModelNameSelect,
@@ -13972,7 +14015,26 @@ const appLogic = {
         setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatParagraphMarginBottomSelect, 'chatParagraphMarginBottom', 'change', () => uiUtils.getValidChatParagraphMarginBottom(elements.chatParagraphMarginBottomSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
+        setupLocalUiSettingSave(elements.enterToSendCheckbox, 'enterToSend');
+        setupLocalUiSettingSave(elements.enableWideModeToggle, 'enableWideMode', 'change', null, () => this.applyWideMode());
+        setupLocalUiSettingSave(elements.autoScrollToggle, 'autoScroll');
+        setupLocalUiSettingSave(elements.swipeNavigationToggle, 'enableSwipeNavigation');
+        setupLocalUiSettingSave(elements.headerAutoHideToggle, 'headerAutoHide', 'change', null, (value) => document.body.classList.toggle('header-auto-hide', value));
         setupLocalUiSettingSave(elements.floatingPanelBehaviorSelect, 'floatingPanelBehavior', 'change', () => elements.floatingPanelBehaviorSelect?.value || DEFAULT_LOCAL_UI_SETTINGS.floatingPanelBehavior, () => this.applyFloatingPanelBehavior());
+        setupLocalUiSettingSave(elements.historySortOrderSelect, 'historySortOrder', 'change', () => ['updatedAt', 'createdAt'].includes(elements.historySortOrderSelect?.value) ? elements.historySortOrderSelect.value : DEFAULT_LOCAL_UI_SETTINGS.historySortOrder);
+        setupLocalUiSettingSave(elements.fontFamilyInput, 'fontFamily', 'input', () => elements.fontFamilyInput?.value || DEFAULT_LOCAL_UI_SETTINGS.fontFamily, () => uiUtils.applyFontFamily());
+        setupLocalUiSettingSave(elements.debugModeToggle, 'debugMode', 'change', null, (value) => {
+            DebugLogger.init();
+            this.toggleDebugLogButtonVisibility(value);
+
+            if (elements.apiProviderRow) {
+                elements.apiProviderRow.classList.remove('hidden');
+            }
+
+            const provider = state.settings.apiProvider || 'gemini';
+            this.updateProviderUI(provider);
+            this.updateModelOptions(provider);
+        });
     
         // --- OpenRouterモデル名テキストボックスのイベントリスナー ---
         if (elements.openrouterModelInput) {
@@ -20332,10 +20394,18 @@ const appLogic = {
             });
 
             const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
-            const settingsForExport = allSettings.filter(setting => 
-                !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId'].includes(setting.key)
-                && !localUiSettingKeysForExport.has(setting.key)
-            );
+            const settingsForExport = allSettings
+                .filter(setting =>
+                    !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId'].includes(setting.key)
+                    && !localUiSettingKeysForExport.has(setting.key)
+                )
+                .map(setting => {
+                    if (setting.key !== 'globalOtherSettings') return setting;
+                    return {
+                        ...setting,
+                        value: this.normalizeGlobalOtherSettings(setting.value || {})
+                    };
+                });
 
             const localAssets = new Map();
             const addAsset = (assetId, blob) => {
