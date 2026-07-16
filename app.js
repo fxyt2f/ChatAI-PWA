@@ -145,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.7-beta2";
-const APP_CACHE_VERSION = "v1.34.7-beta2";
+const APP_VERSION = "1.34.7-beta3";
+const APP_CACHE_VERSION = "v1.34.7-beta3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -231,6 +231,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.7-beta3": [
+        "メッセージの折りたたみ時に表示位置が大きく移動する問題を修正しました。",
+        "個別折りたたみでは操作したボタン付近、一括開閉では閲覧中のメッセージ位置を維持するよう調整しました。",
+        "折りたたみ・展開操作が自動最下部スクロールを発生させないよう調整しました。"
+    ],
     "1.34.7-beta2": [
         "スマホでメッセージを画面全体を使って編集できるように変更しました。",
         "編集中のキャンセル、コピー、保存を常に操作しやすい上部配置へ変更しました。",
@@ -1008,6 +1013,7 @@ Reason: [NGの場合の理由]`,
         previousFocus: null,
         scrollTop: 0
     },
+    suppressAutoScrollForCollapse: false,
     textFormattingSettings: { ...DEFAULT_TEXT_FORMATTING_SETTINGS },
     textFormattingTarget: DEFAULT_TEXT_FORMATTING_SETTINGS.target,
     touchStartX: 0,
@@ -5959,12 +5965,124 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         messageCollapseFrame = 0;
     },
 
+    getChatScrollContainer() {
+        const main = elements.chatScreen?.querySelector?.('.main-content');
+        return main || elements.messageContainer || null;
+    },
+
+    clampScrollTop(container, value) {
+        if (!container) return 0;
+        const maxScrollTop = Math.max(container.scrollHeight - container.clientHeight, 0);
+        return Math.min(Math.max(value, 0), maxScrollTop);
+    },
+
+    getMessageCollapseAnchor(messageElement, preferredAnchor = null) {
+        if (preferredAnchor?.isConnected) return preferredAnchor;
+        const button = this.getMessageCollapseButton(messageElement);
+        if (button?.isConnected) return button;
+        const actions = messageElement?.querySelector?.(':scope > .message-actions');
+        if (actions?.isConnected) return actions;
+        return messageElement?.isConnected ? messageElement : null;
+    },
+
+    captureElementScrollAnchor(anchorElement) {
+        const scrollContainer = this.getChatScrollContainer();
+        if (!scrollContainer || !anchorElement?.isConnected) return null;
+        return {
+            scrollContainer,
+            anchorElement,
+            beforeTop: anchorElement.getBoundingClientRect().top
+        };
+    },
+
+    requestCollapseScrollAdjustment(callback) {
+        state.suppressAutoScrollForCollapse = true;
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                try {
+                    callback?.();
+                } finally {
+                    state.suppressAutoScrollForCollapse = false;
+                    this.updateScrollButtonsState?.();
+                }
+            });
+        });
+    },
+
+    restoreElementScrollAnchor(anchorSnapshot, resolveAnchor = null) {
+        if (!anchorSnapshot?.scrollContainer) return;
+        const scrollContainer = anchorSnapshot.scrollContainer;
+        const anchorElement = resolveAnchor?.() || anchorSnapshot.anchorElement;
+        if (!anchorElement?.isConnected) return;
+        const afterTop = anchorElement.getBoundingClientRect().top;
+        const delta = afterTop - anchorSnapshot.beforeTop;
+        if (!Number.isFinite(delta) || Math.abs(delta) < 1) return;
+        scrollContainer.scrollTop = this.clampScrollTop(scrollContainer, scrollContainer.scrollTop + delta);
+    },
+
+    captureTopVisibleMessageAnchor() {
+        const scrollContainer = this.getChatScrollContainer();
+        if (!scrollContainer) return null;
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const messages = Array.from(elements.messageContainer?.querySelectorAll?.('.message.user, .message.model') || []);
+        let best = null;
+        let bestDistance = Infinity;
+
+        messages.forEach(messageElement => {
+            if (!messageElement.isConnected || messageElement.classList.contains('error')) return;
+            const rect = messageElement.getBoundingClientRect();
+            if (rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) return;
+            const distance = Math.abs(rect.top - containerRect.top);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = {
+                    scrollContainer,
+                    index: messageElement.dataset.index,
+                    role: messageElement.classList.contains('user') ? 'user' : 'model',
+                    beforeTop: rect.top
+                };
+            }
+        });
+        return best;
+    },
+
+    resolveMessageAnchorElement(anchorSnapshot) {
+        if (!anchorSnapshot) return null;
+        const selector = `.message.${anchorSnapshot.role}[data-index="${anchorSnapshot.index}"]`;
+        return elements.messageContainer?.querySelector?.(selector) || null;
+    },
+
+    scrollMessageStartIntoViewAfterExpand(messageElement) {
+        const scrollContainer = this.getChatScrollContainer();
+        if (!scrollContainer || !messageElement?.isConnected) return;
+        const contentElement = messageElement.querySelector(':scope > .message-content') || messageElement;
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const contentRect = contentElement.getBoundingClientRect();
+        const topClearance = 12;
+        const currentOffset = contentRect.top - containerRect.top;
+        const nextScrollTop = scrollContainer.scrollTop + currentOffset - topClearance;
+        scrollContainer.scrollTop = this.clampScrollTop(scrollContainer, nextScrollTop);
+    },
+
     toggleMessageCollapse(messageElement) {
         if (!messageElement) return;
         const willCollapse = !messageElement.classList.contains('tm-collapsed');
+        const button = this.getMessageCollapseButton(messageElement);
+        const anchorSnapshot = willCollapse
+            ? this.captureElementScrollAnchor(this.getMessageCollapseAnchor(messageElement, button))
+            : null;
 
-        this.setMessageCollapsed(messageElement, willCollapse);
+        state.suppressAutoScrollForCollapse = true;
+        this.setMessageCollapsed(messageElement, willCollapse, { keepVisible: false });
         this.updateCollapseAllMessagesButtonState();
+
+        this.requestCollapseScrollAdjustment(() => {
+            if (willCollapse) {
+                this.restoreElementScrollAnchor(anchorSnapshot, () => this.getMessageCollapseAnchor(messageElement, button));
+            } else {
+                this.scrollMessageStartIntoViewAfterExpand(messageElement);
+            }
+        });
     },
 
     getCollapsibleMessageElements() {
@@ -6000,11 +6118,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return;
         }
 
+        const anchorSnapshot = this.captureTopVisibleMessageAnchor();
         const shouldExpand = messages.every(message => message.classList.contains('tm-collapsed'));
+        state.suppressAutoScrollForCollapse = true;
         messages.forEach(message => {
             this.setMessageCollapsed(message, !shouldExpand, { keepVisible: false });
         });
         this.updateCollapseAllMessagesButtonState();
+        this.requestCollapseScrollAdjustment(() => {
+            this.restoreElementScrollAnchor(anchorSnapshot, () => this.resolveMessageAnchorElement(anchorSnapshot));
+        });
     },
 
     keepMessageAboveComposer(messageElement) {
@@ -20483,6 +20606,10 @@ const appLogic = {
     scrollToBottom(force = false) {
         const mainContent = elements.chatScreen.querySelector('.main-content');
         if (!mainContent) return;
+
+        if (state.suppressAutoScrollForCollapse && !force) {
+            return;
+        }
 
         if (!state.settings.autoScroll && !force) {
             return;
