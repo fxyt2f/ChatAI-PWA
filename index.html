@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.35.0-beta1">
+    <link rel="stylesheet" href="./style.css?v=1.35.0-beta2">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.35.0-beta1" defer></script>
+    <script src="./dropbox.js?v=1.35.0-beta2" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.35.0-beta1" defer></script>
+    <script src="./app.js?v=1.35.0-beta2" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -191,39 +191,70 @@
         <!-- 履歴画面 -->
         <div id="history-screen" class="screen">
             <header class="app-header">
-                <button id="back-to-chat-from-history" class="header-button" title="チャットへ戻る"><span class="material-symbols-outlined">arrow_forward_ios</span></button>
-                <h1 id="history-title">履歴一覧</h1>
-                <button id="delete-old-chats-btn" class="header-button header-delete-button" title="古い履歴を一括削除" disabled><span class="material-symbols-outlined">delete_sweep</span></button>
-                <button id="import-history-btn" class="header-save-button" title="履歴をインポート"><span class="material-symbols-outlined">download</span></button>
-                <input type="file" id="import-history-input" accept=".txt,text/plain" class="hidden"> <!-- インポート用ファイル入力 -->
+                <button id="back-to-chat-from-history" class="header-button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
+                <h1 id="history-title">履歴</h1>
             </header>
-            <main class="main-content">
-                <ul id="history-list" class="history-list">
-                    <!-- 履歴アイテムはここに読み込まれる -->
-                    <li class="js-history-item-template history-item">
-                        <div class="history-item-details">
-                            <span class="history-item-title"></span>
-                            <div class="history-item-stats">
-                                <span class="stat-item js-stat-tokens" title="合計トークン数"><span class="material-symbols-outlined">token</span>-</span>
-                                <span class="stat-item js-stat-assets" title="合計アセット数"><span class="material-symbols-outlined">perm_media</span>-</span>
-                                <span class="stat-item js-stat-size" title="合計アセット容量"><span class="material-symbols-outlined">database</span>-</span>
+            <main class="main-content history-main-content">
+                <div class="history-workspace">
+                    <section class="history-list-pane" aria-labelledby="history-title">
+                        <div class="history-toolbar">
+                            <div class="history-toolbar-primary">
+                                <div class="history-search-field">
+                                    <span class="material-symbols-outlined" aria-hidden="true">search</span>
+                                    <label class="visually-hidden" for="history-search-input">チャットを検索</label>
+                                    <input id="history-search-input" type="search" maxlength="200" placeholder="チャットを検索" autocomplete="off" aria-label="チャットを検索">
+                                    <button id="history-search-clear-btn" type="button" class="history-search-clear hidden" aria-label="検索文字列を消去" title="検索文字列を消去"><span class="material-symbols-outlined" aria-hidden="true">close</span></button>
+                                </div>
+                                <label class="history-sort-field" for="history-sort-order-toolbar">
+                                    <span class="visually-hidden">履歴の並び替え</span>
+                                    <select id="history-sort-order-toolbar" aria-label="履歴の並び替え">
+                                        <option value="updatedAt">更新日時の新しい順</option>
+                                        <option value="createdAt">作成日時の新しい順</option>
+                                        <option value="title">タイトル順</option>
+                                    </select>
+                                </label>
+                                <button id="history-new-chat-btn" type="button" class="history-primary-action"><span class="material-symbols-outlined" aria-hidden="true">add</span>新規チャット</button>
+                            </div>
+                            <div class="history-toolbar-secondary">
+                                <button id="import-history-btn" type="button" class="history-secondary-action"><span class="material-symbols-outlined" aria-hidden="true">download</span>インポート</button>
+                                <button id="delete-old-chats-btn" type="button" class="history-secondary-action history-danger-action" disabled><span class="material-symbols-outlined" aria-hidden="true">delete_sweep</span>7日以上未更新の履歴を削除</button>
+                                <input type="file" id="import-history-input" accept=".txt,text/plain" class="hidden">
                             </div>
                         </div>
-                        <div class="history-item-bottom-row">
-                            <div class="history-item-dates">
-                                <span class="created-date"></span>
-                                <span class="updated-date"></span>
-                            </div>
-                            <div class="history-item-actions">
-                                <button class="js-edit-title-btn" title="タイトル編集"><span class="material-symbols-outlined">edit</span></button>
-                                <button class="js-export-btn" title="出力"><span class="material-symbols-outlined">upload</span></button>
-                                <button class="js-duplicate-btn" title="複製"><span class="material-symbols-outlined">content_copy</span></button>
-                                <button class="js-delete-btn" title="削除"><span class="material-symbols-outlined">delete</span></button>
-                            </div>
-                        </div>
-                    </li>
-                </ul>
-                 <p id="no-history-message" class="hidden" style="text-align: center; color: var(--text-secondary); margin-top: 20px;">チャット履歴はありません。</p>
+                        <p id="history-status" class="history-status" role="status" aria-live="polite"></p>
+                        <ul id="history-list" class="history-list" aria-label="チャット履歴"></ul>
+                        <section id="history-state-panel" class="history-state-panel hidden" aria-live="polite">
+                            <span class="material-symbols-outlined history-state-icon" aria-hidden="true">forum</span>
+                            <h2 id="no-history-message"></h2>
+                            <p id="history-state-description"></p>
+                            <button id="history-state-action" type="button" class="history-primary-action hidden"></button>
+                        </section>
+                        <template id="history-item-template" class="js-history-item-template">
+                            <li class="history-item">
+                                <button type="button" class="history-item-open" data-history-action="open">
+                                    <span class="history-item-title"></span>
+                                    <span class="history-item-dates">
+                                        <span class="updated-date"></span>
+                                        <span class="history-date-separator" aria-hidden="true">・</span>
+                                        <span class="created-date"></span>
+                                    </span>
+                                    <span class="history-item-snippet"></span>
+                                    <span class="history-item-stats" aria-label="チャット統計">
+                                        <span class="stat-item js-stat-tokens" title="合計トークン数"><span class="material-symbols-outlined" aria-hidden="true">token</span><span class="stat-value">-</span></span>
+                                        <span class="stat-item js-stat-assets" title="合計アセット数"><span class="material-symbols-outlined" aria-hidden="true">perm_media</span><span class="stat-value">-</span></span>
+                                        <span class="stat-item js-stat-size" title="合計アセット容量"><span class="material-symbols-outlined" aria-hidden="true">database</span><span class="stat-value">-</span></span>
+                                    </span>
+                                </button>
+                                <div class="history-item-actions" aria-label="チャット操作">
+                                    <button type="button" data-history-action="rename" aria-label="タイトルを変更" title="タイトルを変更"><span class="material-symbols-outlined" aria-hidden="true">edit</span></button>
+                                    <button type="button" data-history-action="export" aria-label="チャットを出力" title="チャットを出力"><span class="material-symbols-outlined" aria-hidden="true">upload</span></button>
+                                    <button type="button" data-history-action="duplicate" aria-label="チャットを複製" title="チャットを複製"><span class="material-symbols-outlined" aria-hidden="true">content_copy</span></button>
+                                    <button type="button" data-history-action="delete" aria-label="チャットを削除" title="チャットを削除"><span class="material-symbols-outlined" aria-hidden="true">delete</span></button>
+                                </div>
+                            </li>
+                        </template>
+                    </section>
+                </div>
             </main>
         </div>
 
@@ -976,6 +1007,7 @@
                    <select id="history-sort-order" aria-label="履歴のソート順">
                        <option value="updatedAt">更新日時 (新しい順)</option>
                        <option value="createdAt">作成日時 (新しい順)</option>
+                       <option value="title">タイトル順</option>
                    </select>
                    <!-- フォント指定 -->
                    <label for="font-family-input">アプリのフォント:</label>
