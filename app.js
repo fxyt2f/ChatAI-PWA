@@ -145,8 +145,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.34.7-beta4";
-const APP_CACHE_VERSION = "v1.34.7-beta4";
+const APP_VERSION = "1.34.7";
+const APP_CACHE_VERSION = "v1.34.7";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -231,6 +231,13 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.34.7": [
+        "「その他設定」をブラウザごとの保存へ変更し、プロファイル切替やDropbox同期から分離しました。",
+        "スマホのメッセージ編集を全画面化し、長文を編集しやすい表示へ改善しました。",
+        "PC・スマホの編集操作を、左にキャンセル、右にコピーと保存を配置する構成へ統一しました。",
+        "メッセージの折りたたみ・展開時に閲覧位置が大きく移動しないよう改善しました。",
+        "折りたたみ時の画面の揺れや描画のガタつきを軽減しました。"
+    ],
     "1.34.7-beta4": [
         "メッセージを折りたたむ際に画面が一瞬揺れる問題を修正しました。",
         "スクロール位置補正のタイミングと多重実行を整理しました。",
