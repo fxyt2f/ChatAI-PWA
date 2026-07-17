@@ -1269,6 +1269,11 @@ body.dark-mode .new-chat-button {
     display: none;
 }
 
+.chat-sidebar-list,
+.chat-sidebar-group {
+    text-align: left;
+}
+
 .chat-sidebar-group + .chat-sidebar-group {
     margin-top: 12px;
 }
@@ -1314,7 +1319,10 @@ body.dark-mode .new-chat-button {
 
 .chat-sidebar-item-open {
     display: grid;
+    width: 100%;
     gap: 2px;
+    justify-items: stretch;
+    text-align: left;
 }
 
 .chat-sidebar-item-menu {
@@ -1328,6 +1336,8 @@ body.dark-mode .new-chat-button {
 
 .chat-sidebar-item-title,
 .chat-sidebar-item-snippet {
+    display: block;
+    width: 100%;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
