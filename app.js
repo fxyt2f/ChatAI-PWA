@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta4.1";
-const APP_CACHE_VERSION = "v1.35.0-beta4.1";
+const APP_VERSION = "1.35.0-beta4.2";
+const APP_CACHE_VERSION = "v1.35.0-beta4.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta4.2": [
+        "履歴サイドバーのヘッダー配色をチャットヘッダーと統一しました。",
+        "履歴サイドバー内のテキストを左揃えに統一しました。",
+        "検索欄の文字とアイコンの垂直位置を調整しました。"
+    ],
     "1.35.0-beta4.1": [
         "サイドバーとチャット画面のヘッダーデザインを統一しました。",
         "サイドバーの開閉操作をパネルアイコンへ変更しました。",
