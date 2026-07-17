@@ -366,6 +366,41 @@ button:hover:not(:disabled) {
     margin: 0;
 }
 
+.history-pin-filter {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    min-height: 44px;
+    padding: 3px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 10px;
+    background: var(--bg-input);
+}
+
+.history-pin-filter button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 36px;
+    margin: 0;
+    padding: 6px 10px;
+    border-radius: 7px;
+    color: var(--text-secondary);
+    background: transparent;
+    box-shadow: none;
+    text-transform: none;
+}
+
+.history-pin-filter button[aria-pressed="true"] {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.history-pin-filter .material-symbols-outlined {
+    font-size: 17px;
+}
+
 #history-sort-order-toolbar {
     width: 100%;
     height: 44px;
@@ -532,6 +567,15 @@ body.dark-mode .history-item.is-selected {
     -webkit-line-clamp: 2;
 }
 
+.chat-pin-icon {
+    display: inline-block;
+    margin-right: 4px;
+    color: var(--text-secondary);
+    font-size: 0.95em;
+    line-height: 1;
+    vertical-align: -0.08em;
+}
+
 .history-item-dates {
     display: flex;
     flex-wrap: wrap;
@@ -648,6 +692,19 @@ body.dark-mode .history-item.is-selected {
 .history-detail-pane {
     display: none;
     min-width: 0;
+}
+
+.history-detail-pin-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 6px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.history-detail-pin-status .material-symbols-outlined {
+    font-size: 17px;
 }
 
 .history-detail-empty {

@@ -40,6 +40,8 @@ const DEFAULT_LOCAL_UI_SETTINGS = {
     enableSwipeNavigation: false,
     headerAutoHide: false,
     historySortOrder: 'updatedAt',
+    historyPinFilter: 'all',
+    isPersistentChatSidebarOpen: true,
     fontFamily: '',
     debugMode: false,
     floatingPanelBehavior: 'on-click',
@@ -63,6 +65,7 @@ const LOCAL_OTHER_SETTING_KEYS = [
 const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
 const HISTORY_SORT_OPTIONS = ['updatedAt', 'createdAt', 'title'];
+const HISTORY_PIN_FILTER_OPTIONS = ['all', 'pinned'];
 const HISTORY_SEARCH_DEBOUNCE_MS = 225;
 const HISTORY_RENDER_CHUNK_SIZE = 50;
 const CHAT_TITLE_MAX_LENGTH = 100;
@@ -83,6 +86,50 @@ const ZAI_API_BASE_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DUPLICATE_SUFFIX = ' (コピー)';
 const IMPORT_PREFIX = '(取込) ';
+
+function normalizeChatPinTimestamp(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue) && numericValue > 0) return numericValue;
+    if (typeof value === 'string') {
+        const parsedValue = Date.parse(value);
+        if (Number.isFinite(parsedValue) && parsedValue > 0) return parsedValue;
+    }
+    return null;
+}
+
+function normalizeChatPinState(chat = {}) {
+    const isPinned = chat?.isPinned === true;
+    const pinStateUpdatedAt = normalizeChatPinTimestamp(chat?.pinStateUpdatedAt);
+    const storedPinnedAt = normalizeChatPinTimestamp(chat?.pinnedAt);
+    const fallbackPinnedAt = pinStateUpdatedAt
+        || normalizeChatPinTimestamp(chat?.updatedAt)
+        || normalizeChatPinTimestamp(chat?.createdAt);
+    return {
+        isPinned,
+        pinnedAt: isPinned ? storedPinnedAt : null,
+        pinStateUpdatedAt,
+        effectivePinnedAt: isPinned ? (storedPinnedAt || fallbackPinnedAt) : null
+    };
+}
+
+function applyNormalizedChatPinState(chat = {}, pinState = normalizeChatPinState(chat)) {
+    return {
+        ...chat,
+        isPinned: pinState.isPinned,
+        pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
+        pinStateUpdatedAt: pinState.pinStateUpdatedAt
+    };
+}
+
+function chooseNewerChatPinState(preferredChat = {}, alternateChat = {}) {
+    const preferred = normalizeChatPinState(preferredChat);
+    const alternate = normalizeChatPinState(alternateChat);
+    if (alternate.pinStateUpdatedAt && (!preferred.pinStateUpdatedAt || alternate.pinStateUpdatedAt > preferred.pinStateUpdatedAt)) {
+        return alternate;
+    }
+    return preferred;
+}
 const API_CONFIG_MIGRATION_KEY = 'apiConfigsMigratedV1310';
 const API_MODEL_REF_MIGRATION_KEY = 'apiModelRefsMigratedV1312';
 const API_MODEL_CANDIDATES_MIGRATION_KEY = 'apiModelCandidatesStabilizedV1317';
@@ -148,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta4.2";
-const APP_CACHE_VERSION = "v1.35.0-beta4.2";
+const APP_VERSION = "1.35.0-beta5";
+const APP_CACHE_VERSION = "v1.35.0-beta5";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +281,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta5": [
+        "よく使うチャットをピン留めできる機能を追加しました。",
+        "履歴画面とチャットサイドバーにピン留め一覧を追加しました。",
+        "ワイド画面の常設サイドバー開閉状態をブラウザーごとに保存するようにしました。"
+    ],
     "1.35.0-beta4.2": [
         "履歴サイドバーのヘッダー配色をチャットヘッダーと統一しました。",
         "履歴サイドバー内のテキストを左揃えに統一しました。",
@@ -606,6 +658,7 @@ try {
         historyDetailEmpty: document.getElementById('history-detail-empty'),
         historyDetailContent: document.getElementById('history-detail-content'),
         historyDetailTitle: document.getElementById('history-detail-title'),
+        historyDetailPinStatus: document.getElementById('history-detail-pin-status'),
         historyDetailUpdated: document.getElementById('history-detail-updated'),
         historyDetailCreated: document.getElementById('history-detail-created'),
         historyDetailMessageCount: document.getElementById('history-detail-message-count'),
@@ -625,6 +678,8 @@ try {
         historyStateAction: document.getElementById('history-state-action'),
         historySearchInput: document.getElementById('history-search-input'),
         historySearchClearBtn: document.getElementById('history-search-clear-btn'),
+        historyPinFilter: document.getElementById('history-pin-filter'),
+        historyPinFilterButtons: [...document.querySelectorAll('[data-history-pin-filter]')],
         historySortOrderToolbar: document.getElementById('history-sort-order-toolbar'),
         historyWorkspace: document.querySelector('#history-screen .history-workspace'),
         historyToolbarStandard: [...document.querySelectorAll('#history-screen .history-toolbar-standard')],
@@ -960,6 +1015,9 @@ const state = {
     tabId: `tab_${Date.now()}_${Math.random()}`, // このタブを識別するユニークID
     db: null,
     currentChatId: null,
+    currentChatIsPinned: false,
+    currentChatPinnedAt: null,
+    currentChatPinStateUpdatedAt: null,
     currentMessages: [],
     currentSystemPrompt: '',
     currentPersistentMemory: {}, // 現在のチャットの永続メモリ
@@ -1635,6 +1693,9 @@ const dbUtils = {
                 persistentMemory: state.currentPersistentMemory || {},
                 summarizedContext: state.currentSummarizedContext || null,
                 isMemoryEnabledForChat: state.isMemoryEnabledForChat,
+                isPinned: state.currentChatIsPinned === true,
+                pinnedAt: state.currentChatIsPinned === true ? state.currentChatPinnedAt : null,
+                pinStateUpdatedAt: state.currentChatPinStateUpdatedAt,
             };
         } else {
             messagesForStats = chatObjectToSave.messages || [];
@@ -1661,12 +1722,19 @@ const dbUtils = {
                     }
     
                     const chatIdForOperation = existingChatData ? existingChatData.id : state.currentChatId;
+                    const pinSource = chatObjectToSave
+                        ? chatDataToSave
+                        : existingChatData || chatDataToSave;
+                    const pinState = normalizeChatPinState(pinSource);
                     const finalChatData = {
                         ...chatDataToSave,
                         updatedAt: chatObjectToSave && chatObjectToSave.updatedAt ? chatObjectToSave.updatedAt : now,
                         createdAt: existingChatData ? existingChatData.createdAt : now,
                         title: title,
-                        stats: stats
+                        stats: stats,
+                        isPinned: pinState.isPinned,
+                        pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
+                        pinStateUpdatedAt: pinState.pinStateUpdatedAt
                     };
                     if (chatIdForOperation) {
                         finalChatData.id = chatIdForOperation;
@@ -1677,6 +1745,11 @@ const dbUtils = {
                         const savedId = event.target.result;
                         if (!state.currentChatId && savedId) {
                             state.currentChatId = savedId;
+                        }
+                        if (String(state.currentChatId ?? savedId) === String(chatIdForOperation ?? savedId)) {
+                            state.currentChatIsPinned = pinState.isPinned;
+                            state.currentChatPinnedAt = pinState.isPinned ? pinState.pinnedAt : null;
+                            state.currentChatPinStateUpdatedAt = pinState.pinStateUpdatedAt;
                         }
                         console.log(`チャット ${state.currentChatId ? '更新' : '保存'} 完了 ID:`, state.currentChatId || savedId);
                         if ((state.currentChatId || savedId) === (chatIdForOperation || savedId)) {
@@ -1852,6 +1925,66 @@ const dbUtils = {
             };
             request.onerror = (event) => reject(`全チャット取得エラー (${sortBy}順): ${event.target.error}`);
         });
+    },
+
+    async updateChatPinState(id, shouldPin) {
+        await this.openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
+            const store = transaction.objectStore(CHATS_STORE);
+            const request = store.get(id);
+            let updatedChat = null;
+            request.onsuccess = event => {
+                const chat = event.target.result;
+                if (!chat) {
+                    transaction.abort();
+                    reject(new Error(`チャットが見つかりません: ${id}`));
+                    return;
+                }
+                const now = Date.now();
+                updatedChat = {
+                    ...chat,
+                    isPinned: shouldPin === true,
+                    pinnedAt: shouldPin === true ? now : null,
+                    pinStateUpdatedAt: now
+                };
+                store.put(updatedChat);
+            };
+            request.onerror = event => reject(event.target.error);
+            transaction.oncomplete = () => resolve(updatedChat);
+            transaction.onerror = event => reject(event.target.error || transaction.error);
+            transaction.onabort = () => {
+                if (!updatedChat) return;
+                reject(transaction.error || new Error('ピン状態の保存を中断しました。'));
+            };
+        });
+    },
+
+    async mergeChatPinStatesFromRemote(remoteChats = []) {
+        await this.openDB();
+        const remoteById = new Map((Array.isArray(remoteChats) ? remoteChats : []).map(chat => [String(chat.id), chat]));
+        if (remoteById.size === 0) return [];
+        const localChats = await this.getAllChats('updatedAt');
+        const updates = localChats.filter(localChat => {
+            const remoteChat = remoteById.get(String(localChat.id));
+            if (!remoteChat) return false;
+            const localPin = normalizeChatPinState(localChat);
+            const remotePin = normalizeChatPinState(remoteChat);
+            return Boolean(remotePin.pinStateUpdatedAt && (!localPin.pinStateUpdatedAt || remotePin.pinStateUpdatedAt > localPin.pinStateUpdatedAt));
+        }).map(localChat => {
+            const remotePin = normalizeChatPinState(remoteById.get(String(localChat.id)));
+            return applyNormalizedChatPinState(localChat, remotePin);
+        });
+        if (updates.length === 0) return [];
+        await new Promise((resolve, reject) => {
+            const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
+            const store = transaction.objectStore(CHATS_STORE);
+            updates.forEach(chat => store.put(chat));
+            transaction.oncomplete = resolve;
+            transaction.onerror = event => reject(event.target.error || transaction.error);
+            transaction.onabort = () => reject(transaction.error || new Error('Dropboxピン状態の反映を中断しました。'));
+        });
+        return updates;
     },
 
     // 将来の履歴サイドバー向けに、指定件数へ達した時点でカーソル走査を終了する。
@@ -2123,6 +2256,7 @@ const dbUtils = {
         uiUtils.showProgressDialog('データベースを準備中...');
 
         const { profiles, chats, memories, assets, settings } = data;
+        const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => applyNormalizedChatPinState(chat));
         
         const allAvailableAssets = new Map([...localAssetsBeforeClear, ...downloadedAssets]);
         console.log(`[DB Import V2] 利用可能なアセットの完全なマップを作成しました: ${allAvailableAssets.size}件`);
@@ -2130,7 +2264,7 @@ const dbUtils = {
         // 欠落しているアセットIDを記録するオブジェクト（チャット単位）
         const missingAssetInfo = {};
 
-        (chats || []).forEach(chat => {
+        normalizedChats.forEach(chat => {
             const missingIdsForThisChat = new Set();
             (chat.messages || []).forEach(message => {
                 if (Array.isArray(message.imageIds) && message.imageIds.length > 0) {
@@ -2198,7 +2332,7 @@ const dbUtils = {
             const tempTx = state.db.transaction(tempStoreNames, 'readwrite');
             const tempStores = {
                 'profiles_temp': profilesWithBlobs,
-                'chats_temp': chats || [],
+                'chats_temp': normalizedChats,
                 'memory_store_temp': memories || [],
                 'image_assets_temp': assetsWithBlobs,
                 'image_store_temp': imagesWithBlobs,
@@ -2322,6 +2456,7 @@ const chatListChangeController = {
 const historyUiState = {
     query: '',
     sortOrder: 'updatedAt',
+    pinFilter: 'all',
     scrollTop: 0,
     renderGeneration: 0,
     cachedChats: [],
@@ -2338,18 +2473,17 @@ const historyUiState = {
     deleteTargetIds: []
 };
 
-// チャット画面に滞在する間だけ保持するサイドバー状態。永続化は行わない。
+// 一覧データは一度の全件走査を共有し、常設開閉だけはlocalUiSettingsへ保存する。
 const chatSidebarUiState = {
     mode: 'disabled',
     isOpen: false,
     query: '',
-    recentChats: [],
-    searchChats: null,
+    allChats: [],
     recordsById: new Map(),
     renderGeneration: 0,
     searchTimer: null,
     refreshTimer: null,
-    hasLoadedRecent: false,
+    hasLoadedAll: false,
     unsubscribe: null
 };
 
@@ -4708,6 +4842,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             loading: { icon: 'progress_activity', title: '履歴を読み込んでいます', description: '', action: '', role: 'status' },
             empty: { icon: 'forum', title: 'まだチャット履歴がありません', description: 'チャットを開始すると、ここに表示されます', action: '', role: 'status' },
             noResults: { icon: 'search_off', title: '一致するチャットがありません', description: '検索語を変更してください', action: '検索をクリア', actionName: 'clear-search', role: 'status' },
+            pinnedEmpty: { icon: 'push_pin', title: 'ピン留めした履歴はありません', description: '三点メニューから、よく使う履歴をピン留めできます', action: '', role: 'status' },
+            pinnedNoResults: { icon: 'search_off', title: '一致するピン留め履歴がありません', description: '検索語を変更してください', action: '検索をクリア', actionName: 'clear-search', role: 'status' },
             error: { icon: 'error', title: '履歴を読み込めませんでした', description: '時間をおいて、もう一度お試しください', action: '再試行', actionName: 'retry', role: 'alert' }
         };
         const config = states[type];
@@ -4801,6 +4937,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             ? sortOrderOverride
             : HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
         const groupTimestamp = this.getHistoryDateValue(chat, sortOrder);
+        const pinState = normalizeChatPinState(chat);
         return {
             id: chat.id,
             title,
@@ -4810,6 +4947,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             groupKey: this.getHistoryGroupKey(groupTimestamp),
             snippet: matchedMessage ? this.createHistorySnippet(matchedMessage.historyText, normalizedQuery) : '',
             stats: chat.stats || null,
+            isPinned: pinState.isPinned,
+            pinnedAt: pinState.pinnedAt,
+            effectivePinnedAt: pinState.effectivePinnedAt,
+            pinStateUpdatedAt: pinState.pinStateUpdatedAt,
             isCurrent: String(state.currentChatId ?? '') === String(chat.id)
         };
     },
@@ -4821,11 +4962,28 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (sortOrder === 'title') {
                 return collator.compare(left.title, right.title)
                     || ((right.updatedAt || 0) - (left.updatedAt || 0))
+                    || ((right.effectivePinnedAt || 0) - (left.effectivePinnedAt || 0))
                     || compareIds(left, right);
             }
             const key = sortOrder === 'createdAt' ? 'createdAt' : 'updatedAt';
             return ((right[key] || right.groupTimestamp || 0) - (left[key] || left.groupTimestamp || 0))
+                || ((right.effectivePinnedAt || 0) - (left.effectivePinnedAt || 0))
                 || compareIds(left, right);
+        });
+    },
+
+    sortPinnedHistoryDisplayModels(models, sortOrder) {
+        const collator = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+        return [...models].sort((left, right) => {
+            let primaryResult = 0;
+            if (sortOrder === 'title') primaryResult = collator.compare(left.title, right.title);
+            else {
+                const key = sortOrder === 'createdAt' ? 'createdAt' : 'updatedAt';
+                primaryResult = (right[key] || 0) - (left[key] || 0);
+            }
+            return primaryResult
+                || ((right.effectivePinnedAt || 0) - (left.effectivePinnedAt || 0))
+                || collator.compare(String(left.id ?? ''), String(right.id ?? ''));
         });
     },
 
@@ -4866,6 +5024,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.chatScreen.classList.toggle('chat-sidebar-mode-overlay', mode === 'overlay');
         elements.chatScreen.classList.toggle('chat-sidebar-open', isOpen);
         elements.chatHistorySidebar.setAttribute('aria-hidden', String(!isOpen));
+        elements.chatSidebarCloseBtn?.setAttribute('aria-expanded', String(isOpen));
+        elements.chatSidebarCloseBtn?.setAttribute('aria-controls', 'chat-history-sidebar');
+        elements.chatSidebarCloseBtn?.setAttribute('aria-label', 'サイドバーを閉じる');
         elements.chatSidebarBackdrop.hidden = !isOverlayOpen;
         elements.chatWorkspace.inert = isOverlayOpen;
 
@@ -4897,12 +5058,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.closeHistoryItemMenu();
         chatSidebarUiState.mode = nextMode;
         if (nextMode === 'permanent') {
-            chatSidebarUiState.isOpen = true;
+            chatSidebarUiState.isOpen = state.localUiSettings.isPersistentChatSidebarOpen !== false;
         } else {
             chatSidebarUiState.isOpen = false;
         }
         this.applyChatSidebarState();
-        if (chatSidebarUiState.isOpen && !chatSidebarUiState.hasLoadedRecent) {
+        if (chatSidebarUiState.isOpen && !chatSidebarUiState.hasLoadedAll) {
             void this.renderChatSidebar({ refreshRecent: true });
         } else if (chatSidebarUiState.isOpen) {
             this.renderChatSidebarModels();
@@ -4913,8 +5074,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (chatSidebarUiState.mode === 'disabled') return false;
         this.closeChatSearch({ restoreFocus: false });
         chatSidebarUiState.isOpen = true;
+        if (chatSidebarUiState.mode === 'permanent') {
+            void appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', true)
+                .catch(error => console.error('[Chat Sidebar] 常設サイドバー状態の保存に失敗しました:', error));
+        }
         this.applyChatSidebarState();
-        if (chatSidebarUiState.hasLoadedRecent) this.renderChatSidebarModels();
+        if (chatSidebarUiState.hasLoadedAll) this.renderChatSidebarModels();
         else void this.renderChatSidebar({ refreshRecent: true });
         if (chatSidebarUiState.mode === 'overlay') {
             requestAnimationFrame(() => elements.chatSidebarCloseBtn?.focus());
@@ -4930,6 +5095,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (historyUiState.menuAnchor?.closest('.chat-sidebar-item')) this.closeHistoryItemMenu();
         const wasOverlay = chatSidebarUiState.mode === 'overlay';
         chatSidebarUiState.isOpen = false;
+        if (chatSidebarUiState.mode === 'permanent') {
+            void appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', false)
+                .catch(error => console.error('[Chat Sidebar] 常設サイドバー状態の保存に失敗しました:', error));
+        }
         this.applyChatSidebarState({ restoreFocus: restoreFocus && wasOverlay });
     },
 
@@ -4963,7 +5132,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const title = document.createElement('span');
         title.className = 'chat-sidebar-item-title';
-        title.textContent = model.title;
+        if (model.isPinned) {
+            const pinIcon = document.createElement('span');
+            pinIcon.className = 'material-symbols-outlined chat-pin-icon';
+            pinIcon.setAttribute('aria-hidden', 'true');
+            pinIcon.textContent = 'push_pin';
+            title.appendChild(pinIcon);
+        }
+        title.append(document.createTextNode(model.title));
         title.title = model.title;
         openButton.appendChild(title);
         if (isSearch) {
@@ -4993,12 +5169,20 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
-        const chats = query ? (chatSidebarUiState.searchChats || []) : chatSidebarUiState.recentChats;
-        const models = this.sortHistoryDisplayModels(
-            chats.map(chat => this.createHistoryDisplayModel(chat, query, 'updatedAt')).filter(Boolean),
-            'updatedAt'
+        const allModels = chatSidebarUiState.allChats
+            .map(chat => this.createHistoryDisplayModel(chat, query, 'updatedAt'))
+            .filter(Boolean);
+        const compareIds = (left, right) => String(left.id ?? '').localeCompare(String(right.id ?? ''), 'ja', { numeric: true });
+        const pinnedModels = allModels.filter(model => model.isPinned).sort((left, right) =>
+            ((right.effectivePinnedAt || 0) - (left.effectivePinnedAt || 0))
+            || ((right.updatedAt || 0) - (left.updatedAt || 0))
+            || compareIds(left, right)
         );
-        chatSidebarUiState.recordsById = new Map(chats.map(chat => [String(chat.id), chat]));
+        const unpinnedModels = allModels.filter(model => !model.isPinned).sort((left, right) =>
+            ((right.updatedAt || 0) - (left.updatedAt || 0)) || compareIds(left, right)
+        );
+        const models = query ? [...pinnedModels, ...unpinnedModels] : [...pinnedModels, ...unpinnedModels.slice(0, 30)];
+        chatSidebarUiState.recordsById = new Map(chatSidebarUiState.allChats.map(chat => [String(chat.id), chat]));
         elements.chatSidebarList.replaceChildren();
         elements.chatSidebarStatus.textContent = '';
 
@@ -5012,46 +5196,43 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             const labels = {
                 today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
             };
-            ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
-                const groupModels = models.filter(model => model.groupKey === groupKey);
+            const appendGroup = (label, groupModels) => {
                 if (groupModels.length === 0) return;
                 const group = document.createElement('section');
                 group.className = 'chat-sidebar-group';
                 group.setAttribute('role', 'group');
                 const heading = document.createElement('h2');
                 heading.className = 'chat-sidebar-group-title';
-                heading.textContent = labels[groupKey];
-                group.setAttribute('aria-label', labels[groupKey]);
+                heading.textContent = label;
+                group.setAttribute('aria-label', label);
                 group.appendChild(heading);
                 groupModels.forEach(model => group.appendChild(this.createChatSidebarItem(model)));
                 elements.chatSidebarList.appendChild(group);
+            };
+            appendGroup('ピン留め', pinnedModels);
+            ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
+                appendGroup(labels[groupKey], unpinnedModels.slice(0, 30).filter(model => model.groupKey === groupKey));
             });
         }
         elements.chatSidebarLive.textContent = query
             ? `検索結果 ${models.length}件`
-            : `最近のチャット ${models.length}件`;
+            : `ピン留め ${pinnedModels.length}件、最近のチャット ${unpinnedModels.slice(0, 30).length}件`;
     },
 
     async renderChatSidebar({ refreshRecent = false, invalidateSearch = false } = {}) {
-        if (invalidateSearch) chatSidebarUiState.searchChats = null;
         if (chatSidebarUiState.mode === 'disabled' || !chatSidebarUiState.isOpen) {
-            if (refreshRecent) chatSidebarUiState.hasLoadedRecent = false;
+            if (refreshRecent || invalidateSearch) chatSidebarUiState.hasLoadedAll = false;
             return;
         }
         const generation = ++chatSidebarUiState.renderGeneration;
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
         elements.chatSidebarStatus.textContent = '読み込み中…';
         try {
-            if (refreshRecent || !chatSidebarUiState.hasLoadedRecent) {
-                const recentChats = await dbUtils.getRecentChats('updatedAt', 30);
-                if (generation !== chatSidebarUiState.renderGeneration) return;
-                chatSidebarUiState.recentChats = Array.isArray(recentChats) ? recentChats : [];
-                chatSidebarUiState.hasLoadedRecent = true;
-            }
-            if (query && chatSidebarUiState.searchChats === null) {
+            if (refreshRecent || invalidateSearch || !chatSidebarUiState.hasLoadedAll) {
                 const allChats = await dbUtils.getAllChats('updatedAt');
                 if (generation !== chatSidebarUiState.renderGeneration) return;
-                chatSidebarUiState.searchChats = Array.isArray(allChats) ? allChats : [];
+                chatSidebarUiState.allChats = Array.isArray(allChats) ? allChats : [];
+                chatSidebarUiState.hasLoadedAll = true;
             }
             if (generation !== chatSidebarUiState.renderGeneration) return;
             this.renderChatSidebarModels();
@@ -5087,6 +5268,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             ? chat.messages.some(message => Array.isArray(message?.attachments) && message.attachments.length > 0)
             : null;
         const stats = chat.stats && typeof chat.stats === 'object' ? chat.stats : null;
+        const pinState = normalizeChatPinState(chat);
         return {
             id: chat.id,
             title: this.normalizeChatTitleText(chat.title, `履歴 ${chat.id ?? ''}`) || `履歴 ${chat.id ?? ''}`,
@@ -5100,13 +5282,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             totalAssetSize: stats ? formatFileSize(Number(stats.totalAssetSize || 0)) : '—',
             firstUserMessage: this.createHistoryDetailSnippet(firstUserMessage?.historyText || ''),
             latestRole: latestMessage?.role === 'user' ? '最新のユーザー' : latestMessage?.role === 'model' ? '最新のモデル' : '',
-            latestMessage: this.createHistoryDetailSnippet(latestMessage?.historyText || '')
+            latestMessage: this.createHistoryDetailSnippet(latestMessage?.historyText || ''),
+            isPinned: pinState.isPinned
         };
     },
 
     setHistoryDetailEmpty() {
         elements.historyDetailEmpty?.classList.remove('hidden');
         elements.historyDetailContent?.classList.add('hidden');
+        elements.historyDetailPinStatus?.classList.add('hidden');
         elements.historyDetailPane?.querySelectorAll('[data-history-detail-action]').forEach(button => {
             delete button.dataset.chatId;
         });
@@ -5123,6 +5307,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.historyDetailEmpty.classList.add('hidden');
         elements.historyDetailContent.classList.remove('hidden');
         elements.historyDetailTitle.textContent = detail.title;
+        elements.historyDetailPinStatus?.classList.toggle('hidden', !detail.isPinned);
         elements.historyDetailUpdated.textContent = this.formatDate(detail.updatedAt) || '日時不明';
         elements.historyDetailCreated.textContent = this.formatDate(detail.createdAt) || '日時不明';
         elements.historyDetailMessageCount.textContent = `${detail.messageCount.toLocaleString()}件`;
@@ -5261,6 +5446,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.historySearchInput) elements.historySearchInput.disabled = historyUiState.deleteMode;
         if (elements.historySearchClearBtn) elements.historySearchClearBtn.disabled = historyUiState.deleteMode;
         if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.disabled = historyUiState.deleteMode;
+        elements.historyPinFilterButtons?.forEach(button => { button.disabled = historyUiState.deleteMode; });
         elements.historyList.querySelectorAll('.history-item').forEach(item => {
             const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
             const checkboxControl = item.querySelector('.history-delete-checkbox-control');
@@ -5339,7 +5525,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         item.setAttribute('role', this.isHistoryDetailVisible() ? 'option' : 'listitem');
 
         const titleElement = item.querySelector('.history-item-title');
-        titleElement.textContent = model.title;
+        titleElement.textContent = '';
+        if (model.isPinned) {
+            const pinIcon = document.createElement('span');
+            pinIcon.className = 'material-symbols-outlined chat-pin-icon';
+            pinIcon.setAttribute('aria-hidden', 'true');
+            pinIcon.textContent = 'push_pin';
+            titleElement.appendChild(pinIcon);
+        }
+        titleElement.append(document.createTextNode(model.title));
         titleElement.title = model.title;
         const deleteControl = item.querySelector('.history-delete-checkbox-control');
         const deleteCheckbox = item.querySelector('.history-delete-checkbox');
@@ -5373,8 +5567,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(historyUiState.query);
         const sortOrder = HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
+        const pinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(historyUiState.pinFilter) ? historyUiState.pinFilter : 'all';
+        const filterChats = pinFilter === 'pinned'
+            ? historyUiState.cachedChats.filter(chat => normalizeChatPinState(chat).isPinned)
+            : historyUiState.cachedChats;
         const sortedModels = this.sortHistoryDisplayModels(
-            historyUiState.cachedChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
+            filterChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
             sortOrder
         );
         const deleteTargetIds = new Set(historyUiState.deleteTargetIds.map(String));
@@ -5395,8 +5593,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (models.length === 0) {
             this.setHistoryDetailEmpty();
-            elements.historyStatus.textContent = '検索結果 0件';
-            this.setHistoryStatePanel('noResults');
+            elements.historyStatus.textContent = query ? '検索結果 0件' : '';
+            this.setHistoryStatePanel(pinFilter === 'pinned'
+                ? query ? 'pinnedNoResults' : 'pinnedEmpty'
+                : 'noResults');
             return;
         }
 
@@ -5405,14 +5605,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
         };
         const groups = new Map();
-        const groupOrder = query
-            ? [['search', `検索結果 ${models.length}件`]]
-            : sortOrder === 'title'
-                ? [['title', 'タイトル順']]
-                : Object.entries(groupLabels);
+        const pinnedModels = this.sortPinnedHistoryDisplayModels(models.filter(model => model.isPinned), sortOrder);
+        const unpinnedModels = models.filter(model => !model.isPinned);
+        const groupDescriptors = [];
+        if (pinnedModels.length > 0) groupDescriptors.push(['pinned', 'ピン留め', pinnedModels]);
+        if (pinFilter !== 'pinned' && unpinnedModels.length > 0) {
+            if (query) {
+                groupDescriptors.push(['search', `検索結果 ${unpinnedModels.length}件`, unpinnedModels]);
+            } else if (sortOrder === 'title') {
+                groupDescriptors.push(['title', 'タイトル順', unpinnedModels]);
+            } else {
+                Object.entries(groupLabels).forEach(([key, label]) => {
+                    groupDescriptors.push([key, label, unpinnedModels.filter(model => model.groupKey === key)]);
+                });
+            }
+        }
 
-        groupOrder.forEach(([key, label]) => {
-            const groupModels = query ? models : sortOrder === 'title' ? models : models.filter(model => model.groupKey === key);
+        groupDescriptors.forEach(([key, label, groupModels]) => {
             if (groupModels.length === 0) return;
             const groupItem = document.createElement('li');
             groupItem.className = 'history-group';
@@ -5459,9 +5668,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const generation = ++historyUiState.renderGeneration;
         const restoreScrollTop = resetScroll ? 0 : preserveScroll ? historyUiState.scrollTop : 0;
         historyUiState.sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
+        historyUiState.pinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(state.localUiSettings.historyPinFilter)
+            ? state.localUiSettings.historyPinFilter
+            : 'all';
         if (elements.historySearchInput) elements.historySearchInput.value = historyUiState.query;
         if (elements.historySearchClearBtn) elements.historySearchClearBtn.classList.toggle('hidden', !historyUiState.query);
         if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = historyUiState.sortOrder;
+        elements.historyPinFilterButtons?.forEach(button => {
+            button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === historyUiState.pinFilter));
+            button.disabled = historyUiState.deleteMode;
+        });
         elements.historyTitle.textContent = '履歴';
 
         try {
@@ -5537,6 +5753,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (selectHistoryDetail && this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
         historyUiState.menuChatId = normalizedId;
         historyUiState.menuAnchor = anchor;
+        const record = this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
+        const isPinned = normalizeChatPinState(record || {}).isPinned;
+        const pinMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="pin"]');
+        const pinLabel = pinMenuItem?.querySelector('[data-history-pin-label]');
+        const pinIcon = pinMenuItem?.querySelector('.material-symbols-outlined');
+        if (pinLabel) pinLabel.textContent = isPinned ? 'ピン留めを解除' : 'ピン留め';
+        if (pinIcon) pinIcon.textContent = 'push_pin';
         anchor.closest('.history-item, .chat-sidebar-item')?.classList.add('menu-active');
         anchor.setAttribute('aria-expanded', 'true');
         elements.historyItemMenu.classList.remove('hidden');
@@ -12295,7 +12518,7 @@ const appLogic = {
         localUiSettings.hideSystemPromptInChat = typeof settings.hideSystemPromptInChat === 'boolean'
             ? settings.hideSystemPromptInChat
             : DEFAULT_LOCAL_UI_SETTINGS.hideSystemPromptInChat;
-        ['enterToSend', 'enableWideMode', 'autoScroll', 'enableSwipeNavigation', 'headerAutoHide', 'debugMode'].forEach(key => {
+        ['enterToSend', 'enableWideMode', 'autoScroll', 'enableSwipeNavigation', 'headerAutoHide', 'debugMode', 'isPersistentChatSidebarOpen'].forEach(key => {
             localUiSettings[key] = typeof settings[key] === 'boolean'
                 ? settings[key]
                 : DEFAULT_LOCAL_UI_SETTINGS[key];
@@ -12303,6 +12526,9 @@ const appLogic = {
         localUiSettings.historySortOrder = HISTORY_SORT_OPTIONS.includes(settings.historySortOrder)
             ? settings.historySortOrder
             : DEFAULT_LOCAL_UI_SETTINGS.historySortOrder;
+        localUiSettings.historyPinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(settings.historyPinFilter)
+            ? settings.historyPinFilter
+            : DEFAULT_LOCAL_UI_SETTINGS.historyPinFilter;
         localUiSettings.fontFamily = typeof settings.fontFamily === 'string'
             ? settings.fontFamily
             : DEFAULT_LOCAL_UI_SETTINGS.fontFamily;
@@ -12350,6 +12576,19 @@ const appLogic = {
         historyUiState.sortOrder = normalizedValue;
         if (elements.historySortOrderSelect) elements.historySortOrderSelect.value = normalizedValue;
         if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = normalizedValue;
+        if (render && state.currentScreen === 'history' && historyUiState.hasLoaded) {
+            historyUiState.scrollTop = 0;
+            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
+        }
+    },
+
+    async updateHistoryPinFilter(value, { render = true } = {}) {
+        const normalizedValue = HISTORY_PIN_FILTER_OPTIONS.includes(value) ? value : DEFAULT_LOCAL_UI_SETTINGS.historyPinFilter;
+        await this.updateLocalUiSetting('historyPinFilter', normalizedValue);
+        historyUiState.pinFilter = normalizedValue;
+        elements.historyPinFilterButtons?.forEach(button => {
+            button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === normalizedValue));
+        });
         if (render && state.currentScreen === 'history' && historyUiState.hasLoaded) {
             historyUiState.scrollTop = 0;
             await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
@@ -14331,6 +14570,18 @@ const appLogic = {
                     if (isManual) uiUtils.showProgressDialog('同期を再開しています...');
                     console.log("[Sync Push] ユーザーが上書きを承認しました。Push処理を続行します。");
                 }
+                const mergedPinChats = await dbUtils.mergeChatPinStatesFromRemote(cloudData.data?.chats || []);
+                if (mergedPinChats.length > 0) {
+                    const currentChat = mergedPinChats.find(chat => String(chat.id) === String(state.currentChatId));
+                    if (currentChat) {
+                        const currentPinState = normalizeChatPinState(currentChat);
+                        state.currentChatIsPinned = currentPinState.isPinned;
+                        state.currentChatPinnedAt = currentPinState.isPinned ? currentPinState.pinnedAt : null;
+                        state.currentChatPinStateUpdatedAt = currentPinState.pinStateUpdatedAt;
+                    }
+                    await chatListChangeController.notify({ type: 'sync-pin' });
+                    console.log(`[Sync Push] クラウド側が新しいピン状態を ${mergedPinChats.length}件反映しました。`);
+                }
             }
 
             // --- Step 2: データ準備 ---
@@ -14620,6 +14871,11 @@ const appLogic = {
                 const importResult = await this.importDataFromString(cloudMetadataString);
                 const removedAssetInfo = importResult.removedAssetInfo;
 
+                if (importResult.localPinStateWon) {
+                    state.sync.pendingPush = true;
+                    console.log('[Sync Pull] ローカル側が新しいピン状態を保持したため、追加Pushを予約しました。');
+                }
+
                 state.sync.lastSyncId = importResult.syncId;
                 const hasQueuedChanges = state.sync.pendingPush;
                 state.sync.isDirty = hasQueuedChanges;
@@ -14769,6 +15025,14 @@ const appLogic = {
             };
             elements.historySortOrderToolbar.addEventListener('change', handleHistorySortChange);
             elements.historySortOrderSelect.addEventListener('change', handleHistorySortChange);
+            elements.historyPinFilter?.addEventListener('click', event => {
+                const button = event.target.closest('[data-history-pin-filter]');
+                if (!button || historyUiState.deleteMode) return;
+                this.updateHistoryPinFilter(button.dataset.historyPinFilter).catch(error => {
+                    console.error('履歴のピンフィルターを保存できませんでした:', error);
+                    uiUtils.showCustomAlert('履歴の表示設定を保存できませんでした。');
+                });
+            });
 
             elements.historyDeleteModeBtn.addEventListener('click', () => uiUtils.enterHistoryDeleteMode());
             elements.historyDeleteCancelBtn.addEventListener('click', () => {
@@ -14836,7 +15100,9 @@ const appLogic = {
                     || await dbUtils.getChat(chatId);
                 if (!record) return;
                 const title = uiUtils.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
-                if (action === 'rename') {
+                if (action === 'pin') {
+                    return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
+                } else if (action === 'rename') {
                     await this.editHistoryTitle(chatId, title);
                     if (anchor?.isConnected) anchor.focus();
                     else if (fromSidebar) uiUtils.focusChatSidebarItem(chatId);
@@ -14916,8 +15182,13 @@ const appLogic = {
                 const chatId = historyUiState.menuChatId;
                 const anchor = historyUiState.menuAnchor;
                 const action = menuItem.dataset.historyMenuAction;
-                uiUtils.closeHistoryItemMenu();
                 if (chatId === null) return;
+                if (action === 'pin') {
+                    const result = await executeHistoryAction(action, chatId, anchor);
+                    if (result?.ok) uiUtils.closeHistoryItemMenu();
+                    return;
+                }
+                uiUtils.closeHistoryItemMenu();
                 await executeHistoryAction(action, chatId, anchor);
             });
 
@@ -15062,13 +15333,25 @@ const appLogic = {
                 uiUtils.closeChatSidebar({ restoreFocus: true });
             });
             window.addEventListener('resize', () => uiUtils.updateChatSidebarResponsiveState(), { passive: true });
-            chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(() => {
+            chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(detail => {
                 if (chatSidebarUiState.refreshTimer) {
                     clearTimeout(chatSidebarUiState.refreshTimer);
                     chatSidebarUiState.refreshTimer = null;
                 }
-                chatSidebarUiState.searchChats = null;
-                chatSidebarUiState.hasLoadedRecent = false;
+                if (detail.type === 'pin') {
+                    const cachedIndex = chatSidebarUiState.allChats.findIndex(chat => String(chat.id) === String(detail.chatId));
+                    if (cachedIndex >= 0) {
+                        chatSidebarUiState.allChats[cachedIndex] = {
+                            ...chatSidebarUiState.allChats[cachedIndex],
+                            isPinned: detail.isPinned === true,
+                            pinnedAt: detail.isPinned === true ? detail.pinnedAt : null,
+                            pinStateUpdatedAt: detail.pinStateUpdatedAt
+                        };
+                        if (chatSidebarUiState.isOpen) uiUtils.renderChatSidebarModels();
+                        return;
+                    }
+                }
+                chatSidebarUiState.hasLoadedAll = false;
                 if (chatSidebarUiState.isOpen) {
                     void uiUtils.renderChatSidebar({ refreshRecent: true });
                 }
@@ -16294,6 +16577,9 @@ const appLogic = {
         uiUtils.closeChatSearch({ restoreFocus: false });
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         state.currentChatId = null;
+        state.currentChatIsPinned = false;
+        state.currentChatPinnedAt = null;
+        state.currentChatPinStateUpdatedAt = null;
         state.currentMessages = [];
         state.currentSystemPrompt = state.settings.systemPrompt || ''; 
         state.pendingAttachments = [];
@@ -16401,6 +16687,10 @@ const appLogic = {
         state.pendingCascadeResponses = null;
         state.syncMessageCounter = 0;
         state.currentChatId = chat.id;
+        const loadedPinState = normalizeChatPinState(chat);
+        state.currentChatIsPinned = loadedPinState.isPinned;
+        state.currentChatPinnedAt = loadedPinState.isPinned ? loadedPinState.pinnedAt : null;
+        state.currentChatPinStateUpdatedAt = loadedPinState.pinStateUpdatedAt;
         state.currentMessages = nextMessages;
         state.currentPersistentMemory = chat.persistentMemory || {};
         state.currentSummarizedContext = chat.summarizedContext || null;
@@ -16500,7 +16790,10 @@ const appLogic = {
                     persistentMemory: JSON.parse(JSON.stringify(chat.persistentMemory || {})),
                     updatedAt: Date.now(), // 更新/作成日時は現在
                     createdAt: Date.now(),
-                    title: newTitle
+                    title: newTitle,
+                    isPinned: false,
+                    pinnedAt: null,
+                    pinStateUpdatedAt: null
                 };
                 // 新しいチャットとしてDBに追加
                 const newChatId = await new Promise((resolve, reject) => {
@@ -16634,6 +16927,9 @@ const appLogic = {
                     summarizedContext: state.currentSummarizedContext,
                     createdAt: null,
                     updatedAt: Date.now(),
+                    isPinned: state.currentChatIsPinned,
+                    pinnedAt: state.currentChatPinnedAt,
+                    pinStateUpdatedAt: state.currentChatPinStateUpdatedAt,
                 };
             } else {
                 chatToExport = await dbUtils.getChat(chatId);
@@ -16696,9 +16992,17 @@ const appLogic = {
             }
     
             uiUtils.updateProgressMessage('テキストデータを生成中...');
-            if (chatToExport.persistentMemory && Object.keys(chatToExport.persistentMemory).length > 0) {
+            if ((chatToExport.persistentMemory && Object.keys(chatToExport.persistentMemory).length > 0) || chatToExport.isPinned === true || chatToExport.pinStateUpdatedAt) {
                 try {
-                    const metadataToExport = { ...chatToExport.persistentMemory };
+                    const pinState = normalizeChatPinState(chatToExport);
+                    const metadataToExport = {
+                        ...chatToExport.persistentMemory,
+                        __chatPinState: {
+                            isPinned: pinState.isPinned,
+                            pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
+                            pinStateUpdatedAt: pinState.pinStateUpdatedAt
+                        }
+                    };
                     const metadataJson = JSON.stringify(metadataToExport, null, 2);
                     exportText += `<|#|metadata|#|>\n${metadataJson}\n<|#|/metadata|#|>\n\n`;
                 } catch (e) {
@@ -17556,7 +17860,7 @@ const appLogic = {
                 return;
             }
             try {
-                const { messages: importedMessages, systemPrompt: importedSystemPrompt, persistentMemory: importedMemory, summarizedContext: importedSummary, imageData: importedImageData } = this.parseImportedHistory(textContent);
+                const { messages: importedMessages, systemPrompt: importedSystemPrompt, persistentMemory: importedMemory, summarizedContext: importedSummary, imageData: importedImageData, pinState: importedPinState } = this.parseImportedHistory(textContent);
                 
                 if (importedMessages.length === 0 && !importedSystemPrompt && (!importedMemory || Object.keys(importedMemory).length === 0)) {
                     elements.progressDialog.close();
@@ -17632,7 +17936,10 @@ const appLogic = {
                     summarizedContext: importedSummary || null,
                     updatedAt: Date.now(),
                     createdAt: Date.now(),
-                    title: newTitle.substring(0, 100)
+                    title: newTitle.substring(0, 100),
+                    isPinned: importedPinState.isPinned,
+                    pinnedAt: importedPinState.isPinned ? importedPinState.pinnedAt : null,
+                    pinStateUpdatedAt: importedPinState.pinStateUpdatedAt
                 };
 
                 const newChatId = await new Promise((resolve, reject) => {
@@ -17670,6 +17977,7 @@ const appLogic = {
         let systemPrompt = '';
         let persistentMemory = {};
         let summarizedContext = null;
+        let pinState = normalizeChatPinState({});
         const imageData = {};
         const attachmentData = {}; // 添付ファイルデータ保持用オブジェクト
 
@@ -17685,7 +17993,11 @@ const appLogic = {
                 const jsonData = JSON.parse(blockContent);
                 switch (blockType) {
                     case 'metadata':
-                        persistentMemory = jsonData;
+                        if (jsonData && typeof jsonData === 'object') {
+                            pinState = normalizeChatPinState(jsonData.__chatPinState || {});
+                            persistentMemory = { ...jsonData };
+                            delete persistentMemory.__chatPinState;
+                        }
                         break;
                     case 'summary':
                         summarizedContext = jsonData;
@@ -17756,7 +18068,7 @@ const appLogic = {
         console.log(`インポートテキストから ${messages.length} 件のメッセージとシステムプロンプト(${systemPrompt ? 'あり' : 'なし'})、要約データ(${summarizedContext ? 'あり' : 'なし'})をパースしました。`);
 
         // 返り値にimageDataを追加
-        return { messages, systemPrompt, persistentMemory, summarizedContext, imageData };
+        return { messages, systemPrompt, persistentMemory, summarizedContext, imageData, pinState };
     },
 
 
@@ -22212,6 +22524,21 @@ const appLogic = {
             }
             
             const cloudData = parsedData.data;
+            const localChatsForPinMerge = await dbUtils.getAllChats('updatedAt');
+            const localChatsById = new Map(localChatsForPinMerge.map(chat => [String(chat.id), chat]));
+            let localPinStateWon = false;
+            cloudData.chats = (Array.isArray(cloudData.chats) ? cloudData.chats : []).map(remoteChat => {
+                const localChat = localChatsById.get(String(remoteChat.id));
+                if (!localChat) return applyNormalizedChatPinState(remoteChat);
+                const remotePin = normalizeChatPinState(remoteChat);
+                const localPin = normalizeChatPinState(localChat);
+                const selectedPin = chooseNewerChatPinState(remoteChat, localChat);
+                if (selectedPin.pinStateUpdatedAt && selectedPin.pinStateUpdatedAt === localPin.pinStateUpdatedAt
+                    && selectedPin.pinStateUpdatedAt !== remotePin.pinStateUpdatedAt) {
+                    localPinStateWon = true;
+                }
+                return applyNormalizedChatPinState(remoteChat, selectedPin);
+            });
 
             const localAssetsBeforeClear = new Map();
             const localImageAssets = await dbUtils.getAllAssets();
@@ -22268,7 +22595,8 @@ const appLogic = {
             // 戻り値にクレンジング情報とメタデータを両方含める
             return {
                 ...parsedData, // syncId, exportedAtなどを含む
-                removedAssetInfo: removedAssetInfo // クレンジング情報を追加
+                removedAssetInfo: removedAssetInfo, // クレンジング情報を追加
+                localPinStateWon
             };
     
         } catch (error) {
@@ -22821,6 +23149,54 @@ const chatHistoryActions = {
         return { ok: true, chatId: normalizedId, title: normalizedTitle };
     },
 
+    async setPinned(chatId, shouldPin) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) {
+            await uiUtils.showCustomAlert('ピン留め対象のチャットが見つかりません。');
+            return { ok: false, notFound: true };
+        }
+        if (historyUiState.deleteMode) return { ok: false, disabled: true };
+        try {
+            const updatedChat = await dbUtils.updateChatPinState(normalizedId, shouldPin === true);
+            const pinState = normalizeChatPinState(updatedChat);
+            if (historyUiState.pinFilter === 'pinned' && !pinState.isPinned
+                && String(historyUiState.selectedChatId) === String(normalizedId)) {
+                historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteFallback(normalizedId);
+            }
+            if (String(state.currentChatId) === String(normalizedId)) {
+                state.currentChatIsPinned = pinState.isPinned;
+                state.currentChatPinnedAt = pinState.isPinned ? pinState.pinnedAt : null;
+                state.currentChatPinStateUpdatedAt = pinState.pinStateUpdatedAt;
+            }
+            appLogic.markAsDirtyAndSchedulePush('structural');
+            await chatListChangeController.notify({
+                type: 'pin',
+                chatId: normalizedId,
+                isPinned: pinState.isPinned,
+                pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
+                pinStateUpdatedAt: pinState.pinStateUpdatedAt
+            });
+            const announcement = pinState.isPinned ? 'チャットをピン留めしました' : 'チャットのピン留めを解除しました';
+            if (elements.historyDetailLive) elements.historyDetailLive.textContent = announcement;
+            if (elements.chatSidebarLive) elements.chatSidebarLive.textContent = announcement;
+            return { ok: true, chatId: normalizedId, ...pinState };
+        } catch (error) {
+            console.error('[History Pin] ピン状態の保存に失敗しました:', error);
+            await uiUtils.showCustomAlert('ピン留め状態を保存できませんでした。');
+            return { ok: false, error };
+        }
+    },
+
+    async togglePinned(chatId) {
+        const normalizedId = this.normalizeChatId(chatId);
+        if (normalizedId === null) return { ok: false, notFound: true };
+        const record = uiUtils.getHistoryRecord(normalizedId)
+            || uiUtils.getChatSidebarRecord(normalizedId)
+            || await dbUtils.getChat(normalizedId);
+        if (!record) return { ok: false, notFound: true };
+        return this.setPinned(normalizedId, !normalizeChatPinState(record).isPinned);
+    },
+
     export(chatId, options = {}) {
         const normalizedId = this.normalizeChatId(chatId);
         if (normalizedId === null) return Promise.resolve({ ok: false, notFound: true });
@@ -22932,6 +23308,19 @@ chatListChangeController.subscribe(async detail => {
                 ...historyUiState.cachedChats[cachedIndex],
                 title: detail.title,
                 updatedAt: detail.updatedAt
+            };
+            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: true });
+            return;
+        }
+    }
+    if (detail.type === 'pin') {
+        const cachedIndex = historyUiState.cachedChats.findIndex(chat => String(chat.id) === String(detail.chatId));
+        if (cachedIndex >= 0) {
+            historyUiState.cachedChats[cachedIndex] = {
+                ...historyUiState.cachedChats[cachedIndex],
+                isPinned: detail.isPinned === true,
+                pinnedAt: detail.isPinned === true ? detail.pinnedAt : null,
+                pinStateUpdatedAt: detail.pinStateUpdatedAt
             };
             await uiUtils.renderHistoryList({ refresh: false, preserveScroll: true });
             return;
