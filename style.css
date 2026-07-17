@@ -1319,8 +1319,10 @@ body.dark-mode .new-chat-button {
 
 .chat-sidebar-item-open {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     width: 100%;
     gap: 2px;
+    justify-content: stretch;
     justify-items: stretch;
     text-align: left;
 }
