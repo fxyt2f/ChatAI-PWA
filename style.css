@@ -446,7 +446,7 @@ body.dark-mode .history-item.is-current {
     min-width: 0;
     width: 100%;
     margin: 0;
-    padding: 13px 14px;
+    padding: 12px 8px 12px 14px;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -461,7 +461,7 @@ body.dark-mode .history-item.is-current {
 
 .history-item-title {
     display: -webkit-box;
-    margin: 0 0 5px;
+    margin: 0 0 4px;
     overflow: hidden;
     color: var(--text-primary);
     font-size: 0.96rem;
@@ -478,7 +478,7 @@ body.dark-mode .history-item.is-current {
     flex-wrap: wrap;
     align-items: center;
     gap: 3px;
-    margin-bottom: 7px;
+    margin-bottom: 0;
     color: var(--text-secondary);
     font-size: 0.7rem;
     line-height: 1.35;
@@ -493,13 +493,15 @@ body.dark-mode .history-item.is-current {
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+    margin-top: 6px;
 }
 
 .history-item-stats {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-top: 8px;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 6px;
     color: var(--text-secondary);
     font-size: 0.68rem;
     line-height: 1;
@@ -515,25 +517,16 @@ body.dark-mode .history-item.is-current {
     font-size: 13px;
 }
 
-.history-item-actions {
-    display: grid;
-    grid-template-columns: repeat(2, 40px);
-    align-content: center;
-    gap: 2px;
-    padding: 8px;
-    border-left: 1px solid var(--border-primary);
-    cursor: default;
-}
-
-.history-item-actions button {
+.history-item-menu-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
-    margin: 0;
+    align-self: start;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    margin: 5px 5px 0 0;
     padding: 0;
     border-radius: 50%;
     background: transparent;
@@ -541,27 +534,73 @@ body.dark-mode .history-item.is-current {
     box-shadow: none;
 }
 
-.history-item-actions button:hover {
+.history-item-menu-button:hover,
+.history-item-menu-button[aria-expanded="true"] {
     background: var(--bg-tertiary);
     color: var(--text-primary);
 }
 
-.history-item-actions button[data-history-action="delete"]:hover {
-    color: var(--text-error);
-}
-
-.history-item-actions .material-symbols-outlined {
-    font-size: 19px;
+.history-item-menu-button .material-symbols-outlined {
+    font-size: 21px;
 }
 
 .history-item-open:focus-visible,
-.history-item-actions button:focus-visible,
+.history-item-menu-button:focus-visible,
+.history-item-menu button:focus-visible,
 .history-toolbar button:focus-visible,
 #history-sort-order-toolbar:focus-visible,
 #history-search-input:focus-visible,
 .history-state-panel button:focus-visible {
     outline: 3px solid color-mix(in srgb, var(--bg-button) 70%, white);
     outline-offset: -3px;
+}
+
+.history-item-menu {
+    position: fixed;
+    z-index: 10050;
+    display: grid;
+    min-width: min(220px, calc(100vw - 16px));
+    padding: 5px;
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.history-item-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    margin: 0;
+    padding: 8px 11px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.88rem;
+    text-align: left;
+    box-shadow: none;
+}
+
+.history-item-menu button:hover,
+.history-item-menu button:focus-visible {
+    background: var(--bg-tertiary);
+}
+
+.history-item-menu .material-symbols-outlined {
+    flex: 0 0 auto;
+    font-size: 19px;
+}
+
+.history-item-menu-delete {
+    margin-top: 4px !important;
+    border-top: 1px solid var(--border-primary) !important;
+    border-radius: 0 0 7px 7px !important;
+    color: var(--text-error) !important;
 }
 
 .history-state-panel {
@@ -624,12 +663,7 @@ body.dark-mode .history-item.is-current {
     }
 
     .history-item-open {
-        padding: 11px 12px;
-    }
-
-    .history-item-actions {
-        grid-template-columns: repeat(2, 40px);
-        padding: 6px;
+        padding: 9px 6px 9px 12px;
     }
 }
 
@@ -641,17 +675,6 @@ body.dark-mode .history-item.is-current {
 
     .history-toolbar-secondary > .history-danger-action {
         flex-basis: 100%;
-    }
-
-    .history-item {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .history-item-actions {
-        display: flex;
-        justify-content: flex-end;
-        border-top: 1px solid var(--border-primary);
-        border-left: 0;
     }
 
     .history-date-separator {
