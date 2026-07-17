@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta3.2";
-const APP_CACHE_VERSION = "v1.35.0-beta3.2";
+const APP_VERSION = "1.35.0-beta4";
+const APP_CACHE_VERSION = "v1.35.0-beta4";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta4": [
+        "ワイドモードのチャット画面に履歴サイドバーを追加しました。",
+        "最近のチャット表示と履歴検索に対応しました。",
+        "サイドバーからチャットの切り替えや名称変更、出力、複製、削除ができるようになりました。"
+    ],
     "1.35.0-beta3.2": [
         "履歴削除モードでも通常時と同じツールバーサイズを維持するよう修正しました。",
         "詳細表示中の履歴行を、三点メニュー部分まで統一した背景色で表示するよう修正しました。"
@@ -563,6 +568,18 @@ try {
         appContainer: document.querySelector('.app-container'),
         appHeader: document.querySelector('.app-header'),
         chatScreen: document.getElementById('chat-screen'),
+        chatWorkspace: document.getElementById('chat-workspace'),
+        chatHistorySidebar: document.getElementById('chat-history-sidebar'),
+        chatSidebarBackdrop: document.getElementById('chat-sidebar-backdrop'),
+        chatSidebarCloseBtn: document.getElementById('chat-sidebar-close-btn'),
+        chatSidebarNewBtn: document.getElementById('chat-sidebar-new-btn'),
+        chatSidebarSearchInput: document.getElementById('chat-sidebar-search-input'),
+        chatSidebarSearchClearBtn: document.getElementById('chat-sidebar-search-clear-btn'),
+        chatSidebarScroll: document.getElementById('chat-sidebar-scroll'),
+        chatSidebarStatus: document.getElementById('chat-sidebar-status'),
+        chatSidebarList: document.getElementById('chat-sidebar-list'),
+        chatSidebarLive: document.getElementById('chat-sidebar-live'),
+        chatSidebarAllHistoryBtn: document.getElementById('chat-sidebar-all-history-btn'),
         historyScreen: document.getElementById('history-screen'),
         settingsScreen: document.getElementById('settings-screen'),
         chatTitle: document.getElementById('chat-title'),
@@ -1685,6 +1702,8 @@ const dbUtils = {
                 }
     
                 transaction.oncomplete = () => {
+                    // 保存は高頻度になり得るため、表示中のサイドバーだけをtrailing debounceで更新する。
+                    if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
                     resolve(state.currentChatId);
                 };
                 transaction.onerror = (event) => {
@@ -2308,6 +2327,21 @@ const historyUiState = {
     deleteMode: false,
     deleteSelection: new Set(),
     deleteTargetIds: []
+};
+
+// チャット画面に滞在する間だけ保持するサイドバー状態。永続化は行わない。
+const chatSidebarUiState = {
+    mode: 'disabled',
+    isOpen: false,
+    query: '',
+    recentChats: [],
+    searchChats: null,
+    recordsById: new Map(),
+    renderGeneration: 0,
+    searchTimer: null,
+    refreshTimer: null,
+    hasLoadedRecent: false,
+    unsubscribe: null
 };
 
 // --- UIユーティリティ (uiUtils) ---
@@ -3390,7 +3424,7 @@ const uiUtils = {
         }
 
         const searchDialog = elements.chatSearchDialog;
-        const composer = document.querySelector('#chat-screen > footer.chat-input-area');
+        const composer = document.querySelector('#chat-screen .chat-workspace > footer.chat-input-area');
         const viewportHeight = window.visualViewport?.height ||
             window.innerHeight ||
             document.documentElement.clientHeight ||
@@ -4740,7 +4774,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return 'older';
     },
 
-    createHistoryDisplayModel(chat, query = '') {
+    createHistoryDisplayModel(chat, query = '', sortOrderOverride = null) {
         const title = this.normalizeChatTitleText(chat?.title, `履歴 ${chat?.id ?? ''}`) || `履歴 ${chat?.id ?? ''}`;
         const normalizedQuery = this.normalizeHistoryText(query);
         let matchedMessage = null;
@@ -4754,7 +4788,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (!isMatch) return null;
 
-        const sortOrder = HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
+        const sortOrder = HISTORY_SORT_OPTIONS.includes(sortOrderOverride)
+            ? sortOrderOverride
+            : HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
         const groupTimestamp = this.getHistoryDateValue(chat, sortOrder);
         return {
             id: chat.id,
@@ -4801,6 +4837,234 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     getHistoryRecord(chatId) {
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
         return normalizedId === null ? null : historyUiState.chatRecordsById.get(String(normalizedId)) || null;
+    },
+
+    getChatSidebarMode() {
+        if (!state.settings.enableWideMode || window.innerWidth < 900) return 'disabled';
+        return window.innerWidth >= 1200 ? 'permanent' : 'overlay';
+    },
+
+    getChatSidebarRecord(chatId) {
+        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
+        return normalizedId === null ? null : chatSidebarUiState.recordsById.get(String(normalizedId)) || null;
+    },
+
+    applyChatSidebarState({ restoreFocus = false } = {}) {
+        const mode = chatSidebarUiState.mode;
+        const isOpen = mode !== 'disabled' && chatSidebarUiState.isOpen;
+        const isOverlayOpen = mode === 'overlay' && isOpen;
+        elements.chatScreen.classList.toggle('chat-sidebar-mode-permanent', mode === 'permanent');
+        elements.chatScreen.classList.toggle('chat-sidebar-mode-overlay', mode === 'overlay');
+        elements.chatScreen.classList.toggle('chat-sidebar-open', isOpen);
+        elements.chatHistorySidebar.setAttribute('aria-hidden', String(!isOpen));
+        elements.chatSidebarBackdrop.hidden = !isOverlayOpen;
+        elements.chatWorkspace.inert = isOverlayOpen;
+
+        const headerOpensSidebar = mode !== 'disabled';
+        elements.gotoHistoryBtn.classList.toggle('hidden', mode === 'permanent' && isOpen);
+        elements.gotoHistoryBtn.setAttribute('aria-label', headerOpensSidebar ? '履歴サイドバーを開く' : '履歴一覧へ');
+        elements.gotoHistoryBtn.title = headerOpensSidebar ? '履歴サイドバーを開く' : '履歴一覧へ';
+        if (headerOpensSidebar) {
+            elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
+            elements.gotoHistoryBtn.setAttribute('aria-controls', 'chat-history-sidebar');
+        } else {
+            elements.gotoHistoryBtn.removeAttribute('aria-expanded');
+            elements.gotoHistoryBtn.removeAttribute('aria-controls');
+        }
+
+        if (restoreFocus && mode === 'overlay' && !isOpen && elements.gotoHistoryBtn.isConnected) {
+            elements.gotoHistoryBtn.focus();
+        }
+    },
+
+    updateChatSidebarResponsiveState() {
+        const previousMode = chatSidebarUiState.mode;
+        const nextMode = this.getChatSidebarMode();
+        if (previousMode === nextMode) {
+            this.applyChatSidebarState();
+            return;
+        }
+
+        this.closeHistoryItemMenu();
+        chatSidebarUiState.mode = nextMode;
+        if (nextMode === 'permanent') {
+            chatSidebarUiState.isOpen = true;
+        } else {
+            chatSidebarUiState.isOpen = false;
+        }
+        this.applyChatSidebarState();
+        if (chatSidebarUiState.isOpen && !chatSidebarUiState.hasLoadedRecent) {
+            void this.renderChatSidebar({ refreshRecent: true });
+        } else if (chatSidebarUiState.isOpen) {
+            this.renderChatSidebarModels();
+        }
+    },
+
+    openChatSidebar() {
+        if (chatSidebarUiState.mode === 'disabled') return false;
+        this.closeChatSearch({ restoreFocus: false });
+        chatSidebarUiState.isOpen = true;
+        this.applyChatSidebarState();
+        if (chatSidebarUiState.hasLoadedRecent) this.renderChatSidebarModels();
+        else void this.renderChatSidebar({ refreshRecent: true });
+        if (chatSidebarUiState.mode === 'overlay') {
+            requestAnimationFrame(() => elements.chatSidebarCloseBtn?.focus());
+        }
+        return true;
+    },
+
+    closeChatSidebar({ restoreFocus = false } = {}) {
+        if (!chatSidebarUiState.isOpen) {
+            this.applyChatSidebarState();
+            return;
+        }
+        if (historyUiState.menuAnchor?.closest('.chat-sidebar-item')) this.closeHistoryItemMenu();
+        const wasOverlay = chatSidebarUiState.mode === 'overlay';
+        chatSidebarUiState.isOpen = false;
+        this.applyChatSidebarState({ restoreFocus: restoreFocus && wasOverlay });
+    },
+
+    syncChatSidebarCurrentSelection() {
+        elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item').forEach(item => {
+            const isCurrent = String(item.dataset.chatId) === String(state.currentChatId ?? '');
+            if (isCurrent) item.setAttribute('aria-current', 'page');
+            else item.removeAttribute('aria-current');
+        });
+    },
+
+    focusChatSidebarItem(chatId, action = 'menu') {
+        const item = [...(elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item') || [])]
+            .find(candidate => String(candidate.dataset.chatId) === String(chatId));
+        item?.querySelector(`[data-sidebar-action="${action}"]`)?.focus();
+    },
+
+    createChatSidebarItem(model, { isSearch = false } = {}) {
+        const item = document.createElement('div');
+        item.className = 'chat-sidebar-item';
+        item.dataset.chatId = model.id;
+        item.setAttribute('role', 'listitem');
+        if (model.isCurrent) item.setAttribute('aria-current', 'page');
+
+        const openButton = document.createElement('button');
+        openButton.type = 'button';
+        openButton.className = 'chat-sidebar-item-open';
+        openButton.dataset.sidebarAction = 'open';
+        openButton.dataset.chatId = model.id;
+        openButton.setAttribute('aria-label', `「${model.title}」を開く`);
+
+        const title = document.createElement('span');
+        title.className = 'chat-sidebar-item-title';
+        title.textContent = model.title;
+        title.title = model.title;
+        openButton.appendChild(title);
+        if (isSearch) {
+            if (model.snippet) {
+                const snippet = document.createElement('span');
+                snippet.className = 'chat-sidebar-item-snippet';
+                snippet.textContent = model.snippet;
+                openButton.appendChild(snippet);
+            }
+            const date = document.createElement('span');
+            date.className = 'chat-sidebar-item-date';
+            date.textContent = this.formatDate(model.groupTimestamp) || '日時不明';
+            openButton.appendChild(date);
+        }
+
+        const menuButton = document.createElement('button');
+        menuButton.type = 'button';
+        menuButton.className = 'chat-sidebar-item-menu';
+        menuButton.dataset.sidebarAction = 'menu';
+        menuButton.dataset.chatId = model.id;
+        menuButton.setAttribute('aria-label', `「${model.title}」の操作メニュー`);
+        menuButton.setAttribute('aria-haspopup', 'menu');
+        menuButton.setAttribute('aria-expanded', 'false');
+        menuButton.setAttribute('aria-controls', 'history-item-menu');
+        menuButton.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">more_vert</span>';
+        item.append(openButton, menuButton);
+        return item;
+    },
+
+    renderChatSidebarModels() {
+        if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
+        this.closeHistoryItemMenu();
+        const query = this.normalizeHistoryText(chatSidebarUiState.query);
+        const chats = query ? (chatSidebarUiState.searchChats || []) : chatSidebarUiState.recentChats;
+        const models = this.sortHistoryDisplayModels(
+            chats.map(chat => this.createHistoryDisplayModel(chat, query, 'updatedAt')).filter(Boolean),
+            'updatedAt'
+        );
+        chatSidebarUiState.recordsById = new Map(chats.map(chat => [String(chat.id), chat]));
+        elements.chatSidebarList.replaceChildren();
+        elements.chatSidebarStatus.textContent = '';
+
+        if (models.length === 0) {
+            elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : '最近のチャットはありません';
+        } else if (query) {
+            const fragment = document.createDocumentFragment();
+            models.forEach(model => fragment.appendChild(this.createChatSidebarItem(model, { isSearch: true })));
+            elements.chatSidebarList.appendChild(fragment);
+        } else {
+            const labels = {
+                today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
+            };
+            ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
+                const groupModels = models.filter(model => model.groupKey === groupKey);
+                if (groupModels.length === 0) return;
+                const group = document.createElement('section');
+                group.className = 'chat-sidebar-group';
+                group.setAttribute('role', 'group');
+                const heading = document.createElement('h2');
+                heading.className = 'chat-sidebar-group-title';
+                heading.textContent = labels[groupKey];
+                group.setAttribute('aria-label', labels[groupKey]);
+                group.appendChild(heading);
+                groupModels.forEach(model => group.appendChild(this.createChatSidebarItem(model)));
+                elements.chatSidebarList.appendChild(group);
+            });
+        }
+        elements.chatSidebarLive.textContent = query
+            ? `検索結果 ${models.length}件`
+            : `最近のチャット ${models.length}件`;
+    },
+
+    async renderChatSidebar({ refreshRecent = false, invalidateSearch = false } = {}) {
+        if (invalidateSearch) chatSidebarUiState.searchChats = null;
+        if (chatSidebarUiState.mode === 'disabled' || !chatSidebarUiState.isOpen) {
+            if (refreshRecent) chatSidebarUiState.hasLoadedRecent = false;
+            return;
+        }
+        const generation = ++chatSidebarUiState.renderGeneration;
+        const query = this.normalizeHistoryText(chatSidebarUiState.query);
+        elements.chatSidebarStatus.textContent = '読み込み中…';
+        try {
+            if (refreshRecent || !chatSidebarUiState.hasLoadedRecent) {
+                const recentChats = await dbUtils.getRecentChats('updatedAt', 30);
+                if (generation !== chatSidebarUiState.renderGeneration) return;
+                chatSidebarUiState.recentChats = Array.isArray(recentChats) ? recentChats : [];
+                chatSidebarUiState.hasLoadedRecent = true;
+            }
+            if (query && chatSidebarUiState.searchChats === null) {
+                const allChats = await dbUtils.getAllChats('updatedAt');
+                if (generation !== chatSidebarUiState.renderGeneration) return;
+                chatSidebarUiState.searchChats = Array.isArray(allChats) ? allChats : [];
+            }
+            if (generation !== chatSidebarUiState.renderGeneration) return;
+            this.renderChatSidebarModels();
+        } catch (error) {
+            if (generation !== chatSidebarUiState.renderGeneration) return;
+            console.error('履歴サイドバーの描画に失敗しました:', error);
+            elements.chatSidebarList.replaceChildren();
+            elements.chatSidebarStatus.textContent = '履歴を読み込めませんでした';
+            elements.chatSidebarLive.textContent = '履歴の読み込みに失敗しました';
+        }
+    },
+
+    scheduleChatSidebarRefresh(delay = 260) {
+        if (chatSidebarUiState.refreshTimer) clearTimeout(chatSidebarUiState.refreshTimer);
+        chatSidebarUiState.refreshTimer = setTimeout(() => {
+            chatSidebarUiState.refreshTimer = null;
+            void this.renderChatSidebar({ refreshRecent: true, invalidateSearch: true });
+        }, delay);
     },
 
     createHistoryDetailSnippet(text, maxLength = 280) {
@@ -5223,7 +5487,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     closeHistoryItemMenu({ restoreFocus = false } = {}) {
         const anchor = historyUiState.menuAnchor;
-        anchor?.closest('.history-item')?.classList.remove('menu-active');
+        anchor?.closest('.history-item, .chat-sidebar-item')?.classList.remove('menu-active');
         if (anchor?.isConnected) anchor.setAttribute('aria-expanded', 'false');
         elements.historyItemMenu?.classList.add('hidden');
         if (elements.historyItemMenu) {
@@ -5256,7 +5520,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.top = `${Math.round(top)}px`;
     },
 
-    openHistoryItemMenu(anchor, chatId) {
+    openHistoryItemMenu(anchor, chatId, { selectHistoryDetail = true } = {}) {
         if (historyUiState.deleteMode) return;
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
         if (!anchor || normalizedId === null || !elements.historyItemMenu) return;
@@ -5265,10 +5529,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return;
         }
         this.closeHistoryItemMenu();
-        if (this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
+        if (selectHistoryDetail && this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
         historyUiState.menuChatId = normalizedId;
         historyUiState.menuAnchor = anchor;
-        anchor.closest('.history-item')?.classList.add('menu-active');
+        anchor.closest('.history-item, .chat-sidebar-item')?.classList.add('menu-active');
         anchor.setAttribute('aria-expanded', 'true');
         elements.historyItemMenu.classList.remove('hidden');
         this.positionHistoryItemMenu();
@@ -6162,6 +6426,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return new Promise((resolve) => {
           const startTime = performance.now();
 
+          if (screenName !== 'chat') {
+            this.closeHistoryItemMenu();
+            if (chatSidebarUiState.mode === 'overlay') this.closeChatSidebar({ restoreFocus: false });
+          }
+
           if (screenName !== 'history' && state.currentScreen === 'history') {
             this.captureHistoryScrollPosition();
             this.closeHistoryItemMenu();
@@ -6247,6 +6516,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             finished = true;
             state.currentScreen = screenName;
             if (screenName === 'chat') {
+                this.updateChatSidebarResponsiveState();
+                this.syncChatSidebarCurrentSelection();
                 this.scheduleComposerTextareaResize(true);
                 this.scheduleMessageCollapseStickyTopUpdate();
                 appLogic.updateMessageActionButtonStates();
@@ -6294,7 +6565,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     getComposerElement() {
-        return document.querySelector('#chat-screen > footer.chat-input-area');
+        return document.querySelector('#chat-screen .chat-workspace > footer.chat-input-area');
     },
 
     updateComposerHeight() {
@@ -6870,7 +7141,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!messageElement?.isConnected) return;
 
         const main = document.querySelector('#chat-screen .main-content');
-        const composer = document.querySelector('#chat-screen > footer.chat-input-area');
+        const composer = document.querySelector('#chat-screen .chat-workspace > footer.chat-input-area');
         const actions = messageElement.querySelector(':scope > .message-actions');
         const messageRect = messageElement.getBoundingClientRect();
         const actionsRect = actions?.getBoundingClientRect?.();
@@ -13192,6 +13463,7 @@ const appLogic = {
 
     applyWideMode() {
         document.body.classList.toggle('wide-mode-enabled', state.settings.enableWideMode);
+        uiUtils.updateChatSidebarResponsiveState();
         // ワイドモードの有効/無効が切り替わった際に、メッセージ幅を再計算する
         updateMessageMaxWidthVar();
     },
@@ -14433,6 +14705,10 @@ const appLogic = {
         uiUtils.setupChatTitleEditing();
         elements.gotoHistoryBtn.addEventListener('click', async () => {
             if (state.isEditingSystemPrompt) await this.closeSystemPromptDialog();
+            if (chatSidebarUiState.mode !== 'disabled') {
+                uiUtils.openChatSidebar();
+                return;
+            }
             uiUtils.showScreen('history');
         });
         elements.gotoSettingsBtn.addEventListener('click', async () => {
@@ -14549,12 +14825,16 @@ const appLogic = {
             });
 
             const executeHistoryAction = async (action, chatId, anchor) => {
-                const record = uiUtils.getHistoryRecord(chatId);
+                const fromSidebar = Boolean(anchor?.closest('.chat-sidebar-item'));
+                const record = uiUtils.getHistoryRecord(chatId)
+                    || uiUtils.getChatSidebarRecord(chatId)
+                    || await dbUtils.getChat(chatId);
                 if (!record) return;
                 const title = uiUtils.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
                 if (action === 'rename') {
                     await this.editHistoryTitle(chatId, title);
                     if (anchor?.isConnected) anchor.focus();
+                    else if (fromSidebar) uiUtils.focusChatSidebarItem(chatId);
                     else uiUtils.focusHistorySelection();
                 } else if (action === 'export') {
                     await chatHistoryActions.export(chatId, { title });
@@ -14562,6 +14842,7 @@ const appLogic = {
                 } else if (action === 'duplicate') {
                     await chatHistoryActions.duplicate(chatId);
                     if (anchor?.isConnected) anchor.focus();
+                    else if (fromSidebar) uiUtils.focusChatSidebarItem(chatId);
                     else uiUtils.focusHistorySelection();
                 } else if (action === 'delete') {
                     historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteFallback(chatId);
@@ -14570,7 +14851,8 @@ const appLogic = {
                         historyUiState.deleteFallbackChatId = null;
                         if (anchor?.isConnected) anchor.focus();
                     } else if (!result.wasCurrent) {
-                        uiUtils.focusHistorySelection();
+                        if (fromSidebar) elements.chatSidebarSearchInput?.focus();
+                        else uiUtils.focusHistorySelection();
                     }
                 }
             };
@@ -14700,6 +14982,100 @@ const appLogic = {
             }, { passive: true });
             elements.historyDetailPane.addEventListener('scroll', () => uiUtils.closeHistoryItemMenu(), { passive: true });
             this._historyEventsBound = true;
+        }
+
+        if (!this._chatSidebarEventsBound) {
+            const clearChatSidebarSearch = () => {
+                if (chatSidebarUiState.searchTimer) clearTimeout(chatSidebarUiState.searchTimer);
+                chatSidebarUiState.searchTimer = null;
+                chatSidebarUiState.query = '';
+                elements.chatSidebarSearchInput.value = '';
+                elements.chatSidebarSearchClearBtn.classList.add('hidden');
+                void uiUtils.renderChatSidebar();
+            };
+
+            elements.chatSidebarCloseBtn.addEventListener('click', () => {
+                uiUtils.closeChatSidebar({ restoreFocus: true });
+            });
+            elements.chatSidebarBackdrop.addEventListener('click', () => {
+                uiUtils.closeChatSidebar({ restoreFocus: true });
+            });
+            elements.chatSidebarNewBtn.addEventListener('click', async () => {
+                const started = await this.confirmStartNewChat();
+                if (started && chatSidebarUiState.mode === 'overlay') {
+                    uiUtils.closeChatSidebar({ restoreFocus: false });
+                }
+            });
+            elements.chatSidebarAllHistoryBtn.addEventListener('click', async () => {
+                uiUtils.closeHistoryItemMenu();
+                if (chatSidebarUiState.mode === 'overlay') uiUtils.closeChatSidebar({ restoreFocus: false });
+                await uiUtils.showScreen('history');
+            });
+            elements.chatSidebarSearchInput.addEventListener('input', () => {
+                chatSidebarUiState.query = elements.chatSidebarSearchInput.value;
+                elements.chatSidebarSearchClearBtn.classList.toggle('hidden', !chatSidebarUiState.query);
+                if (chatSidebarUiState.searchTimer) clearTimeout(chatSidebarUiState.searchTimer);
+                const generation = ++chatSidebarUiState.renderGeneration;
+                chatSidebarUiState.searchTimer = setTimeout(() => {
+                    chatSidebarUiState.searchTimer = null;
+                    if (generation !== chatSidebarUiState.renderGeneration) return;
+                    void uiUtils.renderChatSidebar();
+                }, 220);
+            });
+            elements.chatSidebarSearchInput.addEventListener('keydown', event => {
+                if (event.key !== 'Escape') return;
+                if (elements.chatSidebarSearchInput.value) {
+                    event.preventDefault();
+                    clearChatSidebarSearch();
+                }
+            });
+            elements.chatSidebarSearchClearBtn.addEventListener('click', () => {
+                clearChatSidebarSearch();
+                elements.chatSidebarSearchInput.focus();
+            });
+            elements.chatSidebarList.addEventListener('click', async event => {
+                const actionElement = event.target.closest('[data-sidebar-action]');
+                if (!actionElement || !elements.chatSidebarList.contains(actionElement)) return;
+                const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId);
+                if (chatId === null) return;
+                const action = actionElement.dataset.sidebarAction;
+                if (action === 'menu') {
+                    uiUtils.openHistoryItemMenu(actionElement, chatId, { selectHistoryDetail: false });
+                    return;
+                }
+                if (action === 'open') {
+                    uiUtils.closeHistoryItemMenu();
+                    const result = await chatHistoryActions.open(chatId, { source: 'chat-sidebar' });
+                    if (!result?.ok) return;
+                    uiUtils.syncChatSidebarCurrentSelection();
+                    if (chatSidebarUiState.mode === 'overlay') {
+                        uiUtils.closeChatSidebar({ restoreFocus: false });
+                    }
+                }
+            });
+            elements.chatSidebarScroll.addEventListener('scroll', () => {
+                if (historyUiState.menuAnchor?.closest('.chat-sidebar-item')) uiUtils.closeHistoryItemMenu();
+            }, { passive: true });
+            document.addEventListener('keydown', event => {
+                if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen) return;
+                if (!elements.historyItemMenu.classList.contains('hidden')) return;
+                event.preventDefault();
+                uiUtils.closeChatSidebar({ restoreFocus: true });
+            });
+            window.addEventListener('resize', () => uiUtils.updateChatSidebarResponsiveState(), { passive: true });
+            chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(() => {
+                if (chatSidebarUiState.refreshTimer) {
+                    clearTimeout(chatSidebarUiState.refreshTimer);
+                    chatSidebarUiState.refreshTimer = null;
+                }
+                chatSidebarUiState.searchChats = null;
+                chatSidebarUiState.hasLoadedRecent = false;
+                if (chatSidebarUiState.isOpen) {
+                    void uiUtils.renderChatSidebar({ refreshRecent: true });
+                }
+            });
+            uiUtils.updateChatSidebarResponsiveState();
+            this._chatSidebarEventsBound = true;
         }
 
         // --- チャット関連 ---
@@ -15868,7 +16244,7 @@ const appLogic = {
         const confirmed = await uiUtils.showCustomConfirm("現在のチャットを保存して新規チャットを開始しますか？");
         if (!confirmed) {
             console.log("新規チャットの開始をキャンセルしました。");
-            return;
+            return false;
         }
 
         // 送信中なら中断
@@ -15910,7 +16286,8 @@ const appLogic = {
 
         // 新規チャットを開始
         this.startNewChat();
-        uiUtils.showScreen('chat');
+        await uiUtils.showScreen('chat');
+        return true;
     },
 
     // 新規チャットを開始する (状態リセット)
@@ -15933,6 +16310,7 @@ const appLogic = {
         elements.userInput.value = '';
         uiUtils.adjustTextareaHeight();
         uiUtils.setSendingState(false);
+        uiUtils.syncChatSidebarCurrentSelection();
         this.updateCharacterProfileButtonVisibility();
         state.currentStyleProfiles = {};
         this.scheduleInputDraftRestore(0, true);
@@ -16053,6 +16431,7 @@ const appLogic = {
             }
         }
 
+        uiUtils.syncChatSidebarCurrentSelection();
         return { ok: true, chatId: chat.id, chat };
     },
 
@@ -22420,6 +22799,7 @@ const chatHistoryActions = {
         if (options.scroll !== false) {
             appLogic.scrollToBottom();
         }
+        uiUtils.syncChatSidebarCurrentSelection();
         return result;
     },
 

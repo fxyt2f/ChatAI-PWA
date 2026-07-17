@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.35.0-beta3.2">
+    <link rel="stylesheet" href="./style.css?v=1.35.0-beta4">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.35.0-beta3.2" defer></script>
+    <script src="./dropbox.js?v=1.35.0-beta4" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,17 +32,52 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.35.0-beta3.2" defer></script>
+    <script src="./app.js?v=1.35.0-beta4" defer></script>
 </head>
 <body>
     <div class="app-container">
 
         <!-- チャット画面 -->
         <div id="chat-screen" class="screen active">
+            <aside id="chat-history-sidebar" class="chat-history-sidebar" aria-label="チャット履歴サイドバー" aria-hidden="true">
+                <div class="chat-sidebar-header">
+                    <button id="chat-sidebar-close-btn" type="button" class="chat-sidebar-icon-button" aria-label="履歴サイドバーを閉じる" title="履歴サイドバーを閉じる">
+                        <span class="material-symbols-outlined" aria-hidden="true">close</span>
+                    </button>
+                    <span class="chat-sidebar-brand">ChatAI PWA</span>
+                </div>
+                <div class="chat-sidebar-controls">
+                    <button id="chat-sidebar-new-btn" type="button" class="chat-sidebar-new-button">
+                        <span class="material-symbols-outlined" aria-hidden="true">add</span>
+                        新規チャット
+                    </button>
+                    <label class="visually-hidden" for="chat-sidebar-search-input">チャットを検索</label>
+                    <div class="chat-sidebar-search-field">
+                        <span class="material-symbols-outlined" aria-hidden="true">search</span>
+                        <input id="chat-sidebar-search-input" type="search" maxlength="200" placeholder="チャットを検索" autocomplete="off" aria-label="チャットを検索">
+                        <button id="chat-sidebar-search-clear-btn" type="button" class="chat-sidebar-search-clear hidden" aria-label="検索文字列を消去" title="検索文字列を消去">
+                            <span class="material-symbols-outlined" aria-hidden="true">close</span>
+                        </button>
+                    </div>
+                    <p id="chat-sidebar-live" class="visually-hidden" aria-live="polite"></p>
+                </div>
+                <div id="chat-sidebar-scroll" class="chat-sidebar-scroll">
+                    <p id="chat-sidebar-status" class="chat-sidebar-status" role="status"></p>
+                    <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-label="最近のチャット"></div>
+                </div>
+                <div class="chat-sidebar-footer">
+                    <button id="chat-sidebar-all-history-btn" type="button" class="chat-sidebar-all-history-button">
+                        <span class="material-symbols-outlined" aria-hidden="true">history</span>
+                        履歴をすべて表示
+                    </button>
+                </div>
+            </aside>
+            <div id="chat-sidebar-backdrop" class="chat-sidebar-backdrop" hidden></div>
+            <div id="chat-workspace" class="chat-workspace">
             <div id="chat-overlay"></div> 
             <div id="header-trigger-area"></div>
             <header class="app-header">
-                <button id="goto-history-btn" class="header-button" title="履歴一覧へ"><span class="material-symbols-outlined">menu</span></button>
+                <button id="goto-history-btn" class="header-button" title="履歴一覧へ" aria-label="履歴一覧へ"><span class="material-symbols-outlined">menu</span></button>
                 <span id="sync-status-header-icon" class="material-symbols-outlined sync-status-header-icon" title="同期ステータス"></span>
                 <h1 id="chat-title" role="button" tabindex="0" aria-label="チャットタイトル。タップして編集" title="新規チャット">新規チャット</h1>
                 <button id="new-chat-btn" class="new-chat-button" title="新規チャットを開始"><span class="material-symbols-outlined">add</span></button>
@@ -185,6 +220,8 @@
                 </button>
                 <button id="send-button" title="送信"><span class="material-symbols-outlined">send</span></button>
             </footer>
+
+            </div>
 
         </div>
 
