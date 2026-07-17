@@ -265,6 +265,44 @@ button:hover:not(:disabled) {
     flex-wrap: wrap;
 }
 
+.history-delete-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.history-delete-select-all {
+    display: inline-flex;
+    min-height: 42px;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.history-delete-select-all input,
+.history-delete-checkbox {
+    width: 21px;
+    height: 21px;
+    margin: 0;
+    accent-color: var(--bg-button);
+}
+
+.history-delete-count {
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    white-space: nowrap;
+}
+
+.history-delete-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+    flex-wrap: wrap;
+}
+
 .history-search-field {
     display: flex;
     align-items: center;
@@ -430,25 +468,31 @@ button:hover:not(:disabled) {
     box-shadow: none;
 }
 
-.history-item.is-current {
-    border-color: color-mix(in srgb, var(--bg-button) 42%, var(--border-primary));
-    background: color-mix(in srgb, var(--bg-button) 9%, var(--bg-primary));
-}
-
 .history-item.is-selected {
-    background: color-mix(in srgb, var(--bg-button) 7%, var(--bg-primary));
-}
-
-.history-item.is-selected:not(.is-current) {
     border-color: color-mix(in srgb, var(--bg-button) 28%, var(--border-primary));
+    background: color-mix(in srgb, var(--bg-button) 7%, var(--bg-primary));
 }
 
 body.dark-mode .history-item.is-selected {
     background: color-mix(in srgb, var(--bg-button) 11%, var(--bg-primary));
 }
 
-body.dark-mode .history-item.is-current {
-    background: color-mix(in srgb, var(--bg-button) 14%, var(--bg-primary));
+.history-item.is-delete-mode {
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.history-delete-checkbox-control {
+    display: flex;
+    width: 46px;
+    min-width: 46px;
+    align-items: center;
+    justify-content: center;
+}
+
+.history-delete-checkbox:focus-visible,
+.history-delete-select-all input:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--bg-button) 70%, white);
+    outline-offset: 2px;
 }
 
 .history-item-open {
@@ -772,6 +816,19 @@ body.dark-mode .history-item.is-current {
         border-left: 1px solid var(--border-primary);
         scrollbar-gutter: stable;
     }
+
+    #history-screen .main-content > .history-workspace.is-delete-mode {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .history-workspace.is-delete-mode .history-list-pane {
+        max-width: none;
+        padding-right: 0;
+    }
+
+    .history-workspace.is-delete-mode .history-detail-pane {
+        display: none;
+    }
 }
 
 .history-state-panel {
@@ -845,6 +902,19 @@ body.dark-mode .history-item.is-current {
     }
 
     .history-toolbar-secondary > .history-danger-action {
+        flex-basis: 100%;
+    }
+
+    .history-delete-actions {
+        width: 100%;
+        margin-left: 0;
+    }
+
+    .history-delete-actions button {
+        flex: 1 1 auto;
+    }
+
+    .history-delete-actions .history-danger-action {
         flex-basis: 100%;
     }
 

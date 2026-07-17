@@ -198,7 +198,7 @@
                 <div class="history-workspace">
                     <section class="history-list-pane" aria-labelledby="history-title">
                         <div class="history-toolbar">
-                            <div class="history-toolbar-primary">
+                            <div class="history-toolbar-primary history-toolbar-standard">
                                 <div class="history-search-field">
                                     <span class="material-symbols-outlined" aria-hidden="true">search</span>
                                     <label class="visually-hidden" for="history-search-input">チャットを検索</label>
@@ -213,13 +213,24 @@
                                         <option value="title">タイトル順</option>
                                     </select>
                                 </label>
-                                <button id="history-new-chat-btn" type="button" class="history-primary-action"><span class="material-symbols-outlined" aria-hidden="true">add</span>新規チャット</button>
                             </div>
-                            <div class="history-toolbar-secondary">
+                            <div class="history-toolbar-secondary history-toolbar-standard">
                                 <button id="import-history-btn" type="button" class="history-secondary-action"><span class="material-symbols-outlined" aria-hidden="true">download</span>インポート</button>
-                                <button id="delete-old-chats-btn" type="button" class="history-secondary-action history-danger-action" disabled><span class="material-symbols-outlined" aria-hidden="true">delete_sweep</span>7日以上未更新の履歴を削除</button>
+                                <button id="history-delete-mode-btn" type="button" class="history-secondary-action history-danger-action"><span class="material-symbols-outlined" aria-hidden="true">delete</span>履歴を削除</button>
                                 <input type="file" id="import-history-input" accept=".txt,text/plain" class="hidden">
                             </div>
+                            <div id="history-delete-toolbar" class="history-delete-toolbar hidden">
+                                <label class="history-delete-select-all">
+                                    <input id="history-delete-select-all" type="checkbox">
+                                    <span id="history-delete-select-all-label">全選択</span>
+                                </label>
+                                <span id="history-delete-count" class="history-delete-count" role="status" aria-live="polite">選択中 0件</span>
+                                <div class="history-delete-actions">
+                                    <button id="history-delete-cancel-btn" type="button" class="history-secondary-action">キャンセル</button>
+                                    <button id="history-delete-confirm-btn" type="button" class="history-secondary-action history-danger-action" disabled><span class="material-symbols-outlined" aria-hidden="true">delete</span>選択した履歴を削除</button>
+                                </div>
+                            </div>
+                            <p id="history-delete-live" class="visually-hidden" aria-live="polite"></p>
                         </div>
                         <p id="history-status" class="history-status" role="status" aria-live="polite"></p>
                         <ul id="history-list" class="history-list" aria-label="チャット履歴"></ul>
@@ -231,6 +242,9 @@
                         </section>
                         <template id="history-item-template" class="js-history-item-template">
                             <li class="history-item">
+                                <span class="history-delete-checkbox-control hidden">
+                                    <input type="checkbox" class="history-delete-checkbox">
+                                </span>
                                 <button type="button" class="history-item-open" data-history-action="open">
                                     <span class="history-item-title"></span>
                                     <span class="history-item-dates">

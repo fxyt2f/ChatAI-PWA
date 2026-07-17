@@ -237,7 +237,8 @@ const VERSION_HISTORY = {
     "1.35.0-beta3": [
         "ワイド画面の履歴に詳細表示を追加し、選択したチャットの日時や概要を確認できるようにしました。",
         "履歴のチャット操作を共通の三点メニューへ整理しました。",
-        "PCとスマホで履歴行の操作方法を最適化しました。"
+        "チェックボックスと全選択に対応した履歴削除モードを追加しました。",
+        "履歴画面内の新規チャット入口を整理し、PCとスマホで履歴行の操作方法を最適化しました。"
     ],
     "1.35.0-beta2.1": [
         "履歴一覧から通常時の本文抜粋を省き、より多くのチャットを確認しやすい表示へ調整しました。",
@@ -590,7 +591,16 @@ try {
         historySearchInput: document.getElementById('history-search-input'),
         historySearchClearBtn: document.getElementById('history-search-clear-btn'),
         historySortOrderToolbar: document.getElementById('history-sort-order-toolbar'),
-        historyNewChatBtn: document.getElementById('history-new-chat-btn'),
+        historyWorkspace: document.querySelector('#history-screen .history-workspace'),
+        historyToolbarStandard: [...document.querySelectorAll('#history-screen .history-toolbar-standard')],
+        historyDeleteModeBtn: document.getElementById('history-delete-mode-btn'),
+        historyDeleteToolbar: document.getElementById('history-delete-toolbar'),
+        historyDeleteSelectAll: document.getElementById('history-delete-select-all'),
+        historyDeleteSelectAllLabel: document.getElementById('history-delete-select-all-label'),
+        historyDeleteCount: document.getElementById('history-delete-count'),
+        historyDeleteCancelBtn: document.getElementById('history-delete-cancel-btn'),
+        historyDeleteConfirmBtn: document.getElementById('history-delete-confirm-btn'),
+        historyDeleteLive: document.getElementById('history-delete-live'),
         themeColorMeta: document.getElementById('theme-color-meta'),
         systemPromptOpenBtn: document.getElementById('system-prompt-open-btn'),
         systemPromptDialog: document.getElementById('system-prompt-dialog'),
@@ -1845,7 +1855,7 @@ const dbUtils = {
     },
 
     // 指定IDのチャットを削除
-    async deleteChat(id) {
+    async deleteChat(id, { markDirty = true } = {}) {
         await this.openDB();
         
         // Step 1: 削除対象のチャットから画像IDを収集
@@ -1890,7 +1900,7 @@ const dbUtils = {
 
             transaction.oncomplete = () => {
                 console.log(`チャット削除完了 (ID: ${id})`);
-                appLogic.markAsDirtyAndSchedulePush(true);
+                if (markDirty) appLogic.markAsDirtyAndSchedulePush(true);
                 resolve();
             };
             transaction.onerror = (event) => {
@@ -2285,7 +2295,11 @@ const historyUiState = {
     selectedChatId: null,
     displayedChatIds: [],
     chatRecordsById: new Map(),
-    deleteFallbackChatId: null
+    deleteFallbackChatId: null,
+    deleteMode: false,
+    deleteSelection: new Set(),
+    deleteTargetIds: [],
+    deletePreviousSelectedChatId: null
 };
 
 // --- UIユーティリティ (uiUtils) ---
@@ -4641,7 +4655,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     setHistoryStatePanel(type) {
         const states = {
             loading: { icon: 'progress_activity', title: '履歴を読み込んでいます', description: '', action: '', role: 'status' },
-            empty: { icon: 'forum', title: 'まだチャット履歴がありません', description: '新しいチャットを始めると、ここに表示されます', action: '新規チャット', actionName: 'new', role: 'status' },
+            empty: { icon: 'forum', title: 'まだチャット履歴がありません', description: 'チャットを開始すると、ここに表示されます', action: '', role: 'status' },
             noResults: { icon: 'search_off', title: '一致するチャットがありません', description: '検索語を変更してください', action: '検索をクリア', actionName: 'clear-search', role: 'status' },
             error: { icon: 'error', title: '履歴を読み込めませんでした', description: '時間をおいて、もう一度お試しください', action: '再試行', actionName: 'retry', role: 'alert' }
         };
@@ -4762,8 +4776,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    isHistoryDetailVisible() {
+    isHistoryDetailViewport() {
         return window.matchMedia('(min-width: 1000px)').matches;
+    },
+
+    isHistoryDetailVisible() {
+        return this.isHistoryDetailViewport() && !historyUiState.deleteMode;
     },
 
     rebuildHistoryRecordMap() {
@@ -4859,7 +4877,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             item.setAttribute('role', isWide ? 'option' : 'listitem');
             const openButton = item.querySelector('.history-item-open');
             const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
-            openButton?.setAttribute('aria-label', isWide ? `「${title}」の詳細を表示` : `「${title}」を開く`);
+            openButton?.setAttribute('aria-label', historyUiState.deleteMode
+                ? `「${title}」の削除選択を切り替え`
+                : isWide ? `「${title}」の詳細を表示` : `「${title}」を開く`);
         });
         if (!targetIds) {
             elements.historyList.querySelectorAll('.history-group-list').forEach(list => {
@@ -4880,6 +4900,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     reconcileHistorySelection(models, { updateRows = true } = {}) {
         historyUiState.displayedChatIds = models.map(model => model.id);
+        if (historyUiState.deleteMode) {
+            if (updateRows) this.updateHistorySelectionRows();
+            this.updateHistoryDeleteControls();
+            return;
+        }
         const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
         let nextSelected = contains(historyUiState.selectedChatId) ? historyUiState.selectedChatId : null;
         if (nextSelected === null && contains(historyUiState.deleteFallbackChatId)) nextSelected = historyUiState.deleteFallbackChatId;
@@ -4896,6 +4921,120 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const index = historyUiState.displayedChatIds.findIndex(id => String(id) === String(chatId));
         if (index < 0) return null;
         return historyUiState.displayedChatIds[index + 1] ?? historyUiState.displayedChatIds[index - 1] ?? null;
+    },
+
+    getHistoryDeleteManyFallback(chatIds) {
+        const deletedIds = new Set(chatIds.map(String));
+        const selectedIndex = historyUiState.displayedChatIds.findIndex(id => String(id) === String(historyUiState.selectedChatId));
+        if (selectedIndex < 0) {
+            if (historyUiState.displayedChatIds.some(id => String(id) === String(historyUiState.deleteFallbackChatId))
+                && !deletedIds.has(String(historyUiState.deleteFallbackChatId))) {
+                return historyUiState.deleteFallbackChatId;
+            }
+            return historyUiState.displayedChatIds.find(id => !deletedIds.has(String(id))) ?? null;
+        }
+        if (!deletedIds.has(String(historyUiState.selectedChatId))) return historyUiState.selectedChatId;
+        for (let index = selectedIndex + 1; index < historyUiState.displayedChatIds.length; index++) {
+            if (!deletedIds.has(String(historyUiState.displayedChatIds[index]))) return historyUiState.displayedChatIds[index];
+        }
+        for (let index = selectedIndex - 1; index >= 0; index--) {
+            if (!deletedIds.has(String(historyUiState.displayedChatIds[index]))) return historyUiState.displayedChatIds[index];
+        }
+        return null;
+    },
+
+    getActiveHistoryDeleteTargetIds() {
+        const displayedIds = new Set(historyUiState.displayedChatIds.map(String));
+        return historyUiState.deleteTargetIds.filter(id => displayedIds.has(String(id)));
+    },
+
+    updateHistoryDeleteControls() {
+        const targetIds = this.getActiveHistoryDeleteTargetIds();
+        const selectedIds = targetIds.filter(id => historyUiState.deleteSelection.has(String(id)));
+        const selectedCount = selectedIds.length;
+        const targetCount = targetIds.length;
+        if (elements.historyDeleteSelectAll) {
+            elements.historyDeleteSelectAll.checked = targetCount > 0 && selectedCount === targetCount;
+            elements.historyDeleteSelectAll.indeterminate = selectedCount > 0 && selectedCount < targetCount;
+            elements.historyDeleteSelectAll.disabled = targetCount === 0;
+        }
+        if (elements.historyDeleteCount) elements.historyDeleteCount.textContent = `選択中 ${selectedCount}件`;
+        if (elements.historyDeleteConfirmBtn) elements.historyDeleteConfirmBtn.disabled = selectedCount === 0;
+        elements.historyList.querySelectorAll('.history-item').forEach(item => {
+            const checkbox = item.querySelector('.history-delete-checkbox');
+            if (checkbox) checkbox.checked = historyUiState.deleteSelection.has(String(item.dataset.chatId));
+        });
+    },
+
+    setHistoryDeleteSelection(chatId, selected) {
+        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
+        if (!historyUiState.deleteMode || normalizedId === null) return;
+        const idKey = String(normalizedId);
+        if (!this.getActiveHistoryDeleteTargetIds().some(id => String(id) === idKey)) return;
+        if (selected) historyUiState.deleteSelection.add(idKey);
+        else historyUiState.deleteSelection.delete(idKey);
+        const item = [...elements.historyList.querySelectorAll('.history-item')]
+            .find(candidate => String(candidate.dataset.chatId) === idKey);
+        const checkbox = item?.querySelector('.history-delete-checkbox');
+        if (checkbox) checkbox.checked = selected;
+        this.updateHistoryDeleteControls();
+    },
+
+    applyHistoryDeleteModeUi({ announce = '' } = {}) {
+        elements.historyWorkspace?.classList.toggle('is-delete-mode', historyUiState.deleteMode);
+        elements.historyToolbarStandard?.forEach(toolbar => toolbar.classList.toggle('hidden', historyUiState.deleteMode));
+        elements.historyDeleteToolbar?.classList.toggle('hidden', !historyUiState.deleteMode);
+        if (elements.historySearchInput) elements.historySearchInput.disabled = historyUiState.deleteMode;
+        if (elements.historySearchClearBtn) elements.historySearchClearBtn.disabled = historyUiState.deleteMode;
+        if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.disabled = historyUiState.deleteMode;
+        elements.historyList.querySelectorAll('.history-item').forEach(item => {
+            const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
+            const checkboxControl = item.querySelector('.history-delete-checkbox-control');
+            const checkbox = item.querySelector('.history-delete-checkbox');
+            const menuButton = item.querySelector('.history-item-menu-button');
+            checkboxControl?.classList.toggle('hidden', !historyUiState.deleteMode);
+            menuButton?.classList.toggle('hidden', historyUiState.deleteMode);
+            item.classList.toggle('is-delete-mode', historyUiState.deleteMode);
+            if (checkbox) checkbox.setAttribute('aria-label', `「${title}」を削除対象に選択`);
+        });
+        this.updateHistorySelectionRows();
+        this.updateHistoryDeleteControls();
+        if (announce && elements.historyDeleteLive) elements.historyDeleteLive.textContent = announce;
+    },
+
+    enterHistoryDeleteMode() {
+        if (historyUiState.deleteMode || historyUiState.displayedChatIds.length === 0) return false;
+        this.captureHistoryScrollPosition();
+        this.closeHistoryItemMenu();
+        historyUiState.deleteMode = true;
+        historyUiState.deleteSelection.clear();
+        historyUiState.deleteTargetIds = [...historyUiState.displayedChatIds];
+        historyUiState.deletePreviousSelectedChatId = historyUiState.selectedChatId;
+        if (elements.historyDeleteSelectAllLabel) {
+            elements.historyDeleteSelectAllLabel.textContent = historyUiState.query ? '検索結果を全選択' : '全選択';
+        }
+        this.applyHistoryDeleteModeUi({ announce: '履歴削除モードを開始しました' });
+        elements.historyDeleteSelectAll?.focus();
+        return true;
+    },
+
+    exitHistoryDeleteMode({ announce = true, restoreSelection = true } = {}) {
+        if (!historyUiState.deleteMode) return;
+        historyUiState.deleteMode = false;
+        historyUiState.deleteSelection.clear();
+        historyUiState.deleteTargetIds = [];
+        const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
+        if (restoreSelection && contains(historyUiState.deletePreviousSelectedChatId)) {
+            historyUiState.selectedChatId = historyUiState.deletePreviousSelectedChatId;
+        } else if (!contains(historyUiState.selectedChatId)) {
+            historyUiState.selectedChatId = contains(historyUiState.deleteFallbackChatId)
+                ? historyUiState.deleteFallbackChatId
+                : contains(state.currentChatId) ? state.currentChatId : historyUiState.displayedChatIds[0] ?? null;
+        }
+        historyUiState.deletePreviousSelectedChatId = null;
+        historyUiState.deleteFallbackChatId = null;
+        this.applyHistoryDeleteModeUi({ announce: announce ? '履歴削除モードを終了しました' : '' });
+        this.renderHistoryDetail();
     },
 
     focusHistorySelection() {
@@ -4923,6 +5062,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         item.dataset.chatId = model.id;
         item.classList.toggle('is-current', model.isCurrent);
         if (model.isCurrent) item.setAttribute('aria-current', 'page');
+        item.classList.toggle('is-delete-mode', historyUiState.deleteMode);
         const isSelected = this.isHistoryDetailVisible() && String(historyUiState.selectedChatId) === String(model.id);
         item.classList.toggle('is-selected', isSelected);
         if (this.isHistoryDetailVisible()) item.setAttribute('aria-selected', String(isSelected));
@@ -4931,10 +5071,18 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const titleElement = item.querySelector('.history-item-title');
         titleElement.textContent = model.title;
         titleElement.title = model.title;
+        const deleteControl = item.querySelector('.history-delete-checkbox-control');
+        const deleteCheckbox = item.querySelector('.history-delete-checkbox');
+        deleteControl.classList.toggle('hidden', !historyUiState.deleteMode);
+        deleteCheckbox.checked = historyUiState.deleteSelection.has(String(model.id));
+        deleteCheckbox.dataset.chatId = model.id;
+        deleteCheckbox.setAttribute('aria-label', `「${model.title}」を削除対象に選択`);
         item.querySelector('.updated-date').textContent = `更新 ${this.formatDate(model.updatedAt) || '日時不明'}`;
         item.querySelector('.created-date').textContent = `作成 ${this.formatDate(model.createdAt) || '日時不明'}`;
         const openButton = item.querySelector('.history-item-open');
-        openButton.setAttribute('aria-label', this.isHistoryDetailVisible() ? `「${model.title}」の詳細を表示` : `「${model.title}」を開く`);
+        openButton.setAttribute('aria-label', historyUiState.deleteMode
+            ? `「${model.title}」の削除選択を切り替え`
+            : this.isHistoryDetailVisible() ? `「${model.title}」の詳細を表示` : `「${model.title}」を開く`);
         if (model.snippet) {
             const snippetElement = document.createElement('span');
             snippetElement.className = 'history-item-snippet';
@@ -4943,6 +5091,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         const menuButton = item.querySelector('.history-item-menu-button');
         menuButton.setAttribute('aria-label', `「${model.title}」の操作メニュー`);
+        menuButton.classList.toggle('hidden', historyUiState.deleteMode);
         item.querySelectorAll('[data-history-action]').forEach(button => {
             button.dataset.chatId = model.id;
         });
@@ -4954,19 +5103,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(historyUiState.query);
         const sortOrder = HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
-        const models = this.sortHistoryDisplayModels(
+        const sortedModels = this.sortHistoryDisplayModels(
             historyUiState.cachedChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
             sortOrder
         );
+        const deleteTargetIds = new Set(historyUiState.deleteTargetIds.map(String));
+        const models = historyUiState.deleteMode
+            ? sortedModels.filter(model => deleteTargetIds.has(String(model.id)))
+            : sortedModels;
         this.reconcileHistorySelection(models, { updateRows: false });
 
         elements.historyList.replaceChildren();
         this.clearHistoryStatePanel();
-        const sevenDaysAgo = Date.now() - 7 * 86400000;
-        const oldChatsCount = historyUiState.cachedChats.filter(chat => Number(chat.updatedAt) > 0 && Number(chat.updatedAt) < sevenDaysAgo).length;
-        const deleteButton = document.getElementById('delete-old-chats-btn');
-        deleteButton.disabled = oldChatsCount === 0;
-        deleteButton.title = oldChatsCount > 0 ? `${oldChatsCount}件の古い履歴を一括削除` : '削除対象の古い履歴はありません';
+        if (elements.historyDeleteModeBtn) elements.historyDeleteModeBtn.disabled = models.length === 0;
 
         if (historyUiState.cachedChats.length === 0) {
             this.setHistoryDetailEmpty();
@@ -5029,6 +5178,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (generation === historyUiState.renderGeneration && restoreScrollTop > 0 && scrollContainer) {
             scrollContainer.scrollTop = Math.min(restoreScrollTop, Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight));
+        }
+        if (generation === historyUiState.renderGeneration && historyUiState.deleteMode) {
+            this.applyHistoryDeleteModeUi();
         }
     },
 
@@ -5103,6 +5255,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     openHistoryItemMenu(anchor, chatId) {
+        if (historyUiState.deleteMode) return;
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
         if (!anchor || normalizedId === null || !elements.historyItemMenu) return;
         if (historyUiState.menuAnchor === anchor && !elements.historyItemMenu.classList.contains('hidden')) {
@@ -6008,6 +6161,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           if (screenName !== 'history' && state.currentScreen === 'history') {
             this.captureHistoryScrollPosition();
             this.closeHistoryItemMenu();
+            this.exitHistoryDeleteMode({ announce: true, restoreSelection: false });
             historyUiState.renderGeneration++;
           }
       
@@ -14330,7 +14484,65 @@ const appLogic = {
             };
             elements.historySortOrderToolbar.addEventListener('change', handleHistorySortChange);
             elements.historySortOrderSelect.addEventListener('change', handleHistorySortChange);
-            elements.historyNewChatBtn.addEventListener('click', () => this.confirmStartNewChat());
+
+            elements.historyDeleteModeBtn.addEventListener('click', () => uiUtils.enterHistoryDeleteMode());
+            elements.historyDeleteCancelBtn.addEventListener('click', () => {
+                uiUtils.exitHistoryDeleteMode({ announce: true, restoreSelection: true });
+                elements.historyDeleteModeBtn.focus();
+            });
+            elements.historyDeleteSelectAll.addEventListener('change', () => {
+                const shouldSelect = elements.historyDeleteSelectAll.checked;
+                uiUtils.getActiveHistoryDeleteTargetIds().forEach(chatId => {
+                    const idKey = String(chatId);
+                    if (shouldSelect) historyUiState.deleteSelection.add(idKey);
+                    else historyUiState.deleteSelection.delete(idKey);
+                });
+                uiUtils.updateHistoryDeleteControls();
+            });
+            elements.historyDeleteConfirmBtn.addEventListener('click', async () => {
+                if (!historyUiState.deleteMode) return;
+                const selectedIds = uiUtils.getActiveHistoryDeleteTargetIds()
+                    .filter(chatId => historyUiState.deleteSelection.has(String(chatId)));
+                if (selectedIds.length === 0) return;
+                uiUtils.captureHistoryScrollPosition();
+                historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteManyFallback(selectedIds);
+                const result = await chatHistoryActions.deleteMany(selectedIds);
+                if (result.cancelled) {
+                    historyUiState.deleteFallbackChatId = null;
+                    elements.historyDeleteConfirmBtn.focus();
+                    return;
+                }
+                result.successfulIds.forEach(chatId => historyUiState.deleteSelection.delete(String(chatId)));
+                const successfulIdKeys = new Set(result.successfulIds.map(String));
+                historyUiState.deleteTargetIds = historyUiState.deleteTargetIds
+                    .filter(chatId => !successfulIdKeys.has(String(chatId)));
+
+                if (result.successfulIds.length === 0) {
+                    historyUiState.deleteFallbackChatId = null;
+                    await uiUtils.showCustomAlert(`0件を削除しました。\n${result.failures.length}件は削除できませんでした。`);
+                    uiUtils.updateHistoryDeleteControls();
+                    return;
+                }
+
+                if (result.failures.length > 0) {
+                    await uiUtils.showCustomAlert(`${result.successfulIds.length}件を削除しました。\n${result.failures.length}件は削除できませんでした。`);
+                } else {
+                    await uiUtils.showCustomAlert(`${result.successfulIds.length}件の履歴を削除しました。`);
+                }
+
+                if (result.wasCurrent) {
+                    uiUtils.exitHistoryDeleteMode({ announce: false, restoreSelection: false });
+                    this.startNewChat();
+                    await uiUtils.showScreen('chat');
+                    return;
+                }
+                if (result.failures.length === 0) {
+                    uiUtils.exitHistoryDeleteMode({ announce: true, restoreSelection: true });
+                    uiUtils.focusHistorySelection();
+                } else {
+                    uiUtils.applyHistoryDeleteModeUi({ announce: '削除できなかった履歴が選択されています' });
+                }
+            });
 
             const executeHistoryAction = async (action, chatId, anchor) => {
                 const record = uiUtils.getHistoryRecord(chatId);
@@ -14368,7 +14580,10 @@ const appLogic = {
                 const action = actionElement.dataset.historyAction;
 
                 if (action === 'open') {
-                    if (uiUtils.isHistoryDetailVisible()) {
+                    if (historyUiState.deleteMode) {
+                        const shouldSelect = !historyUiState.deleteSelection.has(String(chatId));
+                        uiUtils.setHistoryDeleteSelection(chatId, shouldSelect);
+                    } else if (uiUtils.isHistoryDetailVisible()) {
                         uiUtils.selectHistoryChat(chatId);
                     } else {
                         uiUtils.captureHistoryScrollPosition();
@@ -14377,6 +14592,11 @@ const appLogic = {
                 } else if (action === 'menu') {
                     uiUtils.openHistoryItemMenu(actionElement, chatId);
                 }
+            });
+            elements.historyList.addEventListener('change', event => {
+                const checkbox = event.target.closest('.history-delete-checkbox');
+                if (!checkbox || !historyUiState.deleteMode) return;
+                uiUtils.setHistoryDeleteSelection(checkbox.dataset.chatId, checkbox.checked);
             });
 
             elements.historyItemMenu.addEventListener('click', async event => {
@@ -14391,6 +14611,7 @@ const appLogic = {
             });
 
             elements.historyDetailPane.addEventListener('click', async event => {
+                if (historyUiState.deleteMode) return;
                 const actionElement = event.target.closest('[data-history-detail-action]');
                 if (!actionElement || !elements.historyDetailPane.contains(actionElement)) return;
                 const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId || historyUiState.selectedChatId);
@@ -14444,7 +14665,6 @@ const appLogic = {
 
             elements.historyStateAction.addEventListener('click', () => {
                 const action = elements.historyStateAction.dataset.historyStateAction;
-                if (action === 'new') this.confirmStartNewChat();
                 if (action === 'clear-search') clearHistorySearch();
                 if (action === 'retry') uiUtils.renderHistoryList({ refresh: true, preserveScroll: true });
             });
@@ -15452,44 +15672,6 @@ const appLogic = {
         elements.backToChatFromHistoryBtn.addEventListener('click', resetHeaderVisibility);
         elements.backToChatFromSettingsBtn.addEventListener('click', resetHeaderVisibility);
 
-        // --- 古い履歴の一括削除 ---
-        const deleteOldChatsBtn = document.getElementById('delete-old-chats-btn');
-        if (deleteOldChatsBtn) {
-            deleteOldChatsBtn.addEventListener('click', async () => {
-                const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                const allChats = await dbUtils.getAllChats();
-                const chatsToDelete = allChats.filter(chat => chat.updatedAt < sevenDaysAgo);
-
-                if (chatsToDelete.length === 0) {
-                    await uiUtils.showCustomAlert("削除対象の古いチャットはありません。");
-                    return;
-                }
-
-                const confirmed = await uiUtils.showCustomConfirm(
-                    `${chatsToDelete.length}件の古いチャット（7日以上更新なし）を削除しますか？\nこの操作は元に戻せません。`
-                );
-
-                if (confirmed) {
-                    uiUtils.showProgressDialog('古いチャットを削除中...');
-                    try {
-                        for (const chat of chatsToDelete) {
-                            // 現在開いているチャットは削除しない
-                            if (chat.id !== state.currentChatId) {
-                                await dbUtils.deleteChat(chat.id);
-                            }
-                        }
-                        this.markAsDirtyAndSchedulePush('structural');
-                        await uiUtils.showCustomAlert(`${chatsToDelete.length}件の古いチャットを削除しました。`);
-                        await chatListChangeController.notify({ type: 'delete', chatId: null, bulk: true });
-                    } catch (error) {
-                        console.error("古いチャットの一括削除エラー:", error);
-                        await uiUtils.showCustomAlert(`削除中にエラーが発生しました: ${error.message}`);
-                    } finally {
-                        uiUtils.hideProgressDialog();
-                    }
-                }
-            });
-        }
         elements.sdTestConnectionBtn.addEventListener('click', async () => {
             const url = elements.sdApiUrlInput.value.trim().replace(/\/$/, '');
             if (!url) {
@@ -22278,6 +22460,61 @@ const chatHistoryActions = {
             wasCurrent: result.wasCurrent
         });
         return result;
+    },
+
+    async deleteMany(chatIds) {
+        const normalizedIds = [...new Map(
+            (Array.isArray(chatIds) ? chatIds : [])
+                .map(chatId => this.normalizeChatId(chatId))
+                .filter(chatId => chatId !== null)
+                .map(chatId => [String(chatId), chatId])
+        ).values()];
+        if (normalizedIds.length === 0) return { ok: false, empty: true, successfulIds: [], failures: [] };
+
+        const includesCurrent = normalizedIds.some(chatId => String(chatId) === String(state.currentChatId));
+        const currentNotice = includesCurrent
+            ? '\n\n現在開いているチャットも含まれています。\n削除後は新規チャット画面へ移動します。'
+            : '';
+        const confirmed = await uiUtils.showCustomConfirm(
+            `選択した${normalizedIds.length}件の履歴を削除しますか？\nこの操作は元に戻せません。${currentNotice}`
+        );
+        if (!confirmed) return { ok: false, cancelled: true, successfulIds: [], failures: [] };
+
+        const successfulIds = [];
+        const failures = [];
+        uiUtils.showProgressDialog(`選択した${normalizedIds.length}件の履歴を削除中...`);
+        try {
+            for (const chatId of normalizedIds) {
+                try {
+                    await dbUtils.deleteChat(chatId, { markDirty: false });
+                    successfulIds.push(chatId);
+                } catch (error) {
+                    console.error(`[History Delete Many] チャット ${chatId} の削除に失敗しました:`, error);
+                    failures.push({ chatId, error });
+                }
+            }
+        } finally {
+            uiUtils.hideProgressDialog();
+        }
+
+        const currentDeleted = successfulIds.some(chatId => String(chatId) === String(state.currentChatId));
+        if (successfulIds.length > 0) {
+            appLogic.markAsDirtyAndSchedulePush('structural');
+            await chatListChangeController.notify({
+                type: 'deleteMany',
+                chatIds: successfulIds,
+                failedChatIds: failures.map(failure => failure.chatId),
+                wasCurrent: currentDeleted
+            });
+        }
+        return {
+            ok: successfulIds.length > 0 && failures.length === 0,
+            partial: successfulIds.length > 0 && failures.length > 0,
+            successfulIds,
+            failures,
+            wasCurrent: currentDeleted,
+            requestedCount: normalizedIds.length
+        };
     }
 };
 
