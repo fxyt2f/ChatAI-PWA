@@ -14,11 +14,11 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.35.0-beta2.1">
+    <link rel="stylesheet" href="./style.css?v=1.35.0-beta3">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./function-calling.js?v=1.12" defer></script>
-    <script src="./dropbox.js?v=1.35.0-beta2.1" defer></script>
+    <script src="./dropbox.js?v=1.35.0-beta3" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -32,7 +32,7 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./app.js?v=1.35.0-beta2.1" defer></script>
+    <script src="./app.js?v=1.35.0-beta3" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -238,18 +238,57 @@
                                         <span class="history-date-separator" aria-hidden="true">・</span>
                                         <span class="created-date"></span>
                                     </span>
-                                    <span class="history-item-stats" aria-label="チャット統計">
-                                        <span class="stat-item js-stat-tokens" title="合計トークン数"><span class="material-symbols-outlined" aria-hidden="true">token</span><span class="stat-value">-</span></span>
-                                        <span class="stat-item js-stat-assets" title="合計アセット数"><span class="material-symbols-outlined" aria-hidden="true">perm_media</span><span class="stat-value">-</span></span>
-                                        <span class="stat-item js-stat-size" title="合計アセット容量"><span class="material-symbols-outlined" aria-hidden="true">database</span><span class="stat-value">-</span></span>
-                                    </span>
                                 </button>
-                                <button type="button" class="history-item-menu-button" data-history-action="menu" aria-haspopup="menu" aria-expanded="false">
+                                <button type="button" class="history-item-menu-button" data-history-action="menu" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu">
                                     <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
                                 </button>
                             </li>
                         </template>
                     </section>
+                    <aside id="history-detail-pane" class="history-detail-pane" aria-labelledby="history-detail-heading">
+                        <h2 id="history-detail-heading" class="visually-hidden">チャット詳細</h2>
+                        <div id="history-detail-empty" class="history-detail-empty">
+                            <span class="material-symbols-outlined" aria-hidden="true">info</span>
+                            <h3>チャットを選択してください</h3>
+                            <p>一覧からチャットを選ぶと、詳細を確認できます</p>
+                        </div>
+                        <div id="history-detail-content" class="history-detail-content hidden">
+                            <header class="history-detail-header">
+                                <p class="history-detail-eyebrow">選択したチャット</p>
+                                <h2 id="history-detail-title"></h2>
+                            </header>
+                            <dl class="history-detail-meta">
+                                <div><dt>最終更新</dt><dd id="history-detail-updated"></dd></div>
+                                <div><dt>作成日時</dt><dd id="history-detail-created"></dd></div>
+                                <div><dt>表示メッセージ</dt><dd id="history-detail-message-count"></dd></div>
+                                <div><dt>システムプロンプト</dt><dd id="history-detail-system-prompt"></dd></div>
+                                <div><dt>添付ファイル</dt><dd id="history-detail-attachments"></dd></div>
+                            </dl>
+                            <section class="history-detail-section" aria-labelledby="history-detail-stats-heading">
+                                <h3 id="history-detail-stats-heading">統計</h3>
+                                <div class="history-detail-stats">
+                                    <span><span class="material-symbols-outlined" aria-hidden="true">token</span><span id="history-detail-tokens"></span></span>
+                                    <span><span class="material-symbols-outlined" aria-hidden="true">perm_media</span><span id="history-detail-assets"></span></span>
+                                    <span><span class="material-symbols-outlined" aria-hidden="true">database</span><span id="history-detail-size"></span></span>
+                                </div>
+                            </section>
+                            <section class="history-detail-section" aria-labelledby="history-detail-first-heading">
+                                <h3 id="history-detail-first-heading">最初のユーザーメッセージ</h3>
+                                <p id="history-detail-first-message" class="history-detail-excerpt"></p>
+                            </section>
+                            <section class="history-detail-section" aria-labelledby="history-detail-latest-heading">
+                                <h3 id="history-detail-latest-heading">最新メッセージ</h3>
+                                <p id="history-detail-latest-role" class="history-detail-role"></p>
+                                <p id="history-detail-latest-message" class="history-detail-excerpt"></p>
+                            </section>
+                            <div class="history-detail-actions">
+                                <button type="button" class="history-primary-action" data-history-detail-action="open"><span class="material-symbols-outlined" aria-hidden="true">open_in_new</span>チャットを開く</button>
+                                <button type="button" class="history-secondary-action" data-history-detail-action="export"><span class="material-symbols-outlined" aria-hidden="true">upload</span>チャットを出力</button>
+                                <button type="button" class="history-secondary-action history-detail-menu-button" data-history-detail-action="menu" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu"><span class="material-symbols-outlined" aria-hidden="true">more_vert</span>その他</button>
+                            </div>
+                        </div>
+                        <p id="history-detail-live" class="visually-hidden" aria-live="polite"></p>
+                    </aside>
                 </div>
             </main>
         </div>

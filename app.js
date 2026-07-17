@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta2.1";
-const APP_CACHE_VERSION = "v1.35.0-beta2.1";
+const APP_VERSION = "1.35.0-beta3";
+const APP_CACHE_VERSION = "v1.35.0-beta3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta3": [
+        "ワイド画面の履歴に詳細表示を追加し、選択したチャットの日時や概要を確認できるようにしました。",
+        "履歴のチャット操作を共通の三点メニューへ整理しました。",
+        "PCとスマホで履歴行の操作方法を最適化しました。"
+    ],
     "1.35.0-beta2.1": [
         "履歴一覧から通常時の本文抜粋を省き、より多くのチャットを確認しやすい表示へ調整しました。",
         "履歴ごとの操作を三点メニューへまとめ、一覧の表示を簡潔にしました。"
@@ -561,6 +566,22 @@ try {
         noHistoryMessage: document.getElementById('no-history-message'),
         historyItemTemplate: document.getElementById('history-item-template'),
         historyItemMenu: document.getElementById('history-item-menu'),
+        historyDetailPane: document.getElementById('history-detail-pane'),
+        historyDetailEmpty: document.getElementById('history-detail-empty'),
+        historyDetailContent: document.getElementById('history-detail-content'),
+        historyDetailTitle: document.getElementById('history-detail-title'),
+        historyDetailUpdated: document.getElementById('history-detail-updated'),
+        historyDetailCreated: document.getElementById('history-detail-created'),
+        historyDetailMessageCount: document.getElementById('history-detail-message-count'),
+        historyDetailSystemPrompt: document.getElementById('history-detail-system-prompt'),
+        historyDetailAttachments: document.getElementById('history-detail-attachments'),
+        historyDetailTokens: document.getElementById('history-detail-tokens'),
+        historyDetailAssets: document.getElementById('history-detail-assets'),
+        historyDetailSize: document.getElementById('history-detail-size'),
+        historyDetailFirstMessage: document.getElementById('history-detail-first-message'),
+        historyDetailLatestRole: document.getElementById('history-detail-latest-role'),
+        historyDetailLatestMessage: document.getElementById('history-detail-latest-message'),
+        historyDetailLive: document.getElementById('history-detail-live'),
         historyMainContent: document.querySelector('#history-screen .history-main-content'),
         historyStatus: document.getElementById('history-status'),
         historyStatePanel: document.getElementById('history-state-panel'),
@@ -2260,7 +2281,11 @@ const historyUiState = {
     hasLoaded: false,
     searchTimer: null,
     menuChatId: null,
-    menuAnchor: null
+    menuAnchor: null,
+    selectedChatId: null,
+    displayedChatIds: [],
+    chatRecordsById: new Map(),
+    deleteFallbackChatId: null
 };
 
 // --- UIユーティリティ (uiUtils) ---
@@ -4737,11 +4762,171 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
+    isHistoryDetailVisible() {
+        return window.matchMedia('(min-width: 1000px)').matches;
+    },
+
+    rebuildHistoryRecordMap() {
+        historyUiState.chatRecordsById = new Map(
+            historyUiState.cachedChats.map(chat => [String(chat.id), chat])
+        );
+    },
+
+    getHistoryRecord(chatId) {
+        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
+        return normalizedId === null ? null : historyUiState.chatRecordsById.get(String(normalizedId)) || null;
+    },
+
+    createHistoryDetailSnippet(text, maxLength = 280) {
+        const normalizedText = this.normalizeHistoryText(text);
+        if (!normalizedText) return '';
+        return normalizedText.length > maxLength ? `${normalizedText.slice(0, maxLength - 1)}…` : normalizedText;
+    },
+
+    createHistoryDetailModel(chat) {
+        if (!chat) return null;
+        const visibleMessages = this.getHistoryVisibleTextMessages(chat.messages);
+        const firstUserMessage = visibleMessages.find(message => message.role === 'user') || null;
+        const latestMessage = visibleMessages[visibleMessages.length - 1] || null;
+        const hasAttachments = Array.isArray(chat.messages)
+            ? chat.messages.some(message => Array.isArray(message?.attachments) && message.attachments.length > 0)
+            : null;
+        const stats = chat.stats && typeof chat.stats === 'object' ? chat.stats : null;
+        return {
+            id: chat.id,
+            title: this.normalizeChatTitleText(chat.title, `履歴 ${chat.id ?? ''}`) || `履歴 ${chat.id ?? ''}`,
+            createdAt: Number(chat.createdAt) || null,
+            updatedAt: Number(chat.updatedAt) || null,
+            messageCount: visibleMessages.length,
+            hasSystemPrompt: Boolean(String(chat.systemPrompt || '').trim()),
+            attachmentsLabel: hasAttachments === null ? '不明' : hasAttachments ? 'あり' : 'なし',
+            totalTokens: stats ? Number(stats.totalTokens || 0).toLocaleString() : '—',
+            assetCount: stats ? Number(stats.assetCount || 0).toLocaleString() : '—',
+            totalAssetSize: stats ? formatFileSize(Number(stats.totalAssetSize || 0)) : '—',
+            firstUserMessage: this.createHistoryDetailSnippet(firstUserMessage?.historyText || ''),
+            latestRole: latestMessage?.role === 'user' ? '最新のユーザー' : latestMessage?.role === 'model' ? '最新のモデル' : '',
+            latestMessage: this.createHistoryDetailSnippet(latestMessage?.historyText || '')
+        };
+    },
+
+    setHistoryDetailEmpty() {
+        elements.historyDetailEmpty?.classList.remove('hidden');
+        elements.historyDetailContent?.classList.add('hidden');
+        elements.historyDetailPane?.querySelectorAll('[data-history-detail-action]').forEach(button => {
+            delete button.dataset.chatId;
+        });
+    },
+
+    renderHistoryDetail({ announce = false } = {}) {
+        if (!this.isHistoryDetailVisible()) return;
+        const detail = this.createHistoryDetailModel(this.getHistoryRecord(historyUiState.selectedChatId));
+        if (!detail) {
+            this.setHistoryDetailEmpty();
+            if (announce && elements.historyDetailLive) elements.historyDetailLive.textContent = '詳細表示するチャットがありません';
+            return;
+        }
+        elements.historyDetailEmpty.classList.add('hidden');
+        elements.historyDetailContent.classList.remove('hidden');
+        elements.historyDetailTitle.textContent = detail.title;
+        elements.historyDetailUpdated.textContent = this.formatDate(detail.updatedAt) || '日時不明';
+        elements.historyDetailCreated.textContent = this.formatDate(detail.createdAt) || '日時不明';
+        elements.historyDetailMessageCount.textContent = `${detail.messageCount.toLocaleString()}件`;
+        elements.historyDetailSystemPrompt.textContent = detail.hasSystemPrompt ? 'あり' : 'なし';
+        elements.historyDetailAttachments.textContent = detail.attachmentsLabel;
+        elements.historyDetailTokens.textContent = `${detail.totalTokens} tokens`;
+        elements.historyDetailAssets.textContent = `${detail.assetCount} assets`;
+        elements.historyDetailSize.textContent = detail.totalAssetSize;
+        elements.historyDetailFirstMessage.textContent = detail.firstUserMessage || '表示できるユーザーメッセージはありません';
+        elements.historyDetailLatestRole.textContent = detail.latestRole;
+        elements.historyDetailLatestMessage.textContent = detail.latestMessage || '表示できるメッセージはありません';
+        elements.historyDetailPane.querySelectorAll('[data-history-detail-action]').forEach(button => {
+            button.dataset.chatId = detail.id;
+        });
+        const menuButton = elements.historyDetailPane.querySelector('.history-detail-menu-button');
+        menuButton?.setAttribute('aria-label', `「${detail.title}」のその他の操作`);
+        if (announce && elements.historyDetailLive) elements.historyDetailLive.textContent = `「${detail.title}」の詳細を表示しました`;
+    },
+
+    updateHistorySelectionRows(chatIds = null) {
+        const isWide = this.isHistoryDetailVisible();
+        const targetIds = Array.isArray(chatIds) ? new Set(chatIds.filter(id => id !== null).map(String)) : null;
+        elements.historyList.querySelectorAll('.history-item').forEach(item => {
+            if (targetIds && !targetIds.has(String(item.dataset.chatId))) return;
+            const isSelected = isWide && String(item.dataset.chatId) === String(historyUiState.selectedChatId);
+            item.classList.toggle('is-selected', isSelected);
+            if (isWide) item.setAttribute('aria-selected', String(isSelected));
+            else item.removeAttribute('aria-selected');
+            item.setAttribute('role', isWide ? 'option' : 'listitem');
+            const openButton = item.querySelector('.history-item-open');
+            const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
+            openButton?.setAttribute('aria-label', isWide ? `「${title}」の詳細を表示` : `「${title}」を開く`);
+        });
+        if (!targetIds) {
+            elements.historyList.querySelectorAll('.history-group-list').forEach(list => {
+                list.setAttribute('role', isWide ? 'listbox' : 'list');
+            });
+        }
+    },
+
+    selectHistoryChat(chatId, { announce = true } = {}) {
+        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
+        if (normalizedId === null || !historyUiState.displayedChatIds.some(id => String(id) === String(normalizedId))) return false;
+        const previousId = historyUiState.selectedChatId;
+        historyUiState.selectedChatId = normalizedId;
+        this.updateHistorySelectionRows([previousId, normalizedId]);
+        this.renderHistoryDetail({ announce });
+        return true;
+    },
+
+    reconcileHistorySelection(models, { updateRows = true } = {}) {
+        historyUiState.displayedChatIds = models.map(model => model.id);
+        const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
+        let nextSelected = contains(historyUiState.selectedChatId) ? historyUiState.selectedChatId : null;
+        if (nextSelected === null && contains(historyUiState.deleteFallbackChatId)) nextSelected = historyUiState.deleteFallbackChatId;
+        if (nextSelected === null && contains(state.currentChatId)) nextSelected = state.currentChatId;
+        if (nextSelected === null) nextSelected = historyUiState.displayedChatIds[0] ?? null;
+        historyUiState.selectedChatId = nextSelected;
+        historyUiState.deleteFallbackChatId = null;
+        if (updateRows) this.updateHistorySelectionRows();
+        this.renderHistoryDetail();
+    },
+
+    getHistoryDeleteFallback(chatId) {
+        if (String(historyUiState.selectedChatId) !== String(chatId)) return null;
+        const index = historyUiState.displayedChatIds.findIndex(id => String(id) === String(chatId));
+        if (index < 0) return null;
+        return historyUiState.displayedChatIds[index + 1] ?? historyUiState.displayedChatIds[index - 1] ?? null;
+    },
+
+    focusHistorySelection() {
+        const selectedItem = [...elements.historyList.querySelectorAll('.history-item')]
+            .find(item => String(item.dataset.chatId) === String(historyUiState.selectedChatId));
+        if (selectedItem) {
+            selectedItem.querySelector('.history-item-open')?.focus();
+            return;
+        }
+        if (this.isHistoryDetailVisible()) {
+            elements.historyDetailPane.querySelector('[data-history-detail-action="open"]')?.focus();
+        }
+    },
+
+    handleHistoryDetailViewportChange() {
+        if (state.currentScreen !== 'history') return;
+        const models = historyUiState.displayedChatIds
+            .filter(id => this.getHistoryRecord(id))
+            .map(id => ({ id }));
+        this.reconcileHistorySelection(models);
+    },
+
     createHistoryItemElement(model) {
         const item = elements.historyItemTemplate.content.firstElementChild.cloneNode(true);
         item.dataset.chatId = model.id;
         item.classList.toggle('is-current', model.isCurrent);
         if (model.isCurrent) item.setAttribute('aria-current', 'page');
+        const isSelected = this.isHistoryDetailVisible() && String(historyUiState.selectedChatId) === String(model.id);
+        item.classList.toggle('is-selected', isSelected);
+        if (this.isHistoryDetailVisible()) item.setAttribute('aria-selected', String(isSelected));
+        item.setAttribute('role', this.isHistoryDetailVisible() ? 'option' : 'listitem');
 
         const titleElement = item.querySelector('.history-item-title');
         titleElement.textContent = model.title;
@@ -4749,28 +4934,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         item.querySelector('.updated-date').textContent = `更新 ${this.formatDate(model.updatedAt) || '日時不明'}`;
         item.querySelector('.created-date').textContent = `作成 ${this.formatDate(model.createdAt) || '日時不明'}`;
         const openButton = item.querySelector('.history-item-open');
-        const statsElement = item.querySelector('.history-item-stats');
-        const totalTokens = Number(model.stats?.totalTokens || 0);
-        const assetCount = Number(model.stats?.assetCount || 0);
-        const totalAssetSize = Number(model.stats?.totalAssetSize || 0);
-        const statValues = [
-            ['.js-stat-tokens', totalTokens > 0, `${totalTokens.toLocaleString()} tokens`],
-            ['.js-stat-assets', assetCount > 0, `${assetCount.toLocaleString()} assets`],
-            ['.js-stat-size', totalAssetSize > 0, formatFileSize(totalAssetSize)]
-        ];
-        statValues.forEach(([selector, visible, value]) => {
-            const statElement = item.querySelector(selector);
-            statElement.classList.toggle('hidden', !visible);
-            if (visible) statElement.querySelector('.stat-value').textContent = value;
-        });
-        if (!statValues.some(([, visible]) => visible)) {
-            statsElement.classList.add('hidden');
-        }
+        openButton.setAttribute('aria-label', this.isHistoryDetailVisible() ? `「${model.title}」の詳細を表示` : `「${model.title}」を開く`);
         if (model.snippet) {
             const snippetElement = document.createElement('span');
             snippetElement.className = 'history-item-snippet';
             snippetElement.textContent = model.snippet;
-            openButton.insertBefore(snippetElement, statsElement);
+            openButton.appendChild(snippetElement);
         }
         const menuButton = item.querySelector('.history-item-menu-button');
         menuButton.setAttribute('aria-label', `「${model.title}」の操作メニュー`);
@@ -4789,6 +4958,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             historyUiState.cachedChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
             sortOrder
         );
+        this.reconcileHistorySelection(models, { updateRows: false });
 
         elements.historyList.replaceChildren();
         this.clearHistoryStatePanel();
@@ -4799,11 +4969,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         deleteButton.title = oldChatsCount > 0 ? `${oldChatsCount}件の古い履歴を一括削除` : '削除対象の古い履歴はありません';
 
         if (historyUiState.cachedChats.length === 0) {
+            this.setHistoryDetailEmpty();
             elements.historyStatus.textContent = '';
             this.setHistoryStatePanel('empty');
             return;
         }
         if (models.length === 0) {
+            this.setHistoryDetailEmpty();
             elements.historyStatus.textContent = '検索結果 0件';
             this.setHistoryStatePanel('noResults');
             return;
@@ -4830,6 +5002,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             heading.textContent = label;
             const list = document.createElement('ul');
             list.className = 'history-group-list';
+            list.setAttribute('role', this.isHistoryDetailVisible() ? 'listbox' : 'list');
             groupItem.append(heading, list);
             elements.historyList.appendChild(groupItem);
             groups.set(key, { list, models: groupModels });
@@ -4879,6 +5052,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 historyUiState.cachedChats = Array.isArray(chats) ? chats : [];
                 historyUiState.hasLoaded = true;
             }
+            this.rebuildHistoryRecordMap();
             await this.renderHistoryDisplayModels(generation, { restoreScrollTop });
             if (resetScroll) {
                 historyUiState.scrollTop = 0;
@@ -14158,6 +14332,33 @@ const appLogic = {
             elements.historySortOrderSelect.addEventListener('change', handleHistorySortChange);
             elements.historyNewChatBtn.addEventListener('click', () => this.confirmStartNewChat());
 
+            const executeHistoryAction = async (action, chatId, anchor) => {
+                const record = uiUtils.getHistoryRecord(chatId);
+                if (!record) return;
+                const title = uiUtils.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
+                if (action === 'rename') {
+                    await this.editHistoryTitle(chatId, title);
+                    if (anchor?.isConnected) anchor.focus();
+                    else uiUtils.focusHistorySelection();
+                } else if (action === 'export') {
+                    await chatHistoryActions.export(chatId, { title });
+                    if (anchor?.isConnected) anchor.focus();
+                } else if (action === 'duplicate') {
+                    await chatHistoryActions.duplicate(chatId);
+                    if (anchor?.isConnected) anchor.focus();
+                    else uiUtils.focusHistorySelection();
+                } else if (action === 'delete') {
+                    historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteFallback(chatId);
+                    const result = await chatHistoryActions.delete(chatId, { title });
+                    if (!result?.ok) {
+                        historyUiState.deleteFallbackChatId = null;
+                        if (anchor?.isConnected) anchor.focus();
+                    } else if (!result.wasCurrent) {
+                        uiUtils.focusHistorySelection();
+                    }
+                }
+            };
+
             elements.historyList.addEventListener('click', async event => {
                 const actionElement = event.target.closest('[data-history-action]');
                 if (!actionElement || !elements.historyList.contains(actionElement)) return;
@@ -14165,12 +14366,14 @@ const appLogic = {
                 const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId || item?.dataset.chatId);
                 if (chatId === null || !item) return;
                 const action = actionElement.dataset.historyAction;
-                const titleElement = item.querySelector('.history-item-title');
-                const title = titleElement?.textContent || '';
 
                 if (action === 'open') {
-                    uiUtils.captureHistoryScrollPosition();
-                    await chatHistoryActions.open(chatId, { source: 'history' });
+                    if (uiUtils.isHistoryDetailVisible()) {
+                        uiUtils.selectHistoryChat(chatId);
+                    } else {
+                        uiUtils.captureHistoryScrollPosition();
+                        await chatHistoryActions.open(chatId, { source: 'history' });
+                    }
                 } else if (action === 'menu') {
                     uiUtils.openHistoryItemMenu(actionElement, chatId);
                 }
@@ -14180,20 +14383,26 @@ const appLogic = {
                 const menuItem = event.target.closest('[data-history-menu-action]');
                 if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
                 const chatId = historyUiState.menuChatId;
-                const item = historyUiState.menuAnchor?.closest('.history-item');
-                const titleElement = item?.querySelector('.history-item-title');
-                const title = titleElement?.textContent || '';
+                const anchor = historyUiState.menuAnchor;
                 const action = menuItem.dataset.historyMenuAction;
                 uiUtils.closeHistoryItemMenu();
-                if (chatId === null || !item) return;
-                if (action === 'rename') {
-                    await this.editHistoryTitle(chatId, titleElement);
+                if (chatId === null) return;
+                await executeHistoryAction(action, chatId, anchor);
+            });
+
+            elements.historyDetailPane.addEventListener('click', async event => {
+                const actionElement = event.target.closest('[data-history-detail-action]');
+                if (!actionElement || !elements.historyDetailPane.contains(actionElement)) return;
+                const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId || historyUiState.selectedChatId);
+                if (chatId === null) return;
+                const action = actionElement.dataset.historyDetailAction;
+                if (action === 'open') {
+                    uiUtils.captureHistoryScrollPosition();
+                    await chatHistoryActions.open(chatId, { source: 'history-detail' });
                 } else if (action === 'export') {
-                    await chatHistoryActions.export(chatId, { title });
-                } else if (action === 'duplicate') {
-                    await chatHistoryActions.duplicate(chatId);
-                } else if (action === 'delete') {
-                    await chatHistoryActions.delete(chatId, { title });
+                    await executeHistoryAction('export', chatId, actionElement);
+                } else if (action === 'menu') {
+                    uiUtils.openHistoryItemMenu(actionElement, chatId);
                 }
             });
             elements.historyItemMenu.addEventListener('keydown', event => {
@@ -14227,6 +14436,11 @@ const appLogic = {
                 uiUtils.closeHistoryItemMenu({ restoreFocus: true });
             });
             window.addEventListener('resize', () => uiUtils.closeHistoryItemMenu(), { passive: true });
+            const historyDetailMediaQuery = window.matchMedia('(min-width: 1000px)');
+            historyDetailMediaQuery.addEventListener?.('change', () => {
+                uiUtils.closeHistoryItemMenu();
+                uiUtils.handleHistoryDetailViewportChange();
+            });
 
             elements.historyStateAction.addEventListener('click', () => {
                 const action = elements.historyStateAction.dataset.historyStateAction;
@@ -14240,6 +14454,7 @@ const appLogic = {
                     uiUtils.closeHistoryItemMenu();
                 }
             }, { passive: true });
+            elements.historyDetailPane.addEventListener('scroll', () => uiUtils.closeHistoryItemMenu(), { passive: true });
             this._historyEventsBound = true;
         }
 
@@ -15997,8 +16212,11 @@ const appLogic = {
     },
 
     // 履歴アイテムのタイトルを編集
-    async editHistoryTitle(chatId, titleElement) {
-        const currentTitle = titleElement.textContent;
+    async editHistoryTitle(chatId, titleSource = '') {
+        const record = uiUtils.getHistoryRecord(chatId);
+        const currentTitle = typeof titleSource === 'string' && titleSource.trim()
+            ? titleSource
+            : titleSource?.textContent || uiUtils.normalizeChatTitleText(record?.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
         const newTitle = await uiUtils.showCustomPrompt("新しいタイトル:", currentTitle); // newTitle は OK なら文字列、キャンセルなら ''
 
         // キャンセル時('')でなく、入力があり(trim後空でなく)、変更があった場合
@@ -16007,7 +16225,7 @@ const appLogic = {
         if (newTitle !== '' && trimmedTitle !== '' && trimmedTitle !== currentTitle) {
             const finalTitle = trimmedTitle.substring(0, 100); // 100文字に制限
             try {
-                await chatHistoryActions.rename(chatId, finalTitle);
+                return await chatHistoryActions.rename(chatId, finalTitle);
             } catch (error) {
                 await uiUtils.showCustomAlert(`タイトル更新エラー: ${error}`);
             }
@@ -16015,6 +16233,7 @@ const appLogic = {
             // キャンセルまたは変更なし
             console.log("タイトル編集キャンセルまたは変更なし");
         }
+        return { ok: false, cancelled: true };
     },
 
     async callProofreadingModel(textToProofread, options = {}) {
