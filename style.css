@@ -13,6 +13,9 @@
     --composer-textarea-height: 52px;
     --composer-overflow: hidden;
     --content-max-width: 760px;
+    --app-header-control-size: 40px;
+    --app-header-padding-block: 8px;
+    --app-header-height: calc(var(--app-header-control-size) + var(--app-header-padding-block) + var(--app-header-padding-block) + var(--safe-top));
 
     /* Spacing Unit */
     --spacing-unit: 8px;
@@ -975,7 +978,8 @@ body:not(.dark-mode) .app-container {
 .app-header {
     display: flex;
     align-items: center;
-    padding: var(--spacing-unit) calc(var(--spacing-unit) * 2);
+    min-height: var(--app-header-height);
+    padding: calc(var(--app-header-padding-block) + var(--safe-top)) max(8px, var(--safe-right)) var(--app-header-padding-block) max(8px, var(--safe-left));
     background-color: var(--app-header-bg);
     color: var(--app-header-fg);
     flex-shrink: 0;
@@ -996,7 +1000,7 @@ body:not(.dark-mode) .app-container {
     margin: 0;
     margin-right: auto;
     /* ボタンの高さに合わせるための行の高さを指定 */
-    line-height: 40px; /* header-buttonのpadding(8*2) + icon-size(24) = 40px */
+    line-height: var(--app-header-control-size);
 }
 
 
@@ -1095,23 +1099,24 @@ body.dark-mode .new-chat-button {
 }
 
 .chat-sidebar-header,
-.chat-sidebar-controls,
-.chat-sidebar-footer {
+.chat-sidebar-controls {
     flex: 0 0 auto;
-    padding: 12px;
 }
 
 .chat-sidebar-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding-top: max(12px, var(--safe-top));
+    gap: 8px;
+    min-height: var(--app-header-height);
+    padding: calc(var(--app-header-padding-block) + var(--safe-top)) max(8px, var(--safe-right)) var(--app-header-padding-block) max(8px, var(--safe-left));
+    box-shadow: var(--shadow-2);
 }
 
 .chat-sidebar-brand {
     min-width: 0;
-    font-size: 1rem;
+    font-size: 1.1rem;
     font-weight: 700;
+    line-height: var(--app-header-control-size);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1122,9 +1127,9 @@ body.dark-mode .new-chat-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
+    width: var(--app-header-control-size);
+    height: var(--app-header-control-size);
+    min-width: var(--app-header-control-size);
     padding: 0;
     color: var(--text-secondary);
     background: transparent;
@@ -1143,10 +1148,9 @@ body.dark-mode .new-chat-button {
 .chat-sidebar-controls {
     display: grid;
     gap: 10px;
-    padding-top: 4px;
+    padding: 12px;
 }
 
-.chat-sidebar-new-button,
 .chat-sidebar-all-history-button {
     display: flex;
     align-items: center;
@@ -1163,9 +1167,7 @@ body.dark-mode .new-chat-button {
     text-transform: none;
 }
 
-.chat-sidebar-new-button:hover,
 .chat-sidebar-all-history-button:hover,
-.chat-sidebar-new-button:focus-visible,
 .chat-sidebar-all-history-button:focus-visible {
     background: var(--bg-tertiary);
 }
@@ -1283,8 +1285,7 @@ body.dark-mode .new-chat-button {
 }
 
 .chat-sidebar-item-title,
-.chat-sidebar-item-snippet,
-.chat-sidebar-item-date {
+.chat-sidebar-item-snippet {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1297,29 +1298,15 @@ body.dark-mode .new-chat-button {
 }
 
 .chat-sidebar-item-snippet {
-    display: -webkit-box;
+    display: block;
     color: var(--text-secondary);
     font-size: 0.76rem;
     line-height: 1.35;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-}
-
-.chat-sidebar-item-date {
-    color: var(--text-secondary);
-    font-size: 0.7rem;
     white-space: nowrap;
-}
-
-.chat-sidebar-footer {
-    padding-bottom: max(12px, var(--safe-bottom));
-    border-top: 1px solid var(--border-primary);
 }
 
 .chat-sidebar-all-history-button {
     width: 100%;
-    background: transparent;
-    border-color: transparent;
 }
 
 @media screen and (min-width: 1200px) {
@@ -2984,7 +2971,8 @@ body.dark-mode #chat-screen.drag-over::after {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: calc(8px + var(--safe-top)) max(8px, var(--safe-right)) 8px max(8px, var(--safe-left));
+    min-height: var(--app-header-height);
+    padding: calc(var(--app-header-padding-block) + var(--safe-top)) max(8px, var(--safe-right)) var(--app-header-padding-block) max(8px, var(--safe-left));
 }
 .app-header h1#chat-title {
     margin: 0;

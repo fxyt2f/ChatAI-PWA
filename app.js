@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta4";
-const APP_CACHE_VERSION = "v1.35.0-beta4";
+const APP_VERSION = "1.35.0-beta4.1";
+const APP_CACHE_VERSION = "v1.35.0-beta4.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta4.1": [
+        "サイドバーとチャット画面のヘッダーデザインを統一しました。",
+        "サイドバーの開閉操作をパネルアイコンへ変更しました。",
+        "「全ての履歴」をサイドバー上部へ移動し、検索結果表示を簡潔にしました。"
+    ],
     "1.35.0-beta4": [
         "ワイドモードのチャット画面に履歴サイドバーを追加しました。",
         "最近のチャット表示と履歴検索に対応しました。",
@@ -572,7 +577,6 @@ try {
         chatHistorySidebar: document.getElementById('chat-history-sidebar'),
         chatSidebarBackdrop: document.getElementById('chat-sidebar-backdrop'),
         chatSidebarCloseBtn: document.getElementById('chat-sidebar-close-btn'),
-        chatSidebarNewBtn: document.getElementById('chat-sidebar-new-btn'),
         chatSidebarSearchInput: document.getElementById('chat-sidebar-search-input'),
         chatSidebarSearchClearBtn: document.getElementById('chat-sidebar-search-clear-btn'),
         chatSidebarScroll: document.getElementById('chat-sidebar-scroll'),
@@ -4862,8 +4866,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const headerOpensSidebar = mode !== 'disabled';
         elements.gotoHistoryBtn.classList.toggle('hidden', mode === 'permanent' && isOpen);
-        elements.gotoHistoryBtn.setAttribute('aria-label', headerOpensSidebar ? '履歴サイドバーを開く' : '履歴一覧へ');
-        elements.gotoHistoryBtn.title = headerOpensSidebar ? '履歴サイドバーを開く' : '履歴一覧へ';
+        elements.gotoHistoryBtn.setAttribute('aria-label', headerOpensSidebar ? 'サイドバーを開く' : '履歴一覧へ');
+        elements.gotoHistoryBtn.title = headerOpensSidebar ? 'サイドバーを開く' : '履歴一覧へ';
         if (headerOpensSidebar) {
             elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
             elements.gotoHistoryBtn.setAttribute('aria-controls', 'chat-history-sidebar');
@@ -4964,10 +4968,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 snippet.textContent = model.snippet;
                 openButton.appendChild(snippet);
             }
-            const date = document.createElement('span');
-            date.className = 'chat-sidebar-item-date';
-            date.textContent = this.formatDate(model.groupTimestamp) || '日時不明';
-            openButton.appendChild(date);
         }
 
         const menuButton = document.createElement('button');
@@ -14999,12 +14999,6 @@ const appLogic = {
             });
             elements.chatSidebarBackdrop.addEventListener('click', () => {
                 uiUtils.closeChatSidebar({ restoreFocus: true });
-            });
-            elements.chatSidebarNewBtn.addEventListener('click', async () => {
-                const started = await this.confirmStartNewChat();
-                if (started && chatSidebarUiState.mode === 'overlay') {
-                    uiUtils.closeChatSidebar({ restoreFocus: false });
-                }
             });
             elements.chatSidebarAllHistoryBtn.addEventListener('click', async () => {
                 uiUtils.closeHistoryItemMenu();
