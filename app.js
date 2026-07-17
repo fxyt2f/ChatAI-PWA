@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta3";
-const APP_CACHE_VERSION = "v1.35.0-beta3";
+const APP_VERSION = "1.35.0-beta3.1";
+const APP_CACHE_VERSION = "v1.35.0-beta3.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,11 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta3.1": [
+        "履歴行を1回押すだけでチャットを開けるよう操作を改善しました。",
+        "履歴行と三点メニューの選択表示を一体化しました。",
+        "通常の履歴レイアウトを保ったまま複数削除できるよう削除モードを調整しました。"
+    ],
     "1.35.0-beta3": [
         "ワイド画面の履歴に詳細表示を追加し、選択したチャットの日時や概要を確認できるようにしました。",
         "履歴のチャット操作を共通の三点メニューへ整理しました。",
@@ -2298,8 +2303,7 @@ const historyUiState = {
     deleteFallbackChatId: null,
     deleteMode: false,
     deleteSelection: new Set(),
-    deleteTargetIds: [],
-    deletePreviousSelectedChatId: null
+    deleteTargetIds: []
 };
 
 // --- UIユーティリティ (uiUtils) ---
@@ -4781,7 +4785,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     isHistoryDetailVisible() {
-        return this.isHistoryDetailViewport() && !historyUiState.deleteMode;
+        return this.isHistoryDetailViewport();
     },
 
     rebuildHistoryRecordMap() {
@@ -4879,7 +4883,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
             openButton?.setAttribute('aria-label', historyUiState.deleteMode
                 ? `「${title}」の削除選択を切り替え`
-                : isWide ? `「${title}」の詳細を表示` : `「${title}」を開く`);
+                : `「${title}」を開く`);
         });
         if (!targetIds) {
             elements.historyList.querySelectorAll('.history-group-list').forEach(list => {
@@ -4891,6 +4895,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     selectHistoryChat(chatId, { announce = true } = {}) {
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
         if (normalizedId === null || !historyUiState.displayedChatIds.some(id => String(id) === String(normalizedId))) return false;
+        if (String(historyUiState.selectedChatId) === String(normalizedId)) return false;
         const previousId = historyUiState.selectedChatId;
         historyUiState.selectedChatId = normalizedId;
         this.updateHistorySelectionRows([previousId, normalizedId]);
@@ -4900,11 +4905,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     reconcileHistorySelection(models, { updateRows = true } = {}) {
         historyUiState.displayedChatIds = models.map(model => model.id);
-        if (historyUiState.deleteMode) {
-            if (updateRows) this.updateHistorySelectionRows();
-            this.updateHistoryDeleteControls();
-            return;
-        }
         const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
         let nextSelected = contains(historyUiState.selectedChatId) ? historyUiState.selectedChatId : null;
         if (nextSelected === null && contains(historyUiState.deleteFallbackChatId)) nextSelected = historyUiState.deleteFallbackChatId;
@@ -4914,6 +4914,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         historyUiState.deleteFallbackChatId = null;
         if (updateRows) this.updateHistorySelectionRows();
         this.renderHistoryDetail();
+        if (historyUiState.deleteMode) this.updateHistoryDeleteControls();
     },
 
     getHistoryDeleteFallback(chatId) {
@@ -5009,7 +5010,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         historyUiState.deleteMode = true;
         historyUiState.deleteSelection.clear();
         historyUiState.deleteTargetIds = [...historyUiState.displayedChatIds];
-        historyUiState.deletePreviousSelectedChatId = historyUiState.selectedChatId;
         if (elements.historyDeleteSelectAllLabel) {
             elements.historyDeleteSelectAllLabel.textContent = historyUiState.query ? '検索結果を全選択' : '全選択';
         }
@@ -5024,14 +5024,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         historyUiState.deleteSelection.clear();
         historyUiState.deleteTargetIds = [];
         const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
-        if (restoreSelection && contains(historyUiState.deletePreviousSelectedChatId)) {
-            historyUiState.selectedChatId = historyUiState.deletePreviousSelectedChatId;
-        } else if (!contains(historyUiState.selectedChatId)) {
+        if (restoreSelection && !contains(historyUiState.selectedChatId)) {
             historyUiState.selectedChatId = contains(historyUiState.deleteFallbackChatId)
                 ? historyUiState.deleteFallbackChatId
                 : contains(state.currentChatId) ? state.currentChatId : historyUiState.displayedChatIds[0] ?? null;
         }
-        historyUiState.deletePreviousSelectedChatId = null;
         historyUiState.deleteFallbackChatId = null;
         this.applyHistoryDeleteModeUi({ announce: announce ? '履歴削除モードを終了しました' : '' });
         this.renderHistoryDetail();
@@ -5082,7 +5079,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const openButton = item.querySelector('.history-item-open');
         openButton.setAttribute('aria-label', historyUiState.deleteMode
             ? `「${model.title}」の削除選択を切り替え`
-            : this.isHistoryDetailVisible() ? `「${model.title}」の詳細を表示` : `「${model.title}」を開く`);
+            : `「${model.title}」を開く`);
         if (model.snippet) {
             const snippetElement = document.createElement('span');
             snippetElement.className = 'history-item-snippet';
@@ -5222,6 +5219,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     closeHistoryItemMenu({ restoreFocus = false } = {}) {
         const anchor = historyUiState.menuAnchor;
+        anchor?.closest('.history-item')?.classList.remove('menu-active');
         if (anchor?.isConnected) anchor.setAttribute('aria-expanded', 'false');
         elements.historyItemMenu?.classList.add('hidden');
         if (elements.historyItemMenu) {
@@ -5263,8 +5261,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return;
         }
         this.closeHistoryItemMenu();
+        if (this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
         historyUiState.menuChatId = normalizedId;
         historyUiState.menuAnchor = anchor;
+        anchor.closest('.history-item')?.classList.add('menu-active');
         anchor.setAttribute('aria-expanded', 'true');
         elements.historyItemMenu.classList.remove('hidden');
         this.positionHistoryItemMenu();
@@ -14571,6 +14571,28 @@ const appLogic = {
                 }
             };
 
+            const previewHistoryItem = (item, { requireHover = false } = {}) => {
+                if (!item || !uiUtils.isHistoryDetailVisible()) return false;
+                if (requireHover && !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return false;
+                const chatId = chatHistoryActions.normalizeChatId(item.dataset.chatId);
+                if (chatId === null) return false;
+                if (historyUiState.menuChatId !== null && String(historyUiState.menuChatId) !== String(chatId)) return false;
+                return uiUtils.selectHistoryChat(chatId, { announce: false });
+            };
+
+            elements.historyList.addEventListener('pointerover', event => {
+                const item = event.target.closest('.history-item');
+                if (!item || !elements.historyList.contains(item)) return;
+                if (event.relatedTarget && item.contains(event.relatedTarget)) return;
+                previewHistoryItem(item, { requireHover: true });
+            });
+
+            elements.historyList.addEventListener('focusin', event => {
+                const item = event.target.closest('.history-item');
+                if (!item || !elements.historyList.contains(item)) return;
+                previewHistoryItem(item);
+            });
+
             elements.historyList.addEventListener('click', async event => {
                 const actionElement = event.target.closest('[data-history-action]');
                 if (!actionElement || !elements.historyList.contains(actionElement)) return;
@@ -14583,8 +14605,6 @@ const appLogic = {
                     if (historyUiState.deleteMode) {
                         const shouldSelect = !historyUiState.deleteSelection.has(String(chatId));
                         uiUtils.setHistoryDeleteSelection(chatId, shouldSelect);
-                    } else if (uiUtils.isHistoryDetailVisible()) {
-                        uiUtils.selectHistoryChat(chatId);
                     } else {
                         uiUtils.captureHistoryScrollPosition();
                         await chatHistoryActions.open(chatId, { source: 'history' });
