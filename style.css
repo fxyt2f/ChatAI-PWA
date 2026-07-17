@@ -266,20 +266,19 @@ button:hover:not(:disabled) {
 }
 
 .history-delete-toolbar {
-    display: flex;
-    min-height: 86px;
-    align-items: center;
-    align-content: center;
-    gap: 12px;
+    display: grid;
+    gap: 10px;
     min-width: 0;
-    flex-wrap: wrap;
 }
 
 .history-delete-select-all {
     display: inline-flex;
-    min-height: 42px;
+    flex: 1 1 320px;
+    min-width: 220px;
+    min-height: 44px;
     align-items: center;
     gap: 8px;
+    margin: 0;
     color: var(--text-primary);
     cursor: pointer;
 }
@@ -293,16 +292,14 @@ button:hover:not(:disabled) {
 }
 
 .history-delete-count {
+    display: inline-flex;
+    flex: 0 1 220px;
+    min-width: 180px;
+    min-height: 44px;
+    align-items: center;
     color: var(--text-secondary);
     font-size: 0.84rem;
     white-space: nowrap;
-}
-
-.history-delete-actions {
-    display: flex;
-    gap: 8px;
-    margin-left: auto;
-    flex-wrap: wrap;
 }
 
 .history-search-field {
@@ -480,20 +477,6 @@ body.dark-mode .history-item.is-selected {
     background: color-mix(in srgb, var(--bg-button) 11%, var(--bg-primary));
 }
 
-.history-item.is-selected.menu-active,
-.history-item.is-selected:has(.history-item-menu-button:hover),
-.history-item.is-selected:has(.history-item-menu-button:focus-visible),
-.history-item.is-selected:has(.history-item-menu-button[aria-expanded="true"]) {
-    background: color-mix(in srgb, var(--bg-button) 4%, var(--bg-primary));
-}
-
-body.dark-mode .history-item.is-selected.menu-active,
-body.dark-mode .history-item.is-selected:has(.history-item-menu-button:hover),
-body.dark-mode .history-item.is-selected:has(.history-item-menu-button:focus-visible),
-body.dark-mode .history-item.is-selected:has(.history-item-menu-button[aria-expanded="true"]) {
-    background: color-mix(in srgb, var(--bg-button) 7%, var(--bg-primary));
-}
-
 .history-item.is-delete-mode {
     grid-template-columns: auto minmax(0, 1fr);
 }
@@ -591,9 +574,9 @@ body.dark-mode .history-item.is-selected:has(.history-item-menu-button[aria-expa
 .history-item-menu-button:focus-visible,
 .history-item-menu-button[aria-expanded="true"] {
     border-color: color-mix(in srgb, var(--bg-button) 28%, var(--border-primary));
-    background: color-mix(in srgb, var(--bg-button) 15%, var(--bg-tertiary));
+    background: transparent;
     color: var(--text-primary);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-button) 12%, transparent);
+    box-shadow: none;
 }
 
 .history-item-menu-button .material-symbols-outlined {
@@ -838,10 +821,6 @@ body.dark-mode .history-item.is-selected:has(.history-item-menu-button[aria-expa
         scrollbar-gutter: stable;
     }
 
-    .history-delete-toolbar {
-        min-height: 138px;
-    }
-
     .history-workspace.is-delete-mode .history-detail-actions {
         display: none;
     }
@@ -896,16 +875,14 @@ body.dark-mode .history-item.is-selected:has(.history-item-menu-button[aria-expa
         padding: 10px;
     }
 
-    .history-delete-toolbar {
-        min-height: 138px;
-    }
-
-    .history-search-field {
+    .history-search-field,
+    .history-delete-select-all {
         flex-basis: 100%;
         min-width: 100%;
     }
 
-    .history-sort-field {
+    .history-sort-field,
+    .history-delete-count {
         flex: 1 1 180px;
         min-width: 150px;
     }
@@ -922,23 +899,6 @@ body.dark-mode .history-item.is-selected:has(.history-item-menu-button[aria-expa
     }
 
     .history-toolbar-secondary > .history-danger-action {
-        flex-basis: 100%;
-    }
-
-    .history-delete-actions {
-        width: 100%;
-        margin-left: 0;
-    }
-
-    .history-delete-toolbar {
-        min-height: 190px;
-    }
-
-    .history-delete-actions button {
-        flex: 1 1 auto;
-    }
-
-    .history-delete-actions .history-danger-action {
         flex-basis: 100%;
     }
 

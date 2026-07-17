@@ -148,8 +148,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta3.1";
-const APP_CACHE_VERSION = "v1.35.0-beta3.1";
+const APP_VERSION = "1.35.0-beta3.2";
+const APP_CACHE_VERSION = "v1.35.0-beta3.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -234,6 +234,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta3.2": [
+        "履歴削除モードでも通常時と同じツールバーサイズを維持するよう修正しました。",
+        "詳細表示中の履歴行を、三点メニュー部分まで統一した背景色で表示するよう修正しました。"
+    ],
     "1.35.0-beta3.1": [
         "履歴行を1回押すだけでチャットを開けるよう操作を改善しました。",
         "履歴行と三点メニューの選択表示を一体化しました。",
