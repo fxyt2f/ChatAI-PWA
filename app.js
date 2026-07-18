@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta5.3";
-const APP_CACHE_VERSION = "v1.35.0-beta5.3";
+const APP_VERSION = "1.35.0-beta6";
+const APP_CACHE_VERSION = "v1.35.0-beta6";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta6": [
+        "履歴画面とチャットサイドバーの操作安定性を改善しました。",
+        "三点メニューのキーボード操作と、履歴削除モード中の詳細操作状態を修正しました。"
+    ],
     "1.35.0-beta5.3": [
         "履歴画面とチャットサイドバーの三点メニュー操作が実際の履歴へ反映されない問題を修正しました。",
         "タイトル変更、チャット出力、複製、削除の対象解決と実行処理を修正しました。"
@@ -5460,6 +5464,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.historySearchClearBtn) elements.historySearchClearBtn.disabled = historyUiState.deleteMode;
         if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.disabled = historyUiState.deleteMode;
         elements.historyPinFilterButtons?.forEach(button => { button.disabled = historyUiState.deleteMode; });
+        elements.historyDetailPane?.querySelectorAll('[data-history-detail-action]').forEach(button => {
+            button.disabled = historyUiState.deleteMode;
+            button.setAttribute('aria-disabled', String(historyUiState.deleteMode));
+        });
         elements.historyList.querySelectorAll('.history-item').forEach(item => {
             const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
             const checkboxControl = item.querySelector('.history-delete-checkbox-control');
@@ -15341,6 +15349,15 @@ const appLogic = {
         }
 
         if (!this._historyActionMenuEventsBound) {
+            document.addEventListener('keydown', event => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                const trigger = event.target.closest(
+                    '[data-history-action="menu"], [data-history-detail-action="menu"], [data-sidebar-action="menu"]'
+                );
+                if (!trigger || trigger.disabled) return;
+                event.preventDefault();
+                trigger.click();
+            });
             elements.historyItemMenu.addEventListener('pointerdown', event => {
                 if (event.target.closest('[data-history-menu-action]')) {
                     historyUiState.menuPointerActive = true;
@@ -15392,6 +15409,11 @@ const appLogic = {
                     .filter(item => !item.hidden && !item.disabled);
                 if (items.length === 0) return;
                 const currentIndex = items.indexOf(document.activeElement);
+                if ((event.key === 'Enter' || event.key === ' ') && currentIndex >= 0) {
+                    event.preventDefault();
+                    items[currentIndex].click();
+                    return;
+                }
                 let nextIndex = null;
                 if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1 + items.length) % items.length;
                 if (event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + items.length) % items.length;
