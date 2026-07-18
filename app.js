@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta5.2";
-const APP_CACHE_VERSION = "v1.35.0-beta5.2";
+const APP_VERSION = "1.35.0-beta5.3";
+const APP_CACHE_VERSION = "v1.35.0-beta5.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta5.3": [
+        "履歴画面とチャットサイドバーの三点メニュー操作が実際の履歴へ反映されない問題を修正しました。",
+        "タイトル変更、チャット出力、複製、削除の対象解決と実行処理を修正しました。"
+    ],
     "1.35.0-beta5.2": [
         "履歴画面とチャットサイドバーの三点メニューから履歴操作を実行できない問題を修正しました。",
         "履歴画面の詳細表示では、重複していた三点メニュー内のチャット出力を整理しました。"
@@ -2472,6 +2476,7 @@ const historyUiState = {
     searchTimer: null,
     menuContext: null,
     menuActionPending: false,
+    menuPointerActive: false,
     selectedChatId: null,
     displayedChatIds: [],
     chatRecordsById: new Map(),
@@ -5774,6 +5779,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return null;
     },
 
+    async reportHistoryActionFailure({ action = '', chatId = null, source = '', reason = 'unknown', notify = true } = {}) {
+        console.error('[history-menu] action failed', { action, chatId, source, reason });
+        if (!notify) return;
+        const message = reason === 'invalid-action'
+            ? 'チャット操作の種類が正しくありません。'
+            : reason === 'invalid-chat-id'
+                ? '操作対象のチャットIDが正しくありません。'
+                : reason === 'record-not-found'
+                    ? '操作対象のチャットが見つかりませんでした。'
+                    : 'チャット操作を完了できませんでした。';
+        await this.showCustomAlert(message);
+    },
+
     setHistoryItemMenuBusy(isBusy) {
         const busy = isBusy === true;
         elements.historyItemMenu?.setAttribute('aria-busy', String(busy));
@@ -5825,12 +5843,20 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     async executeHistoryAction(action, context, { record: resolvedRecord = null } = {}) {
         const chatId = chatHistoryActions.normalizeChatId(context?.chatId);
-        if (chatId === null) return { ok: false, notFound: true };
+        const source = context?.source || '';
+        if (!chatHistoryActions.isSupportedMenuAction(action)) {
+            await this.reportHistoryActionFailure({ action, chatId, source, reason: 'invalid-action' });
+            return { ok: false, unsupported: true, reason: 'invalid-action' };
+        }
+        if (chatId === null) {
+            await this.reportHistoryActionFailure({ action, chatId: context?.chatId, source, reason: 'invalid-chat-id' });
+            return { ok: false, notFound: true, reason: 'invalid-chat-id' };
+        }
         const record = resolvedRecord || await this.resolveHistoryActionChat(chatId, {
             action,
-            source: context?.source || ''
+            source
         });
-        if (!record) return { ok: false, notFound: true };
+        if (!record) return { ok: false, notFound: true, reason: 'record-not-found' };
         const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
 
         if (action === 'pin') {
@@ -5866,7 +5892,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             }
             return result;
         }
-        return { ok: false, unsupported: true };
+        await this.reportHistoryActionFailure({ action, chatId, source, reason: 'invalid-action' });
+        return { ok: false, unsupported: true, reason: 'invalid-action' };
     },
 
     async openHistoryItemMenu(anchor, chatId, { selectHistoryDetail = true, source = '' } = {}) {
@@ -5879,7 +5906,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         const resolvedSource = source || (anchor.closest('.chat-sidebar-item')
             ? 'sidebar'
-            : anchor.closest('.history-detail-pane') ? 'history-detail' : 'history');
+            : anchor.closest('.history-detail-pane') ? 'history-detail' : 'history-list');
         this.closeHistoryItemMenu();
         const record = await this.resolveHistoryActionChat(normalizedId, { source: resolvedSource });
         if (!record || !anchor.isConnected) return;
@@ -15263,7 +15290,7 @@ const appLogic = {
                         await chatHistoryActions.open(chatId, { source: 'history' });
                     }
                 } else if (action === 'menu') {
-                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history' });
+                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history-list' });
                 }
             });
             elements.historyList.addEventListener('change', event => {
@@ -15314,6 +15341,11 @@ const appLogic = {
         }
 
         if (!this._historyActionMenuEventsBound) {
+            elements.historyItemMenu.addEventListener('pointerdown', event => {
+                if (event.target.closest('[data-history-menu-action]')) {
+                    historyUiState.menuPointerActive = true;
+                }
+            });
             elements.historyItemMenu.addEventListener('click', async event => {
                 const menuItem = event.target.closest('[data-history-menu-action]');
                 if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
@@ -15322,8 +15354,20 @@ const appLogic = {
                     ? { ...historyUiState.menuContext }
                     : null;
                 const action = menuItem.dataset.historyMenuAction;
-                if (!context || !action) return;
-                const { chatId, source, triggerElement } = context;
+                if (!context) {
+                    await uiUtils.reportHistoryActionFailure({ action, reason: 'missing-menu-context' });
+                    return;
+                }
+                const { source, triggerElement } = context;
+                const chatId = chatHistoryActions.normalizeChatId(context.chatId);
+                if (chatId === null) {
+                    await uiUtils.reportHistoryActionFailure({ action, chatId: context.chatId, source, reason: 'invalid-chat-id' });
+                    return;
+                }
+                if (!chatHistoryActions.isSupportedMenuAction(action)) {
+                    await uiUtils.reportHistoryActionFailure({ action, chatId, source, reason: 'invalid-action' });
+                    return;
+                }
                 const actionContext = { chatId, source, triggerElement };
 
                 historyUiState.menuActionPending = true;
@@ -15339,6 +15383,7 @@ const appLogic = {
                     await uiUtils.showCustomAlert('チャット操作を完了できませんでした。');
                 } finally {
                     historyUiState.menuActionPending = false;
+                    historyUiState.menuPointerActive = false;
                     uiUtils.setHistoryItemMenuBusy(false);
                 }
             });
@@ -15358,12 +15403,21 @@ const appLogic = {
             });
             elements.historyItemMenu.addEventListener('focusout', () => {
                 queueMicrotask(() => {
+                    if (historyUiState.menuPointerActive) return;
                     const activeElement = document.activeElement;
                     const triggerElement = historyUiState.menuContext?.triggerElement;
                     if (!elements.historyItemMenu.contains(activeElement) && activeElement !== triggerElement) {
                         uiUtils.closeHistoryItemMenu();
                     }
                 });
+            });
+            document.addEventListener('pointerup', () => {
+                setTimeout(() => {
+                    historyUiState.menuPointerActive = false;
+                }, 0);
+            });
+            document.addEventListener('pointercancel', () => {
+                historyUiState.menuPointerActive = false;
             });
             document.addEventListener('click', event => {
                 if (elements.historyItemMenu.classList.contains('hidden')) return;
@@ -16850,13 +16904,13 @@ const appLogic = {
     // チャットを複製
     async duplicateChat(id) {
         // 送信中・編集中・他チャット保存の確認 (loadChatと同様)
-        if (state.isSending) { const conf = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？"); if (!conf) return; this.abortRequest(); }
-        if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
+        if (state.isSending) { const conf = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; this.abortRequest(); }
+        if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
         if (state.isEditingSystemPrompt) {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
             if (!saved) {
                 const conf = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したままチャットを複製しますか？");
-                if (!conf) return;
+                if (!conf) return { ok: false, cancelled: true };
             }
             await this.closeSystemPromptDialog({ skipSave: true });
         }
@@ -16864,7 +16918,7 @@ const appLogic = {
         // 保留中の添付ファイルがあれば破棄確認
         if (state.pendingAttachments.length > 0) {
             const confirmedAttach = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄してチャットを複製しますか？");
-            if (!confirmedAttach) return;
+            if (!confirmedAttach) return { ok: false, cancelled: true };
             state.pendingAttachments = []; // 破棄
         }
 
@@ -17035,7 +17089,7 @@ const appLogic = {
     // チャットをテキストファイルとしてエクスポート
     async exportChat(chatId, chatTitle) {
         const confirmed = await uiUtils.showCustomConfirm(`チャット「${chatTitle || 'この履歴'}」をテキスト出力しますか？`);
-        if (!confirmed) return;
+        if (!confirmed) return { ok: false, cancelled: true };
     
         uiUtils.showProgressDialog('エクスポート準備中...');
         try {
@@ -17060,7 +17114,7 @@ const appLogic = {
     
             if (!chatToExport || ((!chatToExport.messages || chatToExport.messages.length === 0) && !chatToExport.systemPrompt)) {
                 await uiUtils.showCustomAlert("チャットデータが空です。");
-                return;
+                return { ok: false, empty: true };
             }
     
             let exportText = '';
@@ -17189,9 +17243,20 @@ const appLogic = {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            console.log("チャットエクスポート完了:", chatId);
+            const result = {
+                ok: true,
+                chatId,
+                blobType: blob.type,
+                blobSize: blob.size,
+                fileName: a.download,
+                clickCount: 1,
+                objectUrlRevoked: true
+            };
+            console.log("チャットエクスポート完了:", JSON.stringify(result));
+            return result;
         } catch (error) {
             await uiUtils.showCustomAlert(`エクスポートエラー: ${error}`);
+            return { ok: false, error };
         } finally {
             uiUtils.hideProgressDialog();
         }
@@ -23221,16 +23286,22 @@ const appLogic = {
 
 // 現行履歴画面と将来の履歴サイドバーが共有する、既存処理の薄い入口。
 const chatHistoryActions = {
+    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'delete']),
+
+    isSupportedMenuAction(action) {
+        return this.supportedMenuActions.has(action);
+    },
+
     normalizeChatId(chatId) {
         if (chatId === null || chatId === undefined || chatId === '') return null;
         if (typeof chatId === 'string' && /^\d+$/.test(chatId.trim())) {
             const numericId = Number(chatId);
-            return Number.isSafeInteger(numericId) ? numericId : null;
+            return Number.isSafeInteger(numericId) && numericId > 0 ? numericId : null;
         }
         if (typeof chatId === 'number') {
-            return Number.isSafeInteger(chatId) ? chatId : null;
+            return Number.isSafeInteger(chatId) && chatId > 0 ? chatId : null;
         }
-        return typeof chatId === 'string' && chatId.trim() ? chatId.trim() : null;
+        return null;
     },
 
     async open(chatId, options = {}) {
