@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta5";
-const APP_CACHE_VERSION = "v1.35.0-beta5";
+const APP_VERSION = "1.35.0-beta5.1";
+const APP_CACHE_VERSION = "v1.35.0-beta5.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta5.1": [
+        "チャットサイドバーの三点メニューから履歴操作を実行できない問題を修正しました。",
+        "チャットサイドバーからピン留めとピン留め解除の両方を行えるようにしました。"
+    ],
     "1.35.0-beta5": [
         "よく使うチャットをピン留めできる機能を追加しました。",
         "履歴画面とチャットサイドバーにピン留め一覧を追加しました。",
@@ -2462,8 +2466,7 @@ const historyUiState = {
     cachedChats: [],
     hasLoaded: false,
     searchTimer: null,
-    menuChatId: null,
-    menuAnchor: null,
+    menuContext: null,
     selectedChatId: null,
     displayedChatIds: [],
     chatRecordsById: new Map(),
@@ -5092,7 +5095,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             this.applyChatSidebarState();
             return;
         }
-        if (historyUiState.menuAnchor?.closest('.chat-sidebar-item')) this.closeHistoryItemMenu();
+        if (historyUiState.menuContext?.source === 'sidebar') this.closeHistoryItemMenu();
         const wasOverlay = chatSidebarUiState.mode === 'overlay';
         chatSidebarUiState.isOpen = false;
         if (chatSidebarUiState.mode === 'permanent') {
@@ -5707,7 +5710,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     closeHistoryItemMenu({ restoreFocus = false } = {}) {
-        const anchor = historyUiState.menuAnchor;
+        const context = historyUiState.menuContext;
+        const anchor = context?.triggerElement;
         anchor?.closest('.history-item, .chat-sidebar-item')?.classList.remove('menu-active');
         if (anchor?.isConnected) anchor.setAttribute('aria-expanded', 'false');
         elements.historyItemMenu?.classList.add('hidden');
@@ -5715,14 +5719,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.historyItemMenu.style.left = '';
             elements.historyItemMenu.style.top = '';
         }
-        historyUiState.menuChatId = null;
-        historyUiState.menuAnchor = null;
+        historyUiState.menuContext = null;
         if (restoreFocus && anchor?.isConnected) anchor.focus();
     },
 
     positionHistoryItemMenu() {
         const menu = elements.historyItemMenu;
-        const anchor = historyUiState.menuAnchor;
+        const anchor = historyUiState.menuContext?.triggerElement;
         if (!menu || !anchor?.isConnected || menu.classList.contains('hidden')) return;
         const viewportMargin = 8;
         const gap = 4;
@@ -5741,24 +5744,115 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.top = `${Math.round(top)}px`;
     },
 
-    openHistoryItemMenu(anchor, chatId, { selectHistoryDetail = true } = {}) {
+    async resolveHistoryActionChat(chatId, { notifyMissing = true } = {}) {
+        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
+        if (normalizedId === null) return null;
+        const cachedRecord = this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
+        if (cachedRecord) return cachedRecord;
+        try {
+            const record = await dbUtils.getChat(normalizedId);
+            if (record) return record;
+        } catch (error) {
+            console.error(`[History Action] チャット ${normalizedId} の取得に失敗しました:`, error);
+            if (notifyMissing) await this.showCustomAlert('操作対象のチャットを読み込めませんでした。');
+            return null;
+        }
+        console.error(`[History Action] 操作対象のチャットが見つかりません: ${normalizedId}`);
+        if (notifyMissing) await this.showCustomAlert('操作対象のチャットが見つかりませんでした。');
+        return null;
+    },
+
+    focusHistoryActionTarget(context, { preferMenu = true } = {}) {
+        if (!context) return;
+        if (context.source === 'sidebar') {
+            const item = [...(elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item') || [])]
+                .find(candidate => String(candidate.dataset.chatId) === String(context.chatId));
+            const target = preferMenu
+                ? item?.querySelector('[data-sidebar-action="menu"]')
+                : item?.querySelector('[data-sidebar-action="open"]');
+            if (target?.isConnected) {
+                target.focus();
+                return;
+            }
+            if (elements.chatSidebarSearchInput?.isConnected) {
+                elements.chatSidebarSearchInput.focus();
+                return;
+            }
+            elements.chatSidebarAllHistoryBtn?.focus();
+            return;
+        }
+        this.focusHistorySelection();
+    },
+
+    async executeHistoryAction(action, context) {
+        const chatId = chatHistoryActions.normalizeChatId(context?.chatId);
+        if (chatId === null) return { ok: false, notFound: true };
+        const record = await this.resolveHistoryActionChat(chatId);
+        if (!record) return { ok: false, notFound: true };
+        const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
+
+        if (action === 'pin') {
+            return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
+        }
+        if (action === 'rename') {
+            const result = await appLogic.editHistoryTitle(chatId, title);
+            if (result?.ok) this.focusHistoryActionTarget(context);
+            else if (context.triggerElement?.isConnected) context.triggerElement.focus();
+            return result;
+        }
+        if (action === 'export') {
+            const result = await chatHistoryActions.export(chatId, { title });
+            if (context.triggerElement?.isConnected) context.triggerElement.focus();
+            else this.focusHistoryActionTarget(context);
+            return result;
+        }
+        if (action === 'duplicate') {
+            const result = await chatHistoryActions.duplicate(chatId);
+            this.focusHistoryActionTarget(context);
+            return result;
+        }
+        if (action === 'delete') {
+            if (context.source !== 'sidebar') {
+                historyUiState.deleteFallbackChatId = this.getHistoryDeleteFallback(chatId);
+            }
+            const result = await chatHistoryActions.delete(chatId, { title });
+            if (!result?.ok) {
+                historyUiState.deleteFallbackChatId = null;
+                if (context.triggerElement?.isConnected) context.triggerElement.focus();
+            } else if (!result.wasCurrent) {
+                this.focusHistoryActionTarget(context);
+            }
+            return result;
+        }
+        return { ok: false, unsupported: true };
+    },
+
+    async openHistoryItemMenu(anchor, chatId, { selectHistoryDetail = true, source = '' } = {}) {
         if (historyUiState.deleteMode) return;
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
         if (!anchor || normalizedId === null || !elements.historyItemMenu) return;
-        if (historyUiState.menuAnchor === anchor && !elements.historyItemMenu.classList.contains('hidden')) {
+        if (historyUiState.menuContext?.triggerElement === anchor && !elements.historyItemMenu.classList.contains('hidden')) {
             this.closeHistoryItemMenu({ restoreFocus: true });
             return;
         }
         this.closeHistoryItemMenu();
+        const record = await this.resolveHistoryActionChat(normalizedId);
+        if (!record || !anchor.isConnected) return;
+        const resolvedSource = source || (anchor.closest('.chat-sidebar-item')
+            ? 'sidebar'
+            : anchor.closest('.history-detail-pane') ? 'history-detail' : 'history');
         if (selectHistoryDetail && this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
-        historyUiState.menuChatId = normalizedId;
-        historyUiState.menuAnchor = anchor;
-        const record = this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
+        historyUiState.menuContext = {
+            chatId: normalizedId,
+            source: resolvedSource,
+            triggerElement: anchor
+        };
         const isPinned = normalizeChatPinState(record || {}).isPinned;
         const pinMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="pin"]');
         const pinLabel = pinMenuItem?.querySelector('[data-history-pin-label]');
         const pinIcon = pinMenuItem?.querySelector('.material-symbols-outlined');
         if (pinLabel) pinLabel.textContent = isPinned ? 'ピン留めを解除' : 'ピン留め';
+        if (pinMenuItem) pinMenuItem.setAttribute('aria-label', isPinned ? 'ピン留めを解除' : 'ピン留め');
         if (pinIcon) pinIcon.textContent = 'push_pin';
         anchor.closest('.history-item, .chat-sidebar-item')?.classList.add('menu-active');
         anchor.setAttribute('aria-expanded', 'true');
@@ -15093,47 +15187,13 @@ const appLogic = {
                 }
             });
 
-            const executeHistoryAction = async (action, chatId, anchor) => {
-                const fromSidebar = Boolean(anchor?.closest('.chat-sidebar-item'));
-                const record = uiUtils.getHistoryRecord(chatId)
-                    || uiUtils.getChatSidebarRecord(chatId)
-                    || await dbUtils.getChat(chatId);
-                if (!record) return;
-                const title = uiUtils.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
-                if (action === 'pin') {
-                    return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
-                } else if (action === 'rename') {
-                    await this.editHistoryTitle(chatId, title);
-                    if (anchor?.isConnected) anchor.focus();
-                    else if (fromSidebar) uiUtils.focusChatSidebarItem(chatId);
-                    else uiUtils.focusHistorySelection();
-                } else if (action === 'export') {
-                    await chatHistoryActions.export(chatId, { title });
-                    if (anchor?.isConnected) anchor.focus();
-                } else if (action === 'duplicate') {
-                    await chatHistoryActions.duplicate(chatId);
-                    if (anchor?.isConnected) anchor.focus();
-                    else if (fromSidebar) uiUtils.focusChatSidebarItem(chatId);
-                    else uiUtils.focusHistorySelection();
-                } else if (action === 'delete') {
-                    historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteFallback(chatId);
-                    const result = await chatHistoryActions.delete(chatId, { title });
-                    if (!result?.ok) {
-                        historyUiState.deleteFallbackChatId = null;
-                        if (anchor?.isConnected) anchor.focus();
-                    } else if (!result.wasCurrent) {
-                        if (fromSidebar) elements.chatSidebarSearchInput?.focus();
-                        else uiUtils.focusHistorySelection();
-                    }
-                }
-            };
-
             const previewHistoryItem = (item, { requireHover = false } = {}) => {
                 if (!item || !uiUtils.isHistoryDetailVisible()) return false;
                 if (requireHover && !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return false;
                 const chatId = chatHistoryActions.normalizeChatId(item.dataset.chatId);
                 if (chatId === null) return false;
-                if (historyUiState.menuChatId !== null && String(historyUiState.menuChatId) !== String(chatId)) return false;
+                if (historyUiState.menuContext?.chatId !== undefined
+                    && String(historyUiState.menuContext.chatId) !== String(chatId)) return false;
                 return uiUtils.selectHistoryChat(chatId, { announce: false });
             };
 
@@ -15167,29 +15227,13 @@ const appLogic = {
                         await chatHistoryActions.open(chatId, { source: 'history' });
                     }
                 } else if (action === 'menu') {
-                    uiUtils.openHistoryItemMenu(actionElement, chatId);
+                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history' });
                 }
             });
             elements.historyList.addEventListener('change', event => {
                 const checkbox = event.target.closest('.history-delete-checkbox');
                 if (!checkbox || !historyUiState.deleteMode) return;
                 uiUtils.setHistoryDeleteSelection(checkbox.dataset.chatId, checkbox.checked);
-            });
-
-            elements.historyItemMenu.addEventListener('click', async event => {
-                const menuItem = event.target.closest('[data-history-menu-action]');
-                if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
-                const chatId = historyUiState.menuChatId;
-                const anchor = historyUiState.menuAnchor;
-                const action = menuItem.dataset.historyMenuAction;
-                if (chatId === null) return;
-                if (action === 'pin') {
-                    const result = await executeHistoryAction(action, chatId, anchor);
-                    if (result?.ok) uiUtils.closeHistoryItemMenu();
-                    return;
-                }
-                uiUtils.closeHistoryItemMenu();
-                await executeHistoryAction(action, chatId, anchor);
             });
 
             elements.historyDetailPane.addEventListener('click', async event => {
@@ -15203,42 +15247,15 @@ const appLogic = {
                     uiUtils.captureHistoryScrollPosition();
                     await chatHistoryActions.open(chatId, { source: 'history-detail' });
                 } else if (action === 'export') {
-                    await executeHistoryAction('export', chatId, actionElement);
+                    await uiUtils.executeHistoryAction('export', {
+                        chatId,
+                        source: 'history-detail',
+                        triggerElement: actionElement
+                    });
                 } else if (action === 'menu') {
-                    uiUtils.openHistoryItemMenu(actionElement, chatId);
+                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history-detail' });
                 }
             });
-            elements.historyItemMenu.addEventListener('keydown', event => {
-                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')];
-                const currentIndex = items.indexOf(document.activeElement);
-                let nextIndex = null;
-                if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1 + items.length) % items.length;
-                if (event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + items.length) % items.length;
-                if (event.key === 'Home') nextIndex = 0;
-                if (event.key === 'End') nextIndex = items.length - 1;
-                if (nextIndex === null) return;
-                event.preventDefault();
-                items[nextIndex]?.focus();
-            });
-            elements.historyItemMenu.addEventListener('focusout', () => {
-                queueMicrotask(() => {
-                    const activeElement = document.activeElement;
-                    if (!elements.historyItemMenu.contains(activeElement) && activeElement !== historyUiState.menuAnchor) {
-                        uiUtils.closeHistoryItemMenu();
-                    }
-                });
-            });
-            document.addEventListener('click', event => {
-                if (elements.historyItemMenu.classList.contains('hidden')) return;
-                if (elements.historyItemMenu.contains(event.target) || historyUiState.menuAnchor?.contains(event.target)) return;
-                uiUtils.closeHistoryItemMenu();
-            });
-            document.addEventListener('keydown', event => {
-                if (event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
-                event.preventDefault();
-                uiUtils.closeHistoryItemMenu({ restoreFocus: true });
-            });
-            window.addEventListener('resize', () => uiUtils.closeHistoryItemMenu(), { passive: true });
             const historyDetailMediaQuery = window.matchMedia('(min-width: 1000px)');
             historyDetailMediaQuery.addEventListener?.('change', () => {
                 uiUtils.closeHistoryItemMenu();
@@ -15258,6 +15275,64 @@ const appLogic = {
             }, { passive: true });
             elements.historyDetailPane.addEventListener('scroll', () => uiUtils.closeHistoryItemMenu(), { passive: true });
             this._historyEventsBound = true;
+        }
+
+        if (!this._historyActionMenuEventsBound) {
+            elements.historyItemMenu.addEventListener('click', async event => {
+                const menuItem = event.target.closest('[data-history-menu-action]');
+                if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
+                const context = historyUiState.menuContext
+                    ? { ...historyUiState.menuContext }
+                    : null;
+                const action = menuItem.dataset.historyMenuAction;
+                if (!context || !action) return;
+
+                if (action === 'pin') {
+                    const result = await uiUtils.executeHistoryAction(action, context);
+                    if (result?.ok) {
+                        uiUtils.closeHistoryItemMenu();
+                        uiUtils.focusHistoryActionTarget(context);
+                    }
+                    return;
+                }
+
+                uiUtils.closeHistoryItemMenu();
+                await uiUtils.executeHistoryAction(action, context);
+            });
+            elements.historyItemMenu.addEventListener('keydown', event => {
+                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')];
+                const currentIndex = items.indexOf(document.activeElement);
+                let nextIndex = null;
+                if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1 + items.length) % items.length;
+                if (event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + items.length) % items.length;
+                if (event.key === 'Home') nextIndex = 0;
+                if (event.key === 'End') nextIndex = items.length - 1;
+                if (nextIndex === null) return;
+                event.preventDefault();
+                items[nextIndex]?.focus();
+            });
+            elements.historyItemMenu.addEventListener('focusout', () => {
+                queueMicrotask(() => {
+                    const activeElement = document.activeElement;
+                    const triggerElement = historyUiState.menuContext?.triggerElement;
+                    if (!elements.historyItemMenu.contains(activeElement) && activeElement !== triggerElement) {
+                        uiUtils.closeHistoryItemMenu();
+                    }
+                });
+            });
+            document.addEventListener('click', event => {
+                if (elements.historyItemMenu.classList.contains('hidden')) return;
+                const triggerElement = historyUiState.menuContext?.triggerElement;
+                if (elements.historyItemMenu.contains(event.target) || triggerElement?.contains(event.target)) return;
+                uiUtils.closeHistoryItemMenu();
+            });
+            document.addEventListener('keydown', event => {
+                if (event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
+                event.preventDefault();
+                uiUtils.closeHistoryItemMenu({ restoreFocus: true });
+            });
+            window.addEventListener('resize', () => uiUtils.closeHistoryItemMenu(), { passive: true });
+            this._historyActionMenuEventsBound = true;
         }
 
         if (!this._chatSidebarEventsBound) {
@@ -15310,7 +15385,10 @@ const appLogic = {
                 if (chatId === null) return;
                 const action = actionElement.dataset.sidebarAction;
                 if (action === 'menu') {
-                    uiUtils.openHistoryItemMenu(actionElement, chatId, { selectHistoryDetail: false });
+                    void uiUtils.openHistoryItemMenu(actionElement, chatId, {
+                        selectHistoryDetail: false,
+                        source: 'sidebar'
+                    });
                     return;
                 }
                 if (action === 'open') {
@@ -15324,7 +15402,7 @@ const appLogic = {
                 }
             });
             elements.chatSidebarScroll.addEventListener('scroll', () => {
-                if (historyUiState.menuAnchor?.closest('.chat-sidebar-item')) uiUtils.closeHistoryItemMenu();
+                if (historyUiState.menuContext?.source === 'sidebar') uiUtils.closeHistoryItemMenu();
             }, { passive: true });
             document.addEventListener('keydown', event => {
                 if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen) return;
