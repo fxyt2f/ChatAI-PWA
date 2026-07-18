@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta5.1";
-const APP_CACHE_VERSION = "v1.35.0-beta5.1";
+const APP_VERSION = "1.35.0-beta5.2";
+const APP_CACHE_VERSION = "v1.35.0-beta5.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0-beta5.2": [
+        "履歴画面とチャットサイドバーの三点メニューから履歴操作を実行できない問題を修正しました。",
+        "履歴画面の詳細表示では、重複していた三点メニュー内のチャット出力を整理しました。"
+    ],
     "1.35.0-beta5.1": [
         "チャットサイドバーの三点メニューから履歴操作を実行できない問題を修正しました。",
         "チャットサイドバーからピン留めとピン留め解除の両方を行えるようにしました。"
@@ -2467,6 +2471,7 @@ const historyUiState = {
     hasLoaded: false,
     searchTimer: null,
     menuContext: null,
+    menuActionPending: false,
     selectedChatId: null,
     displayedChatIds: [],
     chatRecordsById: new Map(),
@@ -5744,22 +5749,56 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.top = `${Math.round(top)}px`;
     },
 
-    async resolveHistoryActionChat(chatId, { notifyMissing = true } = {}) {
+    async resolveHistoryActionChat(chatId, { notifyMissing = true, action = '', source = '' } = {}) {
         const normalizedId = chatHistoryActions.normalizeChatId(chatId);
-        if (normalizedId === null) return null;
-        const cachedRecord = this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
+        if (normalizedId === null) {
+            console.error(`[History Action${action ? ` (${action})` : ''}] 操作対象のchatIdが不正です:`, chatId);
+            if (notifyMissing) await this.showCustomAlert('操作対象のチャットが見つかりませんでした。');
+            return null;
+        }
+        const cachedRecord = source === 'sidebar'
+            ? this.getChatSidebarRecord(normalizedId) || this.getHistoryRecord(normalizedId)
+            : this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
         if (cachedRecord) return cachedRecord;
+        const actionLabel = action ? ` (${action})` : '';
         try {
             const record = await dbUtils.getChat(normalizedId);
             if (record) return record;
         } catch (error) {
-            console.error(`[History Action] チャット ${normalizedId} の取得に失敗しました:`, error);
+            console.error(`[History Action${actionLabel}] チャット ${normalizedId} の取得に失敗しました:`, error);
             if (notifyMissing) await this.showCustomAlert('操作対象のチャットを読み込めませんでした。');
             return null;
         }
-        console.error(`[History Action] 操作対象のチャットが見つかりません: ${normalizedId}`);
+        console.error(`[History Action${actionLabel}] 操作対象のチャットが見つかりません: ${normalizedId}`);
         if (notifyMissing) await this.showCustomAlert('操作対象のチャットが見つかりませんでした。');
         return null;
+    },
+
+    setHistoryItemMenuBusy(isBusy) {
+        const busy = isBusy === true;
+        elements.historyItemMenu?.setAttribute('aria-busy', String(busy));
+        elements.historyItemMenu?.querySelectorAll('[data-history-menu-action]').forEach(item => {
+            item.disabled = busy;
+        });
+    },
+
+    configureHistoryItemMenu(source, record) {
+        if (!elements.historyItemMenu) return;
+        const isPinned = normalizeChatPinState(record || {}).isPinned;
+        const pinMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="pin"]');
+        const pinLabel = pinMenuItem?.querySelector('[data-history-pin-label]');
+        const pinIcon = pinMenuItem?.querySelector('.material-symbols-outlined');
+        const exportMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="export"]');
+        const hideExport = source === 'history-detail';
+
+        if (pinLabel) pinLabel.textContent = isPinned ? 'ピン留めを解除' : 'ピン留め';
+        if (pinMenuItem) pinMenuItem.setAttribute('aria-label', isPinned ? 'ピン留めを解除' : 'ピン留め');
+        if (pinIcon) pinIcon.textContent = 'push_pin';
+        if (exportMenuItem) {
+            exportMenuItem.hidden = hideExport;
+            exportMenuItem.classList.toggle('hidden', hideExport);
+        }
+        this.setHistoryItemMenuBusy(historyUiState.menuActionPending);
     },
 
     focusHistoryActionTarget(context, { preferMenu = true } = {}) {
@@ -5784,10 +5823,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.focusHistorySelection();
     },
 
-    async executeHistoryAction(action, context) {
+    async executeHistoryAction(action, context, { record: resolvedRecord = null } = {}) {
         const chatId = chatHistoryActions.normalizeChatId(context?.chatId);
         if (chatId === null) return { ok: false, notFound: true };
-        const record = await this.resolveHistoryActionChat(chatId);
+        const record = resolvedRecord || await this.resolveHistoryActionChat(chatId, {
+            action,
+            source: context?.source || ''
+        });
         if (!record) return { ok: false, notFound: true };
         const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
 
@@ -5835,25 +5877,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             this.closeHistoryItemMenu({ restoreFocus: true });
             return;
         }
-        this.closeHistoryItemMenu();
-        const record = await this.resolveHistoryActionChat(normalizedId);
-        if (!record || !anchor.isConnected) return;
         const resolvedSource = source || (anchor.closest('.chat-sidebar-item')
             ? 'sidebar'
             : anchor.closest('.history-detail-pane') ? 'history-detail' : 'history');
+        this.closeHistoryItemMenu();
+        const record = await this.resolveHistoryActionChat(normalizedId, { source: resolvedSource });
+        if (!record || !anchor.isConnected) return;
         if (selectHistoryDetail && this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
         historyUiState.menuContext = {
             chatId: normalizedId,
             source: resolvedSource,
             triggerElement: anchor
         };
-        const isPinned = normalizeChatPinState(record || {}).isPinned;
-        const pinMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="pin"]');
-        const pinLabel = pinMenuItem?.querySelector('[data-history-pin-label]');
-        const pinIcon = pinMenuItem?.querySelector('.material-symbols-outlined');
-        if (pinLabel) pinLabel.textContent = isPinned ? 'ピン留めを解除' : 'ピン留め';
-        if (pinMenuItem) pinMenuItem.setAttribute('aria-label', isPinned ? 'ピン留めを解除' : 'ピン留め');
-        if (pinIcon) pinIcon.textContent = 'push_pin';
+        this.configureHistoryItemMenu(resolvedSource, record);
         anchor.closest('.history-item, .chat-sidebar-item')?.classList.add('menu-active');
         anchor.setAttribute('aria-expanded', 'true');
         elements.historyItemMenu.classList.remove('hidden');
@@ -15281,26 +15317,35 @@ const appLogic = {
             elements.historyItemMenu.addEventListener('click', async event => {
                 const menuItem = event.target.closest('[data-history-menu-action]');
                 if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
+                if (historyUiState.menuActionPending) return;
                 const context = historyUiState.menuContext
                     ? { ...historyUiState.menuContext }
                     : null;
                 const action = menuItem.dataset.historyMenuAction;
                 if (!context || !action) return;
+                const { chatId, source, triggerElement } = context;
+                const actionContext = { chatId, source, triggerElement };
 
-                if (action === 'pin') {
-                    const result = await uiUtils.executeHistoryAction(action, context);
-                    if (result?.ok) {
-                        uiUtils.closeHistoryItemMenu();
-                        uiUtils.focusHistoryActionTarget(context);
-                    }
-                    return;
+                historyUiState.menuActionPending = true;
+                uiUtils.setHistoryItemMenuBusy(true);
+                try {
+                    const record = await uiUtils.resolveHistoryActionChat(chatId, { action, source });
+                    if (!record) return;
+                    uiUtils.closeHistoryItemMenu();
+                    const result = await uiUtils.executeHistoryAction(action, actionContext, { record });
+                    if (action === 'pin' && result?.ok) uiUtils.focusHistoryActionTarget(actionContext);
+                } catch (error) {
+                    console.error(`[History Action] ${action} の実行に失敗しました (chatId: ${chatId}):`, error);
+                    await uiUtils.showCustomAlert('チャット操作を完了できませんでした。');
+                } finally {
+                    historyUiState.menuActionPending = false;
+                    uiUtils.setHistoryItemMenuBusy(false);
                 }
-
-                uiUtils.closeHistoryItemMenu();
-                await uiUtils.executeHistoryAction(action, context);
             });
             elements.historyItemMenu.addEventListener('keydown', event => {
-                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')];
+                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')]
+                    .filter(item => !item.hidden && !item.disabled);
+                if (items.length === 0) return;
                 const currentIndex = items.indexOf(document.activeElement);
                 let nextIndex = null;
                 if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1 + items.length) % items.length;
