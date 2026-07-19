@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0-beta6";
-const APP_CACHE_VERSION = "v1.35.0-beta6";
+const APP_VERSION = "1.35.0";
+const APP_CACHE_VERSION = "v1.35.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,15 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.0": [
+        "履歴画面を再設計し、検索、並び替え、日時グループ、詳細表示に対応しました。",
+        "複数の履歴を選択して、まとめて削除できるようになりました。",
+        "ワイドモードのチャット画面に履歴サイドバーを追加しました。",
+        "よく使うチャットのピン留めと、ピン留め履歴の絞り込みに対応しました。",
+        "履歴画面とサイドバーから、タイトル変更、チャット出力、複製、削除を実行できるようになりました。",
+        "常設サイドバーの開閉状態をブラウザーごとに保存するようになりました。",
+        "レスポンシブ表示、キーボード操作、履歴更新処理の安定性を改善しました。"
+    ],
     "1.35.0-beta6": [
         "履歴画面とチャットサイドバーの操作安定性を改善しました。",
         "三点メニューのキーボード操作と、履歴削除モード中の詳細操作状態を修正しました。"
