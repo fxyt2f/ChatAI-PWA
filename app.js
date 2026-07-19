@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.0";
-const APP_CACHE_VERSION = "v1.35.0";
+const APP_VERSION = "1.35.1";
+const APP_CACHE_VERSION = "v1.35.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -281,6 +281,10 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.35.1": [
+        "スマートフォンの全画面文章編集で、ソフトウェアキーボードに下部が隠れる問題を修正しました。",
+        "キーボードの開閉や画面回転に合わせて、編集領域の高さを調整するよう改善しました。"
+    ],
     "1.35.0": [
         "履歴画面を再設計し、検索、並び替え、日時グループ、詳細表示に対応しました。",
         "複数の履歴を選択して、まとめて削除できるようになりました。",
@@ -1198,7 +1202,9 @@ Reason: [NGの場合の理由]`,
         messageElement: null,
         textarea: null,
         previousFocus: null,
-        scrollTop: 0
+        scrollTop: 0,
+        viewportRaf: 0,
+        viewportUpdateHandler: null
     },
     suppressAutoScrollForCollapse: false,
     collapseScrollAdjustmentId: 0,
@@ -18789,6 +18795,74 @@ const appLogic = {
         return editor;
     },
 
+    updateMobileMessageEditorViewport() {
+        const editor = state.mobileMessageEditor.element;
+        if (!editor || editor.classList.contains('hidden')) return;
+
+        const viewport = window.visualViewport;
+        const viewportTop = viewport
+            ? Math.max(0, Number(viewport.offsetTop) || 0)
+            : 0;
+        const viewportHeight = viewport?.height
+            || window.innerHeight
+            || document.documentElement.clientHeight
+            || 1;
+
+        editor.style.setProperty(
+            '--mobile-message-editor-viewport-top',
+            `${Math.round(viewportTop)}px`
+        );
+        editor.style.setProperty(
+            '--mobile-message-editor-viewport-height',
+            `${Math.max(1, Math.round(viewportHeight))}px`
+        );
+    },
+
+    scheduleMobileMessageEditorViewportUpdate() {
+        if (state.mobileMessageEditor.viewportRaf) return;
+
+        state.mobileMessageEditor.viewportRaf = requestAnimationFrame(() => {
+            state.mobileMessageEditor.viewportRaf = 0;
+            this.updateMobileMessageEditorViewport();
+        });
+    },
+
+    startMobileMessageEditorViewportTracking() {
+        this.stopMobileMessageEditorViewportTracking();
+
+        const handler = () => this.scheduleMobileMessageEditorViewportUpdate();
+        state.mobileMessageEditor.viewportUpdateHandler = handler;
+
+        window.visualViewport?.addEventListener('resize', handler);
+        window.visualViewport?.addEventListener('scroll', handler);
+        window.addEventListener('resize', handler);
+        window.addEventListener('orientationchange', handler);
+        state.mobileMessageEditor.textarea?.addEventListener('focus', handler);
+
+        this.updateMobileMessageEditorViewport();
+    },
+
+    stopMobileMessageEditorViewportTracking() {
+        const handler = state.mobileMessageEditor.viewportUpdateHandler;
+        if (handler) {
+            window.visualViewport?.removeEventListener('resize', handler);
+            window.visualViewport?.removeEventListener('scroll', handler);
+            window.removeEventListener('resize', handler);
+            window.removeEventListener('orientationchange', handler);
+            state.mobileMessageEditor.textarea?.removeEventListener('focus', handler);
+        }
+        state.mobileMessageEditor.viewportUpdateHandler = null;
+
+        if (state.mobileMessageEditor.viewportRaf) {
+            cancelAnimationFrame(state.mobileMessageEditor.viewportRaf);
+            state.mobileMessageEditor.viewportRaf = 0;
+        }
+
+        const editor = state.mobileMessageEditor.element;
+        editor?.style.removeProperty('--mobile-message-editor-viewport-top');
+        editor?.style.removeProperty('--mobile-message-editor-viewport-height');
+    },
+
     openMobileMessageEditor(index, messageElement, rawContent) {
         const editor = this.getMobileMessageEditorElement();
         const textarea = editor.querySelector('.mobile-message-editor-textarea');
@@ -18809,17 +18883,21 @@ const appLogic = {
 
         editor.classList.remove('hidden');
         document.body.classList.add('mobile-message-editor-open');
+        this.startMobileMessageEditorViewportTracking();
         requestAnimationFrame(() => {
             textarea.focus({ preventScroll: true });
             uiUtils.scheduleClearInitialEditTextareaFullSelection(textarea);
+            this.scheduleMobileMessageEditorViewportUpdate();
         });
     },
 
     closeMobileMessageEditor(index = null) {
         const editor = state.mobileMessageEditor.element;
-        if (!editor || editor.classList.contains('hidden')) return;
+        if (!editor) return;
         if (index !== null && state.mobileMessageEditor.index !== index) return;
 
+        this.stopMobileMessageEditorViewportTracking();
+        if (editor.classList.contains('hidden')) return;
         editor.classList.add('hidden');
         document.body.classList.remove('mobile-message-editor-open');
 
@@ -18864,9 +18942,6 @@ const appLogic = {
 
     // メッセージ編集開始
     async startEditMessage(index, messageElement) {
-        const startTime = performance.now();
-        console.log(`[PERF_DEBUG] startEditMessage 開始 (index: ${index})`);
-
         if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) {
             await uiUtils.showCustomAlert("送信中は編集できません。");
@@ -18899,8 +18974,6 @@ const appLogic = {
         if (this.shouldUseMobileMessageEditor()) {
             messageElement.classList.add('editing');
             this.openMobileMessageEditor(index, messageElement, rawContent);
-            const endTime = performance.now();
-            console.log(`[PERF_DEBUG] startEditMessage モバイル全画面編集を開始 (所要時間: ${endTime - startTime}ms)`);
             return;
         }
 
@@ -18955,8 +19028,6 @@ const appLogic = {
         uiUtils.installEditTextareaEnhancements(editArea);
         textarea.focus();
         uiUtils.scheduleClearInitialEditTextareaFullSelection(textarea);
-        const endTime = performance.now();
-        console.log(`[PERF_DEBUG] startEditMessage 完了 (所要時間: ${endTime - startTime}ms)`);
     },
 
 

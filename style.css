@@ -5588,15 +5588,22 @@ body.mobile-message-editor-open .app-container {
     pointer-events: none;
 }
 
+body.mobile-message-editor-open {
+    overflow: hidden;
+}
+
 .mobile-message-editor {
     position: fixed;
-    inset: 0;
+    top: var(--mobile-message-editor-viewport-top, 0px);
+    right: 0;
+    bottom: auto;
+    left: 0;
     z-index: 10030;
     display: flex;
     flex-direction: column;
     width: 100%;
-    height: 100vh;
-    height: 100dvh;
+    height: var(--mobile-message-editor-viewport-height, 100dvh);
+    max-height: var(--mobile-message-editor-viewport-height, 100dvh);
     box-sizing: border-box;
     color: var(--text-primary);
     background-color: var(--bg-primary);
@@ -5629,6 +5636,7 @@ body.mobile-message-editor-open .app-container {
 .mobile-message-editor-body {
     flex: 1 1 auto;
     min-height: 0;
+    overflow: hidden;
     width: 100%;
     padding:
         10px
