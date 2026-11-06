@@ -1,0 +1,21 @@
+{
+  "branch": "main",
+  "sourceHashes": {
+    "app.js": "6d26a514dc432490eacacb7b7646beb1c83c8bf85cec69b58acc66a20dfc604d",
+    "settings-v136.js": "4b5e874ed75f927ab220aab4ab0424fecac48e9a25c98c4163697c9b61347225",
+    "settings-ui-v136.js": "e31a45f995b14edbd35150102d1ee76bab5a46f05096e9fb508a2741167c5c97",
+    "style.css": "bebd15fc673b98bfed14cc60a6f89d67a131ca4324a0e2c5f51283a205766b8c",
+    "index.html": "f7a6b08fc07fb223afb44ca8592ce37a69591b79027927560ffb4823cc48aa4d",
+    "sw.js": "74250be4ee3cc7e15f1b54635c7a50308d691bed9ed8de29c70cee80de0a6928"
+  },
+  "uiAssetsUnchanged": true,
+  "swAlgorithmUnchanged": true,
+  "beforeRegressionPassed": 0,
+  "beforeRegressionFailed": 9,
+  "additionalBrowserTests": 45,
+  "additionalNodeTests": 8,
+  "nodeTotal": 69,
+  "browserTotal": 134,
+  "sideBarAssertions": 80,
+  "shellBuild": "25360054c988bc277231"
+}

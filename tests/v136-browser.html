@@ -1,0 +1,331 @@
+<!doctype html><meta charset="utf-8"><title>v136 browser tests</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<script src="../settings-v136.js"></script>
+<script src="./v136-ui-tests.js"></script>
+<script src="./review-regressions-v136.js"></script>
+<script src="./review-n-regressions-v136.js"></script>
+<script src="./settings-adjustments-v136.js"></script>
+<script src="./integration-i-v136.js"></script>
+<script src="./integration-j-v136.js"></script>
+<script>
+window.addEventListener('load', async () => {
+    const output = [];
+    const assert = (value, message = 'assertion failed') => { if (!value) throw new Error(message); };
+    const eq = (a,b) => assert(JSON.stringify(a) === JSON.stringify(b), JSON.stringify({actual:a,expected:b}));
+    const status = text => { document.documentElement.dataset.testStatus = text; };
+    const test = async (name, fn) => { status(name); await fn(); output.push('PASS ' + name); };
+    try {
+        const html = await (await fetch('../index.html')).text();
+        const parsed = new DOMParser().parseFromString(html,'text/html');
+        for(const original of parsed.head.querySelectorAll('link[rel=stylesheet]')) {
+            if(!original.href.includes('fonts.googleapis.com'))continue;
+            const link=document.createElement('link');link.rel='stylesheet';link.href=original.getAttribute('href');document.head.append(link);
+        }
+        document.body.innerHTML = parsed.body.innerHTML;
+        document.querySelectorAll('script').forEach(s=>s.remove());
+        let source = await (await fetch('../app.js')).text();
+        source = source.slice(source.indexOf('// --- 定数 ---'));
+        (0,eval)(source + '\nwindow.testApi=apiUtils;window.testUi=uiUtils;window.testElements=elements;window.testDebug=DebugLogger;');
+        const app=window.appLogic, db=window.dbUtils, st=window.state, api=window.testApi, ui=window.testUi, el=window.testElements;
+        const realUi={...ui};
+        const realAppFunctions={renderApiConfigList:app.renderApiConfigList,scrollToBottom:app.scrollToBottom};
+        window.testRealAppFunctions=realAppFunctions;
+        // Exercise real application methods against real IndexedDB; DOM painting and sync are stubbed.
+        Object.keys(ui).forEach(k=> { if(typeof ui[k]==='function' && /^(apply|render|update|append|set|show|hide|schedule|close|scroll|sync|adjust|capture|revoke|reset)/.test(k)) ui[k]=()=>{}; });
+        ui.showCustomConfirm=async()=>true;
+        ui.showCustomAlert=async message=>{ throw new Error('unexpected alert: '+message); };
+        ui.setSendingState=value=>{st.isSending=value;};
+        app.markAsDirtyAndSchedulePush=()=>{};
+        app.applyTextFormattingSettingsToUI=()=>{};
+        app.renderApiConfigList=()=>{};
+        app.updateCharacterProfileButtonVisibility=()=>{};
+        app.scheduleInputDraftRestore=()=>{};
+        app.clearInputDraftAfterSend=()=>{};
+        app.scrollToBottom=()=>{};
+        window.testDebug.init=()=>{};
+        status('opening database'); await db.openDB();
+        const configs=[{id:'gem',name:'Gem',provider:'gemini',enabled:true,apiKey:'mock',modelCandidates:['gemini-3-pro-preview','gemini-3-flash-preview','gemini-3.8-flash','gemini-2.5-pro'],defaultModel:'gemini-3-pro-preview'},
+            {id:'or',name:'OR',provider:'openrouter',enabled:true,apiKey:'mock',modelCandidates:['test/reasoner'],defaultModel:'test/reasoner'},
+            {id:'zai',name:'Z',provider:'zai',enabled:true,apiKey:'mock',modelCandidates:['glm-4.6'],defaultModel:'glm-4.6'},
+            {id:'aws',name:'AWS',provider:'bedrock',enabled:true,apiKey:'mock',bedrockSecretKey:'mock',modelCandidates:['us.anthropic.claude-opus-4-6-v1'],defaultModel:'us.anthropic.claude-opus-4-6-v1'}];
+        st.apiConfigs=configs;
+        await db.saveSetting('apiConfigs',configs);
+        const aux={apiConfigId:'gem',modelName:'gemini-2.5-pro'};
+        const p1=await db.addProfile({name:'A',settings:{systemPrompt:'A',temperature:0.3,chatFontSize:20,defaultModelRef:{apiConfigId:'gem',modelName:'gemini-3-pro-preview'},enableProofreading:false,summarySystemPrompt:'active summary',includeThoughts:true,apiKey:'must-not-export',darkMode:true,thoughtTranslationModelRef:aux,proofreadingModelRef:aux,summaryModelRef:aux}});
+        const p2=await db.addProfile({name:'B',settings:{systemPrompt:'B',enableProofreading:true,summarySystemPrompt:'other summary',defaultModelRef:{apiConfigId:'gem',modelName:'gemini-3-flash-preview'},darkMode:false}});
+        st.profiles=await db.getAllProfiles();st.activeProfileId=p1;
+        const oldMetadata={schemaVersion:1,provider:'gemini',apiConfigId:'gem',modelName:'gemini-3-pro-preview',profileName:'historic',generatedAt:1234};
+        await new Promise((resolve,reject)=>{const tx=st.db.transaction('chats','readwrite');tx.objectStore('chats').put({id:100,title:'legacy',messages:[{role:'model',content:'old response',usageMetadata:{tmExecution:oldMetadata}}],createdAt:1,updatedAt:1});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
+        st.globalThemeSettings={darkMode:false};st.themeSettingsProfileScoped=true;
+        await db.saveSetting('backgroundImageBlob',new Blob(['image'],{type:'image/png'}));
+        await test('atomic migration, active profile global preference, background asset, old metadata unchanged',async()=>{
+            await app.ensureSettingsMigrationV136();
+            eq(st.globalSettingsV136.summarySystemPrompt,'active summary');
+            assert(st.globalSettingsV136.showThoughtProcess);
+            assert(st.globalSettingsV136.appearance.backgroundAssetId);
+            assert(st.profiles.every(p=>p.settings.useCustomTheme && p.settings.defaultModelRef===undefined));
+            const before=JSON.stringify(st.profiles);await app.ensureSettingsMigrationV136();eq(JSON.stringify(st.profiles),before);
+            eq((await db.getSetting('settingsSchemaVersion')).value,136);
+            eq(st.localUiSettings.chatFontSize,20);
+            assert(st.apiConfigs.some(c=>c.apiKey==='must-not-export'));
+            assert(!JSON.stringify((await db.getSetting('settingsMigrationBackupV136')).value).includes('must-not-export'));
+            const old=await db.getChat(100);eq(old.messages[0].usageMetadata.tmExecution,oldMetadata);eq(old.executionSettings.thinkingEffort,null);
+        });
+        app.applyActiveProfile();
+        st.modelMetadataV136={or:{'test/reasoner':{reasoning:{supported_efforts:['low','high'],default_effort:'high'}}}};
+        await test('empty draft survives reload without history entry; first selection stays',async()=>{
+            app.startNewChat();await st.executionSettingsReady;
+            await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-flash-preview'});
+            await app.setCurrentChatThinkingEffort('medium');
+            eq((await db.getAllChats()).length,1);
+            st.currentExecutionSettings=null;await app.initializeNewChatExecution({restoreDraft:true});
+            eq(app.getCurrentChatThinkingEffort(),'medium');
+        });
+        await test('profile switching preserves chat route and all global helpers/local settings',async()=>{
+            st.localUiSettings.chatFontSize=24;st.localUiSettingsStoredKeys=new Set(Object.keys(st.localUiSettings));
+            st.activeProfileId=p2;app.applyActiveProfile();
+            eq(app.getCurrentChatModelRef().modelName,'gemini-3-flash-preview');eq(app.getCurrentChatThinkingEffort(),'medium');
+            eq(st.settings.enableProofreading,false);eq(st.settings.summarySystemPrompt,'active summary');eq(st.settings.chatFontSize,24);
+        });
+        await test('theme and appearance off/on restores stored overrides',async()=>{
+            await app.setProfileOverride('theme',true);await app.saveAppearanceValues('theme',{darkMode:true});
+            await app.setProfileOverride('theme',false);await app.saveAppearanceValues('theme',{darkMode:false},{global:true});
+            eq(st.settings.darkMode,false);await app.setProfileOverride('theme',true);eq(st.settings.darkMode,true);
+            await app.setProfileOverride('appearance',true);await app.saveAppearanceValues('appearance',{overlayOpacity:0.2});
+            await app.setProfileOverride('appearance',false);eq(st.settings.overlayOpacity,0.65);
+            await app.setProfileOverride('appearance',true);eq(st.settings.overlayOpacity,0.2);
+        });
+        let request;
+        const rawFetch=window.fetch;
+        window.fetch=async(url,opts)=> {request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:'summary',thought:true},{text:'answer',thoughtSignature:'signed-secret'}]},finishReason:'STOP'}]})};};
+        st.settings.enableThoughtTranslation=false;st.settings.enableAutoRetry=false;
+        await test('real Gemini sender final payload and atomic success record',async()=>{
+            el.userInput.value='hello';await app.handleSend();
+            eq(request.generationConfig.thinkingConfig.thinkingLevel,'medium');
+            assert(!JSON.stringify(request).includes('thinkingBudget'));
+            eq(st.currentMessages.at(-1).usageMetadata.tmExecution.thinkingEffort,'medium');
+            assert((await db.getSetting('lastSuccessfulExecution')).value.completedAt);
+            const saved=await db.getChat(st.currentChatId);eq(saved.executionSettings.thinkingEffort,'medium');
+            eq(saved.messages.at(-1).continuation.parts.at(-1).thoughtSignature,'signed-secret');
+        });
+        const chatA=st.currentChatId;
+        const historical=JSON.stringify(st.currentMessages.at(-1).usageMetadata.tmExecution);
+        await test('selection/error/cancellation never updates success; A/B settings persist',async()=>{
+            const success=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
+            await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
+            eq(app.getCurrentChatThinkingEffort(),'high');
+            eq(JSON.stringify(st.currentMessages.at(-1).usageMetadata.tmExecution),historical);
+            window.fetch=async()=>{throw new Error('mock API failure')};el.userInput.value='error';await app.handleSend();
+            eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),success);
+            app.startNewChat();await st.executionSettingsReady;
+            eq(app.getCurrentChatModelRef().modelName,'gemini-3-flash-preview');eq(app.getCurrentChatThinkingEffort(),'medium');
+            await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
+            st.currentMessages=[{role:'user',content:'B'}];await db.saveChat();const chatB=st.currentChatId;
+            await app.loadChat(chatA);eq(app.getCurrentChatModelRef().modelName,'gemini-3-pro-preview');
+            await app.loadChat(chatB);eq(app.getCurrentChatThinkingEffort(),'high');
+            st.abortController=new AbortController();st.abortController.abort();
+            let cancelled=false;try {app.completeExecutionMetadata({},{});}catch(e){cancelled=e.name==='AbortError';}assert(cancelled);st.abortController=null;
+        });
+        await test('regeneration success preserves original metadata and updates defaults',async()=>{
+            window.fetch=async(url,opts)=>({ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:'retry answer'}]},finishReason:'STOP'}]})});
+            await app.loadChat(chatA);st.settings.enableThoughtTranslation=false;
+            const original=JSON.stringify(st.currentMessages.find(m=>m.role==='model').usageMetadata.tmExecution);
+            await app.retryFromMessage(0);
+            eq(JSON.stringify(st.currentMessages.find(m=>m.role==='model').usageMetadata.tmExecution),original);
+            eq((await db.getSetting('lastSuccessfulExecution')).value.modelRef.modelName,'gemini-3-pro-preview');
+            assert(st.currentMessages.at(-1).isSelected);
+        });
+        await test('failed regeneration preserves every original candidate and success record',async()=>{
+            const original=JSON.stringify(st.currentMessages.filter(m=>m.role==='model'));
+            const success=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
+            st.settings.enableAutoRetry=false;window.fetch=async()=>{throw new Error('retry failed')};
+            await app.retryFromMessage(0);
+            eq(JSON.stringify(st.currentMessages.filter(m=>m.role==='model')),original);
+            eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),success);
+            st.pendingCascadeResponses=null;
+        });
+        await test('OpenRouter sender keeps effort independent of display and retains reasoning details',async()=>{
+            await app.setCurrentChatModelRef({apiConfigId:'or',modelName:'test/reasoner'});await app.setCurrentChatThinkingEffort('low');
+            app.freezeExecutionSettings();
+            window.fetch=async(url,opts)=>{request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({model:'test/reasoner',choices:[{index:0,finish_reason:'stop',message:{content:'answer',reasoning:'visible',reasoning_details:[{type:'reasoning.encrypted',data:'opaque'}]}}]})}};
+            await app.setShowThoughtProcess(false);
+            const result=await app.callApiWithRetry({messagesForApi:[{role:'user',parts:[{text:'test'}]}],generationConfig:{},isFirstCall:true});
+            eq(request.reasoning,{effort:'low',exclude:false});eq(result.content,'answer');eq(result.thoughtSummary,'visible');
+            eq(result.continuation.openai.reasoning_details[0].data,'opaque');st.currentExecutionApiConfig=null;
+        });
+        window.fetch=rawFetch;
+        await test('Gemini 3.8 runtime capability and actual adapter send all three levels with medium default',async()=>{
+            const ref=app.getCurrentChatModelRef(),effort=app.getCurrentChatThinkingEffort();
+            try {
+                await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3.8-flash'});
+                const c=app.getModelThinkingCapability();eq(c.mode,'level');eq(c.levels,['low','medium','high']);eq(c.defaultEffort,'medium');
+                // Simulate an existing saved value from a model supporting minimal.
+                await app.setCurrentChatExecution({thinkingEffort:'minimal'});eq(app.getCurrentChatThinkingEffort(),'medium');
+                let rejected=false;try{await app.setCurrentChatThinkingEffort('minimal');}catch{rejected=true;}assert(rejected);
+                let sentUrl;
+                window.fetch=async(url,opts)=>{sentUrl=url;request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:'answer'}]},finishReason:'STOP'}]})}};
+                for(const level of ['medium','low','high']) {
+                    await app.setCurrentChatThinkingEffort(level);app.freezeExecutionSettings();
+                    await api.callGeminiApi([{role:'user',parts:[{text:'test'}]}],{temperature:0.4,thinkingConfig:{thinkingBudget:8000}},'');
+                    assert(sentUrl.includes('/gemini-3.8-flash:generateContent?'));
+                    eq(request.generationConfig.thinkingConfig,{thinkingLevel:level,includeThoughts:true});
+                    eq(request.generationConfig.temperature,0.4);assert(!JSON.stringify(request).includes('thinkingBudget'));
+                    st.currentExecutionApiConfig=null;st.abortController=null;
+                }
+            } finally {
+                window.fetch=rawFetch;st.currentExecutionApiConfig=null;st.abortController=null;
+                await app.setCurrentChatModelRef(ref);await app.setCurrentChatThinkingEffort(effort);
+            }
+        });
+        await test('profile export/import excludes globals and carries own background',async()=>{
+            await app.setProfileOverride('appearance',true);await app.saveBackgroundBlobV136(new Blob(['own'],{type:'image/png'}));
+            const exported=await app.createProfileExportV136(st.activeProfile);
+            assert(exported.backgroundAsset?.data);assert(!JSON.stringify(exported).includes('must-not-export'));
+            assert(!exported.settings.summarySystemPrompt && !exported.settings.defaultModelRef);
+            const imported=await app.parseProfileImportV136(exported);
+            assert(imported.settings.appearance.backgroundAssetId!==exported.settings.appearance.backgroundAssetId);
+            const legacy=await app.parseProfileImportV136({name:'old',settings:{apiKey:'other-key',modelName:'other',enableProofreading:true,systemPrompt:'own'}});
+            eq(legacy.settings.systemPrompt,'own');assert(!legacy.settings.apiKey);
+        });
+        await test('API reference audit includes stored chats and draft',async()=>{
+            const result=await app.inspectApiConfigReferences('gem');assert(result.isInUse);assert(result.usages.some(u=>u.scope==='chat'));
+        });
+        await test('Gemini signatures and complete tool turns survive aggregation and reload',async()=>{
+            await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});app.freezeExecutionSettings();
+            const common={provider:'gemini',apiConfigId:'gem',modelName:'gemini-3-pro-preview'};
+            const messages=[{role:'model',content:'',continuation:{...common,parts:[{functionCall:{name:'tool',args:{}},thoughtSignature:'opaque-signature'}]}},
+                {role:'tool',name:'tool',response:{ok:true}}, {role:'model',content:'final',continuation:{...common,parts:[{text:'final',thoughtSignature:'final-signature'}]}}];
+            const aggregated=app._aggregateMessages(messages);
+            st.currentMessages=[{role:'user',content:'tool test'},aggregated];await db.saveChat();
+            const persisted=(await db.getChat(st.currentChatId)).messages;
+            const prepared=await app._prepareApiHistory(persisted);
+            eq(prepared.length,4);eq(prepared[1].parts[0].thoughtSignature,'opaque-signature');eq(prepared[2].role,'tool');
+            st.currentExecutionApiConfig=null;
+        });
+        await test('generation model changes are blocked and metadata is fixed',async()=>{
+            app.freezeExecutionSettings();st.isSending=true;
+            let blocked=false;try{await app.setCurrentChatModelRef({apiConfigId:'zai',modelName:'glm-4.6'});}catch{blocked=true;}
+            assert(blocked);eq(st.currentExecutionApiConfig.modelName,'gemini-3-pro-preview');
+            st.isSending=false;st.currentExecutionApiConfig=null;
+        });
+        await test('Z.ai and Bedrock actual request adapters preserve separate reasoning',async()=>{
+            await app.setCurrentChatModelRef({apiConfigId:'zai',modelName:'glm-4.6'});app.freezeExecutionSettings();
+            window.fetch=async(url,opts)=>{request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({model:'glm-4.6',choices:[{message:{content:'Z answer',reasoning_content:'Z thinking'},finish_reason:'stop'}]})}};
+            const z=await app.callApiWithRetry({messagesForApi:[{role:'user',parts:[{text:'test'}]}],generationConfig:{},isFirstCall:true});
+            eq(request.thinking,{type:'enabled'});assert(request.reasoning_effort===undefined);eq(z.content,'Z answer');eq(z.thoughtSummary,'Z thinking');
+            st.currentExecutionApiConfig=null;
+            await app.setCurrentChatModelRef({apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1'});await app.setCurrentChatThinkingEffort('max');app.freezeExecutionSettings();
+            window.ConverseCommand=class{constructor(body){this.body=body}};
+            window.BedrockRuntimeClient=class{async send(cmd,options){request=cmd.body;assert(options.abortSignal);return {output:{message:{content:[{reasoningContent:{reasoningText:{text:'AWS summary',signature:'aws-signature'}}},{text:'AWS answer'}]}},stopReason:'end_turn'}}};
+            const b=await app.callApiWithRetry({messagesForApi:[{role:'user',parts:[{text:'test'}]}],generationConfig:{temperature:0.4},isFirstCall:true});
+            eq(request.additionalModelRequestFields,{thinking:{type:'adaptive'},output_config:{effort:'max'}});eq(b.content,'AWS answer');eq(b.thoughtSummary,'AWS summary');
+            eq(b.continuation.bedrock[0].reasoningContent.reasoningText.signature,'aws-signature');
+            st.currentExecutionApiConfig=null;window.fetch=rawFetch;
+        });
+        await test('atomic chat/success save rolls back on transaction abort',async()=>{
+            const before=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
+            const chatBefore=JSON.stringify(await db.getChat(st.currentChatId));
+            const originalTransaction=st.db.transaction.bind(st.db);
+            st.db.transaction=(stores,mode)=>{const tx=originalTransaction(stores,mode);if(mode==='readwrite' && Array.isArray(stores) && stores.length===2) queueMicrotask(()=>tx.abort());return tx;};
+            let failed=false;try{await db.saveChat(null,null,{successfulExecution:{modelRef:{apiConfigId:'aws',modelName:'future'},completedAt:Date.now()+100000}});}catch{failed=true;}
+            st.db.transaction=originalTransaction;assert(failed);eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),before);eq(JSON.stringify(await db.getChat(st.currentChatId)),chatBefore);
+        });
+        await test('Dropbox format roundtrip preserves settings, backgrounds, metadata, memory, icons and local UI',async()=>{
+            await db.saveSetting('activeProfileId',st.activeProfileId);
+            st.activeProfile.icon=new Blob(['icon'],{type:'image/png'});await db.updateProfile(st.activeProfile);
+            await db.saveMemory(st.activeProfileId,{items:['memory']});
+            await db.saveSetting('localUiSettings',{...st.localUiSettings,chatFontSize:22});
+            const exported=await app._prepareExportData();const payload=JSON.parse(exported.metadataJson);
+            eq(payload.settingsSchemaVersion,136);assert(!payload.data.settings.some(s=>s.key==='localUiSettings'||s.key==='settingsMigrationBackupV136'));
+            assert(payload.data.settings.some(s=>s.key==='lastSuccessfulExecution'));assert(exported.localAssets.has(st.globalSettingsV136.appearance.backgroundAssetId));
+            const historical=JSON.stringify(payload.data.chats.map(c=>c.messages.map(m=>m.usageMetadata)));
+            window.dropboxApi={downloadAsset:async id=>exported.localAssets.get(id)?.blob};
+            await app.importDataFromString(exported.metadataJson);
+            await app.loadGlobalSettings();await app.loadProfiles();
+            eq((await db.getSetting('localUiSettings')).value.chatFontSize,22);
+            eq(JSON.stringify((await db.getAllChats()).map(c=>c.messages.map(m=>m.usageMetadata))),historical);
+            assert((await db.getProfile(st.activeProfileId)).icon instanceof Blob);
+            eq((await db.getMemory(st.activeProfileId)).items,['memory']);
+        });
+        await test('future data restore fails before existing records are changed',async()=>{
+            const before=JSON.stringify(await db.getAllChats());let failed=false;
+            try{await app.importDataFromString(JSON.stringify({version:'2.0',settingsSchemaVersion:137,data:{chats:[]}}));}catch{failed=true;}
+            assert(failed);eq(JSON.stringify(await db.getAllChats()),before);
+        });
+        await test('failed migration leaves no completion flag and can be retried idempotently',async()=>{
+            await new Promise((resolve,reject)=>{const tx=st.db.transaction('settings','readwrite');tx.objectStore('settings').delete('settingsSchemaVersion');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
+            st.settingsSchemaVersion=0;const originalTransaction=st.db.transaction.bind(st.db);
+            st.db.transaction=(stores,mode)=>{const tx=originalTransaction(stores,mode);if(mode==='readwrite'&&Array.isArray(stores)&&stores.includes('profiles'))queueMicrotask(()=>tx.abort());return tx;};
+            let failed=false;try{await app.ensureSettingsMigrationV136();}catch{failed=true;}
+            st.db.transaction=originalTransaction;assert(failed);assert(!(await db.getSetting('settingsSchemaVersion')));
+            await app.ensureSettingsMigrationV136();eq((await db.getSetting('settingsSchemaVersion')).value,136);await app.ensureSettingsMigrationV136();
+        });
+        await test('a config disabled by another tab is rejected before a main request starts',async()=>{
+            app.startNewChat();await st.executionSettingsReady;
+            await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
+            const configs=structuredClone(st.apiConfigs);await db.saveSetting('apiConfigs',configs.map(c=>c.id==='gem'?{...c,enabled:false}:c));
+            const alerts=[];const alert=ui.showCustomAlert;ui.showCustomAlert=async message=>alerts.push(message);
+            let fetched=false;window.fetch=async()=>{fetched=true;throw new Error('request must not start')};
+            el.userInput.value='disabled';await app.handleSend();assert(!fetched);assert(alerts.length===1);assert(!st.isSending);
+            ui.showCustomAlert=alert;window.fetch=rawFetch;await db.saveSetting('apiConfigs',configs);await app.refreshExecutionApiConfigsV136();
+        });
+        await test('manual cancellation reaches the actual request signal without updating success',async()=>{
+            const previous=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
+            st.abortController=null;st.settings.enableAutoRetry=false;
+            window.fetch=async(url,opts)=>new Promise((resolve,reject)=>{opts.signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError')),{once:true});setTimeout(()=>app.abortRequest(),0);});
+            el.userInput.value='cancel';await app.handleSend();eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),previous);
+            eq(st.currentMessages.at(-1).role,'error');window.fetch=rawFetch;
+        });
+        await test('old chat imported after migration gets independent settings without changing history metadata',async()=>{
+            await new Promise((resolve,reject)=>{const tx=st.db.transaction('chats','readwrite');tx.objectStore('chats').put({id:999,title:'late legacy',messages:[{role:'model',content:'old',thinkingBudget:4096,usageMetadata:{tmExecution:oldMetadata}}],createdAt:2,updatedAt:2});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
+            await app.loadChat(999);eq(app.getCurrentChatModelRef(),{apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
+            eq(app.getCurrentChatThinkingEffort(),null);eq((await db.getChat(999)).messages[0].usageMetadata.tmExecution,oldMetadata);
+            eq((await db.getChat(999)).messages[0].thinkingBudget,4096);
+        });
+        await test('switching chats waits for the cancelled generation to finish saving',async()=>{
+            app.startNewChat();await st.executionSettingsReady;await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
+            st.settings.enableAutoRetry=false;
+            window.fetch=async(url,opts)=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError')),{once:true}));
+            el.userInput.value='switch during request';const sending=app.handleSend();
+            while(!st.isSending)await new Promise(r=>setTimeout(r,1));
+            await app.loadChat(100);await sending;eq(st.currentChatId,100);eq(st.currentMessages[0].content,'old response');
+            eq((await db.getChat(100)).messages[0].usageMetadata.tmExecution,oldMetadata);window.fetch=rawFetch;
+        });
+        if(new URLSearchParams(location.search).has('review')) {
+            output.push(...await window.runReviewRegressionsV136({app,db,st,ui,el,assert,eq}));
+        }
+        await test('existing settings UI renders and routes instant saves through correct scopes',async()=>{
+            st.currentMessages=[];st.currentChatId=null;st.currentExecutionApiConfig=null;
+            app.startNewChat();await st.executionSettingsReady;
+            Object.assign(ui,realUi);ui.renderChatMessages=()=>{};ui.showCustomAlert=async message=>{throw new Error(message)};
+            ui.applySettingsToUI();app.setupEventListeners();
+            el.temperatureInput.value='0.7';el.temperatureInput.dispatchEvent(new Event('input'));
+            await new Promise(r=>setTimeout(r,25));eq((await db.getProfile(st.activeProfileId)).settings.temperature,0.7);
+            el.includeThoughtsToggle.checked=false;el.includeThoughtsToggle.dispatchEvent(new Event('change'));
+            await new Promise(r=>setTimeout(r,25));eq((await db.getSetting('globalSettingsV136')).value.showThoughtProcess,false);
+            const ref={apiConfigId:'gem',modelName:'gemini-3-flash-preview'};
+            el.modelNameSelect.value=app.encodeModelRefValue(ref);el.modelNameSelect.dispatchEvent(new Event('change'));
+            await new Promise(r=>setTimeout(r,25));eq(app.getCurrentChatModelRef(),ref);
+            assert(!(await db.getProfile(st.activeProfileId)).settings.defaultModelRef);
+        });
+        window.fetch=rawFetch;
+        if (new URLSearchParams(location.search).has('ui')) {
+            await window.runSettingsUiTestsV136({app,db,st,ui,el,realUi,realAppFunctions,test,assert,eq});
+            await window.runSettingsAdjustmentsV136({app,db,st,ui,test,assert,eq});
+            if(new URLSearchParams(location.search).has('review'))await window.runNSettingsUiV136({app,db,st,ui,test,assert,eq});
+            if(new URLSearchParams(location.search).has('integration')){
+                const integration=await window.runIntegrationIRegressionsV136();output.push(...integration.output);
+                for(const failure of integration.failures)output.push(failure.error);
+            }
+        }
+        if(new URLSearchParams(location.search).has('j')){
+            const j=await window.runIntegrationJRegressionsV136();output.push(...j.output);
+            for(const failure of j.failures)output.push(failure.error);
+        }
+        if(!output.some(line=>line.startsWith('FAIL')))output.push('ALL PASSED ('+output.length+' browser tests)');
+    } catch(error) {output.push('FAIL '+error.stack);}
+    const preview=new URLSearchParams(location.search).has('ui');
+    if(!preview)document.body.innerHTML='';
+    const pre=document.createElement('pre');pre.id='test-results';pre.hidden=preview;pre.textContent=output.join('\n');document.body.append(pre);
+});
+</script>

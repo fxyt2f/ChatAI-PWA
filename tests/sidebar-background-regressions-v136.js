@@ -1,0 +1,102 @@
+window.runSidebarBackgroundRegressionsV136 = async () => {
+    const app=window.appLogic,st=window.state,ui=window.uiUtilsV136,db=window.dbUtils,$=id=>document.getElementById(id);
+    const failures=[];let assertions=0;const check=(v,m)=>{assertions++;if(!v)failures.push(m)};
+    const frame=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    await prepareSidebarReviewV136('search',false);
+    $('chat-search-query').value='Alpha';$('chat-search-case-sensitive').checked=true;ui.runChatSearch({scrollToFirst:false});await frame();
+    check(st.chatSearch.matches.length===2,'case-sensitive search matches');
+    ui.moveChatSearchCurrent(1);check(st.chatSearch.currentIndex===1,'search next');ui.moveChatSearchCurrent(-1);check(st.chatSearch.currentIndex===0,'search previous');
+    $('chat-search-regex').checked=true;$('chat-search-query').value='A[lL]pha';ui.runChatSearch({scrollToFirst:false});await frame();
+    check(st.chatSearch.matches.length===2,'regex search');
+    $('chat-search-query').value='Alpha';$('chat-search-regex').checked=false;
+    ui.setChatReplacePreviewOpen(true);$('chat-replace-input').value='Beta';$('chat-replace-target').value='both';ui.updateChatReplacePreview();
+    check(st.chatReplacePreview.plan?.occurrenceCount===2,'replacement preview keeps current scope');
+    const oldConfirm=ui.showCustomConfirm;ui.showCustomConfirm=async()=>true;
+    await ui.executeChatReplacePreviewPlan();ui.showCustomConfirm=oldConfirm;
+    check(st.currentMessages.every(m=>!m.content.includes('Alpha')),'replacement executes on current messages');
+    check((await db.getChat(st.currentChatId)).messages.every(m=>!m.content.includes('Alpha')),'replacement persists');
+    await prepareSidebarReviewV136('system',false);
+    $('system-prompt-editor').value='編集中の内容を保存します。';$('system-prompt-editor').focus();
+    const selection=5;$('system-prompt-editor').setSelectionRange(selection,selection);
+    if(ui.getChatSidebarMode()==='permanent'){
+        ui.openChatSidebar();await frame();
+        check(document.activeElement===$('system-prompt-editor'),'sidebar keeps prompt focus');
+        check($('system-prompt-editor').selectionStart===selection,'sidebar keeps prompt selection');
+        check(Math.abs(measureSidebarReviewV136('system').centerError)<1,'open prompt follows sidebar');
+        ui.closeChatSidebar();await frame();
+    }
+    await app.saveCurrentSystemPrompt({keepOpen:true});
+    check((await db.getChat(st.currentChatId)).systemPrompt==='編集中の内容を保存します。','system prompt saved');
+    await app.closeSystemPromptDialog();check($('system-prompt-dialog').hidden,'system prompt closes');
+    await prepareSidebarReviewV136('format',false);
+    const before=st.currentMessages.map(m=>m.content);const formatted=app.formatNovelText('文章。  \n\n\n次の文章。',app.getTextFormattingOptions());
+    check(typeof formatted==='string'&&formatted.includes('文章'),'formatting produces text');
+    check(st.currentMessages.every((m,i)=>m.content===before[i]),'opening formatting does not edit history');$('textFormattingDialog').close();
+    const oldAlert=ui.showCustomAlert;ui.showCustomAlert=async()=>{};
+    st.currentMessages[0].content='文章。  \n\n\n次の文章。  ';
+    st.textFormattingSettings=app.normalizeTextFormattingSettings({...app.getTextFormattingOptions(),trimTrailing:true,normalizeBlanks:true});
+    await app.applyTextFormattingToMessage(0,'user');
+    check(!st.currentMessages[0].content.includes('  '),'formatting applies to chat');
+    check((await db.getChat(st.currentChatId)).messages[0].content===st.currentMessages[0].content,'formatting persists');
+    app._showSummaryDialog('圧縮した内容',1000);check($('summary-editor').value==='圧縮した内容'&&!$('summary-confirm-btn').disabled,'compression preview stays editable');
+    st.currentSummarizedContext=null;$('summaryDialog').dataset.summaryRangeStart='0';$('summaryDialog').dataset.summaryRangeEnd='0';
+    await app.confirmSummary();check((await db.getChat(st.currentChatId)).summarizedContext?.summaryText==='圧縮した内容','compression persists');
+    check(!$('summaryDialog').open,'compression closes after save');st.currentSummarizedContext=null;
+    ui.showCustomAlert=oldAlert;
+    const memory=st.isMemoryEnabledForChat;await app.toggleChatMemory();check(st.isMemoryEnabledForChat!==memory,'chat memory toggle');
+    check((await db.getChat(st.currentChatId)).isMemoryEnabledForChat===st.isMemoryEnabledForChat,'chat memory toggle persists');
+    st.currentMessages=[{role:'model',content:Array.from({length:100},(_,i)=>`${i+1}行目の長い文章 Alpha`).join('\n'),timestamp:3}];
+    ui.renderChatMessages();await frame();ui.applyMessageCollapseToAll();ui.updateCollapseAllMessagesButtonState();
+    const collapsible=ui.getCollapsibleMessageElements();check(collapsible.length>0,'long message is collapsible');
+    $('collapse-all-messages-btn').click();check(collapsible.every(n=>n.classList.contains('tm-collapsed')),'floating collapse all button');
+    $('collapse-all-messages-btn').click();check(collapsible.every(n=>!n.classList.contains('tm-collapsed')),'floating expand all button');
+    const bottomStub=app.scrollToBottom;app.scrollToBottom=window.testRealAppFunctions.scrollToBottom;
+    app.scrollToBottom(true);await new Promise(r=>setTimeout(r,400));
+    const main=document.querySelector('#chat-workspace .main-content');check(Math.abs(main.scrollHeight-main.clientHeight-main.scrollTop)<2,'scroll to bottom');
+    app.scrollToTop();await new Promise(r=>setTimeout(r,400));check(main.scrollTop<2,'scroll to top');app.scrollToBottom=bottomStub;
+    await ui.openChatSearch();$('chat-search-query').value='Alpha';ui.runChatSearch({scrollToFirst:false});await frame();
+    st.chatSearch.currentIndex=st.chatSearch.matches.length-1;ui.updateCurrentChatSearchHighlight(true);await frame();
+    const lastMatch=st.chatSearch.matches[st.chatSearch.currentIndex]?.range.getBoundingClientRect();
+    check(lastMatch?.top>=$('chat-search-dialog').getBoundingClientRect().bottom&&lastMatch?.bottom<document.querySelector('#chat-workspace footer').getBoundingClientRect().top,'search scroll clears panel and composer');ui.closeChatSearch({restoreFocus:false});
+    for(const mode of ['always','on-click','hidden']){
+        st.settings.floatingPanelBehavior=mode;app.applyFloatingPanelBehavior();
+        check($('floating-action-panel').classList.contains('visible')===(mode==='always'),'floating visibility '+mode);
+        app.showActionPanel();check($('floating-action-panel').classList.contains('visible')===(mode!=='hidden'),'floating click reveal '+mode);
+    }
+    clearTimeout(st.panelFadeOutTimer);
+    document.body.classList.add('header-auto-hide');st.settings.floatingPanelBehavior='always';app.applyFloatingPanelBehavior();await new Promise(r=>setTimeout(r,350));
+    check(Math.abs($('floating-action-panel').getBoundingClientRect().top-$('chat-workspace').getBoundingClientRect().top-16)<1,'floating buttons hidden header top');
+    document.body.classList.add('header-force-show');await new Promise(r=>setTimeout(r,350));
+    check(Math.abs($('floating-action-panel').getBoundingClientRect().top-$('chat-workspace').getBoundingClientRect().top-60)<1,'floating buttons shown header top');
+    document.body.classList.remove('header-auto-hide','header-force-show');
+    // Exercise actual scope resolution and IndexedDB assets, then reloading settings.
+    const blob=async color=>{const c=document.createElement('canvas');c.width=c.height=4;c.getContext('2d').fillStyle=color;c.getContext('2d').fillRect(0,0,4,4);return new Promise(r=>c.toBlob(r));};
+    st.isTemporaryBackgroundActive=false;
+    await app.setProfileOverride('appearance',false);await app.saveBackgroundBlobV136(await blob('#36567d'),{global:true});
+    await app.saveAppearanceValues('appearance',{overlayOpacity:.25},{global:true});
+    const globalId=st.globalSettingsV136.appearance.backgroundAssetId;check(st.settings.overlayOpacity===.25,'global background opacity');
+    await app.setProfileOverride('appearance',true);await app.saveBackgroundBlobV136(await blob('#315c49'));
+    await app.saveAppearanceValues('appearance',{overlayOpacity:.6});const individualId=st.settings.backgroundAssetId;
+    check(globalId!==individualId&&!!individualId,'individual background asset scope');
+    await app.setProfileOverride('appearance',false);check(st.settings.backgroundAssetId===globalId&&st.settings.overlayOpacity===.25,'global background restored');
+    await app.setProfileOverride('appearance',true);check(st.settings.backgroundAssetId===individualId&&st.settings.overlayOpacity===.6,'individual background restored');
+    await app.loadSettingsV136();app.applyGlobalSettingsV136();check(st.settings.backgroundAssetId===individualId,'background survives settings reload');
+    const target=st.profiles.find(p=>p.id!==st.activeProfileId);
+    if(target){const current=st.activeProfileId;await app.switchProfile(target.id);check(st.activeProfileId===target.id,'profile switch');await app.switchProfile(current);check(st.settings.backgroundAssetId===individualId,'profile switch restores background');}
+    // Source replacement while chat is hidden must not await its transitionend.
+    await ui.showScreen('settings',true);ui.setBackgroundImageVisible(true);st.settings.backgroundImageBlob=await blob('#36567d');ui.applyBackgroundImage();
+    await app.openMemoryManagementDialog();
+    const memoryRect=$('memoryManagementDialog').getBoundingClientRect();
+    check(!$('memoryManagementDialog').classList.contains('chat-workspace-dialog')&&Math.abs(memoryRect.left+memoryRect.width/2-innerWidth/2)<1,'memory management from settings stays global');$('memoryManagementDialog').close();
+    check(ui.getBackgroundScreens().every(s=>s.classList.contains('background-visible')),'persistent source changes without fade-out gap');
+    await app.applyBackgroundImageFromUrl('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>');
+    check(st.isTemporaryBackgroundActive&&ui.getBackgroundScreens().every(s=>s.classList.contains('background-visible')),'temporary source on all screens');
+    const temporary=document.documentElement.style.getPropertyValue('--chat-background-image');ui.applyBackgroundImage();check(document.documentElement.style.getPropertyValue('--chat-background-image')===temporary,'temporary background survives settings apply');
+    st.isTemporaryBackgroundActive=false;ui.applyBackgroundImage();check(!document.documentElement.style.getPropertyValue('--chat-background-image').includes('svg+xml'),'temporary background clears to persistent');
+    await ui.showScreen('chat',true);
+    // Common confirmation remains global and is never tagged by chat layout.
+    const promise=ui.showCustomDialog($('confirmDialog'),$('confirmDialog').querySelector('button'));
+    const r=$('confirmDialog').getBoundingClientRect();check(Math.abs(r.left+r.width/2-innerWidth/2)<1,'common confirmation centered on viewport');
+    check(!$('confirmDialog').classList.contains('chat-workspace-dialog'),'common confirmation keeps global scope');$('confirmDialog').close();await promise;
+    return {assertions,failures};
+};
