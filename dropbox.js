@@ -250,6 +250,7 @@ window.dropboxApi = {
     },
 
     async uploadMetadata(content) {
+        window.SettingsV136.assertCompatible(JSON.parse(content));
         const args = { path: this.METADATA_PATH, mode: 'overwrite', mute: true };
         return this._request('content', '/files/upload', {
             method: 'POST',
@@ -268,7 +269,9 @@ window.dropboxApi = {
                 method: 'POST',
                 headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
             });
-            return blob.text();
+            const content = await blob.text();
+            window.SettingsV136.assertCompatible(JSON.parse(content));
+            return content;
         } catch (error) {
             // "path/not_found" という文字列を含むエラーの場合のみ、ファイルなし(null)として扱う
             if (error && error.message && error.message.includes('path/not_found')) {

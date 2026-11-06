@@ -1,0 +1,1324 @@
+/* v1.36 storage/execution core. No DOM or network access in the pure helpers. */
+(function (root) {
+    'use strict';
+    const GLOBAL_KEY = 'globalSettingsV136';
+    const SUCCESS_KEY = 'lastSuccessfulExecution';
+    const MIGRATION_KEY = 'settingsSchemaVersion';
+    const BACKUP_KEY = 'settingsMigrationBackupV136';
+    const DRAFT_KEY = 'chatai-pwa-execution-draft-v1';
+    const appearanceKeys = ['backgroundAssetId', 'overlayOpacity', 'messageOpacity'];
+    const themeKeys = ['darkMode', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode',
+        'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor'];
+    const profileKeys = ['systemPrompt', 'temperature', 'maxTokens', 'topK', 'topP', 'dummyUser', 'dummyModel',
+        'reverseDummyOrder', 'concatDummyModel', 'applyDummyToProofread', 'applyDummyToTranslate',
+        'geminiEnableFunctionCalling', 'geminiEnableGrounding', 'forceFunctionCalling', 'allowPromptUiChanges',
+        'enableMemory', 'memoryAutoSaveInterval', 'useCustomTheme', 'useCustomAppearance', 'theme', 'appearance'];
+    const globalKeys = ['showThoughtProcess', 'enableThoughtTranslation', 'thoughtTranslationModelRef',
+        'thoughtTranslationModel', 'enableProofreading', 'proofreadingModelRef', 'proofreadingModelName',
+        'proofreadingSystemInstruction', 'enableSummaryButton', 'summaryModelRef', 'summaryModelName',
+        'summarySystemPrompt', 'enableAutoRetry', 'maxRetries', 'useFixedRetryDelay', 'fixedRetryDelaySeconds',
+        'maxBackoffDelaySeconds', 'enableApiTimeout', 'apiTimeoutSeconds', 'dropboxAppKey', 'dropboxSyncFrequency',
+        'googleSearchApiKey', 'googleSearchEngineId', 'sdApiUrl', 'sdApiUser', 'sdApiPassword',
+        'memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef',
+        'sdEnableQualityChecker', 'sdQcModel', 'sdQcPrompt', 'sdQcRetries', 'sdPromptImproveModel',
+        'sdPromptImproveSystemPrompt', 'theme', 'appearance'];
+    const pick = (source = {}, keys = []) => Object.fromEntries(keys.filter(key =>
+        Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, structuredClone(source[key])]));
+    const modelRef = value => value?.apiConfigId && value?.modelName
+        ? { apiConfigId: String(value.apiConfigId), modelName: String(value.modelName) } : null;
+    function profileSettings(source = {}, legacyThemeScoped = false) {
+        const result = pick(source, profileKeys);
+        result.useCustomTheme = source.useCustomTheme ?? legacyThemeScoped;
+        result.useCustomAppearance = source.useCustomAppearance === true;
+        if (!result.theme && legacyThemeScoped) result.theme = pick(source, themeKeys);
+        if (result.theme) result.theme = pick(result.theme, themeKeys);
+        if (result.appearance) result.appearance = pick(result.appearance, appearanceKeys);
+        return result;
+    }
+    const cap = (mode, levels = [], defaultEffort = null, extra = {}) =>
+        ({ mode, levels, defaultEffort, supported: mode !== 'unknown' && mode !== 'none', ...extra });
+    // Exact model IDs only. Unlisted models receive no guessed reasoning parameters.
+    // GenerateContent thinking levels/defaults (not the Interactions API's 2.5 mapping):
+    // https://ai.google.dev/gemini-api/docs/generate-content/thinking
+    // https://ai.google.dev/gemini-api/docs/generate-content/image-generation
+    const geminiThinkingModels = {
+        'gemini-3-pro-preview': { levels: ['low', 'high'], defaultEffort: 'high' },
+        'gemini-3-flash-preview': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'high' },
+        'gemini-3.1-pro-preview': { levels: ['low', 'medium', 'high'], defaultEffort: 'high' },
+        'gemini-3.1-pro-preview-customtools': { levels: ['low', 'medium', 'high'], defaultEffort: 'high' },
+        'gemini-3.1-flash-lite-preview': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'minimal' },
+        'gemini-3.1-flash-lite': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'minimal' },
+        'gemini-3.5-flash-lite': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'minimal' },
+        'gemini-3.5-flash': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium' },
+        'gemini-3.6-flash': { levels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium' },
+        'gemini-3.7-flash': { levels: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+        'gemini-3.8-flash': { levels: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+        'gemini-3.1-flash-image': { levels: ['minimal', 'high'], defaultEffort: 'minimal' },
+        'gemini-3.1-flash-lite-image': { levels: ['minimal', 'high'], defaultEffort: 'minimal' },
+        'gemini-3-pro-image': { levels: ['high'], defaultEffort: 'high' }
+    };
+    const bedrockBudgetModels = new Set(['anthropic.claude-3-7-sonnet-20250219-v1:0',
+        'anthropic.claude-sonnet-4-20250514-v1:0', 'anthropic.claude-opus-4-20250514-v1:0',
+        'anthropic.claude-sonnet-4-5-20250929-v1:0', 'anthropic.claude-haiku-4-5-20251001-v1:0',
+        'anthropic.claude-opus-4-5-20251101-v1:0']);
+    function capability(provider, name, metadata) {
+        const id = String(name || '').replace(/^models\//, '');
+        if (provider === 'openrouter' && metadata) {
+            const r = metadata.reasoning;
+            if (r && Object.prototype.hasOwnProperty.call(r, 'supported_efforts')) {
+                const levels = (r.supported_efforts === null
+                    ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : r.supported_efforts)
+                    .filter(level => ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
+                return cap('effort', levels, levels.includes(r.default_effort) ? r.default_effort : levels[0] || null,
+                    { source: 'metadata' });
+            }
+            return cap(r ? 'enabled' : 'none', [], null, { source: 'metadata' });
+        }
+        if (provider === 'gemini') {
+            if (Object.hasOwn(geminiThinkingModels, id)) {
+                const model = geminiThinkingModels[id];
+                return cap('level', model.levels, model.defaultEffort);
+            }
+            if (['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'].includes(id)) {
+                return cap('legacy-default', [], null, { summary: true,
+                    limitation: 'No thinkingLevel; native default only. Flash-Lite needs a budget to force thinking.' });
+            }
+        }
+        if (provider === 'openrouter') {
+            const googleId = id.replace(/^google\//, '');
+            if (id.startsWith('google/') && Object.hasOwn(geminiThinkingModels, googleId)) {
+                const model = geminiThinkingModels[googleId];
+                return cap('effort', model.levels, model.defaultEffort);
+            }
+            if (['openai/o3', 'openai/o3-mini', 'openai/o4-mini', 'openai/o1'].includes(id)) return cap('effort', ['low', 'medium', 'high'], 'medium');
+            if (id === 'openai/gpt-5') return cap('effort', ['minimal', 'low', 'medium', 'high'], 'medium');
+            if (['x-ai/grok-4', 'x-ai/grok-4.1-fast'].includes(id)) return cap('effort', ['low', 'medium', 'high'], 'high');
+        }
+        if (provider === 'zai') {
+            if (id === 'glm-5.2') return cap('effort', ['high', 'max'], 'max');
+            if (['glm-5.3', 'glm-5.3-flash'].includes(id)) return cap('effort', ['low', 'high', 'max'], 'max');
+            if (['glm-4.5', 'glm-4.5-air', 'glm-4.6', 'glm-4.7', 'glm-4.7-flash', 'glm-5', 'glm-5.1'].includes(id)) return cap('enabled');
+        }
+        if (provider === 'bedrock') {
+            const bedrockId = id.replace(/^(us|eu|apac|jp|global)\./, '');
+            if (['anthropic.claude-opus-4-6-v1', 'anthropic.claude-sonnet-4-6'].includes(bedrockId)) return cap('adaptive', ['low', 'medium', 'high', 'max'], 'high');
+            if (bedrockBudgetModels.has(bedrockId)) return cap('budget', [], null, { budgetTokens: 1024 });
+        }
+        return cap('unknown');
+    }
+    // Exact IDs verified against provider model/input-modality documentation.
+    // Unknown IDs (including lookalikes) never inherit a provider-wide vision flag.
+    const geminiImageModels = new Set([
+        'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+        'gemini-2.5-flash-preview-09-2025', 'gemini-2.5-flash-lite-preview-09-2025', 'gemini-2.5-flash-image-preview',
+        'gemini-2.5-flash-image', 'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-pro-preview',
+        'gemini-3.1-pro-preview-customtools', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-lite',
+        'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash',
+        'gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image', 'gemini-3-pro-image'
+    ]);
+    const bedrockImageModels = new Set([
+        'anthropic.claude-3-haiku-20240307-v1:0', 'anthropic.claude-3-sonnet-20240229-v1:0', 'anthropic.claude-3-opus-20240229-v1:0',
+        'anthropic.claude-3-5-sonnet-20240620-v1:0', 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        ...bedrockBudgetModels, 'anthropic.claude-opus-4-6-v1', 'anthropic.claude-sonnet-4-6',
+        'amazon.nova-lite-v1:0', 'amazon.nova-pro-v1:0', 'amazon.nova-premier-v1:0'
+    ]);
+    function imageInputCapability(provider, name, metadata) {
+        const id = String(name || '').replace(/^models\//, '');
+        if (Array.isArray(metadata?.inputModalities)) return metadata.inputModalities.includes('image') ? 'supported' : 'unsupported';
+        if (provider === 'gemini' && geminiImageModels.has(id)) return 'supported';
+        if (provider === 'zai') {
+            if (['glm-4.6v', 'glm-4.6v-flash', 'glm-4.6v-flashx', 'glm-4.5v'].includes(id)) return 'supported';
+            if (['glm-4.5', 'glm-4.5-air', 'glm-4.5-flash', 'glm-4.6', 'glm-4.7', 'glm-4.7-flash'].includes(id)) return 'unsupported';
+        }
+        if (provider === 'bedrock' && bedrockImageModels.has(id.replace(/^(us|eu|apac|jp|global)\./, ''))) return 'supported';
+        return 'unknown';
+    }
+    const normalizeEffort = (value, c) => c.levels.includes(value) ? value : c.defaultEffort;
+    function executionSettings(source, fallbackRef, resolveCapability, preserveUnknown = false) {
+        const ref = modelRef(source?.modelRef) || modelRef(fallbackRef);
+        const c = resolveCapability(ref);
+        return { schemaVersion: 1, modelRef: ref,
+            thinkingEffort: c.mode === 'unknown' ? (source?.thinkingEffort ?? null)
+                : preserveUnknown && source?.thinkingEffort == null ? null : normalizeEffort(source?.thinkingEffort, c),
+            updatedAt: source?.updatedAt || Date.now() };
+    }
+    function applyThinking(body, provider, c, effort) {
+        if (provider === 'gemini') {
+            delete body.thinkingConfig;
+            if (c.mode === 'level') body.thinkingConfig = { thinkingLevel: normalizeEffort(effort, c), includeThoughts: true };
+            else if (c.mode === 'legacy-default') body.thinkingConfig = { includeThoughts: true };
+        } else if (provider === 'openrouter') {
+            delete body.reasoning;
+            if (c.mode === 'effort' && c.levels.length) body.reasoning = { effort: normalizeEffort(effort, c), exclude: false };
+            else if (c.mode === 'enabled') body.reasoning = { enabled: true, exclude: false };
+        } else if (provider === 'zai') {
+            if (c.supported) body.thinking = { type: 'enabled' };
+            if (c.mode === 'effort') body.reasoning_effort = normalizeEffort(effort, c);
+        } else if (provider === 'bedrock' && ['adaptive', 'budget'].includes(c.mode)) {
+            if (body.toolConfig?.toolChoice?.any) throw new Error('Thinking対応ClaudeではFunction Callingの強制を解除してください。');
+            if (c.mode === 'adaptive') {
+                body.additionalModelRequestFields = { thinking: { type: 'adaptive' }, output_config: { effort: normalizeEffort(effort, c) } };
+                delete body.inferenceConfig.temperature;
+                delete body.inferenceConfig.topP;
+            } else {
+                if (body.inferenceConfig.maxTokens && body.inferenceConfig.maxTokens <= c.budgetTokens) throw new Error('このClaudeのThinkingにはMax Tokensを1024より大きく設定してください。');
+                body.additionalModelRequestFields = { thinking: { type: 'enabled', budget_tokens: c.budgetTokens } };
+                delete body.inferenceConfig.temperature;
+                delete body.inferenceConfig.topP;
+            }
+        }
+        return body;
+    }
+    function assertCompatible(envelope) {
+        if (!envelope || envelope.version !== '2.0' || !envelope.data) throw new Error('同期データの形式が無効です。');
+        if ((envelope.settingsSchemaVersion || 0) > 136 || (envelope.minimumReaderVersion || 0) > 136 ||
+            envelope.data.settings?.some(s => s.key === GLOBAL_KEY && s.value?.schemaVersion > 1) ||
+            envelope.data.settings?.some(s => s.key === MIGRATION_KEY && s.value > 136) ||
+            envelope.data.profiles?.some(p => p.profileSchemaVersion > 1) ||
+            envelope.data.chats?.some(c => c.executionSettings?.schemaVersion > 1)) {
+            throw new Error('新しいバージョンの同期データのため復元・上書きできません。');
+        }
+    }
+    const sha256Constants = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    function hashV136(text) {
+        // Synchronous SHA-256 keeps _prepareApiHistory synchronous. The digest is
+        // a local change detector, never a provider signature or authentication token.
+        const input = new TextEncoder().encode(text), data = new Uint8Array(Math.ceil((input.length + 9) / 64) * 64);
+        data.set(input); data[input.length] = 0x80;
+        const view = new DataView(data.buffer), bits = input.length * 8;
+        view.setUint32(data.length - 8, Math.floor(bits / 0x100000000)); view.setUint32(data.length - 4, bits >>> 0);
+        const h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19], w = new Uint32Array(64);
+        const rotate = (x,n) => (x >>> n) | (x << (32 - n));
+        for (let offset = 0; offset < data.length; offset += 64) {
+            for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
+            for (let i = 16; i < 64; i++) {
+                const x = w[i - 15], y = w[i - 2];
+                w[i] = (w[i-16] + (rotate(x,7)^rotate(x,18)^(x>>>3)) + w[i-7] + (rotate(y,17)^rotate(y,19)^(y>>>10))) >>> 0;
+            }
+            let [a,b,c,d,e,f,g,z] = h;
+            for (let i = 0; i < 64; i++) {
+                const t1 = (z + (rotate(e,6)^rotate(e,11)^rotate(e,25)) + ((e&f)^(~e&g)) + sha256Constants[i] + w[i]) >>> 0;
+                const t2 = ((rotate(a,2)^rotate(a,13)^rotate(a,22)) + ((a&b)^(a&c)^(b&c))) >>> 0;
+                z=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;
+            }
+            [a,b,c,d,e,f,g,z].forEach((v,i) => h[i] = (h[i] + v) >>> 0);
+        }
+        return h.map(v => v.toString(16).padStart(8,'0')).join('');
+    }
+    const stableHistoryJson = value => JSON.stringify(value, (_,v) => v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.fromEntries(Object.keys(v).sort().map(k => [k,v[k]])) : v);
+    const historySeedV136 = system => hashV136(stableHistoryJson({ system: system || '' }));
+    function historyStepV136(prefix, message) {
+        const data = pick(message, ['role','content','imageIds','generated_images','tool_calls','name','response','_toolCallId','tool_call_id','geminiFunctionCallId']);
+        // saveChat materializes optional nulls/empty arrays. They do not change
+        // the wire conversation and must not invalidate a fingerprint on reload.
+        const compact = object => Object.fromEntries(Object.entries(object).filter(([,v]) => v != null && (!Array.isArray(v) || v.length)));
+        if (message.attachments?.length) data.attachments = message.attachments.map(a => compact(pick(a,['name','mimeType','base64Data','assetId'])));
+        if (message.continuation) {
+            const continuation = compact(pick(message.continuation,['provider','apiConfigId','modelName','parts','turns','openai','bedrock']));
+            if (Object.keys(continuation).length) data.continuation = continuation;
+        }
+        return hashV136(prefix + stableHistoryJson(compact(data)));
+    }
+    function historyContextV136(messages, system = '') {
+        let prefix = historySeedV136(system), turn = historySeedV136('');
+        for (const message of messages) {
+            if (message.isCascaded && !message.isSelected) continue;
+            if (message.role === 'user') turn = historySeedV136('');
+            prefix = historyStepV136(prefix, message); turn = historyStepV136(turn, message);
+        }
+        return { prefix, turn };
+    }
+    function rememberHistoryContextsV136(messages, system = '') {
+        if (!(messages || []).some(m => m.continuation?.provider && !m.continuation.historyWireV136
+            && (m.continuation.historyPrefixV136 === undefined || m.continuation.historyTurnV136 === undefined))) return;
+        let prefix = historySeedV136(system), turn = historySeedV136(''), editedPrefix = false, editedTurn = false;
+        const groups = new Map();
+        for (const message of messages || []) {
+            if (message.role === 'user') { turn = historySeedV136(''); editedTurn = false; }
+            const group = message.isCascaded && message.siblingGroupId;
+            if (group && !groups.has(group)) groups.set(group, { prefix, turn, editedPrefix, editedTurn });
+            const context = group ? groups.get(group) : { prefix, turn, editedPrefix, editedTurn };
+            const c = message.continuation;
+            if (c?.provider && !c.historyWireV136) {
+                // Known edits in legacy data still use N01's conservative fallback.
+                // Newly generated responses already carry their request's context.
+                if (c.historyPrefixV136 === undefined && context.editedPrefix) c.historyPrefixInvalidV136 = true;
+                if (c.historyTurnV136 === undefined && context.editedTurn) c.historyTurnInvalidV136 = true;
+                if (!context.editedPrefix && !c.historyPrefixInvalidV136) c.historyPrefixV136 ??= context.prefix;
+                if (!context.editedTurn && !c.historyTurnInvalidV136) c.historyTurnV136 ??= context.turn;
+            }
+            if (message.isCascaded && !message.isSelected) continue;
+            const original = c?.displayContent ?? c?.parts?.filter(p => typeof p.text === 'string' && p.thought !== true).map(p=>p.text).join('');
+            const edited = original !== undefined && original !== (message.content || '');
+            editedPrefix ||= edited; editedTurn ||= edited;
+            prefix = historyStepV136(prefix, message); turn = historyStepV136(turn, message);
+        }
+    }
+    // The worker owns serialization, legacy SHA chains and provider conversion.
+    // Large immutable strings are content-keyed (not object-identity-keyed), so an
+    // in-place edit cannot reuse an old digest. The bounded cache is never persisted.
+    const wireConvertersV136 = {
+    convertGeminiToOpenAIFormat(messagesForApi) {
+        const openAIMessages = [];
+
+        for (const geminiMsg of messagesForApi) {
+            const role = geminiMsg.role === 'model' ? 'assistant' : (geminiMsg.role === 'tool' ? 'tool' : 'user');
+            const parts = geminiMsg.parts || [];
+
+            if (role === 'tool') {
+                // ツールレスポンスの処理
+                for (const part of parts) {
+                    if (part.functionResponse) {
+                        // OpenAI互換APIの場合、保存されたtool_call_idを使用
+                        const toolCallId = part.functionResponse._toolCallId || part.functionResponse.id || part.functionResponse.name;
+                        openAIMessages.push({
+                            role: 'tool',
+                            tool_call_id: toolCallId,
+                            content: typeof part.functionResponse.response === 'string'
+                                ? part.functionResponse.response
+                                : JSON.stringify(part.functionResponse.response)
+                        });
+                    }
+                }
+            } else {
+                const contentParts = [];
+                const toolCalls = [];
+
+                for (const part of parts) {
+                    if (part.text && part.thought !== true) {
+                        contentParts.push({ type: 'text', text: part.text });
+                    } else if (part.inlineData) {
+                        contentParts.push(...this._convertInlineDataToOpenAIContentParts(part.inlineData));
+                    } else if (part.functionCall) {
+                        // Function Callingの変換
+                        // OpenAI互換APIの場合、保存されたtool_call_idを使用
+                        const toolCallId = part.functionCall._toolCallId || part.functionCall.id;
+                        if (!toolCallId) throw new Error("ツール呼出しIDがない履歴は安全に変換できません。この応答から再生成してください。");
+                        toolCalls.push({
+                            id: toolCallId,
+                            type: 'function',
+                            function: {
+                                name: part.functionCall.name,
+                                arguments: typeof part.functionCall.args === 'string'
+                                    ? part.functionCall.args
+                                    : JSON.stringify(part.functionCall.args || {})
+                            }
+                        });
+                    }
+                }
+
+                const message = { role };
+                const continuation = geminiMsg.tmContinuation;
+                if (role === 'assistant' && continuation) Object.assign(message, structuredClone(continuation));
+
+                // コンテンツの設定
+                if (contentParts.length > 0) {
+                    if (contentParts.length === 1 && contentParts[0].type === 'text') {
+                        message.content = contentParts[0].text;
+                    } else {
+                        message.content = contentParts.map(part => {
+                            if (part.type === 'text') {
+                                return { type: 'text', text: part.text };
+                            } else if (part.type === 'image_url') {
+                                return part;
+                            }
+                            return part;
+                        });
+                    }
+                } else if (toolCalls.length > 0) {
+                    // tool_callsのみでcontentがない場合は空文字列を設定（Z.ai API互換性のため）
+                    message.content = '';
+                }
+
+                // tool_callsの設定（contentと独立）
+                if (toolCalls.length > 0) {
+                    message.tool_calls = toolCalls;
+                }
+
+                if (message.content !== undefined || message.tool_calls) {
+                    openAIMessages.push(message);
+                }
+            }
+        }
+
+        // デバッグ用にtoolメッセージとassistantメッセージのtool_callsを確認
+        const toolMessages = openAIMessages.filter(m => m.role === 'tool');
+        const assistantMessagesWithTools = openAIMessages.filter(m => m.role === 'assistant' && m.tool_calls);
+        if (toolMessages.length > 0 || assistantMessagesWithTools.length > 0) {
+            console.log('[Z.ai Debug] 変換後のメッセージ情報:');
+            if (assistantMessagesWithTools.length > 0) {
+                console.log(`  - assistant with tool_calls: ${assistantMessagesWithTools.length}件`);
+                const lastAssistant = assistantMessagesWithTools[assistantMessagesWithTools.length - 1];
+                if (lastAssistant && lastAssistant.tool_calls) {
+                    console.log(`  - 最後のassistantのtool_call IDs:`, JSON.stringify(lastAssistant.tool_calls.map(tc => tc.id)));
+                }
+            }
+            if (toolMessages.length > 0) {
+                console.log(`  - tool messages: ${toolMessages.length}件`);
+                const recentToolIds = toolMessages.slice(-5).map(m => m.tool_call_id);
+                console.log(`  - 最近のtool_call_ids:`, JSON.stringify(recentToolIds));
+            }
+            // IDの一致を確認
+            if (assistantMessagesWithTools.length > 0 && toolMessages.length > 0) {
+                const lastAssistant = assistantMessagesWithTools[assistantMessagesWithTools.length - 1];
+                const expectedIds = lastAssistant.tool_calls?.map(tc => tc.id) || [];
+                const actualIds = toolMessages.slice(-expectedIds.length).map(tm => tm.tool_call_id);
+                const matched = expectedIds.every((id, i) => id === actualIds[i]);
+                console.log(`  - ID一致チェック: ${matched ? '✓ 一致' : '✗ 不一致'}`);
+                if (!matched) {
+                    console.warn(`  - 期待されるIDs: ${JSON.stringify(expectedIds)}`);
+                    console.warn(`  - 実際のIDs: ${JSON.stringify(actualIds)}`);
+                }
+            }
+        }
+
+        return openAIMessages;
+    },
+    _convertInlineDataToOpenAIContentParts(inlineData) {
+        const mimeType = inlineData?.mimeType || 'application/octet-stream';
+        const base64Data = inlineData?.data || '';
+        const lowerMimeType = mimeType.toLowerCase();
+        const currentModel = (state.settings.modelName || '').toLowerCase();
+        const isDeepSeekModel = currentModel.startsWith('deepseek/');
+
+        if (lowerMimeType.startsWith('image/')) {
+            if (isDeepSeekModel) {
+                return [{
+                    type: 'text',
+                    text: `[添付画像: ${mimeType}。現在のモデルでは画像を直接読めない可能性があります]`
+                }];
+            }
+
+            return [{
+                type: 'image_url',
+                image_url: { url: `data:${mimeType};base64,${base64Data}` }
+            }];
+        }
+
+        if (lowerMimeType === 'application/pdf') {
+            return [{
+                type: 'file',
+                file: {
+                    filename: 'attachment.pdf',
+                    file_data: `data:application/pdf;base64,${base64Data}`
+                }
+            }];
+        }
+
+        if (this._isTextLikeMimeType(lowerMimeType)) {
+            const decodedText = this._decodeBase64ToUtf8(base64Data);
+            if (decodedText !== null) {
+                return [{
+                    type: 'text',
+                    text: `[添付テキスト / MIME: ${mimeType}]\n${decodedText}`
+                }];
+            }
+        }
+
+        return [{
+            type: 'text',
+            text: `[未対応添付: filename不明 / MIME: ${mimeType}。OpenRouter送信では本文に変換されませんでした]`
+        }];
+    },
+    _isTextLikeMimeType(mimeType) {
+        if (mimeType.startsWith('text/')) {
+            return true;
+        }
+
+        const textMimeTypes = new Set([
+            'application/json',
+            'application/xml',
+            'application/javascript',
+            'application/typescript',
+            'application/x-javascript',
+            'application/ecmascript',
+            'application/sql',
+            'application/yaml',
+            'application/x-yaml',
+            'application/rtf'
+        ]);
+
+        return textMimeTypes.has(mimeType) || mimeType.endsWith('+json') || mimeType.endsWith('+xml');
+    },
+    _decodeBase64ToUtf8(base64Data) {
+        try {
+            if (!base64Data || typeof atob !== 'function') {
+                return null;
+            }
+
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            if (typeof TextDecoder === 'function') {
+                return new TextDecoder('utf-8').decode(bytes);
+            }
+
+            let percentEncoded = '';
+            for (let i = 0; i < bytes.length; i++) {
+                percentEncoded += `%${bytes[i].toString(16).padStart(2, '0')}`;
+            }
+            return decodeURIComponent(percentEncoded);
+        } catch (error) {
+            console.warn('Base64テキスト添付のUTF-8デコードに失敗しました。', error);
+            return null;
+        }
+    },
+    convertGeminiToConverseFormat(messagesForApi) {
+        const converseMessages = [];
+        let pendingToolResults = [];  // 連続するtoolメッセージを一時保存
+
+        for (let i = 0; i < messagesForApi.length; i++) {
+            const geminiMsg = messagesForApi[i];
+
+            // まずロールを判定（デフォルト）
+            let role = geminiMsg.role === 'model' ? 'assistant' : geminiMsg.role;
+            const content = [];
+            if (role === 'assistant' && geminiMsg.tmBedrockContinuation) {
+                const signedContent = structuredClone(geminiMsg.tmBedrockContinuation).map(item => {
+                    if (Array.isArray(item.reasoningContent?.redactedContent))
+                        item.reasoningContent.redactedContent = Uint8Array.from(item.reasoningContent.redactedContent);
+                    return item;
+                });
+                converseMessages.push({ role, content: signedContent });
+                continue;
+            }
+
+            // functionResponseが含まれているかチェック
+            let hasFunctionResponse = false;
+
+            if (geminiMsg.parts) {
+                for (const part of geminiMsg.parts) {
+                    if (part.text) {
+                        content.push({ text: part.text });
+                    } else if (part.inlineData) {
+                        // Base64画像データをバイナリに変換
+                        const base64Data = part.inlineData.data;
+                        const format = part.inlineData.mimeType.split('/')[1];
+                        content.push({
+                            image: {
+                                format: format,
+                                source: {
+                                    bytes: Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
+                                }
+                            }
+                        });
+                    } else if (part.functionCall) {
+                        const toolUseId = part.functionCall._toolCallId || part.functionCall.id;
+                        if (!toolUseId) throw new Error('ツール呼出しIDがない履歴は安全に変換できません。この応答から再生成してください。');
+                        // Tool use形式に変換
+                        content.push({
+                            toolUse: {
+                                toolUseId,
+                                name: part.functionCall.name,
+                                input: part.functionCall.args || {}
+                            }
+                        });
+                    } else if (part.functionResponse) {
+                        // Tool result形式に変換
+                        hasFunctionResponse = true;
+                        const responseContent = typeof part.functionResponse.response === 'string'
+                            ? part.functionResponse.response
+                            : JSON.stringify(part.functionResponse.response);
+
+                        // toolUseIdは元のtoolCallIdを使用（なければ関数名をフォールバック）
+                        const toolUseId = part.functionResponse._toolCallId || part.functionResponse.id || part.functionResponse.name;
+
+                        content.push({
+                            toolResult: {
+                                toolUseId: toolUseId,
+                                content: [{ text: responseContent }]
+                            }
+                        });
+                    }
+                }
+            }
+
+            // role: "tool" の場合は、連続するtoolメッセージを集める
+            if (geminiMsg.role === 'tool' || hasFunctionResponse) {
+                pendingToolResults.push(...content);
+
+                // 次のメッセージがtool以外の場合、または最後のメッセージの場合
+                const nextMsg = messagesForApi[i + 1];
+                const isLastMessage = i === messagesForApi.length - 1;
+                const nextIsNotTool = !nextMsg || (nextMsg.role !== 'tool' && !nextMsg.parts?.some(p => p.functionResponse));
+
+                if (isLastMessage || nextIsNotTool) {
+                    // 溜まっているtoolResultsを1つの"user"メッセージとして追加
+                    if (pendingToolResults.length > 0) {
+                        converseMessages.push({
+                            role: 'user',
+                            content: pendingToolResults
+                        });
+                        pendingToolResults = [];
+                    }
+                }
+            } else {
+                // tool以外のメッセージはそのまま追加
+                if (content.length > 0) {
+                    converseMessages.push({ role, content });
+                }
+            }
+        }
+
+        return converseMessages;
+    },
+    };
+    function historyWorkerRuntime() {
+        const cache = new Map(); let bytes = 0;
+        async function canonical(value) {
+            if (typeof value === 'string' && value.length > 4096) {
+                let digest = cache.get(value);
+                if (!digest) {
+                    digest = crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)).then(buffer => Array.from(new Uint8Array(buffer), x => x.toString(16).padStart(2,'0')).join(''));
+                    if (value.length <= 32 * 1024 * 1024) {
+                        while (bytes + value.length > 64 * 1024 * 1024 && cache.size) { const key = cache.keys().next().value; bytes -= key.length; cache.delete(key); }
+                        cache.set(value,digest); bytes += value.length;
+                    }
+                }
+                return { stringSHA256: await digest, length: value.length };
+            }
+            if (ArrayBuffer.isView(value)) return { bytesSHA256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', value)), x => x.toString(16).padStart(2,'0')).join(''), length: value.byteLength };
+            if (Array.isArray(value)) return Promise.all(value.map(canonical));
+            if (value && typeof value === 'object') {
+                const result = {};
+                for (const key of Object.keys(value).sort()) if (value[key] !== undefined) result[key] = await canonical(value[key]);
+                return result;
+            }
+            return value;
+        }
+        const digest = async value => hashV136(JSON.stringify(await canonical(value)));
+        const converted = new Map();
+        async function convert(provider, messages, model) {
+            const key = await digest({ provider, messages, model });
+            if (converted.has(key)) return converted.get(key);
+            state.settings.modelName = model;
+            let result;
+            if (provider === 'bedrock') result = wireConverters.convertGeminiToConverseFormat(messages);
+            else if (provider === 'openrouter' || provider === 'zai') result = wireConverters.convertGeminiToOpenAIFormat(messages);
+            else result = messages.map(m => ({ role:m.role === 'tool' ? 'user' : m.role, parts:m.parts.map(p => {
+                const copy = structuredClone(p);
+                if (copy.functionCall) delete copy.functionCall._toolCallId;
+                if (copy.functionResponse) delete copy.functionResponse._toolCallId;
+                return copy;
+            }) }));
+            if (converted.size >= 1) converted.delete(converted.keys().next().value);
+            converted.set(key,result); return result;
+        }
+        self.onmessage = async ({data:{id,op,value}}) => {
+            try {
+                let result;
+                if (op === 'remember') {
+                    rememberHistoryContextsV136(value.messages,value.system);
+                    result = value.messages.map(m => m.continuation && pick(m.continuation,['historyPrefixV136','historyTurnV136','historyPrefixInvalidV136','historyTurnInvalidV136']));
+                } else if (op === 'prefixes') {
+                    let prefix = historySeedV136(value.system), turn = historySeedV136('');
+                    result = value.messages.map(m => { if(m.role === 'user') turn=historySeedV136(''); const before={prefix,turn}; prefix=historyStepV136(prefix,m);turn=historyStepV136(turn,m);return before; });
+                } else if (op === 'convert') result = await convert(value.provider,value.messages,value.model);
+                else if (op === 'wire') {
+                    const {provider,messages,model,system} = value;
+                    let start=0;
+                    messages.forEach((m,i) => { if(m.role === 'user' && !m.parts?.some(p=>p.functionResponse)) start=i; });
+                    const native=await convert(provider,messages,model);
+                    const systemText=system?.parts?.[0]?.text || '';
+                    const actualSystem=provider === 'gemini' ? (model === 'gemini-2.5-flash-image-preview' ? null : system || null) : systemText;
+                    result={version:1,prefix:await digest({system:actualSystem,messages:native}),turn:await digest(await convert(provider,messages.slice(start),model))};
+                } else throw new Error('Unknown history operation');
+                self.postMessage({id,result});
+            } catch(error) { self.postMessage({id,error:error.message}); }
+        };
+    }
+    let historyWorker, historyRequestId = 0;
+    const historyRequests = new Map();
+    function configureHistoryWorkerV136(converters) {
+        if (historyWorker) return;
+        const functions = [hashV136,stableHistoryJson,historySeedV136,historyStepV136,historyContextV136,rememberHistoryContextsV136];
+        const source = `const sha256Constants=${JSON.stringify(sha256Constants)}; const pick=${pick.toString()};\n`
+            + functions.map(fn => `const ${fn.name}=${fn.toString()};`).join('\n')
+            + `\nconst state={settings:{}}; const console={log(){},warn(){},error(){}}; const wireConverters={${Object.values(converters).map(fn=>fn.toString()).join(',\n')}};\n(${historyWorkerRuntime.toString()})();`;
+        const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+        try { historyWorker=new Worker(url); } finally { URL.revokeObjectURL(url); }
+        historyWorker.onmessage=({data})=>{const pending=historyRequests.get(data.id);if(!pending)return;historyRequests.delete(data.id);data.error?pending.reject(new Error(data.error)):pending.resolve(data.result);};
+        historyWorker.onerror=()=>{for(const p of historyRequests.values())p.reject(new Error('履歴検証Workerに失敗しました。再読込して再試行してください。'));historyRequests.clear();historyWorker.terminate();historyWorker=null;};
+    }
+    function historyTaskV136(op,value) {
+        if (!historyWorker) throw new Error('履歴検証Workerが初期化されていません。');
+        return new Promise((resolve,reject)=>{const id=++historyRequestId;historyRequests.set(id,{resolve,reject});try{historyWorker.postMessage({id,op,value});}catch(error){historyRequests.delete(id);reject(error);}});
+    }
+    async function rememberHistoryContextsAsyncV136(messages,system='') {
+        if (!(messages || []).some(m=>m.continuation?.provider && !m.continuation.historyWireV136 && (m.continuation.historyPrefixV136 === undefined || m.continuation.historyTurnV136 === undefined))) return;
+        const owner=root.state?.currentMessages === messages ? {messages,system:root.state.currentSystemPrompt} : null;
+        const continuations=messages.map(m=>m.continuation);
+        const original=messages.map(m=>({message:m,content:m.content}));
+        const result=await historyTaskV136('remember',{messages,system});
+        if(owner && (root.state.currentMessages !== owner.messages || root.state.currentSystemPrompt !== owner.system || messages.length !== original.length || original.some((v,i)=>messages[i] !== v.message || messages[i].content !== v.content))) throw new DOMException('履歴の対象が変更されました。','AbortError');
+        result.forEach((patch,i)=>{if(patch && messages[i]?.continuation === continuations[i])Object.assign(continuations[i],patch);});
+    }
+    function createMethods({ state, dbUtils, uiUtils, defaults, localUiKeys = [] }) {
+        let globalSaveQueue = Promise.resolve();
+        const capabilityRequests = new Map();
+        const importedBackgrounds = new WeakMap();
+        const profileReads = new Map();
+        const notify = (type, detail = {}) => root.dispatchEvent?.(new CustomEvent('execution-settings-changed', { detail: { type, ...detail } }));
+        const transaction = (stores, write) => new Promise((resolve, reject) => {
+            const tx = state.db.transaction(stores, 'readwrite');
+            tx.oncomplete = resolve;
+            tx.onabort = tx.onerror = () => reject(tx.error || new Error('保存が中断されました。'));
+            try { write(tx); } catch (error) { tx.abort(); reject(error); }
+        });
+        return {
+            async loadSettingsV136() {
+                const [global, success, version] = await Promise.all([GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY].map(k => dbUtils.getSetting(k)));
+                if (version?.value > 136) throw new Error('保存データは新しいアプリで開いてください。');
+                state.settingsSchemaVersion = version?.value || 0;
+                state.globalSettingsV136 = global?.value || null;
+                state.lastSuccessfulExecution = success?.value || null;
+                state.modelMetadataV136 = {};
+                state.modelMetadataStatusV136 = {};
+                state.modelMetadataSourcesV136 = {};
+                this.ensureGlobalSettingsChannelV136();
+                this.ensureProfileSettingsChannelV136();
+            },
+            async ensureSettingsMigrationV136() {
+                // These stores are locked together across connections/tabs. Read the
+                // marker and migration inputs here, never publish a pre-lock snapshot.
+                const activeId = state.activeProfileId;
+                let committed;
+                await transaction(['settings', 'profiles', 'chats', 'image_store'], tx => {
+                    const store = tx.objectStore('settings'), settingsRequest = store.getAll();
+                    settingsRequest.onsuccess = () => {
+                        try {
+                            const legacy = Object.fromEntries(settingsRequest.result.map(s => [s.key, s.value]));
+                            if (legacy[MIGRATION_KEY] > 136) { tx.abort(); return; }
+                            const profilesRequest = tx.objectStore('profiles').getAll();
+                            profilesRequest.onsuccess = () => {
+                                try {
+                                    const currentProfiles = profilesRequest.result;
+                                    if (legacy[MIGRATION_KEY] === 136) {
+                                        committed = { legacy, profiles: currentProfiles };
+                                        return;
+                                    }
+                                    const originalProfiles = structuredClone(currentProfiles);
+                                    const migratedApi = this.convertLegacyApiSettingsV136?.(legacy, currentProfiles, activeId);
+                                    const active = migratedApi?.active || currentProfiles.find(p => p.id === activeId)?.settings || {};
+                                    const local = { ...state.localUiSettings, ...legacy.localUiSettings };
+                                    localUiKeys.forEach(key => {
+                                        if (Object.prototype.hasOwnProperty.call(legacy.localUiSettings || {}, key)) return;
+                                        if (Object.prototype.hasOwnProperty.call(active, key)) local[key] = active[key];
+                                        else if (Object.prototype.hasOwnProperty.call(legacy, key)) local[key] = legacy[key];
+                                    });
+                                    const configs = structuredClone(migratedApi?.configs || legacy.apiConfigs || []);
+                                    for (const profile of currentProfiles) for (const [provider, key] of [['gemini','apiKey'],['openrouter','openrouterApiKey'],['zai','zaiApiKey'],['bedrock','bedrockAccessKey']]) {
+                                        const settings = profile.settings || {};
+                                        if (!settings[key] || configs.some(c => c.provider === provider && (c.apiKey || c.bedrockAccessKey) === settings[key]
+                                            && (provider !== 'bedrock' || c.bedrockSecretKey === settings.bedrockSecretKey))) continue;
+                                        const recovered = this.createLegacyApiConfig(provider, settings);
+                                        recovered.id = `api_legacy_profile_${profile.id}_${provider}`;
+                                        recovered.name = `${profile.name} / ${this.getProviderDisplayName(provider)} (旧設定)`;
+                                        configs.push(recovered);
+                                    }
+                                    const global = { ...pick(defaults, globalKeys), ...pick(legacy, globalKeys), ...pick(active, globalKeys),
+                                        ...pick(legacy[GLOBAL_KEY] || {}, globalKeys), schemaVersion: 1 };
+                                    global.showThoughtProcess ??= active.includeThoughts ?? legacy.includeThoughts ?? defaults.includeThoughts;
+                                    global.theme ||= { ...pick(defaults, themeKeys), ...pick(legacy.globalThemeSettings || active, themeKeys) };
+                                    global.appearance ||= { overlayOpacity: active.overlayOpacity ?? legacy.overlayOpacity ?? defaults.overlayOpacity,
+                                        messageOpacity: active.messageOpacity ?? legacy.messageOpacity ?? defaults.messageOpacity, backgroundAssetId: null };
+                                    const initialModel = active.modelName || legacy.modelName || defaults.modelName;
+                                    const initialConfig = configs.find(c=>c.id === active.apiConfigId && (c.modelCandidates || []).includes(initialModel)) || configs.find(c=>(c.modelCandidates || []).includes(initialModel));
+                                    const legacyRef = modelRef(active.defaultModelRef) || (initialConfig ? {apiConfigId:initialConfig.id,modelName:initialModel} : null);
+                                    const profiles = currentProfiles.map(p => ({ ...p, settings: profileSettings(p.settings, (legacy.themeSettingsProfileScoped ?? state.themeSettingsProfileScoped) === true) }));
+                                    const oldBlob = legacy.backgroundImageBlob instanceof Blob ? legacy.backgroundImageBlob : state.settings.backgroundImageBlob;
+                                    const backgroundId = !global.appearance.backgroundAssetId && oldBlob instanceof Blob ? `background_${crypto.randomUUID()}` : null;
+                                    if (backgroundId) global.appearance.backgroundAssetId = backgroundId;
+                                    const backup = originalProfiles.map(p => ({ profileId: p.id, settings: pick(p.settings,
+                                        [...globalKeys.filter(k => !/key|password|user/i.test(k)), ...themeKeys, 'modelName', 'apiProvider', 'defaultModelRef', 'thinkingBudget', 'includeThoughts']) }));
+                                    const localUiSettings = this.normalizeLocalUiSettings(local);
+                                    if (!legacy[BACKUP_KEY]) store.put({ key: BACKUP_KEY, value: backup });
+                                    for (const [key, value] of [[GLOBAL_KEY, global], ['apiConfigs', configs], ['localUiSettings', localUiSettings],
+                                        ['legacyInitialModelRefV136', legacyRef], ['apiConfigsMigratedV1310', true],
+                                        ['apiModelRefsMigratedV1312', true], ['apiModelCandidatesStabilizedV1317', true], [MIGRATION_KEY, 136]]) store.put({ key, value });
+                                    profiles.forEach(p => tx.objectStore('profiles').put(p));
+                                    if (backgroundId) tx.objectStore('image_store').put({ id: backgroundId, blob: oldBlob, createdAt: Date.now() });
+                                    const chats = tx.objectStore('chats').openCursor();
+                                    chats.onsuccess = () => {
+                                        try {
+                                            const cursor = chats.result;
+                                            if (!cursor) return;
+                                            const chat = cursor.value;
+                                            if (!chat.executionSettings) {
+                                                const meta = [...(chat.messages || [])].reverse().find(m => m.role === 'model' && (!m.isCascaded || m.isSelected) && m.usageMetadata?.tmExecution?.modelName)?.usageMetadata.tmExecution;
+                                                chat.executionSettings = { schemaVersion: 1, modelRef: modelRef(meta) || modelRef(chat.defaultModelRef) || legacyRef, thinkingEffort: null, updatedAt: Date.now() };
+                                                cursor.update(chat);
+                                            }
+                                            cursor.continue();
+                                        } catch { tx.abort(); }
+                                    };
+                                    committed = { legacy: { ...legacy, [GLOBAL_KEY]: global, apiConfigs: configs, localUiSettings, legacyInitialModelRefV136: legacyRef }, profiles };
+                                } catch { tx.abort(); }
+                            };
+                        } catch { tx.abort(); }
+                    };
+                });
+                const { legacy, profiles } = committed;
+                state.profiles = profiles;
+                state.activeProfile = profiles.find(p => p.id === state.activeProfileId) || null;
+                state.apiConfigs = legacy.apiConfigs || [];
+                state.settings.apiConfigs = state.apiConfigs;
+                state.localUiSettings = this.normalizeLocalUiSettings(legacy.localUiSettings || {});
+                state.localUiSettingsStoredKeys = new Set(localUiKeys);
+                state.globalSettingsV136 = legacy[GLOBAL_KEY];
+                state.legacyInitialModelRefV136 = legacy.legacyInitialModelRefV136;
+                state.apiConfigsMigratedV1310 = true;
+                state.settings.apiConfigsMigratedV1310 = true;
+                state.settingsSchemaVersion = 136;
+                state.settingsScopeMigrationComplete = true;
+            },
+            applyGlobalSettingsV136() {
+                if (!state.globalSettingsV136) return;
+                Object.assign(state.settings, pick(state.globalSettingsV136, globalKeys));
+                state.settings.includeThoughts = state.globalSettingsV136.showThoughtProcess === true;
+                this.applyProfileAppearanceV136();
+            },
+            applyProfileAppearanceV136() {
+                const p = state.activeProfile?.settings || {};
+                const g = state.globalSettingsV136;
+                if (!g) return;
+                state.themeSettingsProfileScoped = p.useCustomTheme === true;
+                state.settings.themeSettingsProfileScoped = state.themeSettingsProfileScoped;
+                Object.assign(state.settings, g.theme, p.useCustomTheme ? p.theme : {},
+                    g.appearance, p.useCustomAppearance ? p.appearance : {});
+                document.documentElement.style.setProperty('--message-bubble-opacity', String(state.settings.messageOpacity));
+                uiUtils.applyOverlayOpacity();
+                uiUtils.applyDarkMode();
+                uiUtils.applyThemeColorSettings();
+                const id = state.settings.backgroundAssetId;
+                const generation = (state.appearanceLoadGeneration || 0) + 1;
+                state.appearanceLoadGeneration = generation;
+                if (state.appliedBackgroundAssetIdV136 === id) return;
+                if (!id) { state.appliedBackgroundAssetIdV136 = id; state.settings.backgroundImageBlob = null; uiUtils.applyBackgroundImage(); return; }
+                const req = state.db.transaction('image_store').objectStore('image_store').get(id);
+                req.onsuccess = () => {
+                    if (state.appearanceLoadGeneration !== generation) return;
+                    state.appliedBackgroundAssetIdV136 = id;
+                    state.settings.backgroundImageBlob = req.result?.blob || null;
+                    uiUtils.applyBackgroundImage();
+                };
+            },
+            ensureGlobalSettingsChannelV136() {
+                if (state.globalSettingsChannelV136 || !root.BroadcastChannel) return;
+                const channel = new root.BroadcastChannel('chatai-global-settings-v136');
+                state.globalSettingsChannelV136 = channel;
+                channel.onmessage = () => this.reloadGlobalSettingsV136().catch(() => {});
+            },
+            async reloadGlobalSettingsV136() {
+                const latest = (await dbUtils.getSetting(GLOBAL_KEY))?.value;
+                if (latest && (latest.revision || 0) >= (state.globalSettingsV136?.revision || 0)) {
+                    state.globalSettingsV136 = latest;
+                    this.applyGlobalSettingsV136(); notify('global');
+                }
+            },
+            async saveGlobalSettingsV136(updates) {
+                const changes = pick(updates, globalKeys);
+                for (const kind of ['theme', 'appearance']) if (changes[kind])
+                    changes[kind] = pick(changes[kind], kind === 'theme' ? themeKeys : appearanceKeys);
+                const save = async () => {
+                    let next;
+                    // IndexedDB serializes readwrite transactions across tabs. Last committed
+                    // field patch wins; untouched fields always come from the same transaction.
+                    await transaction(changes.appearance?.backgroundAssetId ? ['settings', 'image_store'] : ['settings'], tx => {
+                        const store = tx.objectStore('settings'), req = store.get(GLOBAL_KEY);
+                        req.onsuccess = () => {
+                            const current = req.result?.value || {};
+                            next = { ...current, ...changes, schemaVersion: 1, revision: (current.revision || 0) + 1 };
+                            for (const kind of ['theme', 'appearance']) if (changes[kind])
+                                next[kind] = { ...current[kind], ...changes[kind] };
+                            const publish = () => {
+                                store.put({ key: GLOBAL_KEY, value: next });
+                                if (changes.theme) store.put({ key: 'globalThemeSettings', value: next.theme });
+                            };
+                            if (changes.appearance?.backgroundAssetId) {
+                                const asset = tx.objectStore('image_store').get(changes.appearance.backgroundAssetId);
+                                asset.onsuccess = () => { if (asset.result?.blob) publish(); else tx.abort(); };
+                            } else publish();
+                        };
+                    });
+                    state.globalSettingsV136 = next;
+                    if (changes.theme) state.globalThemeSettings = { ...next.theme };
+                    this.applyGlobalSettingsV136();
+                    this.markAsDirtyAndSchedulePush('structural');
+                    this.ensureGlobalSettingsChannelV136();
+                    state.globalSettingsChannelV136?.postMessage({ revision: next.revision });
+                    notify('global');
+                };
+                globalSaveQueue = globalSaveQueue.catch(() => {}).then(save);
+                return globalSaveQueue;
+            },
+            getShowThoughtProcess() { return state.globalSettingsV136?.showThoughtProcess === true; },
+            getGlobalAuxiliaryModelRefV136(refKey, legacyKey) {
+                const global = state.globalSettingsV136 || state.settings;
+                const ref = global[refKey];
+                if (ref?.apiConfigId || ref?.modelName) return { apiConfigId: ref.apiConfigId || '', modelName: ref.modelName || '' };
+                return this.findModelRefForLegacyModel(global[legacyKey] || '') || null;
+            },
+            async setShowThoughtProcess(value) {
+                await this.saveGlobalSettingsV136({ showThoughtProcess: value === true });
+                uiUtils.renderChatMessages();
+            },
+            getProfileAppearanceSettings() { return profileSettings(state.activeProfile?.settings); },
+            ensureProfileSettingsChannelV136() {
+                if (state.profileSettingsChannelV136 || !root.BroadcastChannel) return;
+                const channel = new root.BroadcastChannel('chatai-profile-settings-v136');
+                state.profileSettingsChannelV136 = channel;
+                channel.onmessage = event => {
+                    if (event.data?.database === state.db.name) this.reloadProfileSettingsV136(event.data.profileId).catch(() => {});
+                };
+            },
+            async reloadProfileSettingsV136(profileId) {
+                const generation = (profileReads.get(profileId) || 0) + 1;
+                profileReads.set(profileId, generation);
+                const latest = await dbUtils.getProfile(profileId);
+                if (profileReads.get(profileId) !== generation) return latest;
+                const focused = root.document?.activeElement;
+                const editing = root.settingsUiV136?.editedProfileInputs?.get(focused) === profileId;
+                const draft = editing ? { value: focused.value, start: focused.selectionStart, end: focused.selectionEnd } : null;
+                const index = state.profiles?.findIndex(p => p.id === profileId) ?? -1;
+                if (latest) {
+                    if (index >= 0) state.profiles[index] = latest;
+                    else if (state.profiles) state.profiles.push(latest);
+                } else if (index >= 0) state.profiles.splice(index, 1);
+                if (state.activeProfileId === profileId) {
+                    state.activeProfile = latest ? (index >= 0 ? state.profiles[index] : latest) : null;
+                    if (latest) Object.assign(state.settings, pick(latest.settings, profileKeys));
+                    this.applyProfileAppearanceV136();
+                    uiUtils.applySettingsToUI?.();
+                }
+                notify('profile');
+                if (draft && focused.isConnected && state.activeProfileId === profileId && root.document.activeElement === focused) {
+                    focused.value = draft.value;
+                    if (typeof draft.start === 'number') focused.setSelectionRange(draft.start, draft.end);
+                }
+                return latest;
+            },
+            async mutateProfileV136(profileId, mutate) {
+                if (profileId == null) throw new Error('保存対象のプロファイルがありません。');
+                let missing = false;
+                await transaction(['profiles', 'settings', 'image_store'], tx => {
+                    const profiles = tx.objectStore('profiles'), profileRequest = profiles.get(profileId);
+                    const globalRequest = tx.objectStore('settings').get(GLOBAL_KEY);
+                    const versionRequest = tx.objectStore('settings').get(MIGRATION_KEY);
+                    let remaining = 3;
+                    const update = () => {
+                        if (--remaining) return;
+                        try {
+                            if (!profileRequest.result) { missing = true; tx.abort(); return; }
+                            const previousBackgroundId = profileRequest.result.settings?.appearance?.backgroundAssetId;
+                            const next = mutate(profileRequest.result, globalRequest.result?.value || {});
+                            if (!next || next.id !== profileId || typeof next.then === 'function') { tx.abort(); return; }
+                            if (versionRequest.result?.value === 136) next.settings = profileSettings(next.settings);
+                            const backgroundId = next.settings?.appearance?.backgroundAssetId;
+                            if (backgroundId && backgroundId !== previousBackgroundId) {
+                                const asset = tx.objectStore('image_store').get(backgroundId);
+                                asset.onsuccess = () => { if (asset.result?.blob) profiles.put(next); else tx.abort(); };
+                            } else profiles.put(next);
+                        } catch { tx.abort(); }
+                    };
+                    profileRequest.onsuccess = globalRequest.onsuccess = versionRequest.onsuccess = update;
+                }).catch(async error => { if (missing) { await this.reloadProfileSettingsV136(profileId); throw new Error('保存対象のプロファイルは削除されています。'); } throw error; });
+                const latest = await this.reloadProfileSettingsV136(profileId);
+                this.ensureProfileSettingsChannelV136();
+                state.profileSettingsChannelV136?.postMessage({ database: state.db.name, profileId });
+                this.markAsDirtyAndSchedulePush('structural');
+                return latest;
+            },
+            async patchProfileSettingsV136(profileId, updates) {
+                const changes = pick(updates, profileKeys);
+                return this.mutateProfileV136(profileId, profile => {
+                    const settings = { ...profile.settings, ...changes };
+                    for (const kind of ['theme', 'appearance']) if (changes[kind])
+                        settings[kind] = { ...profile.settings?.[kind], ...pick(changes[kind], kind === 'theme' ? themeKeys : appearanceKeys) };
+                    return { ...profile, settings };
+                });
+            },
+            async setProfileOverride(kind, enabled, profileId = state.activeProfileId) {
+                if (!['theme', 'appearance'].includes(kind)) return;
+                const key = kind === 'theme' ? 'useCustomTheme' : 'useCustomAppearance';
+                await this.mutateProfileV136(profileId, (profile, global) => {
+                    const settings = { ...profile.settings, [key]: enabled === true };
+                    if (enabled && (!settings[kind] || !Object.keys(settings[kind]).length)) settings[kind] = structuredClone(global[kind] || {});
+                    return { ...profile, settings };
+                });
+                notify(kind);
+            },
+            captureAppearanceTargetV136(kind, options = {}) {
+                if (options.scope === 'global' || options.global === true) return { scope: 'global', global: true };
+                if (options.scope === 'profile') return { scope: 'profile', global: false, profileId: options.profileId };
+                const profileId = options.profileId ?? state.activeProfileId;
+                const profile = state.activeProfile?.id === profileId ? state.activeProfile : state.profiles?.find(p => p.id === profileId);
+                if (profileId != null && !profile) throw new Error('保存対象のプロファイルは削除されています。');
+                const own = kind === 'theme' ? profile?.settings?.useCustomTheme : profile?.settings?.useCustomAppearance;
+                return own ? { scope: 'profile', global: false, profileId } : { scope: 'global', global: true };
+            },
+            async saveAppearanceValues(kind, updates, options = {}) {
+                const target = this.captureAppearanceTargetV136(kind, options);
+                const changes = pick(updates, kind === 'theme' ? themeKeys : appearanceKeys);
+                if (target.scope === 'profile') await this.patchProfileSettingsV136(target.profileId, { [kind]: changes });
+                else await this.saveGlobalSettingsV136({ [kind]: changes });
+                notify(kind);
+            },
+            async saveBackgroundBlobV136(blob, options = {}) {
+                const target = this.captureAppearanceTargetV136('appearance', options);
+                return this.saveBackgroundToTargetV136(blob, target);
+            },
+            async saveBackgroundToTargetV136(blob, target) {
+                const id = blob ? `background_${crypto.randomUUID()}` : null;
+                let nextGlobal, missing = false;
+                // Blob + its only new reference commit together. Cleanup shares
+                // these write locks, so it can observe neither half of the save.
+                await transaction(['image_store', 'profiles', 'settings'], tx => {
+                    const store = tx.objectStore(target.scope === 'profile' ? 'profiles' : 'settings');
+                    const request = store.get(target.scope === 'profile' ? target.profileId : GLOBAL_KEY);
+                    request.onsuccess = () => {
+                        try {
+                            if (target.scope === 'profile' && !request.result) { missing = true; tx.abort(); return; }
+                            if (id) tx.objectStore('image_store').put({ id, blob, createdAt: Date.now() });
+                            if (target.scope === 'profile') {
+                                const profile = request.result;
+                                store.put({ ...profile, settings: { ...profile.settings,
+                                    appearance: { ...profile.settings?.appearance, backgroundAssetId: id } } });
+                            } else {
+                                const current = request.result?.value || {};
+                                nextGlobal = { ...current, schemaVersion: 1, revision: (current.revision || 0) + 1,
+                                    appearance: { ...current.appearance, backgroundAssetId: id } };
+                                store.put({ key: GLOBAL_KEY, value: nextGlobal });
+                            }
+                        } catch { tx.abort(); }
+                    };
+                }).catch(async error => { if (missing) { await this.reloadProfileSettingsV136(target.profileId); throw new Error('背景の保存対象プロファイルは削除されています。'); } throw error; });
+                if (target.scope === 'profile') {
+                    await this.reloadProfileSettingsV136(target.profileId);
+                    this.ensureProfileSettingsChannelV136();
+                    state.profileSettingsChannelV136?.postMessage({ database: state.db.name, profileId: target.profileId });
+                } else {
+                    await this.reloadGlobalSettingsV136();
+                    this.ensureGlobalSettingsChannelV136();
+                    state.globalSettingsChannelV136?.postMessage({ revision: nextGlobal.revision });
+                }
+                this.markAsDirtyAndSchedulePush('structural');
+                await this.cleanupBackgroundAssetsV136();
+                notify('appearance');
+                return target;
+            },
+            async cleanupBackgroundAssetsV136() {
+                // Every source of references and the deletion decision belong to
+                // the same snapshot/transaction; no network or external await here.
+                await transaction(['settings', 'profiles', 'chats', 'image_assets', 'image_store'], tx => {
+                    const requests = [tx.objectStore('settings').get(GLOBAL_KEY), tx.objectStore('profiles').getAll(),
+                        tx.objectStore('chats').getAll(), tx.objectStore('image_assets').getAll(), tx.objectStore('image_store').getAllKeys()];
+                    let remaining = requests.length;
+                    requests.forEach(request => request.onsuccess = () => {
+                        if (--remaining) return;
+                        try {
+                            const ids = new Set(requests[1].result.map(p => p.settings?.appearance?.backgroundAssetId).filter(Boolean));
+                            const globalId = requests[0].result?.value?.appearance?.backgroundAssetId;
+                            if (globalId) ids.add(globalId);
+                            requests[3].result.forEach(a => { if (a.assetId) ids.add(a.assetId); });
+                            for (const chat of requests[2].result) for (const m of chat.messages || []) {
+                                (m.imageIds || []).forEach(id => ids.add(id));
+                                (m.attachments || []).forEach(a => { if (a.assetId) ids.add(a.assetId); });
+                            }
+                            requests[4].result.forEach(id => { if (String(id).startsWith('background_') && !ids.has(id)) tx.objectStore('image_store').delete(id); });
+                        } catch { tx.abort(); }
+                    });
+                });
+            },
+            async createProfileExportV136(profile) {
+                const result = { profileSchemaVersion: 1, name: profile.name, createdAt: profile.createdAt,
+                    settings: profileSettings(profile.settings), icon: null };
+                if (profile.icon instanceof Blob) result.icon = { mimeType: profile.icon.type, data: await this.fileToBase64(profile.icon) };
+                const id = result.settings.appearance?.backgroundAssetId;
+                if (id) {
+                    const asset = await new Promise((resolve, reject) => {
+                        const req = state.db.transaction('image_store').objectStore('image_store').get(id);
+                        req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+                    });
+                    if (!asset?.blob) throw new Error('プロファイルの背景画像が見つかりません。');
+                    result.backgroundAsset = { mimeType: asset.blob.type, data: await this.fileToBase64(asset.blob) };
+                }
+                return result;
+            },
+            async parseProfileImportV136(source) {
+                if (source.profileSchemaVersion > 1) throw new Error('新しいバージョンのプロファイルは読み込めません。');
+                const result = { name: source.name, createdAt: Date.now(), icon: source.icon,
+                    settings: profileSettings(source.settings, source.settings?.themeSettingsProfileScoped === true) };
+                if (source.backgroundAsset?.data) {
+                    const blob = await this.base64ToBlob(source.backgroundAsset.data, source.backgroundAsset.mimeType);
+                    const id = `background_${crypto.randomUUID()}`;
+                    importedBackgrounds.set(result, { id, blob });
+                    result.settings.appearance = { ...result.settings.appearance, backgroundAssetId: id };
+                } else if (result.settings.appearance?.backgroundAssetId) {
+                    throw new Error('プロファイルの背景画像データがありません。');
+                }
+                return result;
+            },
+            async addImportedProfileV136(profile) {
+                const background = importedBackgrounds.get(profile);
+                let id;
+                await transaction(['profiles', 'image_store'], tx => {
+                    if (background) tx.objectStore('image_store').put({ ...background, createdAt: Date.now() });
+                    const request = tx.objectStore('profiles').add(profile);
+                    request.onsuccess = () => { id = request.result; };
+                });
+                importedBackgrounds.delete(profile);
+                return id;
+            },
+            isAppearanceTargetActiveV136(target) {
+                return target.scope === 'profile'
+                    ? target.profileId === state.activeProfileId && state.activeProfile?.settings?.useCustomAppearance === true
+                    : !state.activeProfile?.settings?.useCustomAppearance;
+            },
+            getModelMetadataV136(ref) {
+                const config = this.getApiConfigById(ref?.apiConfigId);
+                const source = state.modelMetadataSourcesV136?.[ref?.apiConfigId];
+                if (source && (config?.provider !== 'openrouter' || config.enabled === false
+                    || source.base !== (config.baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '')
+                    || source.apiKey !== config.apiKey)) return undefined;
+                return state.modelMetadataV136?.[ref?.apiConfigId]?.[ref?.modelName];
+            },
+            getModelThinkingCapability(ref = this.getCurrentChatModelRef()) {
+                const config = this.getApiConfigById(ref?.apiConfigId);
+                const metadata = this.getModelMetadataV136(ref);
+                const noReasoningInfo = metadata && metadata.reasoning === undefined
+                    && (!Array.isArray(metadata.supportedParameters) || metadata.supportedParameters.some(p => p === 'reasoning' || p === 'reasoning.effort'));
+                if (config?.provider === 'openrouter' && (!metadata || noReasoningInfo)) {
+                    const status = state.modelMetadataStatusV136?.[ref?.apiConfigId] || 'pending';
+                    return cap('unknown', [], null, { status: status === 'ready' ? 'missing' : status });
+                }
+                return capability(config?.provider, ref?.modelName, metadata);
+            },
+            async refreshModelThinkingCapabilities(apiConfigId) {
+                const config = this.getApiConfigById(apiConfigId);
+                if (config?.provider !== 'openrouter') return;
+                const base = (config.baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+                const pending = capabilityRequests.get(apiConfigId);
+                if (pending?.base === base && pending.key === config.apiKey) return pending.promise;
+                const job = { base, key: config.apiKey };
+                const ownsRequest = () => capabilityRequests.get(apiConfigId) === job;
+                const current = () => {
+                    const latest = this.getApiConfigById(apiConfigId);
+                    return ownsRequest() && latest?.provider === 'openrouter' && latest.enabled !== false
+                        && (latest.baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') === base && latest.apiKey === config.apiKey;
+                };
+                capabilityRequests.set(apiConfigId, job);
+                job.promise = (async () => {
+                    state.modelMetadataStatusV136 ||= {};
+                    state.modelMetadataStatusV136[apiConfigId] = 'pending';
+                    try {
+                        const response = await fetch(`${base}/models`, { signal: AbortSignal.timeout(5000),
+                            headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {} });
+                        if (!response.ok) throw new Error('モデルの対応情報を取得できませんでした。');
+                        const data = await response.json();
+                        if (!Array.isArray(data.data)) throw new Error('モデルの対応情報の形式を確認できませんでした。');
+                        if (!current()) return;
+                        state.modelMetadataV136 ||= {};
+                        state.modelMetadataV136[apiConfigId] = Object.fromEntries(data.data.filter(m => typeof m.id === 'string').map(m => [m.id, {
+                            reasoning: m.reasoning, inputModalities: m.architecture?.input_modalities,
+                            supportedParameters: m.supported_parameters
+                        }]));
+                        state.modelMetadataSourcesV136 ||= {};
+                        state.modelMetadataSourcesV136[apiConfigId] = { base, apiKey: config.apiKey };
+                        state.modelMetadataStatusV136[apiConfigId] = data.data.length ? 'ready' : 'missing';
+                        notify('capabilities', { apiConfigId });
+                    } catch (error) {
+                        if (current()) { state.modelMetadataStatusV136[apiConfigId] = 'failed'; notify('capabilities', { apiConfigId }); }
+                        throw error;
+                    } finally { if (ownsRequest()) capabilityRequests.delete(apiConfigId); }
+                })();
+                return job.promise;
+            },
+            getCurrentChatModelRef() { return modelRef(state.currentExecutionSettings?.modelRef); },
+            getCurrentChatThinkingEffort() { return state.currentExecutionSettings?.thinkingEffort ?? null; },
+            syncChatExecutionToLegacySettings() {
+                const ref = this.getCurrentChatModelRef();
+                if (!ref) return;
+                state.settings.defaultModelRef = ref;
+                state.settings.apiConfigId = ref.apiConfigId;
+                state.settings.modelName = ref.modelName;
+                state.settings.apiProvider = this.getApiConfigById(ref.apiConfigId)?.provider || state.settings.apiProvider;
+            },
+            readExecutionDraft() {
+                try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null'); } catch { return null; }
+            },
+            persistExecutionDraft() {
+                // sessionStorage is isolated per browsing context, including independent duplicated tabs.
+                sessionStorage.setItem(DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
+            },
+            async initializeNewChatExecution({ restoreDraft = false } = {}) {
+                const generation = (state.executionInitGeneration || 0) + 1;
+                state.executionInitGeneration = generation;
+                state.executionInitializingV136 = true;
+                notify('chat');
+                const success = (await dbUtils.getSetting(SUCCESS_KEY))?.value;
+                state.lastSuccessfulExecution = success || state.lastSuccessfulExecution;
+                const legacy = state.legacyInitialModelRefV136 || (await dbUtils.getSetting('legacyInitialModelRefV136'))?.value;
+                const configs = (await dbUtils.getSetting('apiConfigs'))?.value;
+                if (generation !== state.executionInitGeneration || state.currentChatId) return;
+                if (configs) { state.apiConfigs = this.normalizeApiConfigs(configs); state.settings.apiConfigs = state.apiConfigs; }
+                const candidates = [success?.modelRef, legacy, ...this.getApiModelChoices()];
+                const fallback = candidates.find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
+                const draft = restoreDraft ? this.readExecutionDraft() : null;
+                const source = draft || (success && modelRef(success.modelRef) && JSON.stringify(success.modelRef) === JSON.stringify(modelRef(fallback)) ? success : null);
+                state.currentExecutionSettings = executionSettings(source, fallback, ref => this.getModelThinkingCapability(ref));
+                state.executionInitializingV136 = false;
+                this.syncChatExecutionToLegacySettings(); this.persistExecutionDraft();
+                uiUtils.applySettingsToUI(); notify('chat');
+            },
+            async refreshExecutionApiConfigsV136() {
+                const stored = await dbUtils.getSetting('apiConfigs');
+                state.apiConfigs = this.normalizeApiConfigs(stored?.value || []);
+                state.settings.apiConfigs = state.apiConfigs;
+                const ref = this.getCurrentChatModelRef();
+                if (this.getApiConfigById(ref?.apiConfigId)?.provider === 'openrouter' && this.getModelThinkingCapability(ref).mode === 'unknown') {
+                    try { await this.refreshModelThinkingCapabilities(ref.apiConfigId); } catch { /* static fallback */ }
+                }
+            },
+            getChatExecutionSettingsV136(chat) {
+                if (chat.executionSettings?.schemaVersion > 1) throw new Error('新しいバージョンのチャット設定です。');
+                if (chat.executionSettings) return structuredClone(chat.executionSettings);
+                const meta = [...(chat.messages || [])].reverse().find(m => m.role === 'model' && (!m.isCascaded || m.isSelected)
+                    && m.usageMetadata?.tmExecution?.modelName)?.usageMetadata.tmExecution;
+                return { schemaVersion: 1, modelRef: modelRef(meta) || modelRef(chat.defaultModelRef)
+                    || modelRef(state.legacyInitialModelRefV136) || this.getCurrentChatModelRef(), thinkingEffort: null, updatedAt: Date.now() };
+            },
+            async waitForGenerationCompletionV136() {
+                const deadline = Date.now() + 10000;
+                while (state.isSending && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+                return !state.isSending;
+            },
+            async setCurrentChatExecution(updates) {
+                const contextId = state.currentChatId, contextGeneration = state.executionInitGeneration;
+                const selection = (state.executionSelectionGenerationV136 || 0) + 1;
+                state.executionSelectionGenerationV136 = selection;
+                await state.executionSettingsReady;
+                const assertContext = () => {
+                    if (contextId !== state.currentChatId || contextGeneration !== state.executionInitGeneration || selection !== state.executionSelectionGenerationV136)
+                        throw new Error('チャットまたは選択が変わったため、古い選択を適用しませんでした。');
+                };
+                assertContext();
+                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
+                const current = state.currentExecutionSettings || {};
+                const ref = modelRef(updates.modelRef || current.modelRef);
+                this.assertModelRefForExecution(ref);
+                if (this.getApiConfigById(ref.apiConfigId)?.provider === 'openrouter' && this.getModelThinkingCapability(ref).mode === 'unknown') {
+                    try { await this.refreshModelThinkingCapabilities(ref.apiConfigId); } catch { /* verified static definitions remain available */ }
+                }
+                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
+                const next = executionSettings({ ...current, ...updates, updatedAt: Date.now() }, ref, r => this.getModelThinkingCapability(r));
+                assertContext();
+                if (state.currentChatId) {
+                    const id = state.currentChatId;
+                    await transaction(['chats'], tx => {
+                        const store = tx.objectStore('chats'); const req = store.get(id);
+                        req.onsuccess = () => { if (!req.result) { tx.abort(); return; } store.put({ ...req.result, executionSettings: next }); };
+                    });
+                } else {
+                    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+                }
+                if (contextId !== state.currentChatId || contextGeneration !== state.executionInitGeneration || selection !== state.executionSelectionGenerationV136) return next;
+                state.currentExecutionSettings = next; this.syncChatExecutionToLegacySettings();
+                this.markAsDirtyAndSchedulePush('structural'); notify('chat');
+                uiUtils.applySettingsToUI(); return structuredClone(next);
+            },
+            setCurrentChatModelRef(ref) { return this.setCurrentChatExecution({ modelRef: ref }); },
+            setCurrentChatThinkingEffort(value) {
+                if (!this.getModelThinkingCapability().levels.includes(value)) throw new Error('このモデルでは利用できないThinkingレベルです。');
+                return this.setCurrentChatExecution({ thinkingEffort: value });
+            },
+            freezeExecutionSettings() {
+                const config = structuredClone(this.resolveDefaultExecutionApiConfig());
+                const c = this.getModelThinkingCapability(config.ref);
+                if (config.provider === 'openrouter' && c.mode === 'unknown' && this.getCurrentChatThinkingEffort() != null)
+                    throw new Error('Thinking能力を確認できません。設定は保持しています。接続を確認して再送信してください。');
+                config.thinkingCapability = c;
+                config.thinkingEffort = c.mode === 'unknown' ? this.getCurrentChatThinkingEffort() : normalizeEffort(this.getCurrentChatThinkingEffort(), c);
+                state.currentExecutionSettings = { ...state.currentExecutionSettings, thinkingEffort: config.thinkingEffort };
+                state.currentExecutionApiConfig = Object.freeze(config);
+                return config;
+            },
+            applyExecutionThinking(body, provider) {
+                const config = this.getExecutionApiConfig();
+                const c = config?.thinkingCapability || capability(provider, config?.modelName || state.settings.modelName);
+                return applyThinking(body, provider, c, config?.thinkingEffort);
+            },
+            completeExecutionMetadata(snapshot, message) {
+                if (state.abortController?.signal.aborted) throw new DOMException('キャンセルされました。', 'AbortError');
+                const actual = message?.usageMetadata?.tmActualExecution;
+                const result = { ...snapshot, completedAt: Date.now() };
+                if (actual?.modelName) result.modelName = actual.modelName;
+                if (actual && actual.modelName !== snapshot.modelName) {
+                    result.requestedModelName = snapshot.modelName;
+                    result.thinkingEffort = null;
+                }
+                return result;
+            },
+            successfulExecutionRecord(message) {
+                const meta = message?.usageMetadata?.tmExecution;
+                if (!meta?.completedAt || message.role !== 'model' || message.error || (!message.content && !message.imageIds?.length && !message.generated_videos?.length)) return null;
+                return { schemaVersion: 1, modelRef: modelRef(meta), thinkingEffort: meta.thinkingEffort ?? null, completedAt: meta.completedAt };
+            },
+            async inspectApiConfigReferences(configId) {
+                const chats = await dbUtils.getAllChats();
+                const usages = this.collectApiConfigModelRefUsages(configId);
+                for (const key of ['memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef']) {
+                    const ref = state.globalSettingsV136?.[key];
+                    if (ref?.apiConfigId === configId) usages.push({ scope: 'global', usage: key, modelName: ref.modelName, legacy: false });
+                }
+                const add = (ref, label) => { if (ref?.apiConfigId === configId) usages.push({ scope: 'chat', usage: label, modelName: ref.modelName, legacy: false }); };
+                chats.forEach(c => add(c.executionSettings?.modelRef, `チャット「${c.title || c.id}」`));
+                add(this.getCurrentChatModelRef(), '現在のチャット');
+                add(this.readExecutionDraft()?.modelRef, '未送信チャット');
+                return { ...this.getApiConfigUsage(configId), usages, blockingUsages: usages.filter(u => !u.legacy), isInUse: usages.some(u => !u.legacy) };
+            },
+            async getReferencedImageIdsV136({ excludeChatId = null } = {}) {
+                const ids = new Set();
+                const profiles = await dbUtils.getAllProfiles();
+                profiles.forEach(p => { if (p.settings?.appearance?.backgroundAssetId) ids.add(p.settings.appearance.backgroundAssetId); });
+                const global = (await dbUtils.getSetting(GLOBAL_KEY))?.value;
+                if (global?.appearance?.backgroundAssetId) ids.add(global.appearance.backgroundAssetId);
+                const assets = await dbUtils.getAllAssets();
+                assets.forEach(a => { if (a.assetId) ids.add(a.assetId); });
+                for (const chat of (await dbUtils.getAllChats()).filter(c => String(c.id) !== String(excludeChatId))) for (const m of chat.messages || []) {
+                    (m.imageIds || []).forEach(id => ids.add(id));
+                    (m.attachments || []).forEach(a => { if (a.assetId) ids.add(a.assetId); });
+                }
+                return ids;
+            },
+            async getLegacyProfileSettingsV136(profileId) {
+                const backup = (await dbUtils.getSetting(BACKUP_KEY))?.value || [];
+                return structuredClone(backup.find(p => String(p.profileId) === String(profileId))?.settings || null);
+            },
+            async restoreLegacyGlobalSettingsV136(profileId) {
+                const legacy = await this.getLegacyProfileSettingsV136(profileId);
+                if (!legacy) throw new Error('移行前の設定が見つかりません。');
+                const updates = pick(legacy, globalKeys);
+                if (legacy.includeThoughts !== undefined) updates.showThoughtProcess = legacy.includeThoughts === true;
+                await this.saveGlobalSettingsV136(updates);
+            }
+        };
+    }
+    root.SettingsV136 = { GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY, BACKUP_KEY, DRAFT_KEY, profileKeys, globalKeys,
+        themeKeys, appearanceKeys, pick, modelRef, profileSettings, capability, normalizeEffort, executionSettings,
+        applyThinking, imageInputCapability, assertCompatible, createMethods,
+        hashV136, historySeedV136, historyStepV136, historyContextV136, rememberHistoryContextsV136,
+        configureHistoryWorkerV136, historyTaskV136, rememberHistoryContextsAsyncV136, wireConvertersV136 };
+    if (typeof module !== 'undefined') module.exports = root.SettingsV136;
+})(typeof window !== 'undefined' ? window : globalThis);

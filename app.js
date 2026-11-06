@@ -4,8 +4,7 @@ import("https://esm.run/@google/genai").then(module => {
     console.log("Google GenAI SDK (@google/genai) の読み込みが完了しました。");
 }).catch(err => {
     console.error("Google Gen AI SDKの読み込みに失敗しました:", err);
-    // エラーメッセージを画面に表示するなどのフォールバック処理
-    document.body.innerHTML = `<p style="color: red; padding: 20px;">SDKの読み込みに失敗しました。アプリを起動できません。</p>`;
+    // SDKを使う画像生成以外は、保存済みデータやREST通信を引き続き利用できます。
 });
 
 // --- 定数 ---
@@ -195,8 +194,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.35.1";
-const APP_CACHE_VERSION = "v1.35.1";
+const APP_VERSION = "1.36.0";
+const APP_CACHE_VERSION = "v1.36.0";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -528,10 +527,11 @@ const DebugLogger = {
         consoleMethods.forEach(method => {
             this.originalConsole[method] = console[method];
             console[method] = (...args) => {
+                const safeArgs = args.map(arg => sanitizeApiRequestBodyForLog(arg));
                 // ログを内部配列に保存
-                this.addLog(method, args);
+                this.addLog(method, safeArgs);
                 // 元のコンソールメソッドを呼び出す
-                this.originalConsole[method].apply(console, args);
+                this.originalConsole[method].apply(console, safeArgs);
             };
         });
     },
@@ -568,7 +568,10 @@ const DebugLogger = {
         this.logs.push({
             type,
             timestamp: new Date(),
-            args: args.map(arg => (typeof arg === 'object' && arg !== null) ? serialize(arg) : arg)
+            args: args.map(arg => {
+                const safe = sanitizeApiRequestBodyForLog(arg);
+                return (typeof safe === 'object' && safe !== null) ? serialize(safe) : safe;
+            })
         });
 
         // ログが最大数を超えたら古いものから削除
@@ -769,7 +772,6 @@ try {
         maxTokensInput: document.getElementById('max-tokens'),
         topKInput: document.getElementById('top-k'),
         topPInput: document.getElementById('top-p'),
-        thinkingBudgetInput: document.getElementById('thinking-budget'),
         includeThoughtsToggle: document.getElementById('include-thoughts-toggle'),
         thoughtTranslationOptionsDiv: document.getElementById('thought-translation-options'),
         enableThoughtTranslationCheckbox: document.getElementById('enable-thought-translation'),
@@ -1058,6 +1060,7 @@ const state = {
     activeProfileId: null, // 現在アクティブなプロファイルのID
     activeProfile: null, // 現在アクティブなプロファイルの完全なデータ
     currentExecutionApiConfig: null,
+    executionInitializingV136: true,
     profileIconUrls: new Map(),
     videoUrlCache: new Map(),
     imageUrlCache: new Map(),
@@ -1331,6 +1334,17 @@ function formatFileSize(bytes) {
 
 function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = false) {
     if (typeof value === 'string') {
+        if (/^\s*[\[{]/.test(value)) {
+            try { return JSON.stringify(sanitizeApiRequestBodyForLog(JSON.parse(value))); } catch { /* ordinary text */ }
+        }
+        value = value.replace(/([?&](?:key|api_key|access_token|token)=)[^&\s]+/gi, '$1[redacted]')
+            .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]+/gi, 'Bearer [redacted]');
+        const credentials = [state.settings, ...(state.apiConfigs || [])];
+        for (const config of credentials) for (const key of ['apiKey', 'openrouterApiKey', 'zaiApiKey',
+            'bedrockAccessKey', 'bedrockSecretKey', 'googleSearchApiKey', 'sdApiPassword']) {
+            const secret = config?.[key];
+            if (typeof secret === 'string' && secret) value = value.split(secret).join('[redacted]');
+        }
         if (parentKey === 'data' && value.length > 100) {
             return value.substring(0, 50) + '...[省略]...' + value.substring(value.length - 20);
         }
@@ -1341,9 +1355,15 @@ function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = fal
     }
     if (value instanceof Uint8Array) return value;
     if (!value || typeof value !== 'object') return value;
+    if (value.thought === true || ['thinking', 'redacted_thinking'].includes(value.type)) return '[redacted thinking]';
+    if (value instanceof Error) return { name: value.name, message: sanitizeApiRequestBodyForLog(value.message) };
 
     const sanitized = {};
     Object.entries(value).forEach(([key, entryValue]) => {
+        if (/signature|reasoning|redactedcontent|continuation|thinking|apikey|accesskey|secret|token|password|authorization|credential/i.test(key.replace(/[_-]/g, ''))) {
+            sanitized[key] = '[redacted]';
+            return;
+        }
         const nextInSystemField = inSystemField || key === 'systemInstruction' || key === 'system' || value.role === 'system';
         const isSystemContent = value.role === 'system' && key === 'content' && typeof entryValue === 'string';
         const isGeminiSystemText = key === 'text' && typeof entryValue === 'string' && inSystemField;
@@ -1404,6 +1424,8 @@ function registerServiceWorker() {
             if (isReloading) return;
             isReloading = true;
             window.location.reload();
+        } else if (event.data?.status === 'cacheClearFailed') {
+            uiUtils.showCustomAlert(event.data.error || 'アプリ資源を更新できませんでした。既存のキャッシュは保持しています。');
         }
     });
 
@@ -1670,7 +1692,14 @@ const dbUtils = {
     },
 
     async saveChat(optionalTitle = null, chatObjectToSave = null, options = {}) {
-        await this.openDB();
+        appLogic.ensureHistoryWorkerV136();
+        // Capture the owner and contents before the first async boundary. A prompt
+        // save may still be finishing when navigation changes the active chat.
+        const contextMessages = state.currentMessages;
+        let contextChatId = state.currentChatId;
+        let targetChatId = contextChatId, savedChatId = null;
+        const ownsContext = () => state.currentMessages === contextMessages && state.currentChatId === contextChatId
+            && (!chatObjectToSave || chatObjectToSave.id === contextChatId);
     
         let messagesForStats = [];
         let chatDataToSave;
@@ -1683,10 +1712,14 @@ const dbUtils = {
             }
 
             const messagesToSave = state.currentMessages.map(msg => ({
+                ...SettingsV136.pick(msg, ['geminiFunctionCallId', 'name', 'response', '_toolCallId', 'tool_call_id',
+                    'thinkingBudget', 'thinkingConfig', 'thoughtParts', 'thoughtSignature',
+                    'reasoning_details', 'reasoning_content', 'reasoningContent']),
                 role: msg.role,
                 content: msg.content,
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
+                continuation: msg.continuation || null,
                 thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
                 proofreadingModelInfo: msg.proofreadingModelInfo || null,
                 tool_calls: msg.tool_calls || null,
@@ -1720,6 +1753,7 @@ const dbUtils = {
     
             chatDataToSave = {
                 messages: messagesToSave,
+                executionSettings: structuredClone(state.currentExecutionSettings),
                 systemPrompt: state.currentSystemPrompt,
                 persistentMemory: state.currentPersistentMemory || {},
                 summarizedContext: state.currentSummarizedContext || null,
@@ -1733,11 +1767,15 @@ const dbUtils = {
             chatDataToSave = chatObjectToSave;
         }
     
+        chatDataToSave = structuredClone(chatDataToSave);
+        messagesForStats = chatDataToSave.messages || [];
+        await SettingsV136.rememberHistoryContextsAsyncV136(chatDataToSave.messages, chatDataToSave.systemPrompt);
+        await this.openDB();
         const stats = await this._calculateChatStats(messagesForStats);
     
         return new Promise((resolve, reject) => {
             try {
-                const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
+                const transaction = state.db.transaction([CHATS_STORE, SETTINGS_STORE], 'readwrite');
                 const store = transaction.objectStore(CHATS_STORE);
                 const now = Date.now();
     
@@ -1752,12 +1790,13 @@ const dbUtils = {
                         title = firstUserMessage ? firstUserMessage.content.substring(0, 50) : "無題のチャット";
                     }
     
-                    const chatIdForOperation = existingChatData ? existingChatData.id : state.currentChatId;
+                    const chatIdForOperation = existingChatData ? existingChatData.id : targetChatId;
                     const pinSource = chatObjectToSave
                         ? chatDataToSave
                         : existingChatData || chatDataToSave;
                     const pinState = normalizeChatPinState(pinSource);
                     const finalChatData = {
+                        ...existingChatData,
                         ...chatDataToSave,
                         updatedAt: chatObjectToSave && chatObjectToSave.updatedAt ? chatObjectToSave.updatedAt : now,
                         createdAt: existingChatData ? existingChatData.createdAt : now,
@@ -1772,20 +1811,25 @@ const dbUtils = {
                     }
     
                     const putRequest = store.put(finalChatData);
+                    if (options.successfulExecution) {
+                        const settingsStore = transaction.objectStore(SETTINGS_STORE);
+                        const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
+                        successRequest.onsuccess = () => {
+                            if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt)
+                                settingsStore.put({ key: SettingsV136.SUCCESS_KEY, value: options.successfulExecution });
+                        };
+                    }
                     putRequest.onsuccess = (event) => {
                         const savedId = event.target.result;
-                        if (!state.currentChatId && savedId) {
-                            state.currentChatId = savedId;
-                        }
-                        if (String(state.currentChatId ?? savedId) === String(chatIdForOperation ?? savedId)) {
+                        savedChatId = savedId;
+                        if (ownsContext()) {
+                            if (!contextChatId && savedId) state.currentChatId = contextChatId = savedId;
                             state.currentChatIsPinned = pinState.isPinned;
                             state.currentChatPinnedAt = pinState.isPinned ? pinState.pinnedAt : null;
                             state.currentChatPinStateUpdatedAt = pinState.pinStateUpdatedAt;
-                        }
-                        console.log(`チャット ${state.currentChatId ? '更新' : '保存'} 完了 ID:`, state.currentChatId || savedId);
-                        if ((state.currentChatId || savedId) === (chatIdForOperation || savedId)) {
                             uiUtils.updateChatTitle(finalChatData.title);
                         }
+                        console.log('チャット保存完了 ID:', savedId);
                         if (!options.skipPush) {
                             appLogic.markAsDirtyAndSchedulePush();
                         }
@@ -1795,34 +1839,36 @@ const dbUtils = {
                     };
                 };
     
-                if (state.currentChatId && !chatObjectToSave) {
-                    const getRequest = store.get(state.currentChatId);
+                if (targetChatId && !chatObjectToSave) {
+                    const getRequest = store.get(targetChatId);
                     getRequest.onsuccess = (event) => {
                         const existingChat = event.target.result;
                         if (!existingChat) {
-                            console.warn(`ID ${state.currentChatId} のチャットが見つかりません(保存時)。新規として保存します。`);
-                            state.currentChatId = null;
+                            console.warn(`ID ${targetChatId} のチャットが見つかりません(保存時)。新規として保存します。`);
+                            if (ownsContext()) state.currentChatId = contextChatId = null;
+                            targetChatId = null;
                         }
                         processSave(existingChat);
                     };
                     getRequest.onerror = (event) => {
                         console.error("既存チャットの取得エラー(更新用):", event.target.error);
-                        state.currentChatId = null;
-                        processSave(null);
                     };
                 } else {
                     processSave(chatObjectToSave);
                 }
     
                 transaction.oncomplete = () => {
+                    if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
+                    if (options.successfulExecution) state.lastSuccessfulExecution = options.successfulExecution;
                     // 保存は高頻度になり得るため、表示中のサイドバーだけをtrailing debounceで更新する。
                     if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
-                    resolve(state.currentChatId);
+                    resolve(savedChatId);
                 };
                 transaction.onerror = (event) => {
                     console.error("チャット保存トランザクション失敗:", event.target.error);
                     reject(new Error(`チャット保存トランザクション失敗: ${event.target.error.message}`));
                 };
+                transaction.onabort = () => reject(transaction.error || new Error('チャット保存が中断されました。'));
     
             } catch (error) {
                 console.error("チャット保存処理の開始に失敗:", error);
@@ -2070,14 +2116,14 @@ const dbUtils = {
 
         // Step 2: 他のチャットで同じ画像IDが使われていないか確認 (安全対策)
         const allOtherChats = (await this.getAllChats()).filter(chat => chat.id !== id);
-        const activeImageIdsInOtherChats = new Set();
+        const activeImageIdsInOtherChats = await appLogic.getReferencedImageIdsV136({ excludeChatId: id });
         allOtherChats.forEach(chat => {
             (chat.messages || []).forEach(message => {
                 (message.imageIds || []).forEach(imgId => activeImageIdsInOtherChats.add(imgId));
             });
         });
 
-        const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !activeImageIdsInOtherChats.has(id));
+        const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !String(id).startsWith('background_') && !activeImageIdsInOtherChats.has(id));
 
         // Step 3: トランザクション内でチャットと画像の削除を実行
         return new Promise((resolve, reject) => {
@@ -2099,9 +2145,11 @@ const dbUtils = {
                 finalImageIdsToDelete.forEach(imgId => imageStore.delete(imgId));
             }
 
-            transaction.oncomplete = () => {
+            transaction.oncomplete = async () => {
                 console.log(`チャット削除完了 (ID: ${id})`);
                 if (markDirty) appLogic.markAsDirtyAndSchedulePush(true);
+                try { await appLogic.cleanupBackgroundAssetsV136(); }
+                catch (error) { console.warn('背景整理を次回へ延期しました:', error); }
                 resolve();
             };
             transaction.onerror = (event) => {
@@ -2166,15 +2214,20 @@ const dbUtils = {
     },
 
     async addProfile(profile) {
+        profile = structuredClone(profile);
         await this.openDB();
+        if (state.settingsSchemaVersion === 136) profile.settings = appLogic.getSharedProfileSettings(profile.settings);
         return new Promise((resolve, reject) => {
-            const store = this._getStore(PROFILES_STORE, 'readwrite');
-            const request = store.add(profile);
-            request.onsuccess = (event) => {
-                console.log(`[DB] プロファイルを新規追加しました (ID: ${event.target.result})`);
-                resolve(event.target.result);
-            };
-            request.onerror = (event) => reject(`プロファイル追加エラー: ${event.target.error}`);
+            const tx = state.db.transaction([PROFILES_STORE, IMAGE_STORE], 'readwrite');
+            let id, missing = false;
+            const add = () => { const r = tx.objectStore(PROFILES_STORE).add(profile); r.onsuccess = () => { id = r.result; }; };
+            const backgroundId = profile.settings?.appearance?.backgroundAssetId;
+            if (backgroundId) {
+                const r = tx.objectStore(IMAGE_STORE).get(backgroundId);
+                r.onsuccess = () => { if (!r.result?.blob) { missing = true; tx.abort(); } else add(); };
+            } else add();
+            tx.oncomplete = () => resolve(id);
+            tx.onabort = tx.onerror = () => reject(missing ? new Error('コピー元の背景画像がありません。') : tx.error);
         });
     },
 
@@ -2199,15 +2252,25 @@ const dbUtils = {
     },
 
     async updateProfile(profile) {
+        // Full replacement is reserved for explicit callers. Never recreate a
+        // deleted profile; normal settings/UI paths use field patches instead.
+        profile = structuredClone(profile);
         await this.openDB();
+        if (state.settingsSchemaVersion === 136) profile.settings = appLogic.getSharedProfileSettings(profile.settings);
         return new Promise((resolve, reject) => {
-            const store = this._getStore(PROFILES_STORE, 'readwrite');
-            const request = store.put(profile);
+            const tx = state.db.transaction([PROFILES_STORE, IMAGE_STORE], 'readwrite'), store = tx.objectStore(PROFILES_STORE);
+            const request = store.get(profile.id);
+            let missing = false;
             request.onsuccess = () => {
-                console.log(`[DB] プロファイルを更新しました (ID: ${profile.id})`);
-                resolve();
+                if (!request.result) { missing = true; tx.abort(); return; }
+                const id = profile.settings?.appearance?.backgroundAssetId;
+                if (id && id !== request.result.settings?.appearance?.backgroundAssetId) {
+                    const asset = tx.objectStore(IMAGE_STORE).get(id);
+                    asset.onsuccess = () => { if (asset.result?.blob) store.put(profile); else tx.abort(); };
+                } else store.put(profile);
             };
-            request.onerror = (event) => reject(`プロファイル(ID: ${profile.id})更新エラー: ${event.target.error}`);
+            tx.oncomplete = resolve;
+            tx.onabort = tx.onerror = () => reject(missing ? new Error('保存対象のプロファイルは削除されています。') : tx.error);
         });
     },
 
@@ -2290,6 +2353,9 @@ const dbUtils = {
         const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => applyNormalizedChatPinState(chat));
         
         const allAvailableAssets = new Map([...localAssetsBeforeClear, ...downloadedAssets]);
+        for (const id of requiredAssetIds) {
+            if (!allAvailableAssets.has(id)) throw new Error('必要な画像アセットが不足しているため復元を中止しました。');
+        }
         console.log(`[DB Import V2] 利用可能なアセットの完全なマップを作成しました: ${allAvailableAssets.size}件`);
 
         // 欠落しているアセットIDを記録するオブジェクト（チャット単位）
@@ -2355,7 +2421,8 @@ const dbUtils = {
 
         const currentTokens = await dbUtils.getSetting('dropboxTokens');
         const currentLocalUiSettings = await dbUtils.getSetting('localUiSettings');
-        const localUiSettingKeysForImport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
+        const migrationBackup = await dbUtils.getSetting(SettingsV136.BACKUP_KEY);
+        const localUiSettingKeysForImport = new Set(['localUiSettings', SettingsV136.BACKUP_KEY, ...LOCAL_UI_SETTING_KEYS]);
         const settingsForImport = (settings || []).filter(setting => !localUiSettingKeysForImport.has(setting.key));
 
         try {
@@ -2420,6 +2487,7 @@ const dbUtils = {
             });
             await Promise.all(tempClearPromises2);
 
+            if (migrationBackup) mainTx.objectStore(SETTINGS_STORE).put(migrationBackup);
             if (currentTokens) {
                 mainTx.objectStore(SETTINGS_STORE).put(currentTokens);
             }
@@ -3162,6 +3230,8 @@ const uiUtils = {
             redoneAt: null,
             discardedAt: null
         }));
+        appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
         const originalMessages = historyChanges.map(change => {
             const message = state.currentMessages[change.index];
             return {
@@ -3179,6 +3249,7 @@ const uiUtils = {
         try {
             historyChanges.forEach(change => {
                 const message = state.currentMessages[change.index];
+                preserveMessageContentBaselineV136(message);
                 message.content = String(change.after ?? '');
                 message.timestamp = Date.now();
             });
@@ -4106,12 +4177,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     messageDiv.dataset.messageIndex = String(index);
     messageDiv.dataset.role = role;
     
-    if (role === 'model' && messageData && messageData.thoughtSummary) {
+    if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
         const thoughtDetails = document.createElement('details');
         thoughtDetails.classList.add('thought-summary-details');
         const thoughtSummaryElem = document.createElement('summary');
         const thoughtMetaLabel = this.formatModelMetaLabel(messageData.thoughtTranslationMeta, '思考翻訳');
-        thoughtSummaryElem.textContent = thoughtMetaLabel ? `思考プロセス（${thoughtMetaLabel}）` : '思考プロセス';
+        const thoughtLabel = (messageData.usageMetadata?.tmExecution?.provider || messageData.continuation?.provider) === 'gemini'
+            ? '思考要約' : '思考プロセス';
+        thoughtSummaryElem.textContent = thoughtMetaLabel ? `${thoughtLabel}（${thoughtMetaLabel}）` : thoughtLabel;
         thoughtDetails.appendChild(thoughtSummaryElem);
         const thoughtContentDiv = document.createElement('div');
         thoughtContentDiv.classList.add('thought-summary-content');
@@ -5061,6 +5134,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.chatSidebarCloseBtn?.setAttribute('aria-label', 'サイドバーを閉じる');
         elements.chatSidebarBackdrop.hidden = !isOverlayOpen;
         elements.chatWorkspace.inert = isOverlayOpen;
+        this.updateChatWorkspaceLayout();
 
         const headerOpensSidebar = mode !== 'disabled';
         elements.gotoHistoryBtn.classList.toggle('hidden', mode === 'permanent' && isOpen);
@@ -5104,7 +5178,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     openChatSidebar() {
         if (chatSidebarUiState.mode === 'disabled') return false;
-        this.closeChatSearch({ restoreFocus: false });
         chatSidebarUiState.isOpen = true;
         if (chatSidebarUiState.mode === 'permanent') {
             void appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', true)
@@ -5117,6 +5190,56 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             requestAnimationFrame(() => elements.chatSidebarCloseBtn?.focus());
         }
         return true;
+    },
+
+    // Native modal dialogs live in the top layer (viewport coordinates); panels
+    // inside the workspace use local coordinates and need no sidebar offsets.
+    updateChatWorkspaceLayout() {
+        const workspace = elements.chatWorkspace;
+        if (!workspace) return;
+        if (!this.chatWorkspaceLayoutObserver) {
+            const schedule = () => {
+                if (this.chatWorkspaceLayoutFrame) return;
+                this.chatWorkspaceLayoutFrame = requestAnimationFrame(() => {
+                    this.chatWorkspaceLayoutFrame = 0;
+                    this.updateChatWorkspaceLayout();
+                });
+            };
+            this.chatWorkspaceLayoutObserver = new ResizeObserver(schedule);
+            [workspace, workspace.querySelector('.app-header'), workspace.querySelector('footer')]
+                .filter(Boolean).forEach(node => this.chatWorkspaceLayoutObserver.observe(node));
+            window.addEventListener('resize', schedule, { passive: true });
+            window.visualViewport?.addEventListener('resize', schedule, { passive: true });
+            window.visualViewport?.addEventListener('scroll', schedule, { passive: true });
+            const header = workspace.querySelector('.app-header');
+            header?.addEventListener('transitionend', schedule);
+            this.chatWorkspaceHeaderObserver = new MutationObserver(schedule);
+            this.chatWorkspaceHeaderObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+        }
+        const r = workspace.getBoundingClientRect();
+        if (!r.width || !r.height) return;
+        const viewport = window.visualViewport;
+        const left = Math.max(r.left, viewport?.offsetLeft || 0);
+        const top = Math.max(r.top, viewport?.offsetTop || 0);
+        const right = Math.min(r.right, (viewport?.offsetLeft || 0) + (viewport?.width || innerWidth));
+        const bottom = Math.min(r.bottom, (viewport?.offsetTop || 0) + (viewport?.height || innerHeight));
+        const headerBottom = workspace.querySelector('.app-header')?.getBoundingClientRect().bottom || top;
+        const composerTop = workspace.querySelector('footer')?.getBoundingClientRect().top || bottom;
+        const contentTop = Math.max(top, Math.min(bottom, headerBottom));
+        const contentBottom = Math.max(contentTop, Math.min(bottom, composerTop));
+        const root = document.documentElement.style;
+        root.setProperty('--chat-dialog-center-x', `${(left + right) / 2}px`);
+        root.setProperty('--chat-dialog-center-y', `${(top + bottom) / 2}px`);
+        root.setProperty('--chat-dialog-width', `${Math.max(0, right - left - 32)}px`);
+        root.setProperty('--chat-dialog-height', `${Math.max(0, bottom - top - 32)}px`);
+        workspace.style.setProperty('--chat-prompt-center-y', `${(contentTop + contentBottom) / 2 - r.top}px`);
+        workspace.style.setProperty('--chat-prompt-height', `${Math.max(0, contentBottom - contentTop - 24)}px`);
+        window.dispatchEvent(new Event('chat-workspace-layout'));
+    },
+
+    prepareChatDialog(dialog) {
+        dialog?.classList.toggle('chat-workspace-dialog', state.currentScreen === 'chat');
+        if (state.currentScreen === 'chat') this.updateChatWorkspaceLayout();
     },
 
     closeChatSidebar({ restoreFocus = false } = {}) {
@@ -6289,20 +6412,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 state.backgroundImageUrl = URL.createObjectURL(blob);
                 const newUrl = `url("${state.backgroundImageUrl}")`;
                 
-                const backgroundScreens = this.getBackgroundScreens();
-                const isAlreadyVisible = backgroundScreens.some(screen => screen.classList.contains('background-visible'));
-    
-                const switchImageAndFadeIn = () => {
-                    document.documentElement.style.setProperty('--chat-background-image', newUrl);
-                    this.setBackgroundImageVisible(true);
-                };
-    
-                if (isAlreadyVisible) {
-                    elements.chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
-                    this.setBackgroundImageVisible(false);
-                } else {
-                    switchImageAndFadeIn();
-                }
+                // Do not wait for a transition on a possibly hidden chat screen.
+                // All three screens retain their image layer while the source changes.
+                document.documentElement.style.setProperty('--chat-background-image', newUrl);
+                this.setBackgroundImageVisible(true);
     
                 console.log("背景画像をBlobから適用しました。");
             } catch (e) {
@@ -6356,7 +6469,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.maxTokensInput.value = state.settings.maxTokens === null ? '' : state.settings.maxTokens;
         elements.topKInput.value = state.settings.topK === null ? '' : state.settings.topK;
         elements.topPInput.value = state.settings.topP === null ? '' : state.settings.topP;
-        elements.thinkingBudgetInput.value = state.settings.thinkingBudget === null ? '' : state.settings.thinkingBudget;
         elements.includeThoughtsToggle.checked = state.settings.includeThoughts;
         elements.enableThoughtTranslationCheckbox.checked = state.settings.enableThoughtTranslation;
         elements.thoughtTranslationModelSelect.value = state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite';
@@ -6401,7 +6513,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.enableProofreadingCheckbox.checked = state.settings.enableProofreading;
         elements.proofreadingModelNameSelect.value = state.settings.proofreadingModelName || 'gemini-2.5-flash';
         elements.proofreadingSystemInstructionTextarea.value = state.settings.proofreadingSystemInstruction || '';
-        elements.proofreadingOptionsDiv.classList.toggle('hidden', !state.settings.enableProofreading);
+        elements.proofreadingOptionsDiv.classList.remove('hidden');
         elements.enableAutoRetryCheckbox.checked = state.settings.enableAutoRetry;
         elements.maxRetriesInput.value = state.settings.maxRetries;
         elements.autoRetryOptionsDiv.classList.toggle('hidden', !state.settings.enableAutoRetry);
@@ -6499,6 +6611,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.sdPromptImproveModelSelect.value = state.settings.sdPromptImproveModel || 'gemini-2.5-flash';
         elements.sdPromptImproveSystemPromptTextarea.value = state.settings.sdPromptImproveSystemPrompt || '';
         elements.sdQualityCheckerOptionsDiv.classList.toggle('hidden', !state.settings.sdEnableQualityChecker);
+        window.settingsUiV136?.refresh();
     },
 
 
@@ -6833,6 +6946,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     showScreen(screenName, fromPopState = false) {
         return new Promise((resolve) => {
           const startTime = performance.now();
+          window.settingsUiV136?.closePopover(false);
 
           if (screenName !== 'chat') {
             this.closeHistoryItemMenu();
@@ -6885,6 +6999,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             settings.style.transform = pos.history.settings;
             this.renderHistoryList();
           } else if (screenName === 'settings') {
+            if (!fromPopState) window.settingsUiV136?.enter();
 
             chat.style.transform = pos.settings.chat;
             historyEl.style.transform = pos.settings.history;
@@ -6963,6 +7078,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.loadingIndicator.classList.add('hidden');
             elements.loadingIndicator.removeAttribute('aria-live');
         }
+        window.settingsUiV136?.renderExecution();
         this.scheduleComposerTextareaResize(true);
         this.updateGenerationStatusIndicator();
         appLogic.updateChangeHistoryControls();
@@ -7817,25 +7933,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             nameSpan.textContent = profile.name;
             textContainer.appendChild(nameSpan);
 
-            const modelLineDiv = document.createElement('div');
-            modelLineDiv.classList.add('profile-menu-model-line');
-
-            const modelSpan = document.createElement('span');
-            modelSpan.classList.add('profile-menu-model');
-            modelSpan.textContent = profile.settings?.modelName || 'モデル未設定';
-            modelLineDiv.appendChild(modelSpan);
-
-            if (profile.settings?.modelName === 'gemini-2.5-pro') {
-                const usage = profile.apiUsage || { count: 0 };
-    
-                const countSpan = document.createElement('span');
-                countSpan.classList.add('profile-menu-api-count');
-                countSpan.textContent = `(本日: ${usage.count} 回)`;
-                modelLineDiv.appendChild(countSpan);
-            }
-            
-            textContainer.appendChild(modelLineDiv);
-
             menuItem.appendChild(iconContainer);
             menuItem.appendChild(textContainer);
 
@@ -7908,7 +8005,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         elements.profileDisplayNameMain.textContent = profile.name;
         
-        const subText = `${profile.settings.modelName || '...'} / T: ${profile.settings.temperature ?? '...'}`;
+        const subText = 'プロファイルの設定を編集中';
         elements.profileDisplayNameSub.textContent = subText;
         
         elements.profileDisplayStatus.classList.toggle('active', profile.id === state.activeProfileId);
@@ -8005,7 +8102,7 @@ const apiUtils = {
                 const toolCalls = [];
                 
                 for (const part of parts) {
-                    if (part.text) {
+                    if (part.text && part.thought !== true) {
                         contentParts.push({ type: 'text', text: part.text });
                     } else if (part.inlineData) {
                         contentParts.push(...this._convertInlineDataToOpenAIContentParts(part.inlineData));
@@ -8027,6 +8124,8 @@ const apiUtils = {
                 }
                 
                 const message = { role };
+                const continuation = geminiMsg.tmContinuation;
+                if (role === 'assistant' && continuation) Object.assign(message, structuredClone(continuation));
                 
                 // コンテンツの設定
                 if (contentParts.length > 0) {
@@ -8334,6 +8433,7 @@ const apiUtils = {
                 if (parts.length > 0) {
                     candidates.push({
                         content: { parts },
+                        tmContinuation: { reasoning_details: message.reasoning_details, reasoning_content: message.reasoning_content, reasoning: message.reasoning },
                         finishReason: this.mapFinishReason(choice.finish_reason),
                         index: choice.index
                     });
@@ -8350,7 +8450,8 @@ const apiUtils = {
         
         return {
             candidates,
-            usageMetadata
+            usageMetadata,
+            tmActualModel: openAIResponse.model
         };
     },
 
@@ -8433,6 +8534,15 @@ const apiUtils = {
             // まずロールを判定（デフォルト）
             let role = geminiMsg.role === 'model' ? 'assistant' : geminiMsg.role;
             const content = [];
+            if (role === 'assistant' && geminiMsg.tmBedrockContinuation) {
+                const signedContent = structuredClone(geminiMsg.tmBedrockContinuation).map(item => {
+                    if (Array.isArray(item.reasoningContent?.redactedContent))
+                        item.reasoningContent.redactedContent = Uint8Array.from(item.reasoningContent.redactedContent);
+                    return item;
+                });
+                converseMessages.push({ role, content: signedContent });
+                continue;
+            }
             
             // functionResponseが含まれているかチェック
             let hasFunctionResponse = false;
@@ -8520,7 +8630,9 @@ const apiUtils = {
             const message = converseResponse.output.message;
             
             for (const contentItem of message.content || []) {
-                if (contentItem.text) {
+                if (contentItem.reasoningContent?.reasoningText?.text) {
+                    parts.push({ text: contentItem.reasoningContent.reasoningText.text, thought: true });
+                } else if (contentItem.text) {
                     parts.push({ text: contentItem.text });
                 } else if (contentItem.toolUse) {
                     parts.push({
@@ -8553,7 +8665,12 @@ const apiUtils = {
                     parts: parts,
                     role: 'model'
                 },
-                finishReason: finishReason
+                finishReason: finishReason,
+                tmBedrockContinuation: converseResponse.output?.message?.content?.map(item => {
+                    if (item.reasoningContent?.redactedContent instanceof Uint8Array)
+                        return { reasoningContent: { redactedContent: Array.from(item.reasoningContent.redactedContent) } };
+                    return item;
+                })
             }],
             usageMetadata: {
                 promptTokenCount: converseResponse.usage?.inputTokens || 0,
@@ -8619,6 +8736,7 @@ const apiUtils = {
 
     // Gemini APIを呼び出す
     async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callGeminiApi: 現在の設定値を確認します。`, {
             forceFunctionCalling: state.settings.forceFunctionCalling,
@@ -8627,7 +8745,7 @@ const apiUtils = {
             apiConfigId: executionConfig?.id || ''
         });
 
-        const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || state.settings.apiKey) : state.settings.apiKey;
+        const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || '') : state.settings.apiKey;
         if (!apiKey) {
             throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'gemini', modelName: state.settings.modelName || DEFAULT_MODEL }, 'gemini'));
         }
@@ -8653,7 +8771,7 @@ const apiUtils = {
             : GEMINI_API_BASE_URL;
         const endpoint = `${geminiBaseUrl}${model}:${endpointMethod}key=${apiKey}`;
         
-        const finalGenerationConfig = { ...generationConfig };
+        const finalGenerationConfig = appLogic.applyExecutionThinking({ ...generationConfig }, 'gemini');
         
         if (isImageGenModel) {
             finalGenerationConfig.responseModalities = ['IMAGE', 'TEXT'];
@@ -8664,16 +8782,10 @@ const apiUtils = {
             delete finalGenerationConfig.topP;
             delete finalGenerationConfig.temperature;
 
-        } else {
-            if (state.settings.thinkingBudget !== null || state.settings.includeThoughts) {
-                generationConfig.thinkingConfig = {};
-                if(state.settings.thinkingBudget !== null) generationConfig.thinkingConfig.thinkingBudget = state.settings.thinkingBudget;
-                if(state.settings.includeThoughts) generationConfig.thinkingConfig.includeThoughts = true;
-            }
         }
 
         const requestBody = {
-            contents: messagesForApi,
+            contents: await SettingsV136.historyTaskV136('convert',{provider:'gemini',messages:messagesForApi,model}),
             ...(Object.keys(finalGenerationConfig).length > 0 && { generationConfig: finalGenerationConfig }),
             safetySettings : [
                 { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -8720,7 +8832,7 @@ const apiUtils = {
         }
 
         console.log("Geminiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
-        console.log("ターゲットエンドポイント:", endpoint);
+        console.log("Geminiリクエストモデル:", model);
 
         try {
             const timestamp = new Date().toLocaleTimeString();
@@ -8741,7 +8853,7 @@ const apiUtils = {
                 let errorData = null;
                 try {
                     errorData = await response.json();
-                    console.error("APIエラーレスポンスボディ:", errorData);
+                    console.error("APIエラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorData));
                     if (errorData.error && errorData.error.message) {
                         errorMsg = `APIエラー (${response.status}): ${errorData.error.message}`;
                     }
@@ -8756,7 +8868,7 @@ const apiUtils = {
             return response;
         } catch (error) {
             if (error.name === 'AbortError') {
-                throw new Error("リクエストがキャンセルされました。");
+                throw new DOMException("リクエストがキャンセルされました。", 'AbortError');
             } else {
                 throw error;
             }
@@ -8814,13 +8926,13 @@ const apiUtils = {
         
         const legacyTranslationModelName = typeof translationModelName === 'string' ? translationModelName : '';
         const modelToUse = translationConfig.modelName || legacyTranslationModelName || 'gemini-2.5-flash-lite';
-        const apiKey = translationConfig.apiKey || state.settings.apiKey;
+        const apiKey = translationConfig.apiKey || '';
         if (!apiKey) {
             console.warn("翻訳スキップ: APIキーが設定されていません。");
             return textToTranslate;
         }
 
-        const endpoint = `${GEMINI_API_BASE_URL}${modelToUse}:generateContent`;
+        const endpoint = this.getGeminiEndpointV136(translationConfig, modelToUse);
         
         const systemInstruction = {
             parts: [{ text: "You are a professional translator. Translate the given English text into natural Japanese. Do not add any extra comments or explanations. Just output the translated Japanese text." }]
@@ -8895,7 +9007,7 @@ const apiUtils = {
                 if (!response.ok) {
                     let errorBody = await response.text();
                     try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
-                    console.error(`翻訳APIエラー (${response.status})`, errorBody);
+                    console.error(`翻訳APIエラー (${response.status})`, sanitizeApiRequestBodyForLog(errorBody));
                     const error = new Error(`翻訳APIエラー (${response.status})`);
                     error.status = response.status;
                     throw error;
@@ -8907,7 +9019,7 @@ const apiUtils = {
                     console.log("--- 翻訳処理成功 ---");
                     return translatedText;
                 } else {
-                    console.warn("翻訳APIの応答形式が不正、またはコンテンツが空です。", responseData);
+                    console.warn("翻訳APIの応答形式が不正、またはコンテンツが空です。", sanitizeApiRequestBodyForLog(responseData));
                     if(responseData.promptFeedback) {
                         console.warn("翻訳がブロックされた可能性があります:", responseData.promptFeedback);
                     }
@@ -8945,6 +9057,10 @@ const apiUtils = {
         ];
     },
 
+    getGeminiEndpointV136(config, modelName) {
+        const base = config?.baseUrl || GEMINI_API_BASE_URL;
+        return `${base.replace(/\/?$/, '/')}${modelName}:generateContent`;
+    },
     getOpenAICompatibleEndpoint(config = {}, defaultEndpoint = OPENROUTER_API_BASE_URL) {
         if (!config.baseUrl) return defaultEndpoint;
         return `${config.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions');
@@ -8953,7 +9069,7 @@ const apiUtils = {
     async translateTextWithOpenRouter(textToTranslate, translationConfig = {}) {
         console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
 
-        const apiKey = translationConfig.apiKey || state.settings.openrouterApiKey;
+        const apiKey = translationConfig.apiKey || '';
         if (!apiKey) {
             console.warn("OpenRouter翻訳スキップ: OpenRouter APIキーが設定されていません。");
             return textToTranslate;
@@ -8994,7 +9110,7 @@ const apiUtils = {
             if (!response.ok) {
                 let errorBody = await response.text();
                 try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
-                console.error(`OpenRouter翻訳APIエラー (${response.status})`, errorBody);
+                console.error(`OpenRouter翻訳APIエラー (${response.status})`, sanitizeApiRequestBodyForLog(errorBody));
                 return textToTranslate;
             }
 
@@ -9005,7 +9121,7 @@ const apiUtils = {
                 return translatedText;
             }
 
-            console.warn("OpenRouter翻訳APIの応答形式が不正、またはコンテンツが空です。", responseData);
+            console.warn("OpenRouter翻訳APIの応答形式が不正、またはコンテンツが空です。", sanitizeApiRequestBodyForLog(responseData));
             return textToTranslate;
         } catch (error) {
             console.error("OpenRouterでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
@@ -9016,7 +9132,7 @@ const apiUtils = {
     async translateTextWithOpenAICompatible(textToTranslate, translationConfig = {}, providerLabel = 'OpenAI互換API') {
         console.log(`--- ${providerLabel} 思考プロセス翻訳処理開始 ---`);
 
-        const apiKey = translationConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey;
+        const apiKey = translationConfig.apiKey || '';
         if (!apiKey) {
             console.warn(`${providerLabel}翻訳スキップ: APIキーが設定されていません。`);
             return textToTranslate;
@@ -9052,7 +9168,7 @@ const apiUtils = {
             if (!response.ok) {
                 let errorBody = await response.text();
                 try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
-                console.error(`${providerLabel}翻訳APIエラー (${response.status})`, errorBody);
+                console.error(`${providerLabel}翻訳APIエラー (${response.status})`, sanitizeApiRequestBodyForLog(errorBody));
                 return textToTranslate;
             }
 
@@ -9063,7 +9179,7 @@ const apiUtils = {
                 return translatedText;
             }
 
-            console.warn(`${providerLabel}翻訳APIの応答形式が不正、またはコンテンツが空です。`, responseData);
+            console.warn(`${providerLabel}翻訳APIの応答形式が不正、またはコンテンツが空です。`, sanitizeApiRequestBodyForLog(responseData));
             return textToTranslate;
         } catch (error) {
             console.error(`${providerLabel}での思考プロセス翻訳中にエラーが発生しました。原文を返します。`, error);
@@ -9074,8 +9190,8 @@ const apiUtils = {
     async translateTextWithBedrock(textToTranslate, translationConfig = {}) {
         console.log("--- Amazon Bedrock 思考プロセス翻訳処理開始 ---");
 
-        const accessKey = translationConfig.bedrockAccessKey || translationConfig.apiKey || state.settings.bedrockAccessKey;
-        const secretKey = translationConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+        const accessKey = translationConfig.bedrockAccessKey || translationConfig.apiKey || '';
+        const secretKey = translationConfig.bedrockSecretKey || '';
         const region = translationConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
         if (!accessKey || !secretKey) {
             console.warn("Bedrock翻訳スキップ: Bedrock認証情報が設定されていません。");
@@ -9094,6 +9210,7 @@ const apiUtils = {
             uiUtils.setLoadingIndicatorText('思考プロセスをAmazon Bedrockで翻訳中...');
             const client = new window.BedrockRuntimeClient({
                 region,
+                ...(translationConfig.baseUrl && { endpoint: translationConfig.baseUrl }),
                 credentials: {
                     accessKeyId: accessKey,
                     secretAccessKey: secretKey
@@ -9130,10 +9247,11 @@ const apiUtils = {
 
     // Z.ai APIを呼び出す
     async callZaiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callZaiApi: Z.ai APIを呼び出します。`);
 
-        const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey) : (state.settings.zaiApiKey || state.settings.apiKey);
+        const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || '') : (state.settings.zaiApiKey || state.settings.apiKey);
         if (!apiKey) {
             throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'zai', modelName: state.settings.modelName || DEFAULT_ZAI_MODEL }, 'zai'));
         }
@@ -9147,7 +9265,7 @@ const apiUtils = {
         const model = executionConfig?.provider === 'zai' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_ZAI_MODEL) : (state.settings.modelName || DEFAULT_ZAI_MODEL);
 
         // Gemini形式のメッセージをOpenAI形式に変換
-        const openAIMessages = this.convertGeminiToOpenAIFormat(messagesForApi);
+        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || state.settings.apiProvider,messages:messagesForApi,model});
 
         // システムプロンプトの処理
         if (systemInstruction && systemInstruction.parts && systemInstruction.parts.length > 0) {
@@ -9216,6 +9334,7 @@ const apiUtils = {
             }
         }
 
+        appLogic.applyExecutionThinking(requestBody, 'zai');
         console.log("Z.aiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         
         // メッセージ構造の詳細をログ出力（デバッグ用）
@@ -9253,7 +9372,7 @@ const apiUtils = {
         const zaiEndpoint = executionConfig?.provider === 'zai' && executionConfig.baseUrl
             ? `${executionConfig.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions')
             : ZAI_API_BASE_URL;
-        console.log("ターゲットエンドポイント:", zaiEndpoint);
+        console.log("ターゲットエンドポイント:", sanitizeApiRequestBodyForLog(zaiEndpoint));
 
         try {
             const timestamp = new Date().toLocaleTimeString();
@@ -9277,7 +9396,7 @@ const apiUtils = {
                 let errorData = null;
                 try {
                     errorData = await response.json();
-                    console.error("APIエラーレスポンスボディ:", errorData);
+                    console.error("APIエラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorData));
                     if (errorData.error && errorData.error.message) {
                         errorMsg = `APIエラー (${response.status}): ${errorData.error.message}`;
                     } else if (errorData.message) {
@@ -9332,10 +9451,11 @@ const apiUtils = {
 
     // OpenRouter APIを呼び出す
     async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callOpenRouterApi: OpenRouter APIを呼び出します。`);
 
-        const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || state.settings.openrouterApiKey) : state.settings.openrouterApiKey;
+        const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || '') : state.settings.openrouterApiKey;
         if (!apiKey) {
             throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'openrouter', modelName: state.settings.modelName || DEFAULT_OPENROUTER_MODEL }, 'openrouter'));
         }
@@ -9349,7 +9469,7 @@ const apiUtils = {
         const model = executionConfig?.provider === 'openrouter' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_OPENROUTER_MODEL) : (state.settings.modelName || DEFAULT_OPENROUTER_MODEL);
 
         // Gemini形式のメッセージをOpenAI形式に変換
-        const openAIMessages = this.convertGeminiToOpenAIFormat(messagesForApi);
+        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || state.settings.apiProvider,messages:messagesForApi,model});
 
         // システムプロンプトの処理
         if (systemInstruction && systemInstruction.parts && systemInstruction.parts.length > 0) {
@@ -9369,12 +9489,7 @@ const apiUtils = {
             messages: openAIMessages
         };
 
-        if (state.settings.includeThoughts) {
-            requestBody.reasoning = {
-                effort: "high",
-                exclude: false
-            };
-        }
+        appLogic.applyExecutionThinking(requestBody, 'openrouter');
 
         // 生成パラメータの変換
         if (generationConfig) {
@@ -9461,7 +9576,7 @@ const apiUtils = {
         const openRouterEndpoint = executionConfig?.provider === 'openrouter' && executionConfig.baseUrl
             ? `${executionConfig.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions')
             : OPENROUTER_API_BASE_URL;
-        console.log("ターゲットエンドポイント:", openRouterEndpoint);
+        console.log("ターゲットエンドポイント:", sanitizeApiRequestBodyForLog(openRouterEndpoint));
 
         try {
             const timestamp = new Date().toLocaleTimeString();
@@ -9487,13 +9602,13 @@ const apiUtils = {
                 let errorData = null;
                 try {
                     errorData = await response.json();
-                    console.error("APIエラーレスポンスボディ:", errorData);
+                    console.error("APIエラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorData));
                     
                     // 詳細なエラー情報をログ出力
                     if (errorData.error) {
-                        console.error("[OpenRouter] エラー詳細:", JSON.stringify(errorData.error, null, 2));
+                        console.error("[OpenRouter] エラー詳細:", JSON.stringify(sanitizeApiRequestBodyForLog(errorData.error), null, 2));
                         if (errorData.error.metadata) {
-                            console.error("[OpenRouter] メタデータ:", errorData.error.metadata);
+                            console.error("[OpenRouter] メタデータ:", sanitizeApiRequestBodyForLog(errorData.error.metadata));
                         }
                         if (errorData.error.code) {
                             console.error("[OpenRouter] エラーコード:", errorData.error.code);
@@ -9558,11 +9673,12 @@ const apiUtils = {
 
     // Amazon Bedrock APIを呼び出す
     async callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+        appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callBedrockApi: Amazon Bedrock APIを呼び出します。`);
         
-        const accessKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockAccessKey || executionConfig.apiKey || state.settings.bedrockAccessKey) : state.settings.bedrockAccessKey;
-        const secretKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockSecretKey || state.settings.bedrockSecretKey) : state.settings.bedrockSecretKey;
+        const accessKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockAccessKey || executionConfig.apiKey || '') : state.settings.bedrockAccessKey;
+        const secretKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockSecretKey || '') : state.settings.bedrockSecretKey;
         const region = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION) : (state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION);
         
         // デバッグ情報を出力
@@ -9605,7 +9721,7 @@ const apiUtils = {
             });
 
             // Gemini形式からBedrock Converse形式へ変換
-            const converseMessages = this.convertGeminiToConverseFormat(messagesForApi);
+            const converseMessages = await SettingsV136.historyTaskV136('convert',{provider:'bedrock',messages:messagesForApi,model:modelId});
             
             // デバッグ: 変換後のメッセージ数とtoolResult数を確認
             console.log(`[Bedrock] 変換後のメッセージ数: ${converseMessages.length}`);
@@ -9674,6 +9790,7 @@ const apiUtils = {
                 }
             }
 
+            appLogic.applyExecutionThinking(requestBody, 'bedrock');
             console.log("Amazon Bedrockへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), (key, value) => {
                 if (key === 'bytes' && value instanceof Uint8Array) {
                     return `[Uint8Array: ${value.length} bytes]`;
@@ -9683,9 +9800,9 @@ const apiUtils = {
 
             // Converse APIコマンドを実行
             const command = new window.ConverseCommand(requestBody);
-            const response = await client.send(command);
+            const response = await client.send(command, { abortSignal: signal });
             
-            console.log("Amazon Bedrockからのレスポンス:", response);
+            console.log("Amazon Bedrock応答受信:", response.stopReason);
 
             // レスポンスをGemini形式に変換
             const geminiFormatResponse = this.convertConverseToGeminiFormat(response);
@@ -10340,8 +10457,20 @@ function validateHistoryEntryApplication(entry, direction) {
     return { valid: true, reason: '', targets };
 }
 
+function preserveMessageContentBaselineV136(message) {
+    // Reuse the existing optional continuation/displayContent envelope. No schema
+    // migration or destructive rewrite of provider blocks is needed for user edits.
+    if (!message) return;
+    message.continuation ||= {};
+    if (message.continuation.displayContent === undefined) {
+        message.continuation.displayContent = message.continuation.parts
+            ?.filter(p => typeof p.text === 'string' && p.thought !== true).map(p => p.text).join('')
+            ?? String(message.content ?? '');
+    }
+}
 function setHistoryChangeTargetContent(target, nextContent) {
     if (!target?.message) return false;
+    preserveMessageContentBaselineV136(target.message);
     target.message.content = String(nextContent ?? '');
     target.message.timestamp = Date.now();
     return true;
@@ -10459,6 +10588,8 @@ function getLatestApplicableHistoryEntry(history, direction) {
 }
 
 // --- アプリケーションロジック (appLogic) ---
+const INITIAL_SETTINGS_V136 = structuredClone(state.settings);
+
 const appLogic = {
     _setupEventListenersCallCount: 0,
     releaseNotesChangelogTextCache: null,
@@ -10875,13 +11006,14 @@ const appLogic = {
         const profile = state.activeProfile || {};
 
         return {
-            schemaVersion: 1,
+            schemaVersion: 2,
+            thinkingEffort: executionConfig?.thinkingEffort ?? null,
             profileId: state.activeProfileId ?? profile.id ?? null,
             profileName: this.cleanExecutionMetaText(profile.name || '', 120),
             apiConfigId: this.cleanExecutionMetaText(executionConfig?.id || '', 120),
             apiConfigName: this.cleanExecutionMetaText(executionConfig?.name || '', 120),
             provider,
-            modelName: this.cleanExecutionMetaText(this.resolveExecutionModelName(provider), 240),
+            modelName: this.cleanExecutionMetaText(executionConfig?.modelName || this.resolveExecutionModelName(provider), 240),
             generatedAt: Date.now()
         };
     },
@@ -10996,16 +11128,7 @@ const appLogic = {
     },
 
     getSharedProfileSettings(settings = {}) {
-        const sharedSettings = { ...settings };
-        delete sharedSettings.apiConfigs;
-        delete sharedSettings.apiConfigsMigratedV1310;
-        delete sharedSettings.localUiSettings;
-        delete sharedSettings.globalOtherSettings;
-        delete sharedSettings.globalThemeSettings;
-        delete sharedSettings.themeSettingsProfileScoped;
-        LOCAL_UI_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
-        GLOBAL_OTHER_SETTING_KEYS.forEach(key => delete sharedSettings[key]);
-        return sharedSettings;
+        return SettingsV136.profileSettings(settings);
     },
 
     normalizeApiProvider(provider) {
@@ -11310,159 +11433,27 @@ const appLogic = {
         const validation = this.validateModelRefForUsage(modelRef, usageKey);
         if (!validation.valid) {
             const error = new Error(validation.message);
-            error.modelRefValidation = validation;
+            const { config, ...safeValidation } = validation;
+            error.modelRefValidation = safeValidation;
             throw error;
         }
         return validation;
     },
 
     getDefaultModelRefForExecution() {
-        const profileSettings = state.activeProfile?.settings || {};
-        const profileRef = profileSettings.defaultModelRef;
-        if (profileRef?.apiConfigId && profileRef?.modelName) {
-            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
-        }
-
-        const settingsRef = state.settings.defaultModelRef;
-        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
-            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
-        }
-
-        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
-        const legacyModelName = profileSettings.modelName || state.settings.modelName || DEFAULT_MODEL;
-        const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
-        if (byLegacyConfig) return byLegacyConfig;
-
-        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
-        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
-        if (providerConfig) {
-            return {
-                apiConfigId: providerConfig.id,
-                modelName: legacyModelName || this.getApiConfigModelCandidates(providerConfig)[0] || 'gemini-2.5-flash-lite'
-            };
-        }
-
-        return null;
+        return this.getCurrentChatModelRef();
     },
 
     getThoughtTranslationModelRefForExecution() {
-        const profileSettings = state.activeProfile?.settings || {};
-        const profileRef = profileSettings.thoughtTranslationModelRef;
-        if (profileRef?.apiConfigId && profileRef?.modelName) {
-            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
-        }
-
-        const settingsRef = state.settings.thoughtTranslationModelRef;
-        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
-            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
-        }
-
-        const legacyModelName = profileSettings.thoughtTranslationModel
-            || profileSettings.thoughtTranslationModelName
-            || state.settings.thoughtTranslationModel
-            || state.settings.thoughtTranslationModelName
-            || state.settings.modelName
-            || DEFAULT_MODEL;
-        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
-        if (legacyApiConfigId) {
-            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
-            if (byLegacyConfig) return byLegacyConfig;
-        }
-
-        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
-        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
-        if (providerConfig) {
-            const candidates = this.getApiConfigModelCandidates(providerConfig);
-            return {
-                apiConfigId: providerConfig.id,
-                modelName: candidates.includes(legacyModelName) ? legacyModelName : (candidates[0] || legacyModelName)
-            };
-        }
-
-        const byLegacyModel = this.findModelRefForLegacyModel(legacyModelName);
-        if (byLegacyModel) return byLegacyModel;
-
-        return { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: 'gemini-2.5-flash-lite' };
+        return this.getGlobalAuxiliaryModelRefV136('thoughtTranslationModelRef', 'thoughtTranslationModel');
     },
 
     getProofreadingModelRefForExecution() {
-        const profileSettings = state.activeProfile?.settings || {};
-        const profileRef = profileSettings.proofreadingModelRef;
-        if (profileRef?.apiConfigId || profileRef?.modelName) {
-            return { apiConfigId: profileRef.apiConfigId || '', modelName: profileRef.modelName || '' };
-        }
-        const settingsRef = state.settings.proofreadingModelRef;
-        if (settingsRef?.apiConfigId || settingsRef?.modelName) {
-            return { apiConfigId: settingsRef.apiConfigId || '', modelName: settingsRef.modelName || '' };
-        }
-
-        const existingChoices = this.getApiModelChoices();
-        const refs = [
-            profileSettings.defaultModelRef,
-            state.settings.defaultModelRef,
-            profileSettings.summaryModelRef,
-            state.settings.summaryModelRef
-        ];
-        for (const ref of refs) {
-            if (!ref?.apiConfigId || !ref?.modelName) continue;
-            const existing = existingChoices.find(choice => choice.apiConfigId === ref.apiConfigId && choice.modelName === ref.modelName);
-            if (existing) return { apiConfigId: ref.apiConfigId, modelName: ref.modelName };
-        }
-
-        const legacyModelName = profileSettings.proofreadingModelName
-            || state.settings.proofreadingModelName
-            || profileSettings.modelName
-            || state.settings.modelName
-            || DEFAULT_MODEL;
-        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
-        if (legacyApiConfigId) {
-            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
-            if (byLegacyConfig) return byLegacyConfig;
-        }
-
-        const defaultRef = this.getDefaultModelRefForExecution();
-        if (defaultRef) return defaultRef;
-
-        return this.findModelRefForLegacyModel(legacyModelName)
-            || { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: DEFAULT_MODEL };
+        return this.getGlobalAuxiliaryModelRefV136('proofreadingModelRef', 'proofreadingModelName');
     },
 
     getSummaryModelRefForExecution() {
-        const profileSettings = state.activeProfile?.settings || {};
-        const profileRef = profileSettings.summaryModelRef;
-        if (profileRef?.apiConfigId && profileRef?.modelName) {
-            return { apiConfigId: profileRef.apiConfigId, modelName: profileRef.modelName };
-        }
-
-        const settingsRef = state.settings.summaryModelRef;
-        if (settingsRef?.apiConfigId && settingsRef?.modelName) {
-            return { apiConfigId: settingsRef.apiConfigId, modelName: settingsRef.modelName };
-        }
-
-        const legacyModelName = profileSettings.summaryModelName
-            || profileSettings.summaryModel
-            || state.settings.summaryModelName
-            || state.settings.summaryModel
-            || profileSettings.modelName
-            || state.settings.modelName
-            || DEFAULT_MODEL;
-        const legacyApiConfigId = profileSettings.apiConfigId || state.settings.apiConfigId || '';
-        if (legacyApiConfigId) {
-            const byLegacyConfig = this.findModelRefForLegacyModel(legacyModelName, legacyApiConfigId);
-            if (byLegacyConfig) return byLegacyConfig;
-        }
-
-        const legacyProvider = profileSettings.apiProvider || state.settings.apiProvider || 'gemini';
-        const providerConfig = this.getDefaultApiConfigForProvider(legacyProvider);
-        if (providerConfig) {
-            return {
-                apiConfigId: providerConfig.id,
-                modelName: legacyModelName || this.getApiConfigModelCandidates(providerConfig)[0] || DEFAULT_MODEL
-            };
-        }
-
-        return this.findModelRefForLegacyModel(legacyModelName)
-            || { apiConfigId: this.getDefaultApiConfigIdForProvider('gemini'), modelName: DEFAULT_MODEL };
+        return this.getGlobalAuxiliaryModelRefV136('summaryModelRef', 'summaryModelName');
     },
 
     resolveApiConfigForModelRef(modelRef = null) {
@@ -11804,14 +11795,9 @@ const appLogic = {
     },
 
     async setActiveProfileApiConfigIdForProvider(provider = state.settings.apiProvider || 'gemini') {
-        if (!state.activeProfile?.settings) return null;
-        const config = this.getDefaultApiConfigForProvider(provider)
-            || this.createLegacyApiConfig(provider, state.settings);
-        state.settings.apiConfigId = config.id;
-        state.activeProfile.settings.apiConfigId = config.id;
-        state.activeApiConfig = config;
-        await dbUtils.updateProfile(state.activeProfile);
-        this.markAsDirtyAndSchedulePush('structural');
+        const config = this.getDefaultApiConfigForProvider(provider);
+        if (!config) return null;
+        await this.setCurrentChatModelRef({ apiConfigId: config.id, modelName: this.getApiConfigModelCandidates(config)[0] });
         return config;
     },
 
@@ -11856,6 +11842,7 @@ const appLogic = {
         await dbUtils.saveSetting('apiConfigs', state.apiConfigs);
         this.renderApiConfigList();
         uiUtils.updateUserModelOptions();
+        window.settingsUiV136?.refresh();
     },
 
     getApiConfigProviderDefaults(provider = 'gemini') {
@@ -12241,9 +12228,11 @@ const appLogic = {
             if (state.settings.apiProvider === 'bedrock' && config.defaultModel) state.settings.modelName = config.defaultModel;
         }
 
-        if (state.activeProfile?.settings) {
-            Object.assign(state.activeProfile.settings, this.getSharedProfileSettings(state.settings));
-            await dbUtils.updateProfile(state.activeProfile);
+        this.syncChatExecutionToLegacySettings();
+        if (state.settingsSchemaVersion !== 136 && state.activeProfile?.settings) {
+            const changes = SettingsV136.pick(state.settings, ['apiConfigId','apiProvider','apiKey','openrouterApiKey','zaiApiKey',
+                'bedrockAccessKey','bedrockSecretKey','bedrockRegion','modelName','additionalOpenRouterModels','additionalZaiModels','additionalBedrockModels']);
+            await this.mutateProfileV136(state.activeProfileId, p => ({ ...p, settings: { ...p.settings, ...changes } }));
         }
         uiUtils.applySettingsToUI();
     },
@@ -12255,7 +12244,7 @@ const appLogic = {
             const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
             const index = configs.findIndex(config => config.id === nextConfig.id);
             const existingConfig = index >= 0 ? configs[index] : null;
-            const usage = this.getApiConfigUsage(nextConfig.id);
+            const usage = await this.inspectApiConfigReferences(nextConfig.id);
             if (existingConfig?.enabled !== false && nextConfig.enabled === false && usage.isInUse) {
                 await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
                 return;
@@ -12277,7 +12266,6 @@ const appLogic = {
             this.renderApiConfigList();
             this.closeApiConfigDialog();
             this.markAsDirtyAndSchedulePush('structural');
-            await uiUtils.showCustomAlert('API設定を保存しました。');
         } catch (error) {
             await uiUtils.showCustomAlert(error?.message || 'API設定を保存できませんでした。');
         }
@@ -12292,7 +12280,7 @@ const appLogic = {
             return;
         }
 
-        const usage = this.getApiConfigUsage(configId);
+        const usage = await this.inspectApiConfigReferences(configId);
         if (usage.isInUse || usage.isActiveSettingsReference || usage.usedByProfiles.length > 0) {
             await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため削除できません。', usage.blockingUsages));
             return;
@@ -12306,7 +12294,6 @@ const appLogic = {
         this.syncActiveApiConfigState();
         this.renderApiConfigList();
         this.markAsDirtyAndSchedulePush('structural');
-        await uiUtils.showCustomAlert('API設定を削除しました。');
     },
 
     async toggleApiConfigEnabled(configId, enabled) {
@@ -12314,7 +12301,7 @@ const appLogic = {
         const index = configs.findIndex(config => config.id === configId);
         if (index === -1) return;
         if (enabled === false) {
-            const usage = this.getApiConfigUsage(configId);
+            const usage = await this.inspectApiConfigReferences(configId);
             if (usage.isInUse) {
                 await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
                 return;
@@ -12331,51 +12318,50 @@ const appLogic = {
         this.markAsDirtyAndSchedulePush('structural');
     },
 
+    convertLegacyApiSettingsV136(legacy, profiles, activeId) {
+        const active = profiles.find(p => p.id === activeId)?.settings || {};
+        const sources = [{ ...legacy, ...active }, ...profiles.map(p => p.settings || {})];
+        const configs = this.normalizeApiConfigs(legacy.apiConfigs || []);
+        const deleted = new Set(legacy[API_CONFIG_DELETED_IDS_KEY] || []);
+        for (const provider of ['gemini','openrouter','zai','bedrock']) {
+            const id = this.getDefaultApiConfigIdForProvider(provider);
+            if (configs.some(c => c.id === id) || (deleted.has(id) && configs.length)) continue;
+            if (this.shouldCreateApiConfigForProvider(provider, sources)) configs.push(this.createLegacyApiConfig(provider, this.findLegacyApiSourceForProvider(provider, sources)));
+        }
+        const findRef = (name, preferredId) => {
+            const config = configs.find(c => c.id === preferredId && this.getApiConfigModelCandidates(c).includes(name))
+                || configs.find(c => this.getApiConfigModelCandidates(c).includes(name));
+            return config && name ? { apiConfigId: config.id, modelName: name } : null;
+        };
+        const refs = settings => {
+            const result = { ...settings };
+            for (const [key, name] of [['defaultModelRef',settings.modelName || DEFAULT_MODEL],
+                ['thoughtTranslationModelRef',settings.thoughtTranslationModel || 'gemini-2.5-flash-lite'],
+                ['proofreadingModelRef',settings.proofreadingModelName || settings.modelName || DEFAULT_MODEL],
+                ['summaryModelRef',settings.summaryModelName || settings.modelName || DEFAULT_MODEL]])
+                result[key] ||= findRef(name, settings.apiConfigId);
+            return result;
+        };
+        for (const profile of profiles) {
+            const settings = { ...profile.settings };
+            if (!configs.some(c => c.id === settings.apiConfigId)) settings.apiConfigId = configs.find(c => c.provider === (settings.apiProvider || 'gemini') && c.enabled)?.id;
+            profile.settings = refs(settings);
+        }
+        // Supplement candidate lists without replacing existing credentials, endpoints or defaults.
+        for (const config of configs) {
+            const ownSources = !legacy[API_MODEL_CANDIDATES_MIGRATION_KEY] && config.id === this.getDefaultApiConfigIdForProvider(config.provider) ? sources : [];
+            const key = { gemini:'additionalModels',openrouter:'additionalOpenRouterModels',zai:'additionalZaiModels',bedrock:'additionalBedrockModels' }[config.provider];
+            const referenced = [legacy,...profiles.map(p => p.settings)].flatMap(v => Object.values(v).filter(r => r?.apiConfigId === config.id).map(r => r.modelName));
+            config.modelCandidates = this.normalizeModelCandidates([this.getApiConfigModelCandidates(config), referenced,
+                ...ownSources.flatMap(v => [v[key],v.apiProvider === config.provider ? v.modelName : ''])]);
+            config.additionalModels = this.joinModelCandidateList(config.modelCandidates);
+        }
+        for (const profile of profiles) profile.settings = refs(profile.settings);
+        return { configs: this.normalizeApiConfigs(configs), active: refs(active) };
+    },
+
     async ensureApiConfigsMigrationV1310() {
-        const beforeConfigs = this.normalizeApiConfigs(state.settings.apiConfigs || state.apiConfigs || []);
-        const nextConfigs = this.ensureDefaultApiConfigs(beforeConfigs);
-        const beforeJson = JSON.stringify(beforeConfigs);
-        const nextJson = JSON.stringify(nextConfigs);
-        let changed = beforeJson !== nextJson;
-
-        state.apiConfigs = nextConfigs;
-        state.settings.apiConfigs = nextConfigs;
-
-        const defaultGeminiId = this.getDefaultApiConfigIdForProvider('gemini');
-        for (const profile of state.profiles || []) {
-            if (!profile.settings) profile.settings = {};
-            const currentId = profile.settings.apiConfigId;
-            const resolvedId = this.inferApiConfigIdForProfile(profile) || defaultGeminiId;
-            if (!currentId || !this.getApiConfigById(currentId)) {
-                profile.settings.apiConfigId = resolvedId;
-                try {
-                    await dbUtils.updateProfile(profile);
-                    changed = true;
-                } catch (error) {
-                    console.error(`[ApiConfigMigration] プロファイル(ID: ${profile.id})のapiConfigId補完に失敗しました:`, error);
-                }
-            }
-        }
-
-        if (state.activeProfile?.settings) {
-            const latestActiveProfile = state.profiles.find(profile => profile.id === state.activeProfileId);
-            if (latestActiveProfile) {
-                state.activeProfile = latestActiveProfile;
-                state.settings.apiConfigId = latestActiveProfile.settings?.apiConfigId || defaultGeminiId;
-            }
-        }
-
-        if (changed || !state.apiConfigsMigratedV1310) {
-            await this.saveApiConfigs(nextConfigs);
-            await dbUtils.saveSetting(API_CONFIG_MIGRATION_KEY, true);
-            state.apiConfigsMigratedV1310 = true;
-            state.settings.apiConfigsMigratedV1310 = true;
-            this.markAsDirtyAndSchedulePush('structural');
-            console.log("[ApiConfigMigration] v1.31.0 API設定リスト移行を保存しました。", nextConfigs.map(config => this.getSanitizedApiConfigForLog(config)));
-        }
-
-        this.syncActiveApiConfigState();
-        this.renderApiConfigList();
+        return this.ensureSettingsMigrationV136();
     },
 
     collectLegacyModelCandidatesByProvider() {
@@ -12425,119 +12411,11 @@ const appLogic = {
     },
 
     async ensureApiModelCandidatesStabilityV1317() {
-        const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_CANDIDATES_MIGRATION_KEY))?.value === true;
-        const beforeConfigs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
-        const configs = this.ensureDefaultApiConfigs(beforeConfigs);
-        const legacyByProvider = alreadyMigrated ? null : this.collectLegacyModelCandidatesByProvider();
-        const refsByConfigId = this.collectModelRefCandidatesByApiConfigId();
-
-        const nextConfigs = configs.map(config => {
-            const defaultId = this.getDefaultApiConfigIdForProvider(config.provider);
-            const legacyCandidates = !alreadyMigrated && config.id === defaultId ? (legacyByProvider?.[config.provider] || []) : [];
-            const refCandidates = refsByConfigId.get(config.id) || [];
-            const modelCandidates = this.normalizeModelCandidates([
-                this.getApiConfigModelCandidates(config),
-                legacyCandidates,
-                refCandidates
-            ]);
-            return this.normalizeApiConfig({
-                ...config,
-                modelCandidates,
-                additionalModels: this.joinModelCandidateList(modelCandidates),
-                defaultModel: config.defaultModel || modelCandidates[0] || '',
-                updatedAt: this.joinModelCandidateList(modelCandidates) !== this.joinModelCandidateList(this.getApiConfigModelCandidates(config))
-                    ? Date.now()
-                    : config.updatedAt
-            });
-        });
-
-        const changed = JSON.stringify(beforeConfigs) !== JSON.stringify(nextConfigs);
-        if (changed || !alreadyMigrated) {
-            await this.saveApiConfigs(nextConfigs);
-            this.syncActiveApiConfigState();
-            if (changed || !alreadyMigrated) {
-                this.markAsDirtyAndSchedulePush('structural');
-            }
-            console.log("[ApiConfigMigration] v1.31.7 モデル候補をAPI設定へ保存しました。", nextConfigs.map(config => this.getSanitizedApiConfigForLog(config)));
-        } else {
-            state.apiConfigs = nextConfigs;
-            state.settings.apiConfigs = nextConfigs;
-        }
-
-        if (!alreadyMigrated || changed) {
-            await dbUtils.saveSetting(API_MODEL_CANDIDATES_MIGRATION_KEY, true);
-        }
+        return this.ensureSettingsMigrationV136();
     },
 
     async ensureModelRefsMigrationV1312() {
-        const alreadyMigrated = (await dbUtils.getSetting(API_MODEL_REF_MIGRATION_KEY))?.value === true;
-        let changed = false;
-        const sources = this.collectLegacyApiConfigSources();
-        const configs = this.ensureDefaultApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
-        if (!alreadyMigrated) {
-            ['gemini', 'openrouter', 'zai', 'bedrock'].forEach(provider => {
-                const defaultId = this.getDefaultApiConfigIdForProvider(provider);
-                const index = configs.findIndex(config => config.id === defaultId);
-                if (index === -1) return;
-                const legacyConfig = this.createLegacyApiConfig(provider, this.findLegacyApiSourceForProvider(provider, sources));
-                const mergedCandidates = this.joinModelCandidateList([
-                    ...this.getApiConfigModelCandidates(configs[index]),
-                    ...this.getApiConfigModelCandidates(legacyConfig)
-                ]);
-                const normalizedCandidates = this.normalizeModelCandidates(mergedCandidates);
-                if (mergedCandidates !== configs[index].additionalModels) {
-                    configs[index] = this.normalizeApiConfig({
-                        ...configs[index],
-                        defaultModel: normalizedCandidates[0] || configs[index].defaultModel,
-                        modelCandidates: normalizedCandidates,
-                        additionalModels: this.joinModelCandidateList(normalizedCandidates),
-                        updatedAt: Date.now()
-                    });
-                    changed = true;
-                }
-            });
-        }
-        if (changed) {
-            await this.saveApiConfigs(configs);
-            this.syncActiveApiConfigState();
-        }
-        const refsForSettings = (settings = {}) => ({
-            defaultModelRef: settings.defaultModelRef || this.findModelRefForLegacyModel(settings.modelName || DEFAULT_MODEL, settings.apiConfigId),
-            thoughtTranslationModelRef: settings.thoughtTranslationModelRef || this.findModelRefForLegacyModel(settings.thoughtTranslationModel || 'gemini-2.5-flash-lite'),
-            proofreadingModelRef: settings.proofreadingModelRef || this.findModelRefForLegacyModel(settings.proofreadingModelName || settings.modelName || DEFAULT_MODEL, settings.apiConfigId),
-            summaryModelRef: settings.summaryModelRef || this.findModelRefForLegacyModel(settings.summaryModelName || settings.modelName || DEFAULT_MODEL)
-        });
-
-        for (const profile of state.profiles || []) {
-            if (!profile.settings) profile.settings = {};
-            let profileChanged = false;
-            const nextRefs = refsForSettings(profile.settings);
-            ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'].forEach(key => {
-                if (!profile.settings[key] && nextRefs[key]) {
-                    profile.settings[key] = nextRefs[key];
-                    profileChanged = true;
-                }
-            });
-            if (profileChanged) {
-                try {
-                    await dbUtils.updateProfile(profile);
-                    changed = true;
-                } catch (error) {
-                    console.error(`[ApiConfigMigration] プロファイル(ID: ${profile.id})のModelRef補完に失敗しました:`, error);
-                }
-            }
-        }
-
-        if (state.activeProfile?.settings) {
-            const refs = refsForSettings(state.activeProfile.settings);
-            Object.assign(state.settings, refs);
-            Object.assign(state.activeProfile.settings, refs);
-        }
-
-        if (!alreadyMigrated || changed) {
-            await dbUtils.saveSetting(API_MODEL_REF_MIGRATION_KEY, true);
-            this.markAsDirtyAndSchedulePush('structural');
-        }
+        return this.ensureSettingsMigrationV136();
     },
 
     normalizeGlobalOtherSettings(settings = {}) {
@@ -12643,20 +12521,7 @@ const appLogic = {
 
     async updateThemeSettingValue(key, value) {
         if (!THEME_SETTING_KEYS.includes(key)) return;
-        state.settings[key] = value;
-        if (state.themeSettingsProfileScoped) {
-            if (!state.activeProfile || !state.activeProfile.settings) return;
-            state.activeProfile.settings[key] = value;
-            await dbUtils.updateProfile(state.activeProfile);
-        } else {
-            state.globalThemeSettings = this.normalizeGlobalThemeSettings({
-                ...state.globalThemeSettings,
-                [key]: value
-            });
-            this.applyThemeScopeToEffectiveSettings(state.activeProfile?.settings || {});
-            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
-        }
-        this.markAsDirtyAndSchedulePush('structural');
+        await this.saveAppearanceValues('theme', { [key]: value });
     },
 
     getCurrentThemeSettings() {
@@ -12668,26 +12533,7 @@ const appLogic = {
     },
 
     async updateThemeSettingsProfileScoped(value) {
-        const nextValue = value === true;
-        const currentThemeSettings = this.getCurrentThemeSettings();
-        state.themeSettingsProfileScoped = nextValue;
-        state.settings.themeSettingsProfileScoped = nextValue;
-
-        if (nextValue) {
-            if (state.activeProfile && state.activeProfile.settings) {
-                THEME_SETTING_KEYS.forEach(key => {
-                    state.activeProfile.settings[key] = currentThemeSettings[key];
-                });
-                await dbUtils.updateProfile(state.activeProfile);
-            }
-        } else {
-            state.globalThemeSettings = currentThemeSettings;
-            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
-        }
-        await dbUtils.saveSetting('themeSettingsProfileScoped', nextValue);
-        this.applyThemeScopeToEffectiveSettings(state.activeProfile?.settings || {});
-        uiUtils.applySettingsToUI();
-        this.markAsDirtyAndSchedulePush('structural');
+        await this.setProfileOverride('theme', value);
     },
 
     normalizeLocalUiSettings(settings = {}) {
@@ -13127,7 +12973,6 @@ const appLogic = {
             textarea.value = draft.text;
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
             uiUtils.adjustTextareaHeight();
-            uiUtils.showSyncNotification('入力下書きを復元しました。');
         } finally {
             inputDraftRestoring = false;
         }
@@ -13144,27 +12989,13 @@ const appLogic = {
     },
 
     async saveProfileSettingValues(updates) {
-        Object.assign(state.settings, updates);
-        if (!state.activeProfile || !state.activeProfile.settings) return;
-        Object.assign(state.activeProfile.settings, updates);
-        await dbUtils.updateProfile(state.activeProfile);
-        this.markAsDirtyAndSchedulePush('structural');
+        const profileId = state.activeProfileId;
+        if (!state.activeProfile?.settings) return;
+        await this.patchProfileSettingsV136(profileId, updates);
     },
 
     async saveThemeSettingValues(updates) {
-        Object.assign(state.settings, updates);
-        if (state.themeSettingsProfileScoped) {
-            if (!state.activeProfile || !state.activeProfile.settings) return;
-            Object.assign(state.activeProfile.settings, updates);
-            await dbUtils.updateProfile(state.activeProfile);
-        } else {
-            state.globalThemeSettings = this.normalizeGlobalThemeSettings({
-                ...state.globalThemeSettings,
-                ...updates
-            });
-            await dbUtils.saveSetting('globalThemeSettings', state.globalThemeSettings);
-        }
-        this.markAsDirtyAndSchedulePush('structural');
+        await this.saveAppearanceValues('theme', updates);
     },
 
     async resetHeaderColorSetting() {
@@ -13231,6 +13062,7 @@ const appLogic = {
     },
 
     async loadGlobalSettings() {
+        await this.loadSettingsV136();
         try {
             console.log("[GlobalSettings] 共通設定の読み込みを開始します。");
             const storedBlob = await dbUtils.getSetting('backgroundImageBlob');
@@ -13300,7 +13132,7 @@ const appLogic = {
                 globalThemeSettings: state.globalThemeSettings,
                 themeSettingsProfileScoped: state.themeSettingsProfileScoped,
                 settingsScopeMigrationComplete: state.settingsScopeMigrationComplete,
-                apiConfigs: state.apiConfigs,
+                apiConfigCount: state.apiConfigs.length,
                 apiConfigsMigratedV1310: state.apiConfigsMigratedV1310
             });
         } catch (error) {
@@ -13318,11 +13150,18 @@ const appLogic = {
 
             if (state.profiles.length === 0) {
                 console.warn("[Profile] プロファイルが見つかりません。最初のプロファイルを作成します。");
+                const legacyRecords = await new Promise((resolve, reject) => {
+                    const req = state.db.transaction(SETTINGS_STORE).objectStore(SETTINGS_STORE).getAll();
+                    req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+                });
+                const legacySettings = Object.fromEntries(legacyRecords.map(record => [record.key, record.value]));
                 const newProfile = {
                     name: "デフォルトプロファイル",
                     icon: null,
                     createdAt: Date.now(),
-                    settings: this.getSharedProfileSettings(state.settings)
+                    settings: { ...structuredClone(INITIAL_SETTINGS_V136),
+                        ...SettingsV136.pick(legacySettings, Object.keys(INITIAL_SETTINGS_V136)
+                            .filter(key => !['apiConfigs', 'apiConfigsMigratedV1310', 'backgroundImageBlob'].includes(key))) }
                 };
                 const newId = await dbUtils.addProfile(newProfile);
                 await dbUtils.saveSetting('activeProfileId', newId);
@@ -13337,16 +13176,15 @@ const appLogic = {
             }
             
             console.log(`[Profile] ${state.profiles.length}件のプロファイルを読み込みました。アクティブID: ${state.activeProfileId}`);
-            this.applyActiveProfile();
-            await this.ensureApiConfigsMigrationV1310();
-            await this.ensureModelRefsMigrationV1312();
-            await this.ensureApiModelCandidatesStabilityV1317();
+            state.activeProfile = state.profiles.find(p => p.id === state.activeProfileId);
+            await this.ensureSettingsMigrationV136();
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
 
         } catch (error) {
             console.error("[Profile] プロファイルの読み込み中に致命的なエラーが発生しました:", error);
             await uiUtils.showCustomAlert(`プロファイルの読み込みに失敗しました: ${error}`);
+            throw error;
         }
     },
 
@@ -13360,7 +13198,8 @@ const appLogic = {
             
             // 2. ロードしたプロファイルの設定で上書きする
             const loadedProfileSettings = state.activeProfile.settings || {};
-            Object.assign(newSettings, loadedProfileSettings);
+            Object.assign(newSettings, SettingsV136.pick(INITIAL_SETTINGS_V136, SettingsV136.profileKeys),
+                this.getSharedProfileSettings(loadedProfileSettings));
 
             if (!state.settingsScopeMigrationComplete) {
                 this.migrateSettingsScopeFromProfile(loadedProfileSettings);
@@ -13394,8 +13233,10 @@ const appLogic = {
             state.settings.apiConfigsMigratedV1310 = state.apiConfigsMigratedV1310;
             this.applyGlobalOtherSettingsToEffectiveSettings();
             this.applyThemeScopeToEffectiveSettings(loadedProfileSettings);
+            this.applyGlobalSettingsV136();
             this.applyLocalUiSettingsToEffectiveSettings();
             this.syncActiveApiConfigState();
+            this.syncChatExecutionToLegacySettings();
 
             uiUtils.applySettingsToUI(); 
             this.applyTextFormattingSettingsToUI(state.textFormattingSettings);
@@ -13411,8 +13252,10 @@ const appLogic = {
 
 
     async switchProfile(newProfileId) {
+        if (state.isSending) return;
         newProfileId = Number(newProfileId);
         if (newProfileId === state.activeProfileId) return;
+        this.cancelSendPreparationV136();
         
         console.log(`[Profile] プロファイルを ID: ${newProfileId} に切り替えます。`);
         this.flushInputDraft();
@@ -13454,23 +13297,23 @@ const appLogic = {
             this.markAsDirtyAndSchedulePush(true);
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
-            await uiUtils.showCustomAlert(`プロファイル「${newProfile.name}」を保存しました。`);
         } catch (error) {
             console.error("[Profile] 新規プロファイルの保存に失敗しました:", error);
             await uiUtils.showCustomAlert(`プロファイルの保存に失敗しました: ${error}`);
         }
     },
 
-    async updateCurrentProfile() {
-        if (!state.activeProfile) {
+    async updateCurrentProfile(updates = {}, profileId = state.activeProfileId) {
+        if (profileId == null) {
             await uiUtils.showCustomAlert("更新対象のプロファイルが選択されていません。");
             return;
         }
         
-        const updatedProfile = { ...state.activeProfile };
+        const changes = SettingsV136.pick(updates, ['name', 'icon']);
 
         try {
-            await dbUtils.updateProfile(updatedProfile);
+            const updatedProfile = await this.mutateProfileV136(profileId, p => ({ ...p, ...changes }));
+            if (!updatedProfile) return;
             // state内のプロファイルリストも更新
             const index = state.profiles.findIndex(p => p.id === updatedProfile.id);
             if (index !== -1) {
@@ -13502,6 +13345,7 @@ const appLogic = {
         try {
             const idToDelete = state.activeProfileId;
             await dbUtils.deleteProfile(idToDelete);
+            await this.cleanupBackgroundAssetsV136();
             this.markAsDirtyAndSchedulePush(true);
             
             // stateからも削除
@@ -13519,7 +13363,6 @@ const appLogic = {
             
             this.applyActiveProfile();
             uiUtils.updateProfileSwitcherUI();
-            await uiUtils.showCustomAlert("プロファイルを削除しました。");
         } catch (error) {
             console.error("[Profile] プロファイルの削除に失敗しました:", error);
             await uiUtils.showCustomAlert(`プロファイルの削除に失敗しました: ${error}`);
@@ -13528,15 +13371,17 @@ const appLogic = {
 
     async editCurrentProfileName() {
         if (!state.activeProfile) return;
-        const newName = await uiUtils.showCustomPrompt("新しいプロファイル名:", state.activeProfile.name);
-        if (newName && newName.trim() && newName.trim() !== state.activeProfile.name) {
-            state.activeProfile.name = newName.trim();
-            await this.updateCurrentProfile(); // 更新処理を共通化
+        const profileId = state.activeProfileId;
+        const previousName = state.activeProfile.name;
+        const newName = await uiUtils.showCustomPrompt("新しいプロファイル名:", previousName);
+        if (newName && newName.trim() && newName.trim() !== previousName) {
+            await this.updateCurrentProfile({ name: newName.trim() }, profileId);
         }
     },
 
     handleProfileIconChange(file) {
         if (!file || !file.type.startsWith('image/')) return;
+        const profileId = state.activeProfileId;
 
         // 1. 既存のアイコンURLキャッシュがあれば破棄する
         if (state.activeProfile && state.profileIconUrls.has(state.activeProfile.id)) {
@@ -13549,24 +13394,21 @@ const appLogic = {
         const reader = new FileReader();
         reader.onload = async (e) => {
             const blob = new Blob([e.target.result], { type: file.type });
-            if (state.activeProfile) {
-                state.activeProfile.icon = blob;
-                await this.updateCurrentProfile(); // 更新処理を共通化
-            }
+            await this.updateCurrentProfile({ icon: blob }, profileId);
         };
         reader.readAsArrayBuffer(file);
     },
 
     async resetProfileIcon() {
         if (!state.activeProfile) return;
+        const profileId = state.activeProfileId;
         const confirmed = await uiUtils.showCustomConfirm("アイコンをデフォルトに戻しますか？");
         if (confirmed) {
-            state.activeProfile.icon = null;
-            if (state.profileIconUrls.has(state.activeProfile.id)) {
-                URL.revokeObjectURL(state.profileIconUrls.get(state.activeProfile.id));
-                state.profileIconUrls.delete(state.activeProfile.id);
+            if (state.profileIconUrls.has(profileId)) {
+                URL.revokeObjectURL(state.profileIconUrls.get(profileId));
+                state.profileIconUrls.delete(profileId);
             }
-            await this.updateCurrentProfile();
+            await this.updateCurrentProfile({ icon: null }, profileId);
         }
     },
 
@@ -13635,8 +13477,8 @@ const appLogic = {
             if (element) settings[key] = element.checked;
         });
 
-        console.log("[Profile] 現在のUIから設定を取得しました:", settings);
-        const profileSettings = this.getSharedProfileSettings(settings);
+        console.log("[Profile] プロファイル設定を取得しました。");
+        const profileSettings = this.getSharedProfileSettings({ ...state.activeProfile?.settings, ...settings });
         if (!state.themeSettingsProfileScoped) {
             THEME_SETTING_KEYS.forEach(key => delete profileSettings[key]);
         }
@@ -13659,11 +13501,24 @@ const appLogic = {
         return fetch(`data:${mimeType};base64,${base64}`).then(res => res.blob());
     },
 
-    _prepareApiHistory(baseMessages) {
+    ensureHistoryWorkerV136() {
+        SettingsV136.configureHistoryWorkerV136(SettingsV136.wireConvertersV136);
+    },
+    async _prepareApiHistory(baseMessages, systemInstruction = undefined) {
+        this.ensureHistoryWorkerV136();
+        const owner = { messages:state.currentMessages, chatId:state.currentChatId, profileId:state.activeProfileId,
+            system:state.currentSystemPrompt, execution:JSON.stringify(state.currentExecutionSettings), signal:state.abortController?.signal };
+        const initiallyAborted = owner.signal?.aborted;
+        const assertOwner = () => {
+            if (owner.messages !== state.currentMessages || owner.chatId !== state.currentChatId || owner.profileId !== state.activeProfileId
+                || owner.system !== state.currentSystemPrompt || owner.execution !== JSON.stringify(state.currentExecutionSettings)
+                || (!initiallyAborted && owner.signal?.aborted)) throw new DOMException('履歴準備が中断されました。','AbortError');
+        };
+        if (systemInstruction === undefined) systemInstruction = state.currentSystemPrompt?.trim() ? {role:'system',parts:[{text:state.currentSystemPrompt.trim()}]} : null;
         console.log("[API Prep] 履歴をAPIフォーマットに変換します。");
 
         // ディープコピーで元のメッセージ配列を保護する
-        const messagesForApi = JSON.parse(JSON.stringify(baseMessages));
+        const messagesForApi = structuredClone(baseMessages.filter(m=>!m.isCascaded || m.isSelected));
 
         let historyToProcess;
 
@@ -13712,8 +13567,54 @@ const appLogic = {
             }
         }
         
-        return historyToProcess.map(msg => {
+        // Converse signatures bind the preceding conversation. Google signatures
+        // are validated within a tool turn; do not impose Bedrock's prefix policy
+        // on every provider. OpenRouter opaque Anthropic blocks need that policy.
+        const provider = this.getExecutionProvider();
+        let prefixChanged = false, turnChanged = false;
+        const hasLegacyHashes = historyToProcess.some(m => m.continuation && !m.continuation.historyWireV136 && (m.continuation.historyPrefixV136 !== undefined || m.continuation.historyTurnV136 !== undefined));
+        const legacyPrefixes = hasLegacyHashes ? await SettingsV136.historyTaskV136('prefixes',{messages:historyToProcess,system:owner.system}) : [];
+        assertOwner();
+        let oldChanges = [];
+        if (state.currentChatId) {
+            const raw = localStorage.getItem(makeChangeHistoryStorageKey(state.currentChatId));
+            if (raw) {
+                try { oldChanges = JSON.parse(raw).slice().sort((a,b) => a.timestamp - b.timestamp).flatMap(e => e.changes || []); }
+                catch { if (provider === 'bedrock') throw new Error('変更履歴を確認できないため署名付き履歴を送信できません。チャットを再読込してください。'); }
+            }
+        }
+        const prepared = [];
+        for (const [index,msg] of historyToProcess.entries()) {
             const parts = [];
+            const continuation = msg.continuation;
+            const prefixMismatch = continuation?.historyPrefixV136 !== undefined && continuation.historyPrefixV136 !== legacyPrefixes[index]?.prefix;
+            const turnMismatch = continuation?.historyTurnV136 !== undefined && continuation.historyTurnV136 !== legacyPrefixes[index]?.turn;
+            const originalContent = continuation?.displayContent ?? continuation?.parts
+                ?.filter(p => typeof p.text === 'string' && p.thought !== true).map(p => p.text).join('')
+                ?? oldChanges.find(c => c.index === index && c.role === msg.role)?.before;
+            const edited = originalContent !== undefined
+                && (msg.content || '') !== originalContent;
+            prefixChanged ||= edited || (msg.isHidden && msg.content?.startsWith('【これまでの会話の要約】'));
+            if (msg.role === 'user') turnChanged = edited;
+            else turnChanged ||= edited;
+            const opaqueRouter = provider === 'openrouter' && (continuation?.modelName?.startsWith('anthropic/')
+                || continuation?.openai?.reasoning_details?.some(d => d.type === 'reasoning.encrypted' || d.signature));
+            let dependentPrefixChanged = continuation?.historyPrefixInvalidV136 || (continuation?.historyPrefixV136 === undefined ? prefixChanged : prefixMismatch);
+            let dependentTurnChanged = continuation?.historyTurnInvalidV136 || (continuation?.historyTurnV136 === undefined ? turnChanged : turnMismatch);
+            if (continuation?.historyWireV136) {
+                const current = await SettingsV136.historyTaskV136('wire',{provider,messages:prepared,model:this.getExecutionModelName(),system:systemInstruction});
+                assertOwner();
+                dependentPrefixChanged = continuation.historyPrefixInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.prefix !== current.prefix;
+                dependentTurnChanged = continuation.historyTurnInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.turn !== current.turn;
+            }
+            const invalidContinuation = edited || (dependentPrefixChanged && (provider === 'bedrock' || opaqueRouter))
+                || (dependentTurnChanged && ['gemini', 'zai'].includes(provider));
+            prefixChanged ||= prefixMismatch;
+            if (invalidContinuation && historyToProcess[index + 1]?.role === 'tool')
+                throw new Error('編集された応答と別保存のツール結果を安全に対応付けできません。編集を戻すか、この応答から再生成してください。');
+            if (invalidContinuation && msg.role === 'model' && !msg.content?.trim()
+                && (msg.tool_calls?.length || continuation?.parts?.some(p => p.functionCall || p.functionResponse) || continuation?.turns?.some(t => t.parts?.some(p => p.functionCall || p.functionResponse))))
+                throw new Error('変更後のツール履歴を安全に再構築できません。この応答から再生成してください。');
             let contentText = msg.content || '';
             if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
                 const fileNames = msg.attachments.map(att => att.name).join(', ');
@@ -13731,22 +13632,26 @@ const appLogic = {
                     parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
                 });
             }
-            if (msg.role === 'model' && msg.tool_calls) {
+            if (msg.role === 'model' && msg.tool_calls && !invalidContinuation) {
                 msg.tool_calls.forEach(toolCall => parts.push({ functionCall: toolCall.functionCall }));
             }
             if (msg.role === 'tool') {
                 if (msg.name && msg.response) {
                     parts.push({ 
-                        functionResponse: { 
-                            name: msg.name, 
-                            response: msg.response,
-                            _toolCallId: msg._toolCallId || msg.tool_call_id  // 元のtoolCallIdを保存
-                        } 
+                        functionResponse: this.createFunctionResponseV136(msg)
                     });
                 }
             }
-            return { role: msg.role === 'tool' ? 'tool' : (msg.role === 'model' ? 'model' : 'user'), parts };
-        }).filter(c => c.parts.length > 0);
+            const config = this.getExecutionApiConfig();
+            const same = !invalidContinuation && continuation && continuation.provider === provider
+                && continuation.apiConfigId === config?.id && continuation.modelName === this.getExecutionModelName();
+            if (same && continuation.turns?.length) prepared.push(...structuredClone(continuation.turns));
+            else if (parts.length || (same && continuation.parts?.length)) prepared.push({ role:msg.role === 'tool' ? 'tool' : msg.role === 'model' ? 'model' : 'user',
+                parts:same && continuation.parts?.length ? structuredClone(continuation.parts) : parts,
+                ...(same && {tmContinuation:continuation.openai,tmBedrockContinuation:continuation.bedrock}) });
+        }
+        assertOwner();
+        return prepared;
     },
 
 
@@ -13942,7 +13847,7 @@ const appLogic = {
     
         try {
             // 更新されたプロファイル情報をDBに保存
-            await dbUtils.updateProfile(profileToUpdate);
+            await this.mutateProfileV136(profileId, p => ({ ...p, apiUsage: { date: todayPacific, count: (p.apiUsage?.date === todayPacific ? p.apiUsage.count : 0) + 1 } }));
             console.log(`[API Count] Profile ${profileId} の使用回数を更新しました。 Count for ${todayPacific}: ${profileToUpdate.apiUsage.count}`);
             
             // UIを更新
@@ -13975,7 +13880,7 @@ const appLogic = {
                 
                 try {
                     // 更新されたプロファイルをDBに保存
-                    await dbUtils.updateProfile(profile);
+                    await this.mutateProfileV136(profile.id, p => { if (p.apiUsage?.date !== todayPacific) delete p.apiUsage; return p; });
                     profilesWereUpdated = true;
                 } catch (error) {
                     console.error(`[API Count] プロファイルID ${profile.id} のリセット保存に失敗:`, error);
@@ -14210,7 +14115,7 @@ const appLogic = {
                 
                 // 1. 全チャットから有効な画像IDをすべて収集
                 const allChats = await dbUtils.getAllChats();
-                const activeImageIds = new Set();
+                const activeImageIds = await this.getReferencedImageIdsV136();
                 allChats.forEach(chat => {
                     (chat.messages || []).forEach(message => {
                         (message.imageIds || []).forEach(id => activeImageIds.add(id));
@@ -14230,7 +14135,7 @@ const appLogic = {
                 // 3. 孤児IDを特定 (存在するIDのうち、有効でないもの)
                 const orphanImageIds = [];
                 allStoredImageIds.forEach(storedId => {
-                    if (!activeImageIds.has(storedId)) {
+                    if (!String(storedId).startsWith('background_') && !activeImageIds.has(storedId)) {
                         orphanImageIds.push(storedId);
                     }
                 });
@@ -14252,6 +14157,7 @@ const appLogic = {
                 }
     
                 // 5. 処理完了フラグを立てる
+                await this.cleanupBackgroundAssetsV136();
                 await dbUtils.saveSetting('imageStoreCleanup_v1_complete', true);
                 console.log("[Cleanup] クリーンアップ処理が正常に完了しました。");
             } else {
@@ -14485,15 +14391,10 @@ const appLogic = {
                         await dbUtils.saveSetting('localUiSettings', state.localUiSettings);
                         this.applyLocalUiSettingsToEffectiveSettings();
                     }
-                    const initialProfileSettings = this.getSharedProfileSettings({ ...state.settings, ...oldSettingsObject });
+                    const initialProfileSettings = { ...state.settings, ...oldSettingsObject };
                     delete initialProfileSettings.backgroundImageBlob;
                     const defaultProfile = { name: "デフォルトプロファイル", icon: null, createdAt: Date.now(), settings: initialProfileSettings };
                     const newId = await dbUtils.addProfile(defaultProfile);
-                    await new Promise((resolve, reject) => {
-                        const store = dbUtils._getStore(SETTINGS_STORE, 'readwrite');
-                        store.clear().onsuccess = () => resolve();
-                        store.transaction.onerror = () => reject(store.transaction.error);
-                    });
                     await dbUtils.saveSetting('activeProfileId', newId);
                     console.log("[Migration] データ移行が完了しました。");
                     await this.loadProfiles();
@@ -14503,10 +14404,14 @@ const appLogic = {
             if (isSyncReload) uiUtils.updateProgressMessage('チャット履歴を読み込み中...');
     
             const chats = await dbUtils.getAllChats(state.settings.historySortOrder);
-            if (chats && chats.length > 0) {
+            if (this.readExecutionDraft()) {
+                this.startNewChat({ restoreDraft: true });
+                await state.executionSettingsReady;
+            } else if (chats && chats.length > 0) {
                 await this.loadChat(chats[0].id);
             } else {
                 this.startNewChat();
+                await state.executionSettingsReady;
             }
     
         } catch (error) {
@@ -14729,6 +14634,7 @@ const appLogic = {
             
             if (cloudMetadataString) {
                 const cloudData = JSON.parse(cloudMetadataString);
+                SettingsV136.assertCompatible(cloudData);
                 if (cloudData.syncId !== state.sync.lastSyncId) {
                     console.warn(`[Sync Push] 競合を検出！ Local: ${state.sync.lastSyncId}, Cloud: ${cloudData.syncId}`);
                     if (isManual) uiUtils.hideProgressDialog();
@@ -14913,6 +14819,7 @@ const appLogic = {
             }
 
             const cloudData = JSON.parse(cloudMetadataString);
+            SettingsV136.assertCompatible(cloudData);
             const cloudSyncId = cloudData.syncId;
             const localSyncId = state.sync.lastSyncId;
 
@@ -15021,6 +14928,7 @@ const appLogic = {
             }
 
             const cloudData = JSON.parse(cloudMetadataString);
+            SettingsV136.assertCompatible(cloudData);
 
             const cloudSyncId = cloudData.syncId;
 
@@ -15157,7 +15065,7 @@ const appLogic = {
             uiUtils.showScreen('settings');
         });
         elements.backToChatFromHistoryBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
-        elements.backToChatFromSettingsBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
+        elements.backToChatFromSettingsBtn.addEventListener('click', () => window.settingsUiV136 ? window.settingsUiV136.back() : uiUtils.showScreen('chat'));
 
         if (!this._historyEventsBound) {
             const clearHistorySearch = () => {
@@ -15696,7 +15604,7 @@ const appLogic = {
                     if (profile.apiUsage) {
                         delete profile.apiUsage;
                         try {
-                            await dbUtils.updateProfile(profile);
+                            await this.mutateProfileV136(profile.id, p => { delete p.apiUsage; return p; });
                             this.markAsDirtyAndSchedulePush('structural');
                             console.log(`[API Count] カウンターが手動でリセットされました (Profile ID: ${profile.id})`);
                             this.updateApiUsageUI();
@@ -15719,8 +15627,17 @@ const appLogic = {
         });
     
         // --- 設定項目（即時保存） ---
-        const setupInstantSave = (element, key, eventType = 'change', onUpdate = null, getValue = null) => { // getValue関数を追加
+        const setupInstantSave = (element, key, eventType = 'change', onUpdate = null, getValue = null) => {
+            if (THEME_SETTING_KEYS.includes(key) || SettingsV136.appearanceKeys.includes(key)) return;
             if (element) {
+                if (SettingsV136.globalKeys.includes(key) || key === 'includeThoughts') {
+                    this.globalSettingControlsV136 ||= {};
+                    this.globalSettingControlsV136[key] = element;
+                }
+                if (SettingsV136.profileKeys.includes(key)) {
+                    this.profileSettingControlsV136 ||= {};
+                    this.profileSettingControlsV136[key] = element;
+                }
                 element.addEventListener(eventType, async () => {
                     let value;
                     
@@ -15750,54 +15667,41 @@ const appLogic = {
                         }
                     }
                     
-                    if (key === 'themeSettingsProfileScoped') {
-                        await this.updateThemeSettingsProfileScoped(value);
-                    } else if (GLOBAL_OTHER_SETTING_KEYS.includes(key)) {
-                        await this.updateGlobalOtherSetting(key, value);
-                    } else if (THEME_SETTING_KEYS.includes(key)) {
-                        await this.updateThemeSettingValue(key, value);
-                    } else {
-                        if (!state.activeProfile) return;
-                        state.settings[key] = value;
-                        state.activeProfile.settings[key] = value;
-
-                        const modelRefKeyBySetting = {
-                            modelName: 'defaultModelRef',
-                            thoughtTranslationModel: 'thoughtTranslationModelRef',
-                            proofreadingModelName: 'proofreadingModelRef',
-                            summaryModelName: 'summaryModelRef'
-                        };
-                        const modelRefKey = modelRefKeyBySetting[key];
-                        if (modelRefKey && element?.value) {
-                            const modelRef = this.decodeModelRefValue(element.value);
-                            if (modelRef) {
-                                state.settings[modelRefKey] = modelRef;
-                                state.activeProfile.settings[modelRefKey] = modelRef;
-                                if (key === 'modelName') {
-                                    const selectedConfig = this.getApiConfigById(modelRef.apiConfigId);
-                                    if (selectedConfig) {
-                                        state.settings.apiConfigId = selectedConfig.id;
-                                        state.settings.apiProvider = selectedConfig.provider;
-                                        state.activeProfile.settings.apiConfigId = selectedConfig.id;
-                                        state.activeProfile.settings.apiProvider = selectedConfig.provider;
-                                        if (elements.apiProviderSelect) {
-                                            elements.apiProviderSelect.value = selectedConfig.provider;
-                                        }
-                                        if (elements.openrouterModelInput) {
-                                            elements.openrouterModelInput.value = modelRef.modelName;
-                                        }
-                                        this.updateProviderUI(selectedConfig.provider);
-                                    }
-                                }
-                            }
+                    try {
+                        const refs = { modelName: 'defaultModelRef', thoughtTranslationModel: 'thoughtTranslationModelRef',
+                            proofreadingModelName: 'proofreadingModelRef', summaryModelName: 'summaryModelRef',
+                            sdQcModel: 'sdQcModelRef', sdPromptImproveModel: 'sdPromptImproveModelRef' };
+                        if (key === 'thinkingBudget') return;
+                        if (key === 'modelName') {
+                            await this.setCurrentChatModelRef(this.decodeModelRefValue(element.value));
+                        } else if (key === 'apiProvider') {
+                            await this.setActiveProfileApiConfigIdForProvider(value);
+                        } else if (key === 'includeThoughts') {
+                            await this.setShowThoughtProcess(value);
+                        } else if (key === 'themeSettingsProfileScoped') {
+                            await this.setProfileOverride('theme', value);
+                        } else if (THEME_SETTING_KEYS.includes(key)) {
+                            await this.updateThemeSettingValue(key, value);
+                        } else if (SettingsV136.appearanceKeys.includes(key)) {
+                            await this.saveAppearanceValues('appearance', { [key]: value });
+                        } else if (GLOBAL_OTHER_SETTING_KEYS.includes(key)) {
+                            await this.updateGlobalOtherSetting(key, value);
+                        } else if (SettingsV136.globalKeys.includes(key)) {
+                            const updates = { [key]: value };
+                            if (refs[key]) updates[refs[key]] = this.decodeModelRefValue(element.value);
+                            await this.saveGlobalSettingsV136(updates);
+                        } else if (API_CONFIG_LEGACY_SYNC_KEYS.has(key)) {
+                            state.settings[key] = value;
+                            await this.syncDefaultApiConfigFromLegacySettings(state.settings.apiProvider);
+                        } else {
+                            await this.saveProfileSettingValues({ [key]: value });
                         }
-
-                        await dbUtils.updateProfile(state.activeProfile);
-                        appLogic.markAsDirtyAndSchedulePush('structural');
-                    }
-
-                    if (API_CONFIG_LEGACY_SYNC_KEYS.has(key)) {
-                        await this.syncDefaultApiConfigFromLegacySettings(state.settings.apiProvider || 'gemini');
+                        window.settingsUiV136?.error(element, '');
+                    } catch (error) {
+                        uiUtils.applySettingsToUI();
+                        if (window.settingsUiV136) window.settingsUiV136.error(element, error);
+                        else await uiUtils.showCustomAlert(error.message);
+                        return;
                     }
 
                     if (onUpdate) {
@@ -15816,8 +15720,7 @@ const appLogic = {
                 element: elements.apiProviderSelect, 
                 event: 'change',
                 onUpdate: (value) => {
-                    this.setActiveProfileApiConfigIdForProvider(value)
-                        .catch(error => console.error("[ApiConfig] APIプロバイダー変更時のapiConfigId更新に失敗しました:", error));
+                    // The scope-aware instant-save handler already persisted the chat route.
                     this.updateProviderUI(value);
                     this.updateModelOptions(value);
                 }
@@ -15846,7 +15749,6 @@ const appLogic = {
             maxTokens: { element: elements.maxTokensInput, event: 'input' },
             topK: { element: elements.topKInput, event: 'input' },
             topP: { element: elements.topPInput, event: 'input' },
-            thinkingBudget: { element: elements.thinkingBudgetInput, event: 'input' },
             includeThoughts: { element: elements.includeThoughtsToggle, event: 'change' },
             enableThoughtTranslation: { element: elements.enableThoughtTranslationCheckbox, event: 'change' },
             thoughtTranslationModel: {
@@ -15864,7 +15766,6 @@ const appLogic = {
             dummyModel: { element: elements.dummyModelInput, event: 'input' },
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
-            themeSettingsProfileScoped: { element: elements.themeSettingsProfileScopedToggle, event: 'change' },
             darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
@@ -16023,8 +15924,11 @@ const appLogic = {
             }
             element.addEventListener(eventType, async () => {
                 const value = getValue ? getValue() : (element.type === 'checkbox' ? element.checked : element.value);
-                await this.updateLocalUiSetting(key, value);
-                if (onUpdate) onUpdate(value);
+                try {
+                    await this.updateLocalUiSetting(key, value);
+                    window.settingsUiV136?.error(element, '');
+                    if (onUpdate) onUpdate(value);
+                } catch (error) { window.settingsUiV136?.error(element, error); }
             });
         };
 
@@ -16057,11 +15961,10 @@ const appLogic = {
             elements.openrouterModelInput.addEventListener('input', async () => {
                 if (!state.activeProfile) return;
                 const value = elements.openrouterModelInput.value.trim();
-                state.settings.modelName = value;
-                state.activeProfile.settings.modelName = value;
-                await dbUtils.updateProfile(state.activeProfile);
-                await this.syncDefaultApiConfigFromLegacySettings('openrouter');
-                appLogic.markAsDirtyAndSchedulePush('structural');
+                const ref = this.findModelRefForLegacyModel(value, this.getCurrentChatModelRef()?.apiConfigId);
+                if (!ref) return;
+                try { await this.setCurrentChatModelRef(ref); }
+                catch (error) { await uiUtils.showCustomAlert(error.message); return; }
                 uiUtils.updateOpenRouterModelOptions();
                 uiUtils.updateUserModelOptions();
             });
@@ -16074,13 +15977,10 @@ const appLogic = {
                 if (elements.openrouterModelInput) {
                     elements.openrouterModelInput.value = value;
                 }
-                state.settings.modelName = value;
-                if (state.activeProfile && state.activeProfile.settings) {
-                    state.activeProfile.settings.modelName = value;
-                    await dbUtils.updateProfile(state.activeProfile);
-                    await this.syncDefaultApiConfigFromLegacySettings('openrouter');
-                    appLogic.markAsDirtyAndSchedulePush('structural');
-                }
+                const ref = this.findModelRefForLegacyModel(value, this.getCurrentChatModelRef()?.apiConfigId);
+                if (!ref) return;
+                try { await this.setCurrentChatModelRef(ref); }
+                catch (error) { await uiUtils.showCustomAlert(error.message); return; }
                 uiUtils.updateOpenRouterModelOptions();
                 uiUtils.updateUserModelOptions();
                 uiUtils.updateModelWarningMessage();
@@ -16142,40 +16042,11 @@ const appLogic = {
         elements.clearDataBtn.addEventListener('click', () => this.confirmClearAllData());
     
         elements.enableProofreadingCheckbox.addEventListener('change', () => {
-            const isEnabled = elements.enableProofreadingCheckbox.checked;
-            elements.proofreadingOptionsDiv.classList.toggle('hidden', !isEnabled);
+            elements.proofreadingOptionsDiv.classList.remove('hidden');
         });
     
-        elements.uploadBackgroundBtn.addEventListener('click', () => elements.backgroundImageInput.click());
-        elements.backgroundImageInput.addEventListener('change', (event) => {
-            const file = event.target.files[0];
-            if (file) this.handleBackgroundImageUpload(file);
-            event.target.value = null;
-        });
-        elements.deleteBackgroundBtn.addEventListener('click', () => this.confirmDeleteBackgroundImage());
-        
-        if (elements.resetHeaderColorBtn) {
-            elements.resetHeaderColorBtn.addEventListener('click', () => this.resetHeaderColorSetting());
-        }
-        if (elements.resetAccentColorBtn) {
-            elements.resetAccentColorBtn.addEventListener('click', () => this.resetAccentColorSetting());
-        }
-        if (elements.resetHeaderTextColorBtn) {
-            elements.resetHeaderTextColorBtn.addEventListener('click', () => this.resetHeaderTextColorSetting());
-        }
-        if (elements.resetNewChatButtonColorBtn) {
-            elements.resetNewChatButtonColorBtn.addEventListener('click', () => this.resetNewChatButtonColorSetting());
-        }
-        if (elements.resetSendButtonColorBtn) {
-            elements.resetSendButtonColorBtn.addEventListener('click', () => this.resetSendButtonColorSetting());
-        }
-        if (elements.resetOtherButtonColorBtn) {
-            elements.resetOtherButtonColorBtn.addEventListener('click', () => this.resetOtherButtonColorSetting());
-        }
-        if (elements.resetUserMessageColorBtn) {
-            elements.resetUserMessageColorBtn.addEventListener('click', () => this.resetUserMessageColorSetting());
-        }
-        
+        window.settingsUiV136?.bindAppearanceEditors();
+
         elements.messageContainer.addEventListener('click', (event) => {
             if (event.target.tagName === 'IMG' && event.target.closest('.message-content')) {
                 const modalOverlay = document.getElementById('image-modal-overlay');
@@ -16569,27 +16440,20 @@ const appLogic = {
         elements.backToChatFromSettingsBtn.addEventListener('click', resetHeaderVisibility);
 
         elements.sdTestConnectionBtn.addEventListener('click', async () => {
+            const button = elements.sdTestConnectionBtn;
+            const status = document.getElementById('sd-connection-status');
             const url = elements.sdApiUrlInput.value.trim().replace(/\/$/, '');
-            if (!url) {
-                return uiUtils.showCustomAlert("先にWebUIのURLを入力してください。");
-            }
-            const endpoint = `${url}/sdapi/v1/progress`;
-            const headers = {};
-            if (elements.sdApiUserInput.value && elements.sdApiPasswordInput.value) {
-                headers['Authorization'] = 'Basic ' + btoa(`${elements.sdApiUserInput.value}:${elements.sdApiPasswordInput.value}`);
-            }
-
+            button.disabled = true; status.textContent = '接続中…'; status.dataset.error = 'false';
             try {
-                const response = await fetch(endpoint, { headers: headers });
-                if (response.ok) {
-                    await uiUtils.showCustomAlert("接続に成功しました！");
-                } else {
-                    throw new Error(`サーバーからの応答が不正です (ステータス: ${response.status})`);
-                }
-            } catch (error) {
-                console.error("SD接続テストエラー:", error);
-                await uiUtils.showCustomAlert(`接続に失敗しました。\nURL、認証情報、Forge/Reforgeの起動オプション(--listen)を確認してください。\nエラー: ${error.message}`);
-            }
+                if (!url) throw new Error('WebUIのURLを入力してください。');
+                const headers = {};
+                if (elements.sdApiUserInput.value && elements.sdApiPasswordInput.value)
+                    headers.Authorization = 'Basic ' + btoa(`${elements.sdApiUserInput.value}:${elements.sdApiPasswordInput.value}`);
+                const response = await fetch(`${url}/sdapi/v1/progress`, { headers, signal: AbortSignal.timeout(10000) });
+                if (!response.ok) throw new Error(`接続エラー (${response.status})`);
+                status.textContent = '接続できました。';
+            } catch (error) { status.textContent = error.message; status.dataset.error = 'true'; }
+            finally { button.disabled = false; }
         });
 
         elements.sdEnableQualityCheckerCheckbox.addEventListener('change', (event) => {
@@ -16615,6 +16479,8 @@ const appLogic = {
     // popstateイベントハンドラ (戻るボタン/ジェスチャー)
     handlePopState(event) {
     const targetScreen = event.state?.screen || 'chat';
+    if (targetScreen === 'settings') window.settingsUiV136?.restore(event.state);
+    else window.settingsUiV136?.closePopover(false);
     if (targetScreen === state.currentScreen) {
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
       return;
@@ -16746,6 +16612,7 @@ const appLogic = {
         // 送信中なら中断
         if (state.isSending) {
             this.abortRequest();
+            if (!await this.waitForGenerationCompletionV136()) return false;
         }
         // 編集中なら破棄
         if (state.editingMessageIndex !== null) {
@@ -16787,7 +16654,13 @@ const appLogic = {
     },
 
     // 新規チャットを開始する (状態リセット)
-    startNewChat() {
+    startNewChat(options = {}) {
+        if (state.isSending) return;
+        this.cancelSendPreparationV136();
+        this.flushInputDraft();
+        state.currentExecutionSettings = null;
+        state.executionInitializingV136 = true;
+        window.settingsUiV136?.renderExecution();
         uiUtils.closeChatSearch({ restoreFocus: false });
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         state.currentChatId = null;
@@ -16812,6 +16685,7 @@ const appLogic = {
         uiUtils.syncChatSidebarCurrentSelection();
         this.updateCharacterProfileButtonVisibility();
         state.currentStyleProfiles = {};
+        state.executionSettingsReady = this.initializeNewChatExecution(options);
         this.scheduleInputDraftRestore(0, true);
     },
 
@@ -16867,7 +16741,7 @@ const appLogic = {
             ...msg,
             attachments: msg.attachments || []
         })) || [];
-        let needsSave = false;
+        let needsSave = !chat.executionSettings;
         const groupIds = new Set(nextMessages.filter(m => m.siblingGroupId).map(m => m.siblingGroupId));
         groupIds.forEach(gid => {
             const siblings = nextMessages.filter(m => m.siblingGroupId === gid);
@@ -16883,7 +16757,11 @@ const appLogic = {
 
         // ここから先は対象チャットの読み込み成功後にだけ実行する。
         this.flushInputDraft();
-        if (shouldAbortSending) this.abortRequest();
+        this.cancelSendPreparationV136();
+        if (state.isSending) {
+            this.abortRequest();
+            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
+        }
         if (editingMessageIndex !== null) {
             const messageElement = state.mobileMessageEditor.messageElement
                 || elements.messageContainer.querySelector(`.message[data-index="${editingMessageIndex}"]`);
@@ -16901,6 +16779,11 @@ const appLogic = {
         state.pendingCascadeResponses = null;
         state.syncMessageCounter = 0;
         state.currentChatId = chat.id;
+        state.currentExecutionSettings = this.getChatExecutionSettingsV136(chat);
+        state.executionInitializingV136 = false;
+        sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
+        this.syncChatExecutionToLegacySettings();
+        uiUtils.applySettingsToUI();
         const loadedPinState = normalizeChatPinState(chat);
         state.currentChatIsPinned = loadedPinState.isPinned;
         state.currentChatPinnedAt = loadedPinState.isPinned ? loadedPinState.pinnedAt : null;
@@ -17035,7 +16918,7 @@ const appLogic = {
         }
         
         // stateのデータを汚染しないようにディープコピーする
-        const profileToExport = JSON.parse(JSON.stringify(state.activeProfile));
+        const profileToExport = await this.createProfileExportV136(state.activeProfile);
         if (profileToExport.settings) {
             profileToExport.settings = this.getSharedProfileSettings(profileToExport.settings);
         }
@@ -17083,8 +16966,7 @@ const appLogic = {
                     throw new Error("無効なファイルです。'name'と'settings'プロパティが必要です。");
                 }
 
-                let newProfile = { ...importedData };
-                newProfile.settings = this.getSharedProfileSettings(newProfile.settings);
+                let newProfile = await this.parseProfileImportV136(importedData);
                 
                 if (newProfile.icon && newProfile.icon.data) {
                     try {
@@ -17102,7 +16984,7 @@ const appLogic = {
                 }
                 newProfile.name = finalName;
 
-                const newId = await dbUtils.addProfile(newProfile);
+                const newId = await this.addImportedProfileV136(newProfile);
                 const newlyAddedProfile = await dbUtils.getProfile(newId);
                 state.profiles.push(newlyAddedProfile);
                 await dbUtils.saveSetting('activeProfileId', newId);
@@ -17362,7 +17244,7 @@ const appLogic = {
         }
 
         if (provider === 'openrouter' || provider === 'zai') {
-            const apiKey = proofreadingConfig.apiKey || (provider === 'openrouter' ? state.settings.openrouterApiKey : state.settings.zaiApiKey);
+            const apiKey = proofreadingConfig.apiKey || '';
             if (!apiKey) {
                 throw new Error(this.getApiKeyMissingMessage(proofreadingConfig, provider));
             }
@@ -17426,8 +17308,8 @@ const appLogic = {
         }
 
         if (provider === 'bedrock') {
-            const accessKey = proofreadingConfig.bedrockAccessKey || proofreadingConfig.apiKey || state.settings.bedrockAccessKey;
-            const secretKey = proofreadingConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+            const accessKey = proofreadingConfig.bedrockAccessKey || proofreadingConfig.apiKey || '';
+            const secretKey = proofreadingConfig.bedrockSecretKey || '';
             const region = proofreadingConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
             if (!accessKey || !secretKey) {
                 throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
@@ -17437,6 +17319,7 @@ const appLogic = {
             }
             const client = new window.BedrockRuntimeClient({
                 region,
+                ...(proofreadingConfig.baseUrl && { endpoint: proofreadingConfig.baseUrl }),
                 credentials: {
                     accessKeyId: accessKey,
                     secretAccessKey: secretKey
@@ -17467,12 +17350,12 @@ const appLogic = {
             throw new Error("Bedrock APIから有効な校正結果が得られませんでした。");
         }
 
-        const apiKey = proofreadingConfig.apiKey || state.settings.apiKey;
+        const apiKey = proofreadingConfig.apiKey || '';
         if (!apiKey) {
             throw new Error(this.getApiKeyMissingMessage(proofreadingConfig, 'gemini'));
         }
 
-        const endpoint = `${GEMINI_API_BASE_URL}${modelName}:generateContent`;
+        const endpoint = apiUtils.getGeminiEndpointV136(proofreadingConfig, modelName);
         const systemInstruction = systemPrompt.trim() ? { parts: [{ text: systemPrompt.trim() }] } : null;
         const requestBody = {
             contents: [{ role: 'user', parts: [{ text: textToProofread }] }],
@@ -17617,7 +17500,23 @@ const appLogic = {
      * @param {object} systemInstruction - システムプロンプト。
      * @returns {Promise<Array>} 生成された新しいメッセージオブジェクトの配列。
     */
+    createFunctionResponseV136(message) {
+        return { name: message.name, response: message.response,
+            ...(message.geminiFunctionCallId != null && { id: message.geminiFunctionCallId }),
+            _toolCallId: message._toolCallId || message.tool_call_id };
+    },
      async _internalHandleSend(messagesForApi, generationConfig, systemInstruction) {
+        this.ensureHistoryWorkerV136();
+        const requestOwner = {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
+        const wasAborted = requestOwner.signal?.aborted;
+        const requestContext = await SettingsV136.historyTaskV136('wire',{provider:this.getExecutionProvider(),messages:messagesForApi,model:this.getExecutionModelName(),system:systemInstruction});
+
+        if (requestOwner.messages !== state.currentMessages || requestOwner.chatId !== state.currentChatId || requestOwner.profileId !== state.activeProfileId
+            || (!wasAborted && requestOwner.signal?.aborted)) throw new DOMException('送信準備が中断されました。','AbortError');
+        const rememberRequest = result => {
+            if (requestContext && result.continuation) Object.assign(result.continuation, {
+                historyWireV136: requestContext });
+        };
         let loopCount = 0;
         // Z.ai API(OpenAI互換)は1回のレスポンスで1つのtool_callしか返さないため、
         // Gemini APIよりも多くのループが必要
@@ -17639,10 +17538,12 @@ const appLogic = {
                 isFirstCall: (loopCount === 1)
             });
 
+            rememberRequest(result);
             const modelMessage = {
                 role: 'model',
                 content: result.content || '',
-                thoughtSummary: (finalTurnResults.length === 0) ? result.thoughtSummary : null,
+                thoughtSummary: result.thoughtSummary,
+                continuation: result.continuation,
                 tool_calls: result.toolCalls,
                 timestamp: Date.now(),
                 finishReason: result.finishReason,
@@ -17712,6 +17613,7 @@ const appLogic = {
                     name: functionName, 
                     response: responseForAI, 
                     timestamp: Date.now(),
+                    ...(toolCall.functionCall.id != null && { geminiFunctionCallId: toolCall.functionCall.id }),
                     _toolCallId: toolCall.functionCall._toolCallId  // OpenAI互換APIのtool_call_idを保持
                 };
                 
@@ -17731,19 +17633,13 @@ const appLogic = {
                     console.log("[_internalHandleSend] テキスト応答がなかったため、ツール結果を基に最終応答を生成します。");
                     uiUtils.setLoadingIndicatorText('最終応答を生成中...');
 
-                    const partsForApi = [
-                        ...(result.thoughtParts || []),
-                        ...result.toolCalls.map(tc => ({ functionCall: tc.functionCall }))
-                    ];
-                    const modelMessageForApi = { role: 'model', parts: partsForApi };
+                    const partsForApi = result.continuation.parts;
+                    const modelMessageForApi = { role: 'model', parts: partsForApi,
+                        tmContinuation: result.continuation.openai, tmBedrockContinuation: result.continuation.bedrock };
                     const toolResultsForApi = toolResults.map(tr => ({ 
                         role: 'tool', 
                         parts: [{ 
-                            functionResponse: { 
-                                name: tr.name, 
-                                response: tr.response,
-                                _toolCallId: tr._toolCallId  // OpenAI互換APIのtool_call_idを引き継ぐ
-                            } 
+                            functionResponse: this.createFunctionResponseV136(tr)
                         }] 
                     }));
                     currentTurnHistory.push(modelMessageForApi, ...toolResultsForApi);
@@ -17764,25 +17660,21 @@ const appLogic = {
                         isFirstCall: false
                     });
                     
-                    modelMessage.content = textResult.content || '';
+                    rememberRequest(textResult);
+                    finalTurnResults.push({ role: 'model', content: textResult.content || '',
+                        thoughtSummary: textResult.thoughtSummary, continuation: textResult.continuation,
+                        usageMetadata: textResult.usageMetadata, finishReason: textResult.finishReason, timestamp: Date.now() });
                 }
                 break;
             }
 
-                const partsForApi = [
-                    ...(result.thoughtParts || []),
-                    ...result.toolCalls.map(tc => ({ functionCall: tc.functionCall }))
-                ];
-
-                const modelMessageForApi = { role: 'model', parts: partsForApi };
+                const partsForApi = result.continuation.parts;
+                const modelMessageForApi = { role: 'model', parts: partsForApi,
+                    tmContinuation: result.continuation.openai, tmBedrockContinuation: result.continuation.bedrock };
                 const toolResultsForApi = toolResults.map(tr => ({
                     role: 'tool',
                     parts: [{
-                        functionResponse: {
-                            name: tr.name,
-                            response: tr.response,
-                            _toolCallId: tr._toolCallId  // OpenAI互換APIのtool_call_idを引き継ぐ
-                        }
+                        functionResponse: this.createFunctionResponseV136(tr)
                     }]
                 }));
                 currentTurnHistory.push(modelMessageForApi, ...toolResultsForApi);
@@ -17805,7 +17697,7 @@ const appLogic = {
                 content: 'AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。',
                 timestamp: Date.now(),
             };
-            finalTurnResults.push(finalErrorMessage);
+            throw new Error(finalErrorMessage.content);
         }
         
         // 後処理（翻訳や校正）
@@ -17884,6 +17776,15 @@ const appLogic = {
 
         // プライマリメッセージをベースとして、最終的なオブジェクトを作成（ディープコピー）
         const finalAggregatedMessage = JSON.parse(JSON.stringify(primaryModelMessage));
+        if (finalAggregatedMessage.continuation) {
+            finalAggregatedMessage.continuation.turns = messages.map(msg => {
+                if (msg.role === 'model' && msg.continuation) return { role: 'model',
+                    parts: msg.continuation.parts, tmContinuation: msg.continuation.openai,
+                    tmBedrockContinuation: msg.continuation.bedrock };
+                if (msg.role === 'tool') return { role: 'tool', parts: [{ functionResponse: this.createFunctionResponseV136(msg) }] };
+                return null;
+            }).filter(Boolean);
+        }
 
         // imageIds や executedFunctions などを初期化
         finalAggregatedMessage.imageIds = finalAggregatedMessage.imageIds || [];
@@ -17924,7 +17825,44 @@ const appLogic = {
     },
 
     
+    cancelSendPreparationV136() {
+        state.sendPreparationV136 = null;
+    },
+    beginSendPreparationV136() {
+        if (state.isSending || state.sendPreparationV136) return null;
+        const preparation = {
+            chatId: state.currentChatId, messages: state.currentMessages, profileId: state.activeProfileId,
+            initGeneration: state.executionInitGeneration, selectionGeneration: state.executionSelectionGenerationV136,
+            execution: structuredClone(state.currentExecutionSettings), input: elements.userInput.value,
+            profileSignature: JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys)),
+            systemPrompt: state.currentSystemPrompt,
+            attachments: [...state.pendingAttachments]
+        };
+        state.sendPreparationV136 = preparation;
+        this.flushInputDraft();
+        return preparation;
+    },
+    assertSendPreparationV136(preparation, checkInput = false) {
+        if (state.sendPreparationV136 !== preparation || state.currentChatId !== preparation.chatId
+            || state.currentMessages !== preparation.messages || state.activeProfileId !== preparation.profileId
+            || state.executionInitGeneration !== preparation.initGeneration
+            || state.executionSelectionGenerationV136 !== preparation.selectionGeneration
+            || preparation.profileSignature !== JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys))
+            || preparation.systemPrompt !== state.currentSystemPrompt
+            || (preparation.execution && JSON.stringify(state.currentExecutionSettings) !== JSON.stringify(preparation.execution))
+            || (checkInput && (elements.userInput.value !== preparation.input
+                || state.pendingAttachments.length !== preparation.attachments.length
+                || state.pendingAttachments.some((a,i) => a !== preparation.attachments[i]))))
+            throw new DOMException('送信準備の対象が変更されました。', 'AbortError');
+    },
     async handleSend() {
+        const preparation = this.beginSendPreparationV136();
+        if (!preparation) return;
+        try { await this._handleSendPreparedV136(preparation); }
+        catch (error) { if (error.name !== 'AbortError') throw error; }
+        finally { if (state.sendPreparationV136 === preparation) state.sendPreparationV136 = null; }
+    },
+    async _handleSendPreparedV136(preparation) {
         state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
@@ -17934,21 +17872,33 @@ const appLogic = {
                 await uiUtils.showCustomAlert("システムプロンプトの保存に失敗しました。入力内容は保持しています。");
                 return;
             }
+            preparation.profileSignature = JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys));
+            preparation.systemPrompt = state.currentSystemPrompt;
         }
 
-        const text = elements.userInput.value.trim();
-        const attachmentsToSend = [...state.pendingAttachments];
+        this.assertSendPreparationV136(preparation, true);
+        const text = preparation.input.trim();
+        const attachmentsToSend = preparation.attachments;
         if (!text && attachmentsToSend.length === 0) return;
         const inputDraftContextKeyBeforeSend = this.getInputDraftContextKey();
+        await state.executionSettingsReady;
+        this.assertSendPreparationV136(preparation, true);
+        preparation.execution = structuredClone(state.currentExecutionSettings);
+        if (state.isSending) return;
         try {
-            state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
+            await this.refreshExecutionApiConfigsV136();
+            this.assertSendPreparationV136(preparation, true);
+            if (state.isSending) return;
+            this.freezeExecutionSettings();
         } catch (error) {
+            if (error.name === 'AbortError') return;
             await uiUtils.showCustomAlert(error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。');
             return;
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
         uiUtils.setSendingState(true);
+        this.cancelSendPreparationV136();
         uiUtils.setLoadingIndicatorText('応答生成中...');
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
@@ -17980,11 +17930,7 @@ const appLogic = {
             if (state.settings.maxTokens !== null) generationConfig.maxOutputTokens = state.settings.maxTokens;
             if (state.settings.topK !== null) generationConfig.topK = state.settings.topK;
             if (state.settings.topP !== null) generationConfig.topP = state.settings.topP;
-            if (state.settings.thinkingBudget !== null || state.settings.includeThoughts) {
-                generationConfig.thinkingConfig = {};
-                if(state.settings.thinkingBudget !== null) generationConfig.thinkingConfig.thinkingBudget = state.settings.thinkingBudget;
-                if(state.settings.includeThoughts) generationConfig.thinkingConfig.includeThoughts = true;
-            }
+
 
             const summaryText = this._buildSummaryForPrompt();
             let finalSystemPrompt = state.currentSystemPrompt?.trim() || '';
@@ -18003,17 +17949,17 @@ const appLogic = {
 
             const systemInstruction = finalSystemPrompt ? { role: "system", parts: [{ text: finalSystemPrompt }] } : null;
 
-            const historyForApi = this._prepareApiHistory(baseHistory);
+            const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
             const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
             
             const finalAggregatedMessage = this._aggregateMessages(newMessages);
-            this.attachExecutionMetadataToModelMessage(finalAggregatedMessage, executionMetadata);
+            this.attachExecutionMetadataToModelMessage(finalAggregatedMessage, this.completeExecutionMetadata(executionMetadata, finalAggregatedMessage));
             state.currentMessages[modelMessageIndex] = finalAggregatedMessage;
 
             uiUtils.renderChatMessages();
 
-            // モデルの応答をDBに保存
-            await dbUtils.saveChat(null, null, { skipPush: true });
+            // Commit the response and success default atomically.
+            await dbUtils.saveChat(null, null, { skipPush: true, successfulExecution: this.successfulExecutionRecord(finalAggregatedMessage) });
 
             this.updateCharacterProfileButtonVisibility();
 
@@ -18056,6 +18002,7 @@ const appLogic = {
     
     // APIリクエストを中断
     abortRequest() {
+        this.cancelSendPreparationV136();
         if (state.abortController) {
             console.log("中断リクエスト送信");
             state.abortController.abort(); // AbortControllerで中断
@@ -18314,15 +18261,11 @@ const appLogic = {
         try {
             const blob = file;
             // stateとDBを更新し、新しい関数を呼び出してUIに適用する
-            state.settings.backgroundImageBlob = blob;
-            await dbUtils.saveSetting('backgroundImageBlob', blob);
+            await this.saveBackgroundBlobV136(blob);
             uiUtils.applyBackgroundImage();
         } catch (error) {
             console.error("背景画像の保存・適用エラー:", error);
-            // エラー時にはstateとDBをnullに戻し、背景を非表示にする
-            state.settings.backgroundImageBlob = null;
-            await dbUtils.saveSetting('backgroundImageBlob', null);
-            uiUtils.applyBackgroundImage();
+            await uiUtils.showCustomAlert('背景画像を保存できませんでした。');
         }
     },
      // 背景画像削除の確認
@@ -18334,20 +18277,17 @@ const appLogic = {
      },
      // 背景画像削除処理
     async handleBackgroundImageDelete() {
+        const target = this.captureAppearanceTargetV136('appearance');
         try {
-            uiUtils.revokeExistingObjectUrl();
-            await dbUtils.saveSetting('backgroundImageBlob', null);
-            state.settings.backgroundImageBlob = null;
-
-            state.isTemporaryBackgroundActive = false;
-            uiUtils.setBackgroundImageVisible(false);
-            document.documentElement.style.removeProperty('--chat-background-image');
-            uiUtils.updateBackgroundSettingsUI();
+            await this.saveBackgroundBlobV136(null, target);
+            if (this.isAppearanceTargetActiveV136(target)) {
+                state.isTemporaryBackgroundActive = false;
+                state.appliedBackgroundAssetIdV136 = undefined;
+                this.applyProfileAppearanceV136();
+            }
         } catch (error) {
-    
-    
-           console.error("背景画像削除エラー:", error);
-           await uiUtils.showCustomAlert(`背景画像の削除中にエラーが発生しました: ${error}`);
+            console.error("背景画像削除エラー:", error);
+            await uiUtils.showCustomAlert(`背景画像の削除中にエラーが発生しました: ${error}`);
         }
     },
      // -------------------------------
@@ -18494,7 +18434,9 @@ const appLogic = {
     startEditSystemPrompt() {
         this.openSystemPromptDialog();
     },
-    openSystemPromptDialog() {
+    async openSystemPromptDialog() {
+        appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         state.isEditingSystemPrompt = true;
         void this.updateChangeHistoryControls();
@@ -18507,6 +18449,7 @@ const appLogic = {
             uiUtils.adjustTextareaHeight(editor, 200);
         }
         if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = false;
+        uiUtils.updateChatWorkspaceLayout();
         uiUtils.updateSystemPromptCharCount();
         uiUtils.updateSystemPromptSaveStatus('saved');
         uiUtils.updateSystemPromptButtonState();
@@ -19043,6 +18986,9 @@ const appLogic = {
         }
         const newRawContent = textarea.value; // trim() を削除し、空白のみの保存も許可
         const originalMessage = state.currentMessages[index];
+        appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
+        preserveMessageContentBaselineV136(originalMessage);
         const originalContentForHistory = String(originalMessage.content ?? '');
         const originalRoleForHistory = originalMessage.role;
         const chatIdForHistory = state.currentChatId;
@@ -19343,6 +19289,8 @@ const appLogic = {
         const confirmed = await uiUtils.showCustomConfirm(confirmMessage);
         if (confirmed) {
             console.log(`削除実行: ${deleteTargetDescription}`);
+            appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
             const originalFirstUserMsgIndex = state.currentMessages.findIndex(m => m.role === 'user');
 
             indicesToDelete.sort((a, b) => b - a).forEach(idx => {
@@ -19395,6 +19343,13 @@ const appLogic = {
     },
 
     async retryFromMessage(index) {
+        const preparation = this.beginSendPreparationV136();
+        if (!preparation) return;
+        try { await this._retryFromMessagePreparedV136(index, preparation); }
+        catch (error) { if (error.name !== 'AbortError') throw error; }
+        finally { if (state.sendPreparationV136 === preparation) state.sendPreparationV136 = null; }
+    },
+    async _retryFromMessagePreparedV136(index, preparation) {
         if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) { await uiUtils.showCustomAlert("送信中です。"); return; }
         
@@ -19405,8 +19360,17 @@ const appLogic = {
         const confirmed = await uiUtils.showCustomConfirm(`「${messageContentPreview}」から再生成しますか？\n(これより未来の会話履歴は削除され、既存の応答は別候補として保持されます)`);
     
         if (confirmed) {
+            this.assertSendPreparationV136(preparation);
+            await state.executionSettingsReady;
+            this.assertSendPreparationV136(preparation);
+            preparation.execution = structuredClone(state.currentExecutionSettings);
+            await this.refreshExecutionApiConfigsV136();
+            this.assertSendPreparationV136(preparation);
+            if (state.isSending) return;
+            try { this.freezeExecutionSettings(); }
+            catch (error) { await uiUtils.showCustomAlert(error.message); return; }
             uiUtils.setSendingState(true);
-            state.currentExecutionApiConfig = this.resolveDefaultExecutionApiConfig();
+            this.cancelSendPreparationV136();
             const executionMetadata = this.createExecutionMetadataSnapshot();
     
             let originalResponses = [];
@@ -19431,14 +19395,17 @@ const appLogic = {
             state.pendingCascadeResponses = originalResponses;
             
             // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
+            appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
             state.currentMessages.splice(index + 1);
             uiUtils.renderChatMessages();
     
             let modelMessage;
     
             try {
+                const systemInstruction = state.currentSystemPrompt?.trim() ? { role: "system", parts: [{ text: state.currentSystemPrompt.trim() }] } : null;
                 const baseHistory = state.currentMessages.filter(msg => !msg.isCascaded || msg.isSelected);
-                const historyForApi = this._prepareApiHistory(baseHistory);
+                const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
     
                 modelMessage = { role: 'model', content: '', timestamp: Date.now() };
                 state.currentMessages.push(modelMessage);
@@ -19451,16 +19418,11 @@ const appLogic = {
                 if (state.settings.maxTokens !== null) generationConfig.maxOutputTokens = state.settings.maxTokens;
                 if (state.settings.topK !== null) generationConfig.topK = state.settings.topK;
                 if (state.settings.topP !== null) generationConfig.topP = state.settings.topP;
-                 if (state.settings.thinkingBudget !== null || state.settings.includeThoughts) {
-                    generationConfig.thinkingConfig = {};
-                    if(state.settings.thinkingBudget !== null) generationConfig.thinkingConfig.thinkingBudget = state.settings.thinkingBudget;
-                    if(state.settings.includeThoughts) generationConfig.thinkingConfig.includeThoughts = true;
-                }
-                const systemInstruction = state.currentSystemPrompt?.trim() ? { role: "system", parts: [{ text: state.currentSystemPrompt.trim() }] } : null;
+
     
                 const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
                 const newAggregatedMessage = this._aggregateMessages(newMessages);
-                this.attachExecutionMetadataToModelMessage(newAggregatedMessage, executionMetadata);
+                this.attachExecutionMetadataToModelMessage(newAggregatedMessage, this.completeExecutionMetadata(executionMetadata, newAggregatedMessage));
     
                 // 成功したので、待避していたデータを取得し、待避領域をクリア
                 const finalOriginalResponses = state.pendingCascadeResponses || [];
@@ -19503,7 +19465,7 @@ const appLogic = {
                 state.currentMessages.splice(modelMessageIndex, 1, ...finalOriginalResponses, newAggregatedMessage);
                 uiUtils.renderChatMessages();
                 this.scrollToBottom();
-                await dbUtils.saveChat();
+                await dbUtils.saveChat(null, null, { successfulExecution: this.successfulExecutionRecord(newAggregatedMessage) });
     
             } catch(error) {
                 console.error("再生成エラー:", error);
@@ -19511,12 +19473,14 @@ const appLogic = {
                 
     
                 // 1. プレースホルダーを履歴から削除
-                const placeholderIndex = state.currentMessages.findIndex(m => m.timestamp === modelMessage.timestamp);
+                const placeholderIndex = state.currentMessages.indexOf(modelMessage);
                 if (placeholderIndex !== -1) {
                     state.currentMessages.splice(placeholderIndex, 1);
                 }
     
-                // 2. DBにはエラーメッセージを含まない現在の履歴（ユーザープロンプトまで）を保存
+                // Restore original response candidates after a failed regeneration.
+                state.currentMessages.push(...(state.pendingCascadeResponses || []));
+                // 2. DBにはエラーメッセージを含まない現在の履歴を保存
                 await dbUtils.saveChat();
     
                 // 3. UI表示のためだけに、エラーメッセージを現在のメッセージリストに追加
@@ -19584,6 +19548,8 @@ const appLogic = {
         }
 
         if (targetPosition !== -1) {
+            appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
             siblingsWithIndices.forEach(item => {
                 item.msg.isSelected = false;
             });
@@ -19641,6 +19607,8 @@ const appLogic = {
             const wasSelected = msgToDelete.isSelected;
             const groupId = msgToDelete.siblingGroupId;
 
+            appLogic.ensureHistoryWorkerV136();
+        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
             state.currentMessages.splice(indexToDelete, 1);
 
             let newlySelectedIndex = -1;
@@ -19870,6 +19838,9 @@ const appLogic = {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             // このリトライ専用のAbortController
             const attemptController = new AbortController();
+            const userSignal = state.abortController.signal;
+            const cancelAttempt = () => attemptController.abort();
+            userSignal.addEventListener('abort', cancelAttempt, { once: true });
             let timeoutId = null;
             
             try {
@@ -20015,11 +19986,16 @@ const appLogic = {
                 return {
                     content: finalContent,
                     thoughtSummary: finalThoughtSummary.trim() || null,
+                    continuation: { provider: this.getExecutionProvider(), apiConfigId: this.getExecutionApiConfig()?.id,
+                        modelName: this.getExecutionModelName(), displayContent: finalContent, parts: structuredClone(parts),
+                        openai: candidate.tmContinuation || null, bedrock: candidate.tmBedrockContinuation || null },
                     toolCalls: finalToolCalls.length > 0 ? finalToolCalls : null,
                     thoughtParts: finalThoughtParts.length > 0 ? finalThoughtParts : null, // 追加
                     finishReason: candidate.finishReason,
                     safetyRatings: candidate.safetyRatings,
-                    usageMetadata: responseData.usageMetadata,
+                    usageMetadata: { ...responseData.usageMetadata, tmActualExecution: {
+                        provider: this.getExecutionProvider(), apiConfigId: this.getExecutionApiConfig()?.id,
+                        modelName: responseData.tmActualModel || responseData.modelVersion || this.getExecutionModelName() } },
                     retryCount: attempt
                 };
 
@@ -20043,9 +20019,9 @@ const appLogic = {
                 }
                 
                 // ユーザーによる手動キャンセル
-                if (error.name === 'AbortError' && state.abortController?.signal.aborted) {
+                if (state.abortController?.signal.aborted) {
                     console.error("待機中または通信中に中断されました。リトライを中止します。", error);
-                    throw error;
+                    throw new DOMException('リクエストがキャンセルされました。', 'AbortError');
                 }
                 
                 // 4xx系エラーは即座に終了
@@ -20056,8 +20032,11 @@ const appLogic = {
                 
                 console.warn(`API呼び出し/処理試行 ${attempt + 1} が失敗しました。`, error);
                 if (error.candidate) {
-                    console.error("ブロックされた応答の詳細:", JSON.stringify(error.candidate, null, 2));
+                    console.error("ブロックされた応答の理由:", error.candidate.finishReason);
                 }
+            } finally {
+                userSignal.removeEventListener('abort', cancelAttempt);
+                if (timeoutId) clearTimeout(timeoutId);
             }
         }
 
@@ -20100,14 +20079,14 @@ const appLogic = {
 
         if (typeof opacitySettings.overlay === 'number' && opacitySettings.overlay >= 0 && opacitySettings.overlay <= 1) {
             state.settings.overlayOpacity = opacitySettings.overlay;
-            await dbUtils.saveSetting('overlayOpacity', state.settings.overlayOpacity);
+            await this.saveAppearanceValues('appearance', { overlayOpacity: opacitySettings.overlay });
             document.documentElement.style.setProperty('--overlay-opacity-value', state.settings.overlayOpacity);
             changedItems.push(`オーバーレイの濃さを${Math.round(opacitySettings.overlay * 100)}%に`);
             settingsChanged = true;
         }
         if (typeof opacitySettings.message_bubble === 'number' && opacitySettings.message_bubble >= 0.1 && opacitySettings.message_bubble <= 1) {
             state.settings.messageOpacity = opacitySettings.message_bubble;
-            await dbUtils.saveSetting('messageOpacity', state.settings.messageOpacity);
+            await this.saveAppearanceValues('appearance', { messageOpacity: opacitySettings.message_bubble });
             changedItems.push(`メッセージバブルの濃さを${Math.round(opacitySettings.message_bubble * 100)}%に`);
             settingsChanged = true;
         }
@@ -20138,23 +20117,8 @@ const appLogic = {
         // 新しいURLをstateに保存
         state.backgroundImageUrl = url;
         
-        const backgroundScreens = uiUtils.getBackgroundScreens();
-        const isAlreadyVisible = backgroundScreens.some(screen => screen.classList.contains('background-visible'));
-    
-        // フェードアウト完了後に画像を設定してフェードインさせる処理
-        const switchImageAndFadeIn = () => {
-            document.documentElement.style.setProperty('--chat-background-image', `url("${url}")`);
-            uiUtils.setBackgroundImageVisible(true);
-        };
-    
-        if (isAlreadyVisible) {
-            // 画像が表示されている場合：一度フェードアウトさせてから切り替える
-            elements.chatScreen.addEventListener('transitionend', switchImageAndFadeIn, { once: true });
-            uiUtils.setBackgroundImageVisible(false);
-        } else {
-            // 画像がない場合：即座に切り替えてフェードイン
-            switchImageAndFadeIn();
-        }
+        document.documentElement.style.setProperty('--chat-background-image', `url("${url}")`);
+        uiUtils.setBackgroundImageVisible(true);
         
         // 一時的な背景が適用されたことを示すフラグを立てる
     
@@ -20170,6 +20134,7 @@ const appLogic = {
 
 
     async handleBackgroundImageUrl(url) {
+        const target = this.captureAppearanceTargetV136('appearance');
         if (!url || typeof url !== 'string') {
             return { error: "画像URLが無効です。" };
         }
@@ -20192,13 +20157,8 @@ const appLogic = {
                 return { error: `画像サイズが大きすぎます (${(maxSize / 1024 / 1024).toFixed(1)}MB以下にしてください)` };
             }
 
-            uiUtils.revokeExistingObjectUrl();
-            await dbUtils.saveSetting('backgroundImageBlob', blob);
-            state.settings.backgroundImageBlob = blob;
-            state.backgroundImageUrl = URL.createObjectURL(blob);
-            document.documentElement.style.setProperty('--chat-background-image', `url("${state.backgroundImageUrl}")`);
-            uiUtils.setBackgroundImageVisible(true);
-            uiUtils.updateBackgroundSettingsUI();
+            await this.saveBackgroundBlobV136(blob, target);
+            this.applyProfileAppearanceV136();
             
             console.log("背景画像をURLから正常に更新しました。");
             return { success: true, message: "背景画像を更新しました。" };
@@ -20222,7 +20182,7 @@ const appLogic = {
         }
         
         // stateのデータを汚染しないようにディープコピーする
-        const profileToExport = JSON.parse(JSON.stringify(state.activeProfile));
+        const profileToExport = await this.createProfileExportV136(state.activeProfile);
         if (profileToExport.settings) {
             profileToExport.settings = this.getSharedProfileSettings(profileToExport.settings);
         }
@@ -20270,8 +20230,7 @@ const appLogic = {
                     throw new Error("無効なファイルです。'name'と'settings'プロパティが必要です。");
                 }
 
-                let newProfile = { ...importedData };
-                newProfile.settings = this.getSharedProfileSettings(newProfile.settings);
+                let newProfile = await this.parseProfileImportV136(importedData);
                 
                 if (newProfile.icon && newProfile.icon.data) {
                     try {
@@ -20289,7 +20248,7 @@ const appLogic = {
                 }
                 newProfile.name = finalName;
 
-                const newId = await dbUtils.addProfile(newProfile);
+                const newId = await this.addImportedProfileV136(newProfile);
                 const newlyAddedProfile = await dbUtils.getProfile(newId);
                 state.profiles.push(newlyAddedProfile);
                 
@@ -20640,6 +20599,7 @@ const appLogic = {
             this.renderCharacterDetails(characterNames[0]);
         }
 
+        uiUtils.prepareChatDialog(elements.characterProfileDialog);
         elements.characterProfileDialog.showModal();
     },
 
@@ -20891,7 +20851,7 @@ const appLogic = {
                 // 併せて image_store の孤児Blobをクリーンアップ
                 try {
                     const activeChats = await dbUtils.getAllChats();
-                    const activeImageIds = new Set();
+                    const activeImageIds = await this.getReferencedImageIdsV136();
                     (activeChats || []).forEach(chat => {
                         (chat.messages || []).forEach(msg => {
                             (msg.imageIds || []).forEach(id => activeImageIds.add(id));
@@ -20904,13 +20864,14 @@ const appLogic = {
                         const getAllKeysReq = store.getAllKeys();
                         getAllKeysReq.onsuccess = () => {
                             const keys = getAllKeysReq.result || [];
-                            const orphanIds = keys.filter(id => !activeImageIds.has(id));
+                            const orphanIds = keys.filter(id => !String(id).startsWith('background_') && !activeImageIds.has(id));
                             orphanIds.forEach(id => store.delete(id));
                             tx.oncomplete = resolve;
                             tx.onerror = () => reject(tx.error);
                         };
                         getAllKeysReq.onerror = () => reject(getAllKeysReq.error);
                     });
+                    await this.cleanupBackgroundAssetsV136();
                     console.log("image_store の孤児Blobをクリーンアップしました。");
                 } catch (cleanupErr) {
                     console.warn("image_store クリーンアップ中にエラー:", cleanupErr);
@@ -20999,6 +20960,7 @@ const appLogic = {
         try {
             const memoryData = await dbUtils.getMemory(state.activeProfileId);
             this.renderMemoryList(memoryData ? memoryData.items : []);
+            uiUtils.prepareChatDialog(elements.memoryManagementDialog);
             elements.memoryManagementDialog.showModal();
         } catch (error) {
             console.error("記憶管理ダイアログの表示に失敗:", error);
@@ -21119,12 +21081,76 @@ const appLogic = {
     },
 
 
+    async resolveAuxiliaryApiConfigV136(refKey, legacyKey, fallbackModel) {
+        const stored = await dbUtils.getSetting('apiConfigs');
+        state.apiConfigs = this.normalizeApiConfigs(stored?.value || []);
+        state.settings.apiConfigs = state.apiConfigs;
+        const settings = state.globalSettingsV136 || state.settings;
+        let ref = settings[refKey];
+        if (!ref) {
+            const modelName = settings[legacyKey] || state.settings[legacyKey] || fallbackModel;
+            // Legacy SD/memory requests were Gemini native calls, regardless of chat provider.
+            const config = state.apiConfigs.find(c => c.enabled !== false && c.provider === 'gemini'
+                && this.getApiConfigModelCandidates(c).includes(modelName));
+            ref = { apiConfigId: config?.id || '', modelName };
+        }
+        this.assertModelRefForExecution(ref, refKey);
+        return structuredClone(this.resolveApiConfigForModelRef(ref));
+    },
+    async assertAuxiliaryImageInputV136(config) {
+        const metadata = () => this.getModelMetadataV136({ apiConfigId: config.id, modelName: config.modelName });
+        let support = SettingsV136.imageInputCapability(config.provider, config.modelName, metadata());
+        if (support === 'unknown' && config.provider === 'openrouter') {
+            try { await this.refreshModelThinkingCapabilities(config.id); } catch { /* error below retains the selected model */ }
+            support = SettingsV136.imageInputCapability(config.provider, config.modelName, metadata());
+        }
+        if (support !== 'supported') throw new Error(support === 'unsupported'
+            ? '品質判定モデルは画像入力に対応していません。設定で画像対応モデルを選び直してください。'
+            : '品質判定モデルの画像入力能力を確認できません。接続を確認するか、確認済みの画像対応モデルを選び直してください。');
+    },
+    async callAuxiliaryApiV136(config, requestBody) {
+        if (requestBody.contents?.some(m => m.parts?.some(p => p.inlineData))) await this.assertAuxiliaryImageInputV136(config);
+        let body = structuredClone(requestBody), endpoint, headers = { 'Content-Type': 'application/json' };
+        if (config.provider === 'gemini') {
+            if (!config.apiKey) throw new Error(this.getApiKeyMissingMessage(config, 'gemini'));
+            endpoint = apiUtils.getGeminiEndpointV136(config, config.modelName);
+            headers['x-goog-api-key'] = config.apiKey;
+        } else if (config.provider === 'openrouter' || config.provider === 'zai') {
+            if (!config.apiKey) throw new Error(this.getApiKeyMissingMessage(config, config.provider));
+            endpoint = apiUtils.getOpenAICompatibleEndpoint(config, config.provider === 'openrouter' ? OPENROUTER_API_BASE_URL : ZAI_API_BASE_URL);
+            headers.Authorization = `Bearer ${config.apiKey}`;
+            const messages = [];
+            if (body.systemInstruction) messages.push({ role: 'system', content: body.systemInstruction.parts.map(p => p.text || '').join('') });
+            for (const message of body.contents) messages.push({ role: message.role === 'model' ? 'assistant' : 'user',
+                content: message.parts.map(p => p.inlineData ? { type: 'image_url', image_url: { url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}` } } : { type: 'text', text: p.text || '' }) });
+            body = { model: config.modelName, messages, ...(body.generationConfig?.temperature != null && { temperature: body.generationConfig.temperature }) };
+        } else if (config.provider === 'bedrock') {
+            const accessKeyId = config.bedrockAccessKey || config.apiKey;
+            if (!accessKeyId || !config.bedrockSecretKey) throw new Error(this.getApiKeyMissingMessage(config, 'bedrock'));
+            if (!window.BedrockRuntimeClient || !window.ConverseCommand) throw new Error('Bedrock SDKが利用できません。');
+            const client = new window.BedrockRuntimeClient({ region: config.bedrockRegion || DEFAULT_BEDROCK_REGION,
+                ...(config.baseUrl && { endpoint: config.baseUrl }), credentials: { accessKeyId, secretAccessKey: config.bedrockSecretKey } });
+            const result = await client.send(new window.ConverseCommand({ modelId: config.modelName,
+                messages: body.contents.map(m => ({ role: m.role === 'model' ? 'assistant' : 'user', content: m.parts.map(p => p.inlineData
+                    ? { image: { format: p.inlineData.mimeType.split('/')[1], source: { bytes: Uint8Array.from(atob(p.inlineData.data), c => c.charCodeAt(0)) } } }
+                    : { text: p.text || '' }) })),
+                ...(body.systemInstruction && { system: body.systemInstruction.parts }),
+                inferenceConfig: { temperature: body.generationConfig?.temperature ?? 0.5 } }));
+            return (result.output?.message?.content || []).map(p => p.text || '').join('');
+        } else throw new Error('補助機能のAPIプロバイダーに対応していません。');
+        const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+        if (!response.ok) throw new Error(`補助機能のAPIエラー (${response.status})`);
+        const data = await response.json();
+        return config.provider === 'gemini' ? (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('')
+            : (data.choices?.[0]?.message?.content || '');
+    },
     async triggerAutoMemorySave() {
-        if (!state.activeProfileId || !state.settings.apiKey) {
+        if (!state.activeProfileId) {
             console.error("[Memory] APIキーが未設定のため、自動学習をスキップしました。");
             return;
         }
 
+        const profileId = state.activeProfileId;
         try {
             const interval = parseInt(state.settings.memoryAutoSaveInterval, 10);
             const userMessagesInInterval = state.currentMessages.filter(m => m.role === 'user').slice(-interval);
@@ -21138,7 +21164,7 @@ const appLogic = {
                 return `${msg.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${msg.content}`;
             }).join('\n');
 
-            const memoryData = await dbUtils.getMemory(state.activeProfileId) || { items: [] };
+            const memoryData = await dbUtils.getMemory(profileId) || { items: [] };
             const existingMemoryText = memoryData.items.length > 0
                 ? `- ${memoryData.items.join('\n- ')}`
                 : "（まだ何も記憶していません）";
@@ -21183,8 +21209,7 @@ const appLogic = {
 
             [抽出結果]`;
 
-            const modelForMemory = "gemini-2.5-flash";
-            const endpoint = `${GEMINI_API_BASE_URL}${modelForMemory}:generateContent`;
+            const memoryConfig = await this.resolveAuxiliaryApiConfigV136('memoryModelRef', '', 'gemini-2.5-flash');
             const requestBody = {
                 contents: [{
                     role: 'user',
@@ -21198,20 +21223,7 @@ const appLogic = {
                 ]
             };
 
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.settings.apiKey },
-                body: JSON.stringify(requestBody),
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                const errorMessage = errorData.error?.message || `HTTPエラー: ${response.status}`;
-                throw new Error(errorMessage);
-            }
-
-            const responseData = await response.json();
-            const summaryText = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
+            const summaryText = await this.callAuxiliaryApiV136(memoryConfig, requestBody);
 
             if (!summaryText) {
                 console.warn("[Memory] 自動学習による要約結果が空でした。");
@@ -21233,7 +21245,7 @@ const appLogic = {
                 
                 if (uniqueNewItems.length > 0) {
                     memoryData.items.push(...uniqueNewItems);
-                    await dbUtils.saveMemory(state.activeProfileId, memoryData);
+                    await dbUtils.saveMemory(profileId, memoryData);
                     console.log(`[Memory] 自動学習により、${uniqueNewItems.length}件の新しい記憶を追加しました。`, uniqueNewItems);
                 } else {
                     console.log("[Memory] 自動学習で生成された記憶は、すべて既存のものでした。");
@@ -21441,6 +21453,7 @@ const appLogic = {
         this.updateTextFormattingDialogStatus();
         void this.updateChangeHistoryControls();
         if (elements.textFormattingDialog && !elements.textFormattingDialog.open) {
+            uiUtils.prepareChatDialog(elements.textFormattingDialog);
             elements.textFormattingDialog.showModal();
         }
         requestAnimationFrame(() => {
@@ -21643,8 +21656,11 @@ const appLogic = {
             : null;
 
         try {
+            appLogic.ensureHistoryWorkerV136();
+            await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
             candidateList.forEach(candidate => {
                 const message = state.currentMessages[candidate.index];
+                preserveMessageContentBaselineV136(message);
                 message.content = candidate.formatted;
                 message.timestamp = Date.now();
             });
@@ -22075,6 +22091,7 @@ const appLogic = {
         elements.summaryEditor.disabled = true;
         elements.summaryRegenerateBtn.disabled = true;
         elements.summaryConfirmBtn.disabled = true;
+        uiUtils.prepareChatDialog(elements.summaryDialog);
         elements.summaryDialog.showModal();
 
         await this._callSummaryApi(originalText);
@@ -22130,7 +22147,7 @@ const appLogic = {
             };
 
             const summaryModel = summaryConfig.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
-            const apiKey = summaryConfig.apiKey || state.settings.apiKey;
+            const apiKey = summaryConfig.apiKey || '';
             if (!apiKey) {
                 throw new Error(this.getApiKeyMissingMessage(summaryConfig, 'gemini'));
             }
@@ -22138,7 +22155,7 @@ const appLogic = {
             console.log("使用モデル:", summaryModelLabel || summaryModel);
             console.log("リクエストボディ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
 
-            const endpoint = `${GEMINI_API_BASE_URL}${summaryModel}:generateContent`;
+            const endpoint = apiUtils.getGeminiEndpointV136(summaryConfig, summaryModel);
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
@@ -22149,14 +22166,14 @@ const appLogic = {
                 const errorData = await response.json().catch(() => ({ error: { message: "レスポンスボディのJSONパースに失敗" } }));
                 console.error("--- [要約API] APIエラーレスポンス ---");
                 console.error("ステータス:", response.status, response.statusText);
-                console.error("エラーレスポンスボディ:", errorData);
+                console.error("エラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorData));
                 throw new Error(errorData.error?.message || `APIエラー: ${response.status}`);
             }
 
             const responseData = await response.json();
 
             console.log("--- [要約API] 正常レスポンス ---");
-            console.log("レスポンスボディ全体:", JSON.stringify(responseData, null, 2));
+            console.log("レスポンスボディ全体:", JSON.stringify(sanitizeApiRequestBodyForLog(responseData), null, 2));
 
             const candidate = responseData.candidates?.[0];
             const summaryText = candidate?.content?.parts?.[0]?.text;
@@ -22190,7 +22207,7 @@ const appLogic = {
     },
 
     async _callOpenRouterSummaryApi(originalText, summaryConfig = {}) {
-        const apiKey = summaryConfig.apiKey || state.settings.openrouterApiKey;
+        const apiKey = summaryConfig.apiKey || '';
         if (!apiKey) {
             throw new Error(this.getApiKeyMissingMessage(summaryConfig, 'openrouter'));
         }
@@ -22234,14 +22251,14 @@ const appLogic = {
             try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
             console.error("--- [OpenRouter要約API] APIエラーレスポンス ---");
             console.error("ステータス:", response.status, response.statusText);
-            console.error("エラーレスポンスボディ:", errorBody);
+            console.error("エラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorBody));
             throw new Error(errorBody?.error?.message || `OpenRouter APIエラー: ${response.status}`);
         }
 
         const responseData = await response.json();
 
         console.log("--- [OpenRouter要約API] 正常レスポンス ---");
-        console.log("レスポンスボディ全体:", JSON.stringify(responseData, null, 2));
+        console.log("レスポンスボディ全体:", JSON.stringify(sanitizeApiRequestBodyForLog(responseData), null, 2));
 
         const messageContent = responseData.choices?.[0]?.message?.content;
         let summaryText = '';
@@ -22268,7 +22285,7 @@ const appLogic = {
     },
 
     async _callOpenAICompatibleSummaryApi(originalText, summaryConfig = {}, providerLabel = 'OpenAI互換API') {
-        const apiKey = summaryConfig.apiKey || state.settings.zaiApiKey || state.settings.apiKey;
+        const apiKey = summaryConfig.apiKey || '';
         if (!apiKey) {
             throw new Error(this.getApiKeyMissingMessage(summaryConfig, summaryConfig.provider || 'zai'));
         }
@@ -22303,13 +22320,13 @@ const appLogic = {
             try { errorBody = JSON.parse(errorBody); } catch(e) { /* ignore */ }
             console.error(`--- [${providerLabel}要約API] APIエラーレスポンス ---`);
             console.error("ステータス:", response.status, response.statusText);
-            console.error("エラーレスポンスボディ:", errorBody);
+            console.error("エラーレスポンスボディ:", sanitizeApiRequestBodyForLog(errorBody));
             throw new Error(errorBody?.error?.message || `${providerLabel} APIエラー: ${response.status}`);
         }
 
         const responseData = await response.json();
         console.log(`--- [${providerLabel}要約API] 正常レスポンス ---`);
-        console.log("レスポンスボディ全体:", JSON.stringify(responseData, null, 2));
+        console.log("レスポンスボディ全体:", JSON.stringify(sanitizeApiRequestBodyForLog(responseData), null, 2));
 
         const messageContent = responseData.choices?.[0]?.message?.content;
         let summaryText = '';
@@ -22334,8 +22351,8 @@ const appLogic = {
     },
 
     async _callBedrockSummaryApi(originalText, summaryConfig = {}) {
-        const accessKey = summaryConfig.bedrockAccessKey || summaryConfig.apiKey || state.settings.bedrockAccessKey;
-        const secretKey = summaryConfig.bedrockSecretKey || state.settings.bedrockSecretKey;
+        const accessKey = summaryConfig.bedrockAccessKey || summaryConfig.apiKey || '';
+        const secretKey = summaryConfig.bedrockSecretKey || '';
         const region = summaryConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
         if (!accessKey || !secretKey) {
             throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
@@ -22364,6 +22381,7 @@ const appLogic = {
 
         const client = new window.BedrockRuntimeClient({
             region,
+                ...(summaryConfig.baseUrl && { endpoint: summaryConfig.baseUrl }),
             credentials: {
                 accessKeyId: accessKey,
                 secretAccessKey: secretKey
@@ -22401,6 +22419,7 @@ const appLogic = {
         elements.summaryConfirmBtn.disabled = false;
         // ダイアログが既に開いていることを確認
         if (!elements.summaryDialog.open) {
+            uiUtils.prepareChatDialog(elements.summaryDialog);
             elements.summaryDialog.showModal();
         }
     },
@@ -22611,7 +22630,7 @@ const appLogic = {
             const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
             const settingsForExport = allSettings
                 .filter(setting =>
-                    !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId'].includes(setting.key)
+                    !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY, 'backgroundImageBlob'].includes(setting.key)
                     && !localUiSettingKeysForExport.has(setting.key)
                 )
                 .map(setting => {
@@ -22774,6 +22793,8 @@ const appLogic = {
             const syncId = 'sync_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
             const metadata = {
                 version: "2.0",
+                settingsSchemaVersion: 136,
+                minimumReaderVersion: 136,
                 exportedAt: new Date().toISOString(),
                 syncId: syncId,
                 data: {
@@ -22809,6 +22830,7 @@ const appLogic = {
     
         try {
             const parsedData = JSON.parse(jsonString);
+            SettingsV136.assertCompatible(parsedData);
             if (parsedData.version !== "2.0" || !parsedData.data) {
                 throw new Error("インポートデータの形式が無効か、バージョンが古いです。");
             }
@@ -22847,6 +22869,9 @@ const appLogic = {
             console.log(`[Sync Pull] ローカルに存在するアセットBlob: ${localAssetsBeforeClear.size}件をメモリに保持しました。`);
 
             const requiredAssetIds = new Set();
+            const appearanceGlobal = cloudData.settings?.find(s => s.key === SettingsV136.GLOBAL_KEY)?.value?.appearance;
+            if (appearanceGlobal?.backgroundAssetId) requiredAssetIds.add(appearanceGlobal.backgroundAssetId);
+            (cloudData.profiles || []).forEach(p => { if (p.settings?.appearance?.backgroundAssetId) requiredAssetIds.add(p.settings.appearance.backgroundAssetId); });
             (cloudData.profiles || []).forEach(p => { if (p.iconAssetId) requiredAssetIds.add(p.iconAssetId); });
             (cloudData.assets || []).forEach(a => { if (a.assetId) requiredAssetIds.add(a.assetId); });
             (cloudData.chats || []).forEach(c => {
@@ -22879,6 +22904,8 @@ const appLogic = {
 
             // clearAndImportDataからの戻り値を受け取る
             const { removedAssetInfo } = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds);
+            await this.loadGlobalSettings();
+            await this.loadProfiles();
     
             console.log("[Data Import V2] データのインポートに成功しました。");
             
@@ -23103,6 +23130,7 @@ const appLogic = {
     
         openLogDialog() {
             this.renderLogDialogContent();
+            uiUtils.prepareChatDialog(elements.debugLogDialog);
             elements.debugLogDialog.showModal();
         },
     
@@ -23195,7 +23223,7 @@ const appLogic = {
         },
 
     async _improveSdPrompt(originalPrompt, failedPrompt, ngReason) {
-        const model = state.settings.sdPromptImproveModel;
+        const config = await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef', 'sdPromptImproveModel', 'gemini-2.5-flash');
         const systemPrompt = state.settings.sdPromptImproveSystemPrompt;
 
         const userPrompt = `元のプロンプト: ${originalPrompt}\n失敗したプロンプト: ${failedPrompt}\n失敗理由: ${ngReason}`;
@@ -23206,17 +23234,7 @@ const appLogic = {
             generationConfig: { temperature: 0.5 }
         };
 
-        const endpoint = `${GEMINI_API_BASE_URL}${model}:generateContent`;
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.settings.apiKey },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) throw new Error(`プロンプト改善APIエラー (${response.status})`);
-
-        const data = await response.json();
-        const improvedPrompt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const improvedPrompt = await this.callAuxiliaryApiV136(config, requestBody);
 
         if (!improvedPrompt) throw new Error("プロンプト改善APIから有効な応答が得られませんでした。");
         
@@ -23225,7 +23243,7 @@ const appLogic = {
     },
 
     runQualityChecker: async function(imageBlob, prompt, responseText = '') {
-        const qcModel = state.settings.sdQcModel;
+        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');
@@ -23242,19 +23260,7 @@ const appLogic = {
             generationConfig: { temperature: 0.1 }
         };
 
-        const endpoint = `${GEMINI_API_BASE_URL}${qcModel}:generateContent`;
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.settings.apiKey },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            throw new Error(`品質チェックAPIエラー (${response.status})`);
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const text = await this.callAuxiliaryApiV136(config, requestBody);
 
         if (text.includes('Result: OK')) {
             const result = { result: 'OK', reason: '' };
@@ -23345,7 +23351,7 @@ const appLogic = {
 
 
     runQualityChecker: async function(imageBlob, prompt, responseText = '') {
-        const qcModel = state.settings.sdQcModel;
+        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');
@@ -23362,19 +23368,7 @@ const appLogic = {
             generationConfig: { temperature: 0.1 }
         };
 
-        const endpoint = `${GEMINI_API_BASE_URL}${qcModel}:generateContent`;
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.settings.apiKey },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            throw new Error(`品質チェックAPIエラー (${response.status})`);
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const text = await this.callAuxiliaryApiV136(config, requestBody);
 
         if (text.includes('Result: OK')) {
             return { result: 'OK', reason: '' };
@@ -23625,6 +23619,8 @@ chatListChangeController.subscribe(async detail => {
     await uiUtils.renderHistoryList({ refresh: true, preserveScroll: true });
 });
 
+Object.assign(appLogic, SettingsV136.createMethods({ state, dbUtils, uiUtils, defaults: INITIAL_SETTINGS_V136, localUiKeys: LOCAL_UI_SETTING_KEYS }));
+window.uiUtilsV136 = uiUtils;
 window.appLogic = appLogic;
 window.state = state;
 window.dbUtils = dbUtils;

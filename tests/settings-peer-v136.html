@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>Settings transaction peer</title>
+<script src="../settings-v136.js"></script>
+<script>
+window.initializeSettingsPeerV136=async(name,initial)=>{
+    const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(name);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+    const state={db,globalSettingsV136:initial};
+    const dbUtils={getSetting:key=>new Promise((resolve,reject)=>{const r=db.transaction('settings').objectStore('settings').get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)}),
+        saveSetting:(key,value)=>new Promise((resolve,reject)=>{const tx=db.transaction('settings','readwrite');tx.objectStore('settings').put({key,value});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})};
+    window.peerSettings=SettingsV136.createMethods({state,dbUtils,uiUtils:{},defaults:{}});
+    peerSettings.applyGlobalSettingsV136=()=>{};peerSettings.markAsDirtyAndSchedulePush=()=>{};
+};
+</script>

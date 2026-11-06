@@ -1,0 +1,73 @@
+<!doctype html><meta charset="utf-8"><title>Isolated integration storage peer</title>
+<script src="../settings-v136.js">window.openFullIntegrationPeerV136=async name=>{
+    const base=await openIntegrationPeerV136(name);
+    const html=new DOMParser().parseFromString(await(await fetch('/index.html')).text(),'text/html');document.body.innerHTML=html.body.innerHTML;document.querySelectorAll('script').forEach(n=>n.remove());
+    const source=await(await fetch('/app.js')).text();(0,eval)(source.slice(source.indexOf('// --- 定数 ---'))+'\nwindow.peerUi=uiUtils;');
+    const st=window.state,app=window.appLogic,db=window.dbUtils,ui=window.peerUi;st.db=base.state.db;
+    Object.keys(ui).forEach(k=>{if(typeof ui[k]==='function')ui[k]=()=>{}});ui.showCustomAlert=async m=>{throw Error(m)};
+    app.markAsDirtyAndSchedulePush=()=>{};app.renderApiConfigList=()=>{};app.applyTextFormattingSettingsToUI=()=>{};app.scheduleInputDraftRestore=()=>{};
+    return {...base,app,state:st,db,close(){st.profileSettingsChannelV136?.close();st.globalSettingsChannelV136?.close();base.close()}};
+};
+</script><script>
+window.openIntegrationPeerV136=async name=>{
+    const gates=new Map();
+    const database=await new Promise((resolve,reject)=>{const r=indexedDB.open(name);r.onupgradeneeded=()=>{
+        for(const key of ['settings','profiles','chats','image_store','image_assets'])r.result.createObjectStore(key,{keyPath:key==='settings'?'key':key==='image_assets'?'name':'id',autoIncrement:key==='profiles'});
+    };r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+    const read=(store,key,all=false)=>new Promise((resolve,reject)=>{const r=all?database.transaction(store).objectStore(store).getAll():database.transaction(store).objectStore(store).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+    const write=(stores,fn)=>new Promise((resolve,reject)=>{const tx=database.transaction(stores,'readwrite');tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||Error('transaction aborted'));fn(tx)});
+    const gated=async(name,fn)=>{const value=await fn();const gate=gates.get(name);if(gate){gates.delete(name);gate.enter();await gate.promise}return value};
+    const state={db:database,settingsSchemaVersion:0,profiles:[],settings:{},localUiSettings:{},localUiSettingsStoredKeys:new Set(),apiConfigs:[],activeProfileId:1};
+    const db={getSetting:key=>read('settings',key),getProfile:id=>read('profiles',id),
+        getAllProfiles:()=>gated('profiles',()=>read('profiles',null,true)),getAllChats:()=>gated('chats',()=>read('chats',null,true)),getAllAssets:()=>read('image_assets',null,true),
+        saveSetting:(key,value)=>write(['settings'],tx=>tx.objectStore('settings').put({key,value})),
+        updateProfile:profile=>write(['profiles'],tx=>tx.objectStore('profiles').put(profile))};
+    const defaults={modelName:'gemini-2.5-flash',temperature:.7,overlayOpacity:.75,messageOpacity:1,darkMode:false};
+    const ui={applyOverlayOpacity(){},applyDarkMode(){},applyThemeColorSettings(){},applySettingsToUI(){},applyBackgroundImage(){}};
+    const app=SettingsV136.createMethods({state,dbUtils:db,uiUtils:ui,defaults,localUiKeys:[]});
+    Object.assign(app,{normalizeLocalUiSettings:v=>v,findModelRefForLegacyModel:()=>({apiConfigId:'gem',modelName:'gemini-2.5-flash'}),
+        createLegacyApiConfig:(provider,s)=>({id:provider,provider,apiKey:s.apiKey}),getProviderDisplayName:p=>p,markAsDirtyAndSchedulePush(){}});
+    const seed=async()=>{
+        await write(['settings','profiles','chats','image_store'],tx=>{
+            tx.objectStore('settings').put({key:'settingsSchemaVersion',value:0});
+            tx.objectStore('settings').put({key:'globalSettingsV136',value:{schemaVersion:1,theme:{darkMode:false,accentColor:'#1976d2'},appearance:{backgroundAssetId:null,overlayOpacity:.75,messageOpacity:1}}});
+            tx.objectStore('settings').put({key:'apiConfigs',value:[{id:'gem',provider:'gemini',enabled:true}]});
+            for(const id of [1,2])tx.objectStore('profiles').put({id,name:'Test '+id,settings:{temperature:.7,systemPrompt:'original',useCustomTheme:false,useCustomAppearance:true,appearance:{backgroundAssetId:null,overlayOpacity:.75}}});
+            tx.objectStore('chats').put({id:1,messages:[{role:'user',content:'original'}]});
+        });
+    };
+    const reload=async()=>{state.profiles=await read('profiles',null,true);state.activeProfile=state.profiles.find(p=>p.id===state.activeProfileId);await app.loadSettingsV136();app.applyGlobalSettingsV136()};
+    const select=async(id,own)=>{state.activeProfileId=id;await reload();if(own!==undefined){state.activeProfile.settings.useCustomAppearance=own;await db.updateProfile(state.activeProfile);app.applyProfileAppearanceV136()}};
+    return window.integrationPeerV136={state,app,db,read,write,seed,reload,select,
+        hold(name){
+            const method={chats:'ensureSettingsMigrationV136',profiles:'cleanupBackgroundAssetsV136'}[name];
+            if(!method)throw Error('Unknown gate '+name);
+            return this.holdMethod(method);
+        },
+        holdMethod(method){
+            let enter,release;const entered=new Promise(r=>enter=r),promise=new Promise(r=>release=r),original=app[method];let once=true;
+            app[method]=async(...args)=>{if(once){once=false;enter();await promise}return original.apply(app,args)};
+            return {entered,release};
+        },
+        holdAppearance(){return this.holdMethod('saveBackgroundToTargetV136')},
+        abortMigrationOnce(){const original=IDBObjectStore.prototype.put;let once=true;
+            IDBObjectStore.prototype.put=function(value,...args){const request=original.call(this,value,...args);
+                if(once&&this.name==='settings'&&value.key==='settingsSchemaVersion'&&value.value===136){once=false;request.addEventListener('success',()=>this.transaction.abort(),{once:true})}return request};
+            return ()=>{IDBObjectStore.prototype.put=original}},
+        observeBlobPut(callback){const original=IDBObjectStore.prototype.put;let once=true;
+            IDBObjectStore.prototype.put=function(value,...args){const request=original.call(this,value,...args);
+                if(once&&this.name==='image_store'&&String(value.id).startsWith('background_')){once=false;request.addEventListener('success',callback,{once:true})}return request};
+            return ()=>{IDBObjectStore.prototype.put=original}},
+        close(){state.globalSettingsChannelV136?.close();state.profileSettingsChannelV136?.close();database.close()}
+    };
+};
+window.openFullIntegrationPeerV136=async name=>{
+    const base=await openIntegrationPeerV136(name);
+    const html=new DOMParser().parseFromString(await(await fetch('/index.html')).text(),'text/html');document.body.innerHTML=html.body.innerHTML;document.querySelectorAll('script').forEach(n=>n.remove());
+    const source=await(await fetch('/app.js')).text();(0,eval)(source.slice(source.indexOf('// --- 定数 ---'))+'\nwindow.peerUi=uiUtils;');
+    const st=window.state,app=window.appLogic,db=window.dbUtils,ui=window.peerUi;st.db=base.state.db;
+    Object.keys(ui).forEach(k=>{if(typeof ui[k]==='function')ui[k]=()=>{}});ui.showCustomAlert=async m=>{throw Error(m)};
+    app.markAsDirtyAndSchedulePush=()=>{};app.renderApiConfigList=()=>{};app.applyTextFormattingSettingsToUI=()=>{};app.scheduleInputDraftRestore=()=>{};
+    return {...base,app,state:st,db,close(){st.profileSettingsChannelV136?.close();st.globalSettingsChannelV136?.close();base.close()}};
+};
+</script>

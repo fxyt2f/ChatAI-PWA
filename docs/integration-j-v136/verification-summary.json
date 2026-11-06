@@ -1,0 +1,218 @@
+{
+  "branch": "main",
+  "head": "198c8d5b3ff130034edd1250a965febe3d2aa6b9",
+  "sourceHashes": {
+    "app.js": "8f2b8d4d563380637f183e34116fa7e6949691a962ff27f38d71d07f829a5730",
+    "settings-v136.js": "9476fb27c6690bf281d9ab43fc30cf1b0f4cd58c256868158d3ea34fdaf8b043",
+    "settings-ui-v136.js": "e31a45f995b14edbd35150102d1ee76bab5a46f05096e9fb508a2741167c5c97",
+    "sw.js": "04ab797ee910d5ff93228fdf95987d24b6485b207c3ba03a7b178c637b6489c0",
+    "index.html": "f7a6b08fc07fb223afb44ca8592ce37a69591b79027927560ffb4823cc48aa4d",
+    "style.css": "bebd15fc673b98bfed14cc60a6f89d67a131ca4324a0e2c5f51283a205766b8c"
+  },
+  "originalFiles": 2194,
+  "originalMissing": [],
+  "originalUnexpectedChanges": [],
+  "modifiedOriginalPaths": [
+    "settings-v136.js",
+    "tests/integration-i-peer-v136.html",
+    "tests/integration-i-v136.js",
+    "tests/review-n-regressions-v136.js",
+    "tests/review-regressions-v136.js",
+    "tests/run-browser-tests.py",
+    "tests/v136-browser.html",
+    "app.js",
+    "sw.js"
+  ],
+  "originalUnchanged": 2185,
+  "tests": {
+    "node": 69,
+    "browser": 169,
+    "existing": 203,
+    "added": 35,
+    "total": 238,
+    "sidebarAssertions": 80
+  },
+  "performanceBefore": [
+    {
+      "base64MiB": 0,
+      "attachments": 0,
+      "saveSync": 0.10000002384185791,
+      "saveTotal": 1,
+      "prepareSync": 0.3999999761581421,
+      "prepareTotal": 0.3999999761581421,
+      "maxTimerGap": 14.600000023841858,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 1.0999999046325684
+    },
+    {
+      "base64MiB": 1,
+      "attachments": 1,
+      "saveSync": 55,
+      "saveTotal": 59.89999997615814,
+      "prepareSync": 123,
+      "prepareTotal": 123,
+      "maxTimerGap": 127,
+      "maxLongTask": 123,
+      "uiTick": true,
+      "reloadAndRepeat": 161.60000002384186
+    },
+    {
+      "base64MiB": 4,
+      "attachments": 1,
+      "saveSync": 215.29999995231628,
+      "saveTotal": 229,
+      "prepareSync": 351.7999999523163,
+      "prepareTotal": 351.7999999523163,
+      "maxTimerGap": 354.7999999523163,
+      "maxLongTask": 351,
+      "uiTick": true,
+      "reloadAndRepeat": 578.2999999523163
+    },
+    {
+      "base64MiB": 20,
+      "attachments": 1,
+      "saveSync": 882,
+      "saveTotal": 909.1000000238419,
+      "prepareSync": 1734.6999999284744,
+      "prepareTotal": 1734.6999999284744,
+      "maxTimerGap": 1740.7000000476837,
+      "maxLongTask": 1734,
+      "uiTick": true,
+      "reloadAndRepeat": 2644.2999999523163
+    },
+    {
+      "base64MiB": 4,
+      "attachments": 4,
+      "saveSync": 208.10000002384186,
+      "saveTotal": 245.79999995231628,
+      "prepareSync": 393.2000000476837,
+      "prepareTotal": 393.2000000476837,
+      "maxTimerGap": 397.7000000476837,
+      "maxLongTask": 393,
+      "uiTick": true,
+      "reloadAndRepeat": 682.1000000238419
+    }
+  ],
+  "performanceAfter": [
+    {
+      "base64MiB": 0,
+      "attachments": 0,
+      "saveSync": 0,
+      "saveTotal": 0.7999999523162842,
+      "prepareSync": 0.20000004768371582,
+      "prepareTotal": 0.20000004768371582,
+      "maxTimerGap": 8.799999952316284,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 0.8999999761581421
+    },
+    {
+      "base64MiB": 1,
+      "attachments": 1,
+      "saveSync": 0.6000000238418579,
+      "saveTotal": 2.100000023841858,
+      "prepareSync": 0.6999999284744263,
+      "prepareTotal": 0.6999999284744263,
+      "maxTimerGap": 8.200000047683716,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 4.799999952316284
+    },
+    {
+      "base64MiB": 4,
+      "attachments": 1,
+      "saveSync": 2.299999952316284,
+      "saveTotal": 11.200000047683716,
+      "prepareSync": 1.5,
+      "prepareTotal": 1.5,
+      "maxTimerGap": 15.300000071525574,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 19.600000023841858
+    },
+    {
+      "base64MiB": 20,
+      "attachments": 1,
+      "saveSync": 10.299999952316284,
+      "saveTotal": 34.799999952316284,
+      "prepareSync": 6.300000071525574,
+      "prepareTotal": 6.300000071525574,
+      "maxTimerGap": 17.800000071525574,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 71.39999997615814
+    },
+    {
+      "base64MiB": 4,
+      "attachments": 4,
+      "saveSync": 4.100000023841858,
+      "saveTotal": 17.699999928474426,
+      "prepareSync": 2.3000000715255737,
+      "prepareTotal": 2.3000000715255737,
+      "maxTimerGap": 15.899999976158142,
+      "maxLongTask": 0,
+      "uiTick": true,
+      "reloadAndRepeat": 28.699999928474426
+    }
+  ],
+  "digestAndGenerationMetrics": [
+    {
+      "name": "none",
+      "saveSync": 0.10000002384185791,
+      "saveTotal": 0.8999999761581421,
+      "prepareSync": 0.20000004768371582,
+      "prepareTotal": 0.20000004768371582,
+      "maxTimerGap": 0,
+      "maxLongTask": 0
+    },
+    {
+      "name": "1MiB",
+      "saveSync": 0.3999999761581421,
+      "saveTotal": 1.600000023841858,
+      "prepareSync": 0.2999999523162842,
+      "prepareTotal": 0.2999999523162842,
+      "maxTimerGap": 7,
+      "maxLongTask": 0
+    },
+    {
+      "name": "4MiB",
+      "saveSync": 1.899999976158142,
+      "saveTotal": 13.799999952316284,
+      "prepareSync": 1.100000023841858,
+      "prepareTotal": 1.100000023841858,
+      "maxTimerGap": 21.699999928474426,
+      "maxLongTask": 0
+    },
+    {
+      "name": "20MiB",
+      "saveSync": 10.899999976158142,
+      "saveTotal": 41.10000002384186,
+      "prepareSync": 5.699999928474426,
+      "prepareTotal": 5.699999928474426,
+      "maxTimerGap": 96.69999992847443,
+      "maxLongTask": 89
+    },
+    {
+      "name": "multiple",
+      "saveSync": 5,
+      "saveTotal": 15.200000047683716,
+      "prepareSync": 2.200000047683716,
+      "prepareTotal": 2.200000047683716,
+      "maxTimerGap": 16.899999976158142,
+      "maxLongTask": 0
+    }
+  ],
+  "passedGates": [
+    "loadProfiles after old settings read 0",
+    "loadProfiles after old settings read 0",
+    "loadProfiles after old settings read 1",
+    "actual handleSend digest abort",
+    "actual handleSend digest chat",
+    "digest before owner check abort",
+    "digest before owner check chat",
+    "digest before owner check profile"
+  ],
+  "shellBuild": "5acc5ef0c1d9ccb177bc",
+  "shellResources": 14
+}
