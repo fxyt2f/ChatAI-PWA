@@ -194,8 +194,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.0";
-const APP_CACHE_VERSION = "v1.36.0";
+const APP_VERSION = "1.36.1";
+const APP_CACHE_VERSION = "v1.36.1";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -280,6 +280,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.36.1": [
+        "フローティングボタン、スクロールボタン、サイドバーの表示と操作を改善しました。",
+        "システムプロンプトの編集画面を統一し、ダイアログの外側クリック・タップに対応しました。",
+        "Android PWAのテーマ色と、画面サイズに応じたチャット領域の表示を改善しました。",
+        "Markdown表示の安全性、プロンプト保存、添付キャンセル、アプリ更新とダイアログ開閉の安定性を改善しました。"
+    ],
     "1.35.1": [
         "スマートフォンの全画面文章編集で、ソフトウェアキーボードに下部が隠れる問題を修正しました。",
         "キーボードの開閉や画面回転に合わせて、編集領域の高さを調整するよう改善しました。"
@@ -984,7 +990,6 @@ try {
         textFormattingCancelBtn: document.getElementById('text-formatting-cancel-btn'),
         textFormattingUndoBtn: document.getElementById('text-formatting-undo-btn'),
         textFormattingRedoBtn: document.getElementById('text-formatting-redo-btn'),
-        scrollToTopBtn: document.getElementById('scroll-to-top-btn'),
         scrollToBottomBtn: document.getElementById('scroll-to-bottom-btn'),
         floatingPanelBehaviorSelect: document.getElementById('floating-panel-behavior'),
         characterProfileBtn: document.getElementById('character-profile-btn'),
@@ -1035,9 +1040,10 @@ try {
         sessionStorage.removeItem('reloadAttempted');
         document.body.innerHTML = `<div style="padding: 20px; text-align: center; color: red;">
             <h1>アプリケーションの起動に失敗しました</h1>
-            <p>エラー: ${error.message}</p>
+            <p id="startup-error-detail"></p>
             <p>自動リロードを試みましたが、問題が解決しませんでした。ブラウザのキャッシュを手動でクリアする必要があるかもしれません。</p>
         </div>`;
+        document.getElementById('startup-error-detail').textContent = `エラー: ${error.message}`;
     }
 }
 
@@ -1198,6 +1204,7 @@ Reason: [NGの場合の理由]`,
     isEditingSystemPrompt: false,
     systemPromptSaveTimer: 0,
     systemPromptSaveStatus: 'saved',
+    systemPromptRevision: 0,
     systemPromptLastSaveError: null,
     mobileMessageEditor: {
         element: null,
@@ -1384,46 +1391,86 @@ function base64ToBlob(base64, mimeType) {
 }
 
 // --- Service Worker関連 ---
+// One retry timer exists only while an update/reload is pending. Other tabs may
+// activate a worker before this tab is safe, so activation and reload are guarded.
+function createServiceWorkerUpdateCoordinator() {
+    let waiting = null, reloadPending = false, reloading = false, timer = null, checking = false;
+    const safe = () => {
+        const imageOverlay = document.getElementById('image-modal-overlay');
+        return Boolean(state.db && state.activeProfile && appLogic._setupEventListenersCallCount) &&
+            !state.executionInitializingV136 && !state.isSending && !state.sendPreparationV136 &&
+            !appLogic.isGenerationBlockingActive?.() && state.editingMessageIndex === null &&
+            !state.isEditingSystemPrompt && !appLogic.hasUnsavedSystemPrompt?.() &&
+            !appLogic.attachmentOperation && !state.pendingAttachments?.length && !state.selectedFilesForUpload?.length &&
+            !dbUtils.pendingChatSaves && !state.sync?.isSyncing &&
+            !document.querySelector('dialog[open]') && (!imageOverlay || imageOverlay.classList.contains('hidden'));
+    };
+    const schedule = (delay = 1000) => {
+        if (timer !== null || reloading || (!waiting && !reloadPending)) return;
+        timer = setTimeout(() => { timer = null; void check(); }, delay);
+    };
+    const check = async () => {
+        if (checking || reloading) return;
+        checking = true;
+        try {
+            if (!safe()) return;
+            if (appLogic.prepareForServiceWorkerUpdate) {
+                if (await appLogic.prepareForServiceWorkerUpdate() === false) return;
+            } else await appLogic.flushInputDraft();
+            // Saving the draft may yield to an input/navigation event.
+            if (!safe()) return;
+            if (reloadPending) {
+                reloading = true;
+                window.location.reload();
+            } else if (waiting) {
+                const worker = waiting;
+                if (worker.state !== 'redundant') worker.postMessage({ action: 'skipWaiting' });
+                waiting = null;
+            }
+        } catch (error) {
+            console.error('Service Worker更新を延期しました:', error);
+        } finally {
+            checking = false;
+            schedule();
+        }
+    };
+    return {
+        requestActivation(worker) { waiting = worker; schedule(0); },
+        requestReload() { reloadPending = true; schedule(0); }
+    };
+}
+
 function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) {
         console.warn('このブラウザはService Workerをサポートしていません。');
         return;
     }
 
-    // ページリロードの唯一のトリガーとしてcontrollerchangeを定義
-    let isReloading = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-        if (isReloading) return;
-        isReloading = true;
-        console.log("Controller has changed, reloading page for update...");
-        window.location.reload();
-    });
+    const updates = createServiceWorkerUpdateCoordinator();
+    const observedWorkers = new WeakSet();
+    navigator.serviceWorker.addEventListener('controllerchange', () => updates.requestReload());
 
     const handleUpdateFound = (registration) => {
         const newWorker = registration.installing;
-        if (newWorker) {
+        if (newWorker && !observedWorkers.has(newWorker)) {
+            observedWorkers.add(newWorker);
             console.log('新しいService Workerのインストールを検知しました。');
-            newWorker.addEventListener('statechange', () => {
+            const checkInstalled = () => {
                 // 新しいワーカーがインストールされ、待機状態になったら...
                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
                     console.log('新しいService Workerが待機状態に入りました。アクティベートを試みます。');
-                    // 確認なしで即座に更新を指示
-                    if (state.db) {
-                        state.db.close();
-                        console.log("Service Worker更新のため、現在のDB接続を閉じました。");
-                    }
-                    newWorker.postMessage({ action: 'skipWaiting' });
+                    updates.requestActivation(newWorker);
                 }
-            });
+            };
+            newWorker.addEventListener('statechange', checkInstalled);
+            checkInstalled();
         }
     };
 
     navigator.serviceWorker.addEventListener('message', event => {
         if (event.data && event.data.status === 'cacheCleared') {
             console.log('Service Workerから手動キャッシュクリア完了のメッセージを受信。リロードを実行します。');
-            if (isReloading) return;
-            isReloading = true;
-            window.location.reload();
+            updates.requestReload();
         } else if (event.data?.status === 'cacheClearFailed') {
             uiUtils.showCustomAlert(event.data.error || 'アプリ資源を更新できませんでした。既存のキャッシュは保持しています。');
         }
@@ -1434,9 +1481,15 @@ function registerServiceWorker() {
             const registration = await navigator.serviceWorker.register('./sw.js');
             console.log('ServiceWorker登録成功 スコープ: ', registration.scope);
 
+            const observeRegistration = readyRegistration => {
+                if (readyRegistration.waiting) updates.requestActivation(readyRegistration.waiting);
+                handleUpdateFound(readyRegistration);
+            };
             const checkForUpdates = () => {
-                navigator.serviceWorker.ready.then(readyRegistration => {
-                    readyRegistration.update();
+                return navigator.serviceWorker.ready.then(async readyRegistration => {
+                    observeRegistration(readyRegistration);
+                    await readyRegistration.update();
+                    observeRegistration(readyRegistration);
                 }).catch(error => {
                     console.error('navigator.serviceWorker.ready failed:', error);
                 });
@@ -1449,15 +1502,8 @@ function registerServiceWorker() {
             });
             window.addEventListener('focus', checkForUpdates);
 
-            // 待機中のワーカーがいれば即座に更新を試みる
-            if (registration.waiting) {
-                console.log('待機中の新しいService Workerが見つかりました。アクティベートを試みます。');
-                // 確認なしで即座に更新を指示
-                if (state.db) state.db.close();
-                registration.waiting.postMessage({ action: 'skipWaiting' });
-            }
-
-            registration.addEventListener('updatefound', () => handleUpdateFound(registration));
+            registration.addEventListener('updatefound', () => observeRegistration(registration));
+            observeRegistration(registration);
 
         } catch (error) {
             console.error('ServiceWorker処理中にエラー: ', error);
@@ -1467,6 +1513,59 @@ function registerServiceWorker() {
 
 // --- HTMLエスケープユーティリティ ---
 const htmlUtils = {
+    renderMarkdownInto(element, text) {
+        // Fail closed if an offline shell is incomplete. Never fall back to raw HTML.
+        if (typeof marked === 'undefined' || !window.DOMPurify?.isSupported) {
+            element.textContent = String(text || '');
+            return;
+        }
+        const fragment = DOMPurify.sanitize(marked.parse(String(text || '')), {
+            USE_PROFILES: { html: true }, RETURN_DOM_FRAGMENT: true,
+            ALLOW_DATA_ATTR: false,
+            FORBID_TAGS: ['style', 'form', 'input', 'textarea', 'button', 'video', 'audio', 'source'],
+            FORBID_ATTR: ['style', 'id', 'name']
+        });
+        fragment.querySelectorAll('a').forEach(link => {
+            link.target = '_blank'; link.rel = 'noopener noreferrer';
+        });
+        element.replaceChildren(fragment);
+    },
+    safeUrl(value, media = false) {
+        try {
+            const url = new URL(String(value), document.baseURI);
+            if (['https:', 'http:'].includes(url.protocol) || (!media && url.protocol === 'mailto:') ||
+                (media && (url.protocol === 'blob:' || (url.protocol === 'data:' && /^data:(image|video|audio)\//i.test(String(value)))))) return url.href;
+        } catch { /* Invalid imported/provider URL. */ }
+        return '';
+    },
+    replaceTextPlaceholder(root, token, createNode) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+        while (walker.nextNode()) {
+            if (walker.currentNode.textContent.includes(token) && !walker.currentNode.parentElement.closest('pre,code')) nodes.push(walker.currentNode);
+        }
+        for (const text of nodes) {
+            const parts = text.textContent.split(token), fragment = document.createDocumentFragment();
+            parts.forEach((part, i) => {
+                if (i) { const node = createNode(); if (node) fragment.append(node); }
+                fragment.append(document.createTextNode(part));
+            });
+            const parent = text.parentElement;
+            if (parent.tagName === 'P' && parent.childNodes.length === 1 && text.textContent === token) parent.replaceWith(fragment);
+            else text.replaceWith(fragment);
+        }
+    },
+    insertGeneratedImages(root, imageIds) {
+        let index = 0;
+        const createImage = () => {
+            if (index >= imageIds.length) return null;
+            const img = document.createElement('img');
+            img.className = 'lazy-load-image'; img.alt = '生成画像（読み込み中...）';
+            img.dataset.imageId = String(imageIds[index++]);
+            return img;
+        };
+        this.replaceTextPlaceholder(root, '[IMAGE_HERE]', createImage);
+        while (index < imageIds.length) root.append(createImage());
+    },
     // HTML要素内のテキストコンテンツ用エスケープ
     escapeHtml(text) {
         if (text === null || text === undefined) return '';
@@ -1698,14 +1797,23 @@ const dbUtils = {
         const contextMessages = state.currentMessages;
         let contextChatId = state.currentChatId;
         let targetChatId = contextChatId, savedChatId = null;
+        let savedUiState = null;
         const ownsContext = () => state.currentMessages === contextMessages && state.currentChatId === contextChatId
             && (!chatObjectToSave || chatObjectToSave.id === contextChatId);
-    
+
         let messagesForStats = [];
         let chatDataToSave;
-    
+
+        const promptSave = options.systemPromptSave;
+        if (promptSave && (promptSave.messages !== contextMessages ||
+            (promptSave.chatId != null && promptSave.chatId !== contextChatId))) {
+            throw new DOMException('System prompt save owner changed', 'AbortError');
+        }
+
         if (!chatObjectToSave) {
-            if ((!state.currentMessages || state.currentMessages.length === 0) && !state.currentSystemPrompt) {
+            const knownOwner = this.chatSaveOwners?.get(contextMessages);
+            if (!contextChatId && !knownOwner?.id && !knownOwner?.pending &&
+                (!state.currentMessages || state.currentMessages.length === 0) && !state.currentSystemPrompt) {
                 if(state.currentChatId) console.log(`saveChat: 既存チャット ${state.currentChatId} にメッセージもシステムプロンプトもないため保存せず`);
                 else console.log("saveChat: 新規チャットに保存するメッセージもシステムプロンプトもなし");
                 return state.currentChatId;
@@ -1750,11 +1858,11 @@ const dbUtils = {
             }));
 
             messagesForStats = messagesToSave;
-    
+
             chatDataToSave = {
                 messages: messagesToSave,
                 executionSettings: structuredClone(state.currentExecutionSettings),
-                systemPrompt: state.currentSystemPrompt,
+                systemPrompt: promptSave ? promptSave.value : state.currentSystemPrompt,
                 persistentMemory: state.currentPersistentMemory || {},
                 summarizedContext: state.currentSummarizedContext || null,
                 isMemoryEnabledForChat: state.isMemoryEnabledForChat,
@@ -1766,115 +1874,141 @@ const dbUtils = {
             messagesForStats = chatObjectToSave.messages || [];
             chatDataToSave = chatObjectToSave;
         }
-    
+
         chatDataToSave = structuredClone(chatDataToSave);
         messagesForStats = chatDataToSave.messages || [];
-        await SettingsV136.rememberHistoryContextsAsyncV136(chatDataToSave.messages, chatDataToSave.systemPrompt);
-        await this.openDB();
-        const stats = await this._calculateChatStats(messagesForStats);
-    
-        return new Promise((resolve, reject) => {
-            try {
-                const transaction = state.db.transaction([CHATS_STORE, SETTINGS_STORE], 'readwrite');
-                const store = transaction.objectStore(CHATS_STORE);
-                const now = Date.now();
-    
-                const processSave = (existingChatData = null) => {
-                    let title;
-                    if (optionalTitle !== null) {
-                        title = optionalTitle;
-                    } else if (existingChatData && existingChatData.title) {
-                        title = existingChatData.title;
-                    } else {
-                        const firstUserMessage = (chatDataToSave.messages || []).find(m => m.role === 'user' && !m.isHidden);
-                        title = firstUserMessage ? firstUserMessage.content.substring(0, 50) : "無題のチャット";
-                    }
-    
-                    const chatIdForOperation = existingChatData ? existingChatData.id : targetChatId;
-                    const pinSource = chatObjectToSave
-                        ? chatDataToSave
-                        : existingChatData || chatDataToSave;
-                    const pinState = normalizeChatPinState(pinSource);
-                    const finalChatData = {
-                        ...existingChatData,
-                        ...chatDataToSave,
-                        updatedAt: chatObjectToSave && chatObjectToSave.updatedAt ? chatObjectToSave.updatedAt : now,
-                        createdAt: existingChatData ? existingChatData.createdAt : now,
-                        title: title,
-                        stats: stats,
-                        isPinned: pinState.isPinned,
-                        pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
-                        pinStateUpdatedAt: pinState.pinStateUpdatedAt
-                    };
-                    if (chatIdForOperation) {
-                        finalChatData.id = chatIdForOperation;
-                    }
-    
-                    const putRequest = store.put(finalChatData);
-                    if (options.successfulExecution) {
-                        const settingsStore = transaction.objectStore(SETTINGS_STORE);
-                        const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
-                        successRequest.onsuccess = () => {
-                            if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt)
-                                settingsStore.put({ key: SettingsV136.SUCCESS_KEY, value: options.successfulExecution });
-                        };
-                    }
-                    putRequest.onsuccess = (event) => {
-                        const savedId = event.target.result;
-                        savedChatId = savedId;
-                        if (ownsContext()) {
-                            if (!contextChatId && savedId) state.currentChatId = contextChatId = savedId;
-                            state.currentChatIsPinned = pinState.isPinned;
-                            state.currentChatPinnedAt = pinState.isPinned ? pinState.pinnedAt : null;
-                            state.currentChatPinStateUpdatedAt = pinState.pinStateUpdatedAt;
-                            uiUtils.updateChatTitle(finalChatData.title);
-                        }
-                        console.log('チャット保存完了 ID:', savedId);
-                        if (!options.skipPush) {
-                            appLogic.markAsDirtyAndSchedulePush();
-                        }
-                    };
-                    putRequest.onerror = (event) => {
-                        console.error("チャット保存(put)エラー:", event.target.error);
-                    };
-                };
-    
-                if (targetChatId && !chatObjectToSave) {
-                    const getRequest = store.get(targetChatId);
-                    getRequest.onsuccess = (event) => {
-                        const existingChat = event.target.result;
-                        if (!existingChat) {
-                            console.warn(`ID ${targetChatId} のチャットが見つかりません(保存時)。新規として保存します。`);
-                            if (ownsContext()) state.currentChatId = contextChatId = null;
-                            targetChatId = null;
-                        }
-                        processSave(existingChat);
-                    };
-                    getRequest.onerror = (event) => {
-                        console.error("既存チャットの取得エラー(更新用):", event.target.error);
-                    };
-                } else {
-                    processSave(chatObjectToSave);
-                }
-    
-                transaction.oncomplete = () => {
-                    if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
-                    if (options.successfulExecution) state.lastSuccessfulExecution = options.successfulExecution;
-                    // 保存は高頻度になり得るため、表示中のサイドバーだけをtrailing debounceで更新する。
-                    if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
-                    resolve(savedChatId);
-                };
-                transaction.onerror = (event) => {
-                    console.error("チャット保存トランザクション失敗:", event.target.error);
-                    reject(new Error(`チャット保存トランザクション失敗: ${event.target.error.message}`));
-                };
-                transaction.onabort = () => reject(transaction.error || new Error('チャット保存が中断されました。'));
-    
-            } catch (error) {
-                console.error("チャット保存処理の開始に失敗:", error);
-                reject(error);
+        // Snapshot first, then serialize commits. Concurrent saves of a new draft
+        // share its eventual ID even when all callers initially captured null.
+        this.chatSaveOwners ||= new WeakMap();
+        let owner = this.chatSaveOwners.get(contextMessages);
+        if (!chatObjectToSave && !owner) {
+            owner = { id: contextChatId };
+            this.chatSaveOwners.set(contextMessages, owner);
+        }
+        const commit = async () => {
+            if (!chatObjectToSave && !targetChatId && owner.id) {
+                targetChatId = contextChatId = owner.id;
             }
-        });
+            if (!chatObjectToSave && !targetChatId && !chatDataToSave.messages.length && !chatDataToSave.systemPrompt) return null;
+            await SettingsV136.rememberHistoryContextsAsyncV136(chatDataToSave.messages, chatDataToSave.systemPrompt);
+            await this.openDB();
+            const stats = await this._calculateChatStats(messagesForStats);
+
+            return new Promise((resolve, reject) => {
+                try {
+                    const transaction = state.db.transaction([CHATS_STORE, SETTINGS_STORE], 'readwrite');
+                    const store = transaction.objectStore(CHATS_STORE);
+                    const now = Date.now();
+
+                    const processSave = (existingChatData = null) => {
+                        let title;
+                        if (optionalTitle !== null) {
+                            title = optionalTitle;
+                        } else if (existingChatData && existingChatData.title) {
+                            title = existingChatData.title;
+                        } else {
+                            const firstUserMessage = (chatDataToSave.messages || []).find(m => m.role === 'user' && !m.isHidden);
+                            title = firstUserMessage ? firstUserMessage.content.substring(0, 50) : "無題のチャット";
+                        }
+
+                        const chatIdForOperation = existingChatData ? existingChatData.id : targetChatId;
+                        const pinSource = chatObjectToSave
+                            ? chatDataToSave
+                            : existingChatData || chatDataToSave;
+                        const pinState = normalizeChatPinState(pinSource);
+                        const finalChatData = {
+                            ...existingChatData,
+                            ...chatDataToSave,
+                            updatedAt: chatObjectToSave && chatObjectToSave.updatedAt ? chatObjectToSave.updatedAt : now,
+                            createdAt: existingChatData ? existingChatData.createdAt : now,
+                            title: title,
+                            stats: stats,
+                            isPinned: pinState.isPinned,
+                            pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
+                            pinStateUpdatedAt: pinState.pinStateUpdatedAt
+                        };
+                        if (chatIdForOperation) {
+                            finalChatData.id = chatIdForOperation;
+                        }
+
+                        const putRequest = store.put(finalChatData);
+                        if (options.successfulExecution) {
+                            const settingsStore = transaction.objectStore(SETTINGS_STORE);
+                            const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
+                            successRequest.onsuccess = () => {
+                                if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt)
+                                    settingsStore.put({ key: SettingsV136.SUCCESS_KEY, value: options.successfulExecution });
+                            };
+                        }
+                        putRequest.onsuccess = (event) => {
+                            const savedId = event.target.result;
+                            savedChatId = savedId;
+                            savedUiState = { pinState, title: finalChatData.title };
+                        };
+                        putRequest.onerror = (event) => {
+                            console.error("チャット保存(put)エラー:", event.target.error);
+                        };
+                    };
+
+                    if (targetChatId && !chatObjectToSave) {
+                        const getRequest = store.get(targetChatId);
+                        getRequest.onsuccess = (event) => {
+                            const existingChat = event.target.result;
+                            if (!existingChat) {
+                                console.warn(`ID ${targetChatId} のチャットが見つかりません(保存時)。新規として保存します。`);
+                                if (ownsContext()) state.currentChatId = contextChatId = null;
+                                targetChatId = null;
+                            }
+                            processSave(existingChat);
+                        };
+                        getRequest.onerror = (event) => {
+                            console.error("既存チャットの取得エラー(更新用):", event.target.error);
+                        };
+                    } else {
+                        processSave(chatObjectToSave);
+                    }
+
+                    transaction.oncomplete = () => {
+                        if (!chatObjectToSave) owner.id = savedChatId;
+                        try {
+                            if (savedUiState && ownsContext()) {
+                                if (!contextChatId && savedChatId) state.currentChatId = contextChatId = savedChatId;
+                                state.currentChatIsPinned = savedUiState.pinState.isPinned;
+                                state.currentChatPinnedAt = savedUiState.pinState.isPinned ? savedUiState.pinState.pinnedAt : null;
+                                state.currentChatPinStateUpdatedAt = savedUiState.pinState.pinStateUpdatedAt;
+                                uiUtils.updateChatTitle(savedUiState.title);
+                            }
+                            if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush();
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
+                            if (options.successfulExecution) state.lastSuccessfulExecution = options.successfulExecution;
+                            if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
+                        } catch (error) {
+                            // A committed write must resolve even if a view/storage side effect fails.
+                            console.error('チャット保存後の表示更新に失敗しました:', error);
+                        }
+                        resolve(savedChatId);
+                    };
+                    transaction.onerror = (event) => {
+                        console.error("チャット保存トランザクション失敗:", event.target.error);
+                        reject(new Error(`チャット保存トランザクション失敗: ${event.target.error.message}`));
+                    };
+                    transaction.onabort = () => reject(transaction.error || new Error('チャット保存が中断されました。'));
+
+                } catch (error) {
+                    console.error("チャット保存処理の開始に失敗:", error);
+                    reject(error);
+                }
+            });
+        };
+        this.pendingChatSaves = (this.pendingChatSaves || 0) + 1;
+        if (!chatObjectToSave) owner.pending = (owner.pending || 0) + 1;
+        const saving = (this.chatSaveTail || Promise.resolve()).then(commit);
+        this.chatSaveTail = saving.catch(() => {});
+        try { return await saving; }
+        finally {
+            this.pendingChatSaves--;
+            if (!chatObjectToSave) owner.pending--;
+        }
     },
 
     async _calculateChatStats(messages) {
@@ -3849,7 +3983,7 @@ const uiUtils = {
     async openChatSearch() {
         if (!elements.chatSearchDialog) return;
         if (state.isEditingSystemPrompt) {
-            await appLogic.closeSystemPromptDialog();
+            if (!await appLogic.closeSystemPromptDialog()) return;
         }
         state.chatSearch.isOpen = true;
         elements.chatSearchDialog.hidden = false;
@@ -4192,7 +4326,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             thoughtContentDiv.id = `streaming-thought-summary-${index}`;
         } else {
             try {
-                thoughtContentDiv.innerHTML = marked.parse(messageData.thoughtSummary || '');
+                htmlUtils.renderMarkdownInto(thoughtContentDiv, messageData.thoughtSummary || '');
             } catch (e) {
                 console.error("Thought Summary Markdownパースエラー:", e);
                 thoughtContentDiv.textContent = messageData.thoughtSummary || '';
@@ -4284,6 +4418,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     // modalContentではなく、存在する要素を直接操作する
                     if (modalOverlay && modalImg) {
                         if (previewElement.tagName === 'IMG') {
+                            uiUtils.imageModalPreviousFocus = document.activeElement;
                             modalImg.src = previewElement.src;
                             modalOverlay.classList.remove('hidden');
                         } else {
@@ -4322,7 +4457,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 contentDiv.appendChild(this.createGenerationPlaceholderContent());
             } else if (content && (role === 'model' || role === 'user')) {
                  if (role === 'model' && !isStreamingPlaceholder && typeof marked !== 'undefined') {
-                    contentDiv.innerHTML = marked.parse(content || '');
+                    htmlUtils.renderMarkdownInto(contentDiv, content || '');
                 } else {
                     const pre = document.createElement('pre'); pre.textContent = content; contentDiv.appendChild(pre);
                 }
@@ -4336,30 +4471,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     }
     messageDiv.appendChild(contentDiv);
             
-    const imagePlaceholderRegex = /<p>\[IMAGE_HERE\]<\/p>|\[IMAGE_HERE\]/g;
     if (role === 'model' && messageData && messageData.imageIds && messageData.imageIds.length > 0) {
-        let imageIndex = 0;
-        const replacedHtml = contentDiv.innerHTML.replace(imagePlaceholderRegex, () => {
-            if (imageIndex < messageData.imageIds.length) {
-                const imageId = messageData.imageIds[imageIndex++];
-                return `<img class="lazy-load-image" alt="生成画像（読み込み中...）" data-image-id="${imageId}">`;
-            }
-            return '';
-        });
-        contentDiv.innerHTML = replacedHtml;
-
-        if (imageIndex < messageData.imageIds.length) {
-            const fragment = document.createDocumentFragment();
-            for (let i = imageIndex; i < messageData.imageIds.length; i++) {
-                const imageId = messageData.imageIds[i];
-                const img = document.createElement('img');
-                img.className = 'lazy-load-image';
-                img.alt = '生成画像（読み込み中...）';
-                img.dataset.imageId = imageId;
-                fragment.appendChild(img);
-            }
-            contentDiv.appendChild(fragment);
-        }
+        htmlUtils.insertGeneratedImages(contentDiv, messageData.imageIds);
         requestAnimationFrame(() => {
             const newImages = contentDiv.querySelectorAll('.lazy-load-image');
             newImages.forEach(img => appLogic.imageObserver.observe(img));
@@ -4406,7 +4519,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 sortedCitations.forEach(([chunkIndex, citationInfo]) => {
                     const listItem = document.createElement('li');
                     const link = document.createElement('a');
-                    link.href = citationInfo.uri;
+                    link.href = htmlUtils.safeUrl(citationInfo.uri);
                     link.textContent = `[${citationInfo.displayIndex}] ${citationInfo.title}`;
                     link.title = citationInfo.title;
                     link.target = '_blank';
@@ -4419,7 +4532,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                          if (chunk?.web?.uri) {
                              const listItem = document.createElement('li');
                              const link = document.createElement('a');
-                             link.href = chunk.web.uri;
+                             link.href = htmlUtils.safeUrl(chunk.web.uri);
                              link.textContent = chunk.web.title || `ソース ${idx + 1}`;
                              link.title = chunk.web.title || 'タイトル不明';
                              link.target = '_blank';
@@ -4508,7 +4621,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         messageData.search_web_results.forEach(result => {
             const listItem = document.createElement('li');
             const link = document.createElement('a');
-            link.href = result.link;
+            link.href = htmlUtils.safeUrl(result.link);
             link.textContent = result.title;
             link.title = result.snippet;
             link.target = '_blank';
@@ -4537,7 +4650,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             video.style.display = 'block';
 
             if (videoData.url) {
-                video.src = videoData.url;
+                video.src = htmlUtils.safeUrl(videoData.url, true);
             } else if (videoData.base64Data) {
                 base64ToBlob(videoData.base64Data, 'video/mp4')
                     .then(blob => {
@@ -4550,17 +4663,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     });
             }
 
-            const placeholderRegex = /\[VIDEO_HERE\]/g;
-            if (placeholderRegex.test(contentDiv.innerHTML)) {
-                let replaced = false;
-                contentDiv.innerHTML = contentDiv.innerHTML.replace(placeholderRegex, (match) => {
-                    if (!replaced) {
-                        replaced = true;
-                        return video.outerHTML;
-                    }
-                    return '';
-                });
-            }
+            let inserted = false;
+            htmlUtils.replaceTextPlaceholder(contentDiv, '[VIDEO_HERE]', () => {
+                if (inserted) return null;
+                inserted = true;
+                return video;
+            });
         }
     }
 
@@ -5223,10 +5331,35 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const top = Math.max(r.top, viewport?.offsetTop || 0);
         const right = Math.min(r.right, (viewport?.offsetLeft || 0) + (viewport?.width || innerWidth));
         const bottom = Math.min(r.bottom, (viewport?.offsetTop || 0) + (viewport?.height || innerHeight));
+        // Android's keyboard can shrink only the visual viewport. Share its
+        // inset between the composer, scroll padding and jump button; ignore pinch zoom.
+        const composerViewportInset = !viewport || Math.abs(viewport.scale - 1) < 0.01
+            ? Math.max(0, r.bottom - bottom) : 0;
+        const insetValue = `${composerViewportInset}px`;
+        if (workspace.style.getPropertyValue('--composer-viewport-inset') !== insetValue) {
+            workspace.style.setProperty('--composer-viewport-inset', insetValue);
+        }
         const headerBottom = workspace.querySelector('.app-header')?.getBoundingClientRect().bottom || top;
-        const composerTop = workspace.querySelector('footer')?.getBoundingClientRect().top || bottom;
+        const composerRect = workspace.querySelector('footer')?.getBoundingClientRect();
+        const composerTop = composerRect?.top || bottom;
         const contentTop = Math.max(top, Math.min(bottom, headerBottom));
         const contentBottom = Math.max(contentTop, Math.min(bottom, composerTop));
+        const textarea = this.getComposerTextarea();
+        if (textarea && composerRect) {
+            const controlsHeight = Math.max(0, composerRect.height - textarea.getBoundingClientRect().height);
+            const bottomGap = Math.max(0, bottom - composerRect.bottom);
+            // Reserve room for the jump button, its composer gap and top margin.
+            // Keep the existing 520px maximum when the viewport has enough room.
+            const maxHeight = viewport && Math.abs(viewport.scale - 1) >= 0.01
+                ? COMPOSER_TEXTAREA_MAX_HEIGHT
+                : Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, Math.min(COMPOSER_TEXTAREA_MAX_HEIGHT,
+                    Math.floor(bottom - contentTop - bottomGap - controlsHeight - 64)));
+            if (this.composerTextareaMaxHeight !== maxHeight) {
+                this.composerTextareaMaxHeight = maxHeight;
+                workspace.style.setProperty('--composer-textarea-max-height', `${maxHeight}px`);
+                this.scheduleComposerTextareaResize(true);
+            }
+        }
         const root = document.documentElement.style;
         root.setProperty('--chat-dialog-center-x', `${(left + right) / 2}px`);
         root.setProperty('--chat-dialog-center-y', `${(top + bottom) / 2}px`);
@@ -6298,10 +6431,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.setThemeCssVariable('--app-header-fg', readableTextColor);
         this.setThemeCssVariable('--app-header-hover-bg', hoverBackgroundColor);
         this.setThemeCssVariable('--app-header-hover-fg', hoverTextColor);
-        if (elements.themeColorMeta) {
-            elements.themeColorMeta.setAttribute('content', finalHeaderColor);
-        }
-        console.log(`ヘッダーカラー適用。テーマカラー: ${finalHeaderColor}, 文字色: ${readableTextColor}, hover背景: ${hoverBackgroundColor}`);
+        console.log(`ヘッダーカラー適用。背景色: ${finalHeaderColor}, 文字色: ${readableTextColor}, hover背景: ${hoverBackgroundColor}`);
     },
 
     applyNewChatButtonColor() {
@@ -6816,15 +6946,19 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.updateOpenRouterModelOptions();
     },
 
+    updatePageThemeColor() {
+        if (!elements.themeColorMeta || !elements.chatScreen) return;
+        const backgroundColor = getComputedStyle(elements.chatScreen).backgroundColor;
+        elements.themeColorMeta.content = this.colorToHex(backgroundColor, elements.themeColorMeta.content).toUpperCase();
+    },
+
     // ダークモードを適用
     applyDarkMode() {
         const isDark = state.settings.darkMode;
         document.body.classList.toggle('dark-mode', isDark);
         // OS設定の上書き用クラス (ダークモードでない場合)
         document.body.classList.toggle('light-mode-forced', !isDark);
-        if (elements.themeColorMeta) {
-            elements.themeColorMeta.content = isDark ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
-        }
+        this.updatePageThemeColor();
         console.log(`ダークモード ${isDark ? '有効' : '無効'}. テーマカラー: ${elements.themeColorMeta?.content || '未設定'}`);
         this.applyOverlayOpacity();
         this.applyThemeColorSettings();
@@ -6949,6 +7083,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           window.settingsUiV136?.closePopover(false);
 
           if (screenName !== 'chat') {
+            appLogic.invalidateSystemPromptOpen();
             this.closeHistoryItemMenu();
             if (chatSidebarUiState.mode === 'overlay') this.closeChatSidebar({ restoreFocus: false });
           }
@@ -7113,11 +7248,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         textarea.style.height = 'auto';
         const contentHeight = Math.ceil(textarea.scrollHeight);
+        const maxHeight = this.composerTextareaMaxHeight || COMPOSER_TEXTAREA_MAX_HEIGHT;
         const nextHeight = Math.max(
             COMPOSER_TEXTAREA_MIN_HEIGHT,
-            Math.min(contentHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)
+            Math.min(contentHeight, maxHeight)
         );
-        const overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT + 1 ? 'auto' : 'hidden';
+        const overflowY = contentHeight > maxHeight + 1 ? 'auto' : 'hidden';
 
         textarea.style.height = `${nextHeight}px`;
         textarea.style.setProperty('--composer-textarea-height', `${nextHeight}px`);
@@ -7511,7 +7647,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     finishCollapseScrollAdjustment(operationId) {
         if (operationId !== state.collapseScrollAdjustmentId) return;
         state.suppressAutoScrollForCollapse = false;
-        this.updateScrollButtonsState?.();
+        appLogic.scheduleScrollToBottomButtonUpdate();
     },
 
     requestCollapseResidualAdjustment(operationId, callback) {
@@ -7713,25 +7849,154 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
 
 
+    // One delegated gesture handler for native backdrops and the image overlay.
+    installDialogDismissal() {
+        if (this.dialogDismissalInstalled) return;
+        this.dialogDismissalInstalled = true;
+        let gesture = null;
+        let blockClickUntil = 0;
+        const previousFocus = new WeakMap();
+        const stop = event => {
+            if (event.cancelable) event.preventDefault();
+            event.stopImmediatePropagation();
+        };
+        const targetDialog = event => {
+            const dialog = event.target.closest?.('dialog[open]');
+            if (dialog) return dialog;
+            const overlay = document.getElementById('image-modal-overlay');
+            return overlay && !overlay.classList.contains('hidden') && overlay.contains(event.target) ? overlay : null;
+        };
+        const outside = (dialog, event) => {
+            const surface = dialog.id === 'image-modal-overlay' ? document.getElementById('image-modal-img') : dialog;
+            const rect = surface.getBoundingClientRect();
+            return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+        };
+        document.addEventListener('beforetoggle', event => {
+            if (event.target instanceof HTMLDialogElement && event.newState === 'open') {
+                previousFocus.set(event.target, document.activeElement);
+            }
+        }, true);
+        document.addEventListener('pointerdown', event => {
+            blockClickUntil = 0;
+            if (!event.isPrimary) { if (gesture) gesture.moved = true; return; }
+            gesture = null;
+            if (event.button !== 0) return;
+            const dialog = targetDialog(event);
+            if (!dialog) return;
+            gesture = { dialog, path: event.composedPath(), pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+                outside: outside(dialog, event), moved: false };
+            if (gesture.outside) stop(event);
+        }, true);
+        document.addEventListener('pointermove', event => {
+            if (gesture?.pointerId === event.pointerId && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 8) {
+                gesture.moved = true;
+            }
+        }, { capture: true, passive: true });
+        document.addEventListener('pointercancel', event => {
+            if (gesture?.pointerId !== event.pointerId) return;
+            if (gesture.outside) blockClickUntil = performance.now() + 800;
+            gesture = null;
+        }, true);
+        const cancelGesture = () => { if (gesture) gesture.moved = true; };
+        document.addEventListener('scroll', event => {
+            // Only scrolling the pressed content belongs to this gesture. A
+            // backdrop press cannot scroll that content; movement, wheel and
+            // pointercancel still reject actual backdrop scroll gestures.
+            if (gesture && !gesture.outside && gesture.path.includes(event.target)) gesture.moved = true;
+        }, { capture: true, passive: true });
+        document.addEventListener('wheel', cancelGesture, { capture: true, passive: true });
+        document.addEventListener('pointerup', event => {
+            if (!gesture || gesture.pointerId !== event.pointerId) return;
+            const current = gesture; gesture = null;
+            if (Math.hypot(event.clientX - current.x, event.clientY - current.y) > 8) current.moved = true;
+            const endsOutside = outside(current.dialog, event);
+            if (current.outside || endsOutside) {
+                stop(event);
+                // The following trusted click may be retargeted after close().
+                blockClickUntil = performance.now() + 800;
+                if (current.outside && endsOutside && !current.moved && targetDialog(event) === current.dialog) {
+                    void this.dismissDialog(current.dialog);
+                }
+            }
+        }, true);
+        document.addEventListener('click', event => {
+            if (event.isTrusted && event.detail > 0 && performance.now() < blockClickUntil) stop(event);
+        }, true);
+        document.addEventListener('cancel', event => {
+            if (!(event.target instanceof HTMLDialogElement)) return;
+            stop(event);
+            void this.dismissDialog(event.target);
+        }, true);
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape') return;
+            if (document.querySelector('dialog:modal')) {
+                // Keep the browser's top-modal cancel action, but do not let
+                // sidebar/menu Escape handlers close UI behind that modal.
+                event.stopImmediatePropagation();
+                return;
+            }
+            const overlay = document.getElementById('image-modal-overlay');
+            if (overlay && !overlay.classList.contains('hidden')) {
+                stop(event);
+                void this.dismissDialog(overlay);
+            }
+        }, true);
+        document.addEventListener('close', event => {
+            const dialog = event.target;
+            if (!(dialog instanceof HTMLDialogElement)) return;
+            // close is queued by the browser. A reopened modal owns a new
+            // editing/focus operation, so an older notification must do nothing.
+            if (dialog.open) return;
+            if (dialog === elements.systemPromptDialog && state.isEditingSystemPrompt) {
+                void appLogic.closeSystemPromptDialog();
+                if (dialog.open) return; // Saving reopened it and captured a new focus owner.
+            }
+            const opener = previousFocus.get(dialog); previousFocus.delete(dialog);
+            queueMicrotask(() => {
+                if (dialog.open) return;
+                const modal = document.querySelector('dialog:modal');
+                if (opener?.isConnected && !opener.closest('[inert]') && (!modal || modal.contains(opener)) &&
+                    (document.activeElement === document.body || dialog.contains(document.activeElement))) {
+                    opener.focus({ preventScroll: true });
+                }
+            });
+        }, true);
+    },
+
+    async dismissDialog(dialog) {
+        if (dialog.id === 'image-modal-overlay') {
+            dialog.classList.add('hidden');
+            if (this.imageModalPreviousFocus?.isConnected) this.imageModalPreviousFocus.focus({ preventScroll: true });
+            return;
+        }
+        if (!dialog.open || dialog === elements.progressDialog) return;
+        if (dialog === elements.systemPromptDialog) return appLogic.closeSystemPromptDialog();
+        if (dialog === elements.apiConfigDialog) return appLogic.closeApiConfigDialog();
+        dialog.close(dialog === elements.promptDialog ? '' : 'cancel');
+    },
+
     // --- カスタムダイアログ関数 ---
     showCustomDialog(dialogElement, focusElement) {
+        this.installDialogDismissal();
         return new Promise((resolve) => {
+            const finishAnimation = () => dialogElement.classList.remove('animating');
             const closeListener = () => {
                 dialogElement.removeEventListener('close', closeListener);
+                dialogElement.removeEventListener('animationend', finishAnimation);
+                finishAnimation();
                 resolve(dialogElement.returnValue);
             };
             dialogElement.addEventListener('close', closeListener);
 
             // アニメーションクラスを追加
             dialogElement.classList.add('animating');
-            dialogElement.addEventListener('animationend', () => {
-                dialogElement.classList.remove('animating');
-            }, { once: true });
+            dialogElement.addEventListener('animationend', finishAnimation, { once: true });
 
+            dialogElement.returnValue = '';
             dialogElement.showModal();
             
             if (focusElement) {
-                requestAnimationFrame(() => { focusElement.focus(); });
+                requestAnimationFrame(() => { if (dialogElement.open && focusElement.isConnected) focusElement.focus(); });
             }
         });
     },
@@ -7750,7 +8015,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
     },
     // 確認ダイアログ表示
-    async showCustomConfirm(message) {
+    async showCustomConfirm(message, { placement = 'global' } = {}) {
+        elements.confirmDialog.classList.toggle('chat-workspace-dialog', placement === 'chat');
+        if (placement === 'chat') this.updateChatWorkspaceLayout();
         elements.confirmMessage.textContent = message;
          // ボタンのイベントリスナーが重複しないように複製して置き換え
          const newOkBtn = elements.confirmOkBtn.cloneNode(true);
@@ -7811,6 +8078,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // ファイルアップロードダイアログ表示
     showFileUploadDialog() {
+        appLogic.beginAttachmentSession();
+        elements.fileUploadDialog.returnValue = '';
         if (state.selectedFilesForUpload.length === 0 && state.pendingAttachments.length > 0) {
             state.selectedFilesForUpload = state.pendingAttachments.map(att => ({ file: att.file }));
             console.log("送信待ちの添付ファイルをダイアログに復元:", state.selectedFilesForUpload.map(item => item.file.name));
@@ -8028,6 +8297,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // --- 進捗ダイアログ ヘルパー ---
     showProgressDialog(message) {
+        this.installDialogDismissal();
         elements.progressMessage.textContent = message;
         if (!elements.progressDialog.open) {
             elements.progressDialog.showModal();
@@ -12721,7 +12991,7 @@ const appLogic = {
                     elements.alertMessage.textContent = releaseNotes;
                 } else {
                     try {
-                        elements.alertMessage.innerHTML = marked.parse(releaseNotes);
+                        htmlUtils.renderMarkdownInto(elements.alertMessage, releaseNotes);
                     } catch (renderError) {
                         console.error('[ReleaseNotes] Markdown描画に失敗しました。プレーンテキストで表示します:', renderError);
                         elements.alertMessage.textContent = releaseNotes || RELEASE_NOTES_FALLBACK_MESSAGE;
@@ -12925,6 +13195,13 @@ const appLogic = {
         clearTimeout(inputDraftSaveTimer);
         this.persistInputDraft(contextKey, elements.userInput.value);
         this.flushInputDraftDropboxSave();
+    },
+
+    prepareForServiceWorkerUpdate() {
+        this.flushInputDraft();
+        const text = elements.userInput?.value || '';
+        // Quota/storage failures and over-limit drafts must also defer reload.
+        return !text || this.loadInputDraftLocal(this.getInputDraftContextKey())?.text === text;
     },
 
     scheduleInputDraftRestore(delay = 60, force = false) {
@@ -14231,7 +14508,7 @@ const appLogic = {
                 const html = originalLinkRenderer.call(renderer, href, title, text);
                 return html.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
             };
-            marked.setOptions({ renderer, breaks: true, gfm: true, sanitize: true, smartypants: false });
+            marked.setOptions({ renderer, breaks: true, gfm: true, smartypants: false });
         } else {
             console.error("Marked.jsライブラリが読み込まれていません！");
         }
@@ -15049,11 +15326,12 @@ const appLogic = {
         }
     
         this._setupEventListenersCallCount++;
+        uiUtils.installDialogDismissal();
     
         // --- 画面遷移 ---
         uiUtils.setupChatTitleEditing();
         elements.gotoHistoryBtn.addEventListener('click', async () => {
-            if (state.isEditingSystemPrompt) await this.closeSystemPromptDialog();
+            if (state.isEditingSystemPrompt && !await this.closeSystemPromptDialog()) return;
             if (chatSidebarUiState.mode !== 'disabled') {
                 uiUtils.openChatSidebar();
                 return;
@@ -15061,7 +15339,7 @@ const appLogic = {
             uiUtils.showScreen('history');
         });
         elements.gotoSettingsBtn.addEventListener('click', async () => {
-            if (state.isEditingSystemPrompt) await this.closeSystemPromptDialog();
+            if (state.isEditingSystemPrompt && !await this.closeSystemPromptDialog()) return;
             uiUtils.showScreen('settings');
         });
         elements.backToChatFromHistoryBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
@@ -15526,14 +15804,10 @@ const appLogic = {
                 this.openSystemPromptDialog();
             }
         });
-        elements.systemPromptCloseBtn?.addEventListener('pointerdown', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            this.closeSystemPromptDialog();
-        });
         elements.systemPromptCloseBtn?.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
+            this.closeSystemPromptDialog();
         });
         document.addEventListener('input', (event) => {
             if (event.target?.id === 'system-prompt-editor') {
@@ -15545,12 +15819,6 @@ const appLogic = {
                 this.saveCurrentSystemPrompt({ keepOpen: true });
             }
         }, true);
-        elements.systemPromptEditor?.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') {
-                event.preventDefault();
-                this.closeSystemPromptDialog();
-            }
-        });
     
         // --- プロファイルメニューの表示/非表示 ---
         elements.profileCardHeader.addEventListener('click', (e) => {
@@ -16053,6 +16321,7 @@ const appLogic = {
                 const modalImg = document.getElementById('image-modal-img');
                 
                 if (modalOverlay && modalImg) {
+                    uiUtils.imageModalPreviousFocus = document.activeElement;
                     modalImg.src = event.target.src;
                     modalOverlay.classList.remove('hidden');
                 }
@@ -16095,7 +16364,7 @@ const appLogic = {
         elements.confirmAttachBtn.addEventListener('click', () => this.confirmAttachment());
         elements.cancelAttachBtn.addEventListener('click', () => this.cancelAttachment());
         elements.fileUploadDialog.addEventListener('close', () => {
-            if (elements.fileUploadDialog.returnValue !== 'ok') {
+            if (!elements.fileUploadDialog.open && elements.fileUploadDialog.returnValue !== 'ok') {
                 this.cancelAttachment();
             }
         });
@@ -16170,13 +16439,7 @@ const appLogic = {
         
         if (modalOverlay && modalCloseBtn) {
             modalCloseBtn.addEventListener('click', () => {
-                modalOverlay.classList.add('hidden');
-            });
-            
-            modalOverlay.addEventListener('click', (event) => {
-                if (event.target === modalOverlay) {
-                    modalOverlay.classList.add('hidden');
-                }
+                void uiUtils.dismissDialog(modalOverlay);
             });
         }
         elements.enableAutoRetryCheckbox.addEventListener('change', () => {
@@ -16232,10 +16495,14 @@ const appLogic = {
         const mainContent = elements.chatScreen.querySelector('.main-content');
         uiUtils.setupChatSearch();
 
-        // スクロールイベントからはパネル表示ロジックを削除し、ボタンの状態更新のみ残す
-        mainContent.addEventListener('scroll', () => {
-            this.updateScrollButtonsState();
-        });
+        mainContent.addEventListener('scroll', () => this.scheduleScrollToBottomButtonUpdate(), { passive: true });
+        // Observe the stable content wrapper, not individual messages. This also
+        // covers streaming, images, deletion, collapse and chat/viewport changes.
+        this.scrollToBottomResizeObserver?.disconnect();
+        this.scrollToBottomResizeObserver = new ResizeObserver(() => this.scheduleScrollToBottomButtonUpdate());
+        this.scrollToBottomResizeObserver.observe(mainContent);
+        this.scrollToBottomResizeObserver.observe(elements.messageContainer);
+        this.scheduleScrollToBottomButtonUpdate();
         uiUtils.installMessageCollapseStickyObservers();
         uiUtils.installMessageCollapseStickyEventListeners();
 
@@ -16296,7 +16563,6 @@ const appLogic = {
         elements.textFormattingUndoBtn?.addEventListener('click', () => this.undoFromTextFormattingDialog());
         elements.textFormattingRedoBtn?.addEventListener('click', () => this.redoFromTextFormattingDialog());
         elements.textFormattingCancelBtn?.addEventListener('click', () => elements.textFormattingDialog?.close('cancel'));
-        elements.scrollToTopBtn.addEventListener('click', () => this.scrollToTop());
         elements.scrollToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
 
         // --- Header Auto-Hide Event Listeners ---
@@ -16621,7 +16887,7 @@ const appLogic = {
         }
         // システムプロンプト編集中なら保存して閉じる
         if (state.isEditingSystemPrompt) {
-            await this.closeSystemPromptDialog();
+            if (!await this.closeSystemPromptDialog()) return false;
         }
         // 保留中の添付ファイルがあれば破棄
         if (state.pendingAttachments.length > 0) {
@@ -16656,6 +16922,10 @@ const appLogic = {
     // 新規チャットを開始する (状態リセット)
     startNewChat(options = {}) {
         if (state.isSending) return;
+        this.invalidateSystemPromptOpen();
+        this.cancelAttachmentOperation();
+        this.attachmentSession = null;
+        state.selectedFilesForUpload = [];
         this.cancelSendPreparationV136();
         this.flushInputDraft();
         state.currentExecutionSettings = null;
@@ -16698,6 +16968,7 @@ const appLogic = {
             return { ok: false, notFound: true, reason: 'invalid-chat-id' };
         }
 
+        this.invalidateSystemPromptOpen();
         const shouldAbortSending = state.isSending;
         const editingMessageIndex = state.editingMessageIndex;
         const shouldCloseSystemPrompt = state.isEditingSystemPrompt;
@@ -16713,10 +16984,7 @@ const appLogic = {
         }
         if (shouldCloseSystemPrompt) {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
-            if (!saved) {
-                const confirmed = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したまま別のチャットを読み込みますか？");
-                if (!confirmed) return { ok: false, cancelled: true, reason: 'system-prompt' };
-            }
+            if (!saved) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
         if (shouldDiscardAttachments) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
@@ -16768,7 +17036,7 @@ const appLogic = {
             this.cancelEditMessage(editingMessageIndex, messageElement);
         }
         if (shouldCloseSystemPrompt) {
-            await this.closeSystemPromptDialog({ skipSave: true });
+            if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
         if (shouldDiscardAttachments) {
             state.pendingAttachments = [];
@@ -16778,6 +17046,9 @@ const appLogic = {
 
         state.pendingCascadeResponses = null;
         state.syncMessageCounter = 0;
+        this.cancelAttachmentOperation();
+        this.attachmentSession = null;
+        state.selectedFilesForUpload = [];
         state.currentChatId = chat.id;
         state.currentExecutionSettings = this.getChatExecutionSettingsV136(chat);
         state.executionInitializingV136 = false;
@@ -16828,11 +17099,8 @@ const appLogic = {
         if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
         if (state.isEditingSystemPrompt) {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
-            if (!saved) {
-                const conf = await uiUtils.showCustomConfirm("システムプロンプトの保存に失敗しました。入力内容を保持したままチャットを複製しますか？");
-                if (!conf) return { ok: false, cancelled: true };
-            }
-            await this.closeSystemPromptDialog({ skipSave: true });
+            if (!saved) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
+            if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
         if ((state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId && state.currentChatId !== id) { try { await dbUtils.saveChat(); } catch (error) { console.error("複製前の現チャット保存失敗:", error); const conf = await uiUtils.showCustomConfirm("現在のチャット保存に失敗しました。複製を続行しますか？"); if (!conf) return; } }
         // 保留中の添付ファイルがあれば破棄確認
@@ -18434,12 +18702,29 @@ const appLogic = {
     startEditSystemPrompt() {
         this.openSystemPromptDialog();
     },
+    invalidateSystemPromptOpen() {
+        if (this.systemPromptDialogOperation?.kind === 'open') this.systemPromptDialogOperation = null;
+    },
     async openSystemPromptDialog() {
+        const operation = { kind: 'open', messages: state.currentMessages, chatId: state.currentChatId };
+        this.systemPromptDialogOperation = operation;
+        const isCurrent = () => this.systemPromptDialogOperation === operation &&
+            operation.messages === state.currentMessages && operation.chatId === state.currentChatId &&
+            state.currentScreen === 'chat' && !elements.chatScreen.inert;
+        if (!isCurrent()) return false;
+        // Reopening during a pending close takes ownership without resetting
+        // the editor, its save session or the latest autosave timer.
+        if (elements.systemPromptDialog.open && state.isEditingSystemPrompt) return true;
         appLogic.ensureHistoryWorkerV136();
-        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
+        try {
+            await SettingsV136.rememberHistoryContextsAsyncV136(operation.messages, state.currentSystemPrompt);
+        } catch (error) {
+            if (!isCurrent()) return false;
+            throw error;
+        }
+        if (!isCurrent()) return false;
         uiUtils.closeChatSearch?.({ restoreFocus: false });
-        state.isEditingSystemPrompt = true;
-        void this.updateChangeHistoryControls();
+        this.getSystemPromptSaveSession();
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
         const editor = uiUtils.getSystemPromptEditorElement();
@@ -18448,13 +18733,18 @@ const appLogic = {
             editor.disabled = Boolean(state.isSending);
             uiUtils.adjustTextareaHeight(editor, 200);
         }
-        if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = false;
-        uiUtils.updateChatWorkspaceLayout();
+        uiUtils.prepareChatDialog(elements.systemPromptDialog);
+        if (elements.systemPromptDialog && !elements.systemPromptDialog.open) elements.systemPromptDialog.showModal();
+        state.isEditingSystemPrompt = elements.systemPromptDialog.open;
+        void this.updateChangeHistoryControls();
         uiUtils.updateSystemPromptCharCount();
-        uiUtils.updateSystemPromptSaveStatus('saved');
+        uiUtils.updateSystemPromptSaveStatus(this.hasUnsavedSystemPrompt() ? (this.systemPromptSession.error ? 'error' : 'dirty') : 'saved');
         uiUtils.updateSystemPromptButtonState();
-        requestAnimationFrame(() => uiUtils.getSystemPromptEditorElement()?.focus());
+        requestAnimationFrame(() => {
+            if (isCurrent() && elements.systemPromptDialog.open) uiUtils.getSystemPromptEditorElement()?.focus();
+        });
         console.log("システムプロンプト編集開始");
+        return true;
     },
     scheduleSystemPromptAutosave(delay = SYSTEM_PROMPT_AUTOSAVE_DELAY_MS) {
         clearTimeout(state.systemPromptSaveTimer);
@@ -18463,53 +18753,141 @@ const appLogic = {
             this.saveCurrentSystemPrompt({ keepOpen: true });
         }, delay);
     },
-    handleSystemPromptInput() {
-        const editor = uiUtils.getSystemPromptEditorElement();
-        if (editor) {
-            state.currentSystemPrompt = editor.value.trim();
+    isCurrentSystemPromptSession(session) {
+        return session?.messages === state.currentMessages &&
+            (session.chatId == null || session.chatId === state.currentChatId);
+    },
+    getSystemPromptSaveSession() {
+        if (!this.isCurrentSystemPromptSession(this.systemPromptSession)) {
+            const revision = ++state.systemPromptRevision;
+            this.systemPromptSession = {
+                messages: state.currentMessages, chatId: state.currentChatId,
+                value: String(state.currentSystemPrompt || ''), revision,
+                persistedValue: String(state.currentSystemPrompt || ''), persistedRevision: revision,
+                pending: null, error: null
+            };
         }
+        return this.systemPromptSession;
+    },
+    hasUnsavedSystemPrompt() {
+        const session = this.systemPromptSession;
+        return this.isCurrentSystemPromptSession(session) && Boolean(session.pending || session.error ||
+            session.revision !== session.persistedRevision || session.value !== session.persistedValue);
+    },
+    handleSystemPromptInput() {
+        const session = this.getSystemPromptSaveSession();
+        const editor = uiUtils.getSystemPromptEditorElement();
+        if (editor) session.value = state.currentSystemPrompt = editor.value.trim();
+        session.revision = ++state.systemPromptRevision;
         uiUtils.updateSystemPromptCharCount();
         uiUtils.updateSystemPromptButtonState();
         uiUtils.updateSystemPromptSaveStatus('dirty');
         this.scheduleSystemPromptAutosave();
     },
     async saveCurrentSystemPrompt({ keepOpen = true } = {}) {
+        const operation = this.systemPromptDialogOperation;
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
+        const session = this.getSystemPromptSaveSession();
         const editor = uiUtils.getSystemPromptEditorElement();
-        const newPrompt = editor ? editor.value.trim() : state.currentSystemPrompt;
-        if (newPrompt === state.currentSystemPrompt && state.systemPromptSaveStatus === 'saved') {
-            uiUtils.updateSystemPromptSaveStatus('saved');
-            uiUtils.updateSystemPromptButtonState();
-            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
-            return true;
+        const value = String(state.isEditingSystemPrompt && editor ? editor.value.trim() : state.currentSystemPrompt || '');
+        if (value !== session.value) {
+            session.value = state.currentSystemPrompt = value;
+            session.revision = ++state.systemPromptRevision;
         }
-        state.currentSystemPrompt = newPrompt;
-        uiUtils.updateSystemPromptSaveStatus('saving');
+        state.currentSystemPrompt = value;
+        if (!session.pending) {
+            session.pending = (async () => {
+                while (this.isCurrentSystemPromptSession(session)) {
+                    const { value: prompt, revision } = session;
+                    if (session.persistedValue === prompt && !session.error) {
+                        session.persistedRevision = revision;
+                        uiUtils.updateSystemPromptSaveStatus('saved');
+                        return true;
+                    }
+                    uiUtils.updateSystemPromptSaveStatus('saving');
+                    try {
+                        // saveChat snapshots this owner and all contents synchronously.
+                        const id = await dbUtils.saveChat(null, null, { systemPromptSave: {
+                            messages: session.messages, chatId: session.chatId, value: prompt, revision
+                        } });
+                        session.chatId = id;
+                        session.persistedValue = prompt;
+                        session.persistedRevision = revision;
+                        session.error = null;
+                    } catch (error) {
+                        session.error = error;
+                        if (this.isCurrentSystemPromptSession(session)) {
+                            state.systemPromptLastSaveError = error;
+                            uiUtils.updateSystemPromptSaveStatus('error');
+                        }
+                        console.error('システムプロンプト保存エラー:', error);
+                        return false;
+                    }
+                    if (!this.isCurrentSystemPromptSession(session)) return false;
+                    state.currentSystemPrompt = session.value;
+                    // Input may have advanced while IndexedDB/worker work was pending.
+                    // Loop before reporting success, without clearing a newer input timer.
+                    if (session.revision === revision) {
+                        uiUtils.updateSystemPromptSaveStatus('saved');
+                        return true;
+                    }
+                }
+                return false;
+            })();
+        }
+        const saving = session.pending;
+        let saved;
+        try { saved = await saving; }
+        finally { if (session.pending === saving) session.pending = null; }
         uiUtils.updateSystemPromptButtonState();
-        try {
-            await dbUtils.saveChat();
-            uiUtils.updateSystemPromptSaveStatus('saved');
-            console.log("システムプロンプト保存完了");
-            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
-            return true;
-        } catch (error) {
-            state.systemPromptLastSaveError = error;
-            console.error("システムプロンプト保存エラー:", error);
-            uiUtils.updateSystemPromptSaveStatus('error');
-            if (!keepOpen) this.closeSystemPromptDialog({ skipSave: true });
-            return false;
+        if (saved && !keepOpen) {
+            if (this.systemPromptDialogOperation !== operation || !this.isCurrentSystemPromptSession(session)) return false;
+            return this.closeSystemPromptDialog({ skipSave: true });
         }
+        return saved;
     },
     async closeSystemPromptDialog({ skipSave = false } = {}) {
-        state.isEditingSystemPrompt = false;
-        if (elements.systemPromptDialog) elements.systemPromptDialog.hidden = true;
-        uiUtils.updateSystemPromptButtonState();
-        void this.updateChangeHistoryControls();
-        if (!skipSave) {
-            await this.saveCurrentSystemPrompt({ keepOpen: true });
+        const current = this.systemPromptDialogOperation;
+        if (current?.kind === 'close' && this.isCurrentSystemPromptSession(current.session)) return current.promise;
+        const session = this.getSystemPromptSaveSession();
+        const operation = { kind: 'close', session };
+        this.systemPromptDialogOperation = operation;
+        const isCurrent = () => this.systemPromptDialogOperation === operation && this.isCurrentSystemPromptSession(session);
+        // Native/external close() can arrive before persistence. Keep pending
+        // edits visible and open/editing in sync while saving or retrying.
+        if (state.isEditingSystemPrompt && !elements.systemPromptDialog.open) {
+            uiUtils.prepareChatDialog(elements.systemPromptDialog);
+            elements.systemPromptDialog.showModal();
         }
-        console.log("システムプロンプト編集を閉じました");
+        operation.promise = (async () => {
+            // skipSave is only a hint: input can change during navigation's awaits.
+            while (!skipSave || this.hasUnsavedSystemPrompt()) {
+                const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
+                if (!isCurrent()) return false;
+                if (!saved) {
+                    if (!elements.systemPromptDialog.open && this.isCurrentSystemPromptSession(session)) {
+                        uiUtils.prepareChatDialog(elements.systemPromptDialog);
+                        elements.systemPromptDialog.showModal();
+                    }
+                    return false;
+                }
+                skipSave = true;
+            }
+            if (!isCurrent()) return false;
+            clearTimeout(state.systemPromptSaveTimer);
+            state.systemPromptSaveTimer = 0;
+            state.isEditingSystemPrompt = false;
+            if (elements.systemPromptDialog?.open) elements.systemPromptDialog.close('close');
+            uiUtils.updateSystemPromptButtonState();
+            void this.updateChangeHistoryControls();
+            return true;
+        })();
+        try { return await operation.promise; }
+        finally {
+            // Do not retain a completed close as a reusable pending operation.
+            if (this.systemPromptDialogOperation === operation) this.systemPromptDialogOperation = null;
+        }
     },
     cancelEditSystemPrompt() {
         this.closeSystemPromptDialog();
@@ -19014,7 +19392,7 @@ const appLogic = {
         const contentDiv = messageElement.querySelector('.message-content');
         if (contentDiv) {
             if (updatedMessage.role === 'model' && typeof marked !== 'undefined') {
-                contentDiv.innerHTML = marked.parse(newRawContent || '');
+                htmlUtils.renderMarkdownInto(contentDiv, newRawContent || '');
             } else {
                 const pre = contentDiv.querySelector('pre') || document.createElement('pre');
                 pre.textContent = newRawContent;
@@ -19026,35 +19404,8 @@ const appLogic = {
         }
 
         // 4. 画像が存在する場合、画像を再注入
-        const imagePlaceholderRegex = /<p>\[IMAGE_HERE\]<\/p>|\[IMAGE_HERE\]/g;
-        if (updatedMessage.role === 'model' && updatedMessage.imageIds && updatedMessage.imageIds.length > 0) {
-            let imageIndex = 0;
-            // プレースホルダーを<img>タグに置換
-            const replacedHtml = contentDiv.innerHTML.replace(imagePlaceholderRegex, () => {
-                if (imageIndex < updatedMessage.imageIds.length) {
-                    const imageId = updatedMessage.imageIds[imageIndex++];
-                    // createMessageElementと同様の遅延読み込み用のimgタグを生成
-                    return `<img class="lazy-load-image" alt="生成画像（読み込み中...）" data-image-id="${imageId}">`;
-                }
-                return ''; // プレースホルダーが画像の数より多い場合は空文字に
-            });
-            contentDiv.innerHTML = replacedHtml;
-
-            // プレースホルダーが足りなかった場合、残りの画像を末尾に追加
-            if (imageIndex < updatedMessage.imageIds.length) {
-                const fragment = document.createDocumentFragment();
-                for (let i = imageIndex; i < updatedMessage.imageIds.length; i++) {
-                    const imageId = updatedMessage.imageIds[i];
-                    const img = document.createElement('img');
-                    img.className = 'lazy-load-image';
-                    img.alt = '生成画像（読み込み中...）';
-                    img.dataset.imageId = imageId;
-                    fragment.appendChild(img);
-                }
-                contentDiv.appendChild(fragment);
-            }
-            
-            // 新しく追加された画像をIntersectionObserverの監視対象に追加
+            if (updatedMessage.role === 'model' && updatedMessage.imageIds && updatedMessage.imageIds.length > 0) {
+            htmlUtils.insertGeneratedImages(contentDiv, updatedMessage.imageIds);
             requestAnimationFrame(() => {
                 const newImages = contentDiv.querySelectorAll('.lazy-load-image[data-image-id]');
                 newImages.forEach(img => this.imageObserver.observe(img));
@@ -19094,7 +19445,7 @@ const appLogic = {
                 updatedMessage.search_web_results.forEach(result => {
                     const listItem = document.createElement('li');
                     const link = document.createElement('a');
-                    link.href = result.link;
+                    link.href = htmlUtils.safeUrl(result.link);
                     link.textContent = result.title;
                     link.title = result.snippet;
                     link.target = '_blank';
@@ -19659,6 +20010,7 @@ const appLogic = {
     
     // --- ファイルアップロード関連ロジック ---
     async handleFileSelection(fileList) {
+        this.cancelAttachmentOperation();
         if (!fileList || fileList.length === 0) return;
 
         const newFiles = Array.from(fileList);
@@ -19729,6 +20081,7 @@ const appLogic = {
     
 
     removeSelectedFile(indexToRemove) {
+        this.cancelAttachmentOperation();
         if (indexToRemove >= 0 && indexToRemove < state.selectedFilesForUpload.length) {
             const removedFile = state.selectedFilesForUpload.splice(indexToRemove, 1)[0];
             console.log(`ファイル "${removedFile.file.name}" をリストから削除しました。`);
@@ -19736,6 +20089,17 @@ const appLogic = {
         }
     },
 
+    beginAttachmentSession() {
+        this.cancelAttachmentOperation();
+        this.attachmentSession = {};
+    },
+    cancelAttachmentOperation() {
+        this.attachmentOperation = null;
+        if (elements.confirmAttachBtn) {
+            elements.confirmAttachBtn.disabled = false;
+            elements.confirmAttachBtn.textContent = '添付して閉じる';
+        }
+    },
     async confirmAttachment() {
         if (state.selectedFilesForUpload.length === 0) {
             state.pendingAttachments = [];
@@ -19746,71 +20110,87 @@ const appLogic = {
             return;
         }
 
+        if (this.attachmentOperation) return;
+        if (!this.attachmentSession) this.beginAttachmentSession();
+        const operation = this.attachmentOperation = {
+            id: this.attachmentOperationId = (this.attachmentOperationId || 0) + 1,
+            session: this.attachmentSession, messages: state.currentMessages, chatId: state.currentChatId
+        };
+        const current = () => this.attachmentOperation === operation && this.attachmentSession === operation.session &&
+            elements.fileUploadDialog.open && state.currentMessages === operation.messages &&
+            (operation.chatId == null || state.currentChatId === operation.chatId);
+        const selected = [...state.selectedFilesForUpload];
         elements.confirmAttachBtn.disabled = true;
         elements.confirmAttachBtn.textContent = '処理中...';
 
         const attachmentsToAdd = [];
         let encodingError = false;
 
-        for (const item of state.selectedFilesForUpload) {
-            try {
-                // 確実なキャッシュ回避のため、一度Base64に変換し、そこから新しいBlobを再生成する
-                const base64Data = await this.fileToBase64(item.file);
-                const rehydratedBlob = await this.base64ToBlob(base64Data, item.file.type);
+        try {
+            for (const item of selected) {
+                if (!current()) return;
+                try {
+                    // 確実なキャッシュ回避のため、一度Base64に変換し、そこから新しいBlobを再生成する
+                    const base64Data = await this.fileToBase64(item.file);
+                    if (!current()) return;
+                    const rehydratedBlob = await this.base64ToBlob(base64Data, item.file.type);
+                    if (!current()) return;
 
-                let browserMimeType = item.file.type || '';
-                const fileName = item.file.name;
-                const fileExtension = fileName.slice(((fileName.lastIndexOf(".") - 1) >>> 0) + 2).toLowerCase();
+                    let browserMimeType = item.file.type || '';
+                    const fileName = item.file.name;
+                    const fileExtension = fileName.slice(((fileName.lastIndexOf(".") - 1) >>> 0) + 2).toLowerCase();
 
-                let guessedMimeType = null;
-                if (fileExtension && extensionToMimeTypeMap[fileExtension]) {
-                    guessedMimeType = extensionToMimeTypeMap[fileExtension];
-                }
-
-                let finalMimeType;
-                if (guessedMimeType) {
-                    finalMimeType = guessedMimeType;
-                    if (finalMimeType !== browserMimeType) {
-                        console.log(`ファイル "${fileName}": 拡張子(.${fileExtension})からMIMEタイプを "${finalMimeType}" に設定 (ブラウザ提供: ${browserMimeType || '空'})`);
+                    let guessedMimeType = null;
+                    if (fileExtension && extensionToMimeTypeMap[fileExtension]) {
+                        guessedMimeType = extensionToMimeTypeMap[fileExtension];
                     }
-                } else if (browserMimeType) {
-                    finalMimeType = browserMimeType;
-                    console.log(`ファイル "${fileName}": ブラウザ提供のMIMEタイプ "${finalMimeType}" を使用します。(拡張子からの推測なし)`);
-                } else {
-                    finalMimeType = 'application/octet-stream';
-                    console.warn(`ファイル "${fileName}": MIMEタイプ不明。拡張子(.${fileExtension})にもマッピングなし。'application/octet-stream' を使用します。`);
+
+                    let finalMimeType;
+                    if (guessedMimeType) {
+                        finalMimeType = guessedMimeType;
+                        if (finalMimeType !== browserMimeType) {
+                            console.log(`ファイル "${fileName}": 拡張子(.${fileExtension})からMIMEタイプを "${finalMimeType}" に設定 (ブラウザ提供: ${browserMimeType || '空'})`);
+                        }
+                    } else if (browserMimeType) {
+                        finalMimeType = browserMimeType;
+                        console.log(`ファイル "${fileName}": ブラウザ提供のMIMEタイプ "${finalMimeType}" を使用します。(拡張子からの推測なし)`);
+                    } else {
+                        finalMimeType = 'application/octet-stream';
+                        console.warn(`ファイル "${fileName}": MIMEタイプ不明。拡張子(.${fileExtension})にもマッピングなし。'application/octet-stream' を使用します。`);
+                    }
+
+                    attachmentsToAdd.push({
+                        file: rehydratedBlob,
+                        name: fileName,
+                        mimeType: finalMimeType,
+                        base64Data: base64Data
+                    });
+                } catch (error) {
+                    if (!current()) return;
+                    console.error(`ファイル "${item.file.name}" のBase64エンコード中にエラー:`, error);
+                    encodingError = true;
+                    await uiUtils.showCustomAlert(`ファイル "${item.file.name}" の処理中にエラーが発生しました。`);
+                    break;
                 }
-
-                attachmentsToAdd.push({
-                    file: rehydratedBlob,
-                    name: fileName,
-                    mimeType: finalMimeType,
-                    base64Data: base64Data
-                });
-            } catch (error) {
-                console.error(`ファイル "${item.file.name}" のBase64エンコード中にエラー:`, error);
-                encodingError = true;
-                await uiUtils.showCustomAlert(`ファイル "${item.file.name}" の処理中にエラーが発生しました。`);
-                break;
             }
-        }
 
-        elements.confirmAttachBtn.disabled = false;
-        elements.confirmAttachBtn.textContent = '添付して閉じる';
-
-        if (!encodingError) {
-            state.pendingAttachments = attachmentsToAdd;
-            console.log(`${state.pendingAttachments.length}件のファイルを添付準備完了:`, state.pendingAttachments.map(a => `${a.name} (${a.mimeType})`));
-            elements.fileUploadDialog.close('ok');
-            uiUtils.adjustTextareaHeight();
-            uiUtils.updateAttachmentBadgeVisibility();
+            if (!encodingError && current()) {
+                state.pendingAttachments = attachmentsToAdd;
+                console.log(`${state.pendingAttachments.length}件のファイルを添付準備完了:`, state.pendingAttachments.map(a => `${a.name} (${a.mimeType})`));
+                elements.fileUploadDialog.close('ok');
+                uiUtils.adjustTextareaHeight();
+                uiUtils.updateAttachmentBadgeVisibility();
+            }
+        } finally {
+            if (this.attachmentOperation === operation) this.cancelAttachmentOperation();
         }
     },
 
     cancelAttachment() {
+        this.cancelAttachmentOperation();
+        this.attachmentSession = null;
         state.selectedFilesForUpload = [];
-        console.log("ファイル添付をキャンセルしました。");
-        elements.fileUploadDialog.close('cancel');
+        if (elements.fileUploadDialog.open) elements.fileUploadDialog.close('cancel');
         uiUtils.updateAttachmentBadgeVisibility();
     },
 
@@ -20415,6 +20795,7 @@ const appLogic = {
             let conflictChoice = null;
             let applyToAll = false;
             let importedCount = 0;
+            let importCancelled = false;
 
             for (let i = 0; i < assetsToImport.length; i++) {
                 const item = assetsToImport[i];
@@ -20428,6 +20809,7 @@ const appLogic = {
                     if (!applyToAll) {
                         uiUtils.hideProgressDialog(); // 確認ダイアログ表示のため一時的に隠す
                         const userDecision = await this.showAssetConflictDialog(assetName);
+                        if (userDecision.choice === 'cancel') { importCancelled = true; break; }
                         uiUtils.showProgressDialog(`アセットを処理中 (${i + 1}/${assetsToImport.length}): ${assetName}`); // 再表示
                         conflictChoice = userDecision.choice;
                         applyToAll = userDecision.applyToAll;
@@ -20459,7 +20841,7 @@ const appLogic = {
             }
             
             uiUtils.hideProgressDialog();
-            await uiUtils.showCustomAlert(`${importedCount}件のアセットのインポート処理が完了しました。`);
+            await uiUtils.showCustomAlert(`${importedCount}件のアセットを取り込み、インポート処理を${importCancelled ? '中止' : '完了'}しました。`);
             await this.updateAssetCount();
 
             if (importedCount > 0) {
@@ -20890,43 +21272,23 @@ const appLogic = {
     },
 
 
-    showAssetConflictDialog: function(assetName) {
-        return new Promise(resolve => {
-            const dialog = elements.assetConflictDialog;
-            elements.assetConflictMessage.textContent = `アセット「${assetName}」は既に存在します。どうしますか？`;
-            elements.assetConflictApplyAll.checked = false; // チェックボックスをリセット
-
-            const actionArea = dialog.querySelector('.dialog-actions-main');
-
-            const listener = (event) => {
-                const button = event.target.closest('button');
-                if (!button) return; // ボタン以外がクリックされた場合は何もしない
-
-                const choice = button.value;
-                if (choice) {
-                    dialog.close(); // ダイアログを閉じる
-                    // リスナーを削除
-                    actionArea.removeEventListener('click', listener);
-                    // 結果を返す
-                    resolve({
-                        choice: choice,
-                        applyToAll: elements.assetConflictApplyAll.checked
-                    });
-                }
-            };
-            
-            // 既存のリスナーがあれば念のため削除
-            // (dialog.close()で消えるはずだが、安全のため)
-            const oldListener = actionArea._listener;
-            if (oldListener) {
-                actionArea.removeEventListener('click', oldListener);
-            }
-
-            actionArea.addEventListener('click', listener);
-            actionArea._listener = listener; // リスナーを記憶させておく
-
-            dialog.showModal();
-        });
+    async showAssetConflictDialog(assetName) {
+        const dialog = elements.assetConflictDialog;
+        elements.assetConflictMessage.textContent = `アセット「${assetName}」は既に存在します。どうしますか？`;
+        elements.assetConflictApplyAll.checked = false;
+        const actionArea = dialog.querySelector('.dialog-actions-main');
+        const listener = event => {
+            const choice = event.target.closest('button')?.value;
+            if (choice) dialog.close(choice);
+        };
+        actionArea.addEventListener('click', listener);
+        try {
+            const result = await uiUtils.showCustomDialog(dialog);
+            const choice = ['overwrite', 'skip', 'rename'].includes(result) ? result : 'cancel';
+            return { choice, applyToAll: choice !== 'cancel' && elements.assetConflictApplyAll.checked };
+        } finally {
+            actionArea.removeEventListener('click', listener);
+        }
     },
     // --- Memory Feature ---
     toggleMemoryOptions(isEnabled) {
@@ -22073,7 +22435,8 @@ const appLogic = {
         const originalText = messagesToSummarize.map(m => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.content}`).join('\n\n');
 
         const confirmed = await uiUtils.showCustomConfirm(
-            `履歴を要約しますか？\n\n要約を実行すると、対象範囲のメッセージ（${messagesToSummarize.length}件）は編集・削除・再生成ができなくなります。この操作は元に戻せません。`
+            `履歴を要約しますか？\n\n要約を実行すると、対象範囲のメッセージ（${messagesToSummarize.length}件）は編集・削除・再生成ができなくなります。この操作は元に戻せません。`,
+            { placement: 'chat' }
         );
 
         if (!confirmed) {
@@ -22099,6 +22462,8 @@ const appLogic = {
 
 
     async _callSummaryApi(originalText) {
+        const requestId = (this.summaryRequestId || 0) + 1;
+        this.summaryRequestId = requestId;
         let summaryModelLabel = '';
         try {
             const summaryConfig = this.resolveSummaryApiConfig(state.settings.summaryModelName);
@@ -22112,17 +22477,17 @@ const appLogic = {
             const provider = this.normalizeApiProvider(summaryConfig.provider);
             if (provider === 'openrouter') {
                 const summaryText = await this._callOpenRouterSummaryApi(originalText, summaryConfig);
-                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta, requestId);
                 return;
             }
             if (provider === 'zai') {
                 const summaryText = await this._callOpenAICompatibleSummaryApi(originalText, summaryConfig, 'Z.ai');
-                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta, requestId);
                 return;
             }
             if (provider === 'bedrock') {
                 const summaryText = await this._callBedrockSummaryApi(originalText, summaryConfig);
-                this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+                this._showSummaryDialog(summaryText, originalText.length, summaryMeta, requestId);
                 return;
             }
 
@@ -22196,10 +22561,11 @@ const appLogic = {
                 throw new Error(errorMessage);
             }
 
-            this._showSummaryDialog(summaryText, originalText.length, summaryMeta);
+            this._showSummaryDialog(summaryText, originalText.length, summaryMeta, requestId);
 
         } catch (error) {
             console.error("要約API呼び出し/処理中にエラー:", error);
+            if (this.summaryRequestId !== requestId || !elements.summaryDialog.open) return;
             elements.summaryDialog.close();
             const modelLine = summaryModelLabel ? `\n使用モデル: ${summaryModelLabel}` : '';
             uiUtils.showCustomAlert(`要約の生成に失敗しました: ${error.message}${modelLine}`);
@@ -22399,7 +22765,9 @@ const appLogic = {
     },
 
 
-    _showSummaryDialog(summaryText, originalLength, summaryMeta = null) {
+    _showSummaryDialog(summaryText, originalLength, summaryMeta = null, requestId = null) {
+        // A dismissed/replaced request may finish, but must not reopen its UI.
+        if (requestId !== null && (requestId !== this.summaryRequestId || !elements.summaryDialog.open)) return;
         // 統計情報を更新
         const reductionRate = (100 - (summaryText.length / originalLength * 100)).toFixed(1);
         const summaryMetaLabel = uiUtils.formatModelMetaLabel(summaryMeta, '履歴要約');
@@ -22514,47 +22882,21 @@ const appLogic = {
         }, 5000); // 5秒後にフェードアウト
     },
 
-    updateScrollButtonsState() {
-        const mainContent = elements.chatScreen.querySelector('.main-content');
-        if (!mainContent) return;
-
-        const isAtTop = mainContent.scrollTop < 50;
-        const isAtBottom = mainContent.scrollHeight - mainContent.scrollTop - mainContent.clientHeight < 50;
-
-        elements.scrollToTopBtn.disabled = isAtTop;
-        elements.scrollToBottomBtn.disabled = isAtBottom;
+    scheduleScrollToBottomButtonUpdate() {
+        if (this.scrollToBottomButtonFrame) return;
+        this.scrollToBottomButtonFrame = requestAnimationFrame(() => {
+            this.scrollToBottomButtonFrame = 0;
+            this.updateScrollToBottomButtonState();
+        });
     },
 
-    scrollToTop() {
+    updateScrollToBottomButtonState() {
         const mainContent = elements.chatScreen.querySelector('.main-content');
-        if (!mainContent) return;
-
-        const startY = mainContent.scrollTop;
-        const endY = 0;
-        const distance = endY - startY;
-        const duration = 300; // 300ミリ秒で完了
-        let startTime = null;
-
-        if (distance === 0) return;
-
-        const step = (currentTime) => {
-            if (startTime === null) startTime = currentTime;
-            const elapsed = currentTime - startTime;
-            const t = Math.min(elapsed / duration, 1);
-            // easeOutCubic イージング関数で滑らかな動きに
-            const easedT = 1 - Math.pow(1 - t, 3);
-
-            mainContent.scrollTop = startY + (distance * easedT);
-
-            if (elapsed < duration) {
-                requestAnimationFrame(step);
-            } else {
-                // アニメーション終了後、確実に最終位置に設定
-                mainContent.scrollTop = endY;
-            }
-        };
-
-        requestAnimationFrame(step);
+        const button = elements.scrollToBottomBtn;
+        if (!mainContent || !button) return;
+        // Allow small rounding/subpixel errors at the bottom, including overscroll.
+        const remaining = mainContent.scrollHeight - mainContent.clientHeight - Math.max(0, mainContent.scrollTop);
+        button.hidden = mainContent.clientHeight === 0 || remaining <= 4;
     },
 
 
@@ -22593,6 +22935,7 @@ const appLogic = {
             } else {
                 // アニメーション終了後、その時点での最新のscrollHeightを使って確実に最下部に設定
                 mainContent.scrollTop = mainContent.scrollHeight;
+                this.updateScrollToBottomButtonState();
             }
         };
 

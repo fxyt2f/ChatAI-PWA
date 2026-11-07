@@ -27,7 +27,7 @@ window.runSidebarBackgroundRegressionsV136 = async () => {
     }
     await app.saveCurrentSystemPrompt({keepOpen:true});
     check((await db.getChat(st.currentChatId)).systemPrompt==='編集中の内容を保存します。','system prompt saved');
-    await app.closeSystemPromptDialog();check($('system-prompt-dialog').hidden,'system prompt closes');
+    await app.closeSystemPromptDialog();check(!$('system-prompt-dialog').open,'system prompt closes');
     await prepareSidebarReviewV136('format',false);
     const before=st.currentMessages.map(m=>m.content);const formatted=app.formatNovelText('文章。  \n\n\n次の文章。',app.getTextFormattingOptions());
     check(typeof formatted==='string'&&formatted.includes('文章'),'formatting produces text');
@@ -53,7 +53,7 @@ window.runSidebarBackgroundRegressionsV136 = async () => {
     const bottomStub=app.scrollToBottom;app.scrollToBottom=window.testRealAppFunctions.scrollToBottom;
     app.scrollToBottom(true);await new Promise(r=>setTimeout(r,400));
     const main=document.querySelector('#chat-workspace .main-content');check(Math.abs(main.scrollHeight-main.clientHeight-main.scrollTop)<2,'scroll to bottom');
-    app.scrollToTop();await new Promise(r=>setTimeout(r,400));check(main.scrollTop<2,'scroll to top');app.scrollToBottom=bottomStub;
+    check(!$('scroll-to-top-btn')&&typeof app.scrollToTop==='undefined','scroll-to-top control retired');app.scrollToBottom=bottomStub;
     await ui.openChatSearch();$('chat-search-query').value='Alpha';ui.runChatSearch({scrollToFirst:false});await frame();
     st.chatSearch.currentIndex=st.chatSearch.matches.length-1;ui.updateCurrentChatSearchHighlight(true);await frame();
     const lastMatch=st.chatSearch.matches[st.chatSearch.currentIndex]?.range.getBoundingClientRect();

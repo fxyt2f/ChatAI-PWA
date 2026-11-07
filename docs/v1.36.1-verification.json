@@ -1,0 +1,272 @@
+{
+  "recordType": "v1.36.1 pre-commit release validation",
+  "releaseVersion": "1.36.1",
+  "branch": "feature/v1.36.1",
+  "baseCommit": "bb7d381d159a5c4a28d3896d64fc7ef7bef51ff2",
+  "comparisonCommit": "db1462a61eb954addd2467d626816566300a193b",
+  "shellBuildId": "6ad1738e304358051d49",
+  "shellIntegrity": {
+    "./": "2efda1ca9c0ce5aaf6697cf529b1950b41407416af60b6ff33ee8646a8256fc4",
+    "./index.html": "2efda1ca9c0ce5aaf6697cf529b1950b41407416af60b6ff33ee8646a8256fc4",
+    "./style.css?v=1.36.1": "d827d388fa6d6267a2a53a2e278d80c78f21b94f7911cf08904175ae15c5a8b5",
+    "./app.js?v=1.36.1": "99b88f464d8eedc9c74d2437f6df28778cb386f84e734e8635292925b2fba2dc",
+    "./settings-v136.js?v=1.36.1": "7c2937301bc9b9fc12bff0128680b9be074b71eaa45f2913c164f9032369636b",
+    "./settings-ui-v136.js?v=1.36.1": "e31a45f995b14edbd35150102d1ee76bab5a46f05096e9fb508a2741167c5c97",
+    "./dropbox.js?v=1.36.1": "e96ed0a4aa2dd8cd5896346e77352ce853ae23bfde08df837b12ca88b753ba6b",
+    "./function-calling.js?v=1.36.1": "6624cab9b2862b42829de0630d8ee90403a012281104d96e3061a473a7638972",
+    "./marked.js": "3e2114d1a065d1f251f7f881c53c3412c33e076c3195145dcf411286910c31e1",
+    "./purify.min.js": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
+    "./prism.js": "da5661b98f140d4a80eeb9078777d1af2e5ee01c926a22f741cdd61acc51804c",
+    "./prism.css": "6716bccc001a583aba601bbcc93b1dff19950ae7c1a5b4b4b029a3083b750bf8",
+    "./CHANGELOG.md": "43df4a5029f0037108a62155bb33a9823ef07fa3cf8a9c0d2460eb3c983e3ac5",
+    "./manifest.json": "e80df7c0654b02b862f93246cc34a9157c56a7c1cc57a4ae18c846298fc07153",
+    "./icon-192x192.png": "4a2ee87a9599ec5d2de05d3d4a0cf8e62911b7765c0c125de9289149b059b39f"
+  },
+  "workerSha256": "b1bae8042f9b64640f71ae3f66509a845bd3aa0e8b086d030273e235dc1ec3b3",
+  "realIndexValidation": "PASS: --check --staged on the normal Git index",
+  "checks": {
+    "nodeFiles": [
+      {
+        "file": "tests/history-context-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/image-capabilities-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/settings-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/sw-clear-cache-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/sw-install-concurrency-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/sw-update-safety-v1361.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/sw-v136.test.js",
+        "exitCode": 0
+      },
+      {
+        "file": "tests/ui-static-v136.test.js",
+        "exitCode": 0
+      }
+    ],
+    "pythonRegressionCases": 5,
+    "browserResults": [
+      "ALL PASSED (169 browser tests)",
+      "ALL PASSED (18 F1/F2 regressions; 69 assertions)",
+      "ALL PASSED (6 native F2 assertions; real background scroll between mouse down/up, click suppression and actual touch scrolling)",
+      "ALL PASSED (18 safety regressions)",
+      "ALL PASSED (690 dialog assertions; native mouse/touch, storage, modal stack and progress exception)",
+      "ALL PASSED (73 runtime theme color assertions; light/dark, header/accent independence, settings reload, CSS source)",
+      "ALL PASSED (720 sidebar hover assertions; 8 theme/sidebar/input cases; five real menu actions)",
+      "ALL PASSED (467 scroll button assertions; 14 width/wide/theme cases, reduced viewport and visual-only keyboard simulation)",
+      "ALL PASSED (263 responsive assertions across 360/390/768/1280px)",
+      "ALL PASSED (8 resize state/focus assertions)",
+      "ALL PASSED (4 reduced-viewport assertions)",
+      "ALL PASSED (60 native touch/mouse/keyboard assertions)",
+      "ALL PASSED (N02 real SW normal install rejects stale HTML, JavaScript, CSS, unlisted references and network failures; previous worker retained)",
+      "ALL PASSED (N02 previous app boots offline after rejected normal installs with HTTP cache disabled)",
+      "ALL PASSED (N03 real SW parallel reads from two tabs during shell replacement; deterministic paused-pointer order tested separately in VM)",
+      "ALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.36.1 boot and DOMPurify sanitization)"
+    ],
+    "sidebarBackgroundAssertions": 80,
+    "stagedAudit": {
+      "files": 40,
+      "bytes": 2153493,
+      "secretFindings": [],
+      "missingDependencies": [],
+      "syntax": {
+        "javascript": 17,
+        "python": 8
+      },
+      "assetVersion": "1.36.1",
+      "dbVersion": 13,
+      "manifestTheme": "#1e1e1e",
+      "publishedShellBytesEqual": true,
+      "nonShellGitEOLNormalization": [
+        "README.md",
+        "docs/v1.36.1-verification.json",
+        "tests/v136-ui-tests.js"
+      ]
+    }
+  },
+  "releaseFiles": [
+    "app.js",
+    "index.html",
+    "manifest.json",
+    "style.css",
+    "sw.js",
+    "purify.min.js",
+    "purify.LICENSE.txt",
+    "CHANGELOG.md",
+    "README.md",
+    "tests/run-browser-tests.py",
+    "tests/sidebar-background-regressions-v136.js",
+    "tests/sidebar-background-review.py",
+    "tests/sidebar-background-v136.js",
+    "tests/sw-clear-cache-v136.test.js",
+    "tests/sw-install-concurrency-v136.test.js",
+    "tests/sw-v136.test.js",
+    "tests/ui-static-v136.test.js",
+    "tests/v136-browser.html",
+    "tests/v136-ui-tests.js",
+    "tests/dialog-races-v1361.js",
+    "tests/dialog-ui-v1361.js",
+    "tests/dialog_races_v1361.py",
+    "tests/dialog_ui_v1361.py",
+    "tests/safety-v1361.js",
+    "tests/scroll-button-v1361.js",
+    "tests/sidebar-hover-v1361.js",
+    "tests/sidebar_hover_v1361.py",
+    "tests/sw-update-safety-v1361.test.js",
+    "tests/theme-color-v1361.js",
+    "docs/v1.36.1-release.md",
+    "docs/v1.36.1-verification.json",
+    "docs/v1.36.1/desktop-system.png",
+    "docs/v1.36.1/mobile-system.png",
+    "docs/v1.36.1/sidebar-menu.png",
+    "docs/v1.36.1/mobile-scroll.png",
+    ".gitattributes",
+    "tests/update-shell-integrity.py",
+    "tests/shell-integrity-publication.test.py",
+    "tests/browser-server-burst.test.py",
+    "docs/sw-release-blockers-v1361.md"
+  ],
+  "fileSelection": {
+    "releaseFileCount": 40,
+    "representativeImages": 4,
+    "initialUntrackedFiles": 2397,
+    "excludedArtifacts": "Intermediate images, browser profiles, before copies, full logs, OCR and local-only audits retained locally"
+  },
+  "knownIssue": {
+    "severity": "Medium",
+    "deferredTo": "v1.36.2",
+    "description": "Cancellation before AbortController creation can allow the source chat API request to start or continue. Also reproduced at the v1.36.0 comparison base. Cross-chat response contamination or data loss was not observed in the controlled investigation."
+  },
+  "verificationLimits": [
+    "Real provider API, Dropbox and SD requests were mocked in the local suites",
+    "Physical device and OS keyboard coverage is separate",
+    "Non-Chrome browsers not tested"
+  ],
+  "postCommitVerification": "PR checks, merge and Pages/public asset outcomes are recorded in GitHub and the final delivery report.",
+  "releaseExecutionStatus": "PRE_COMMIT_VALIDATED_MIGRATION_SAFE",
+  "publicPrecheck": {
+    "publishedVersion": "1.36.0",
+    "publishedBuildId": "de3970c70dd93c2ca82e",
+    "assetMismatches": [
+      {
+        "path": "./dropbox.js?v=1.36.0",
+        "matches": false,
+        "expected": "6e85e8356b7143330229fb5c90359a5be01388aa8f575b26f86bbcc2ac598f8f",
+        "actual": "e96ed0a4aa2dd8cd5896346e77352ce853ae23bfde08df837b12ca88b753ba6b"
+      },
+      {
+        "path": "./manifest.json",
+        "matches": false,
+        "expected": "57da954cc9fa11d707dfcac9a9d40dd47286ac4801220f41a21541db276e1912",
+        "actual": "b14edd21f7eb1b8decb18a00438062e9bc6788b4ecc75d3efdd5ce8f3dfcbaf1"
+      }
+    ],
+    "serviceWorkerInstall": "REJECTED: App shell release integrity mismatch",
+    "controller": null,
+    "cacheNames": [],
+    "localCandidateIntegrity": "PASS: all 15 staged assets and worker match build 6ad1738e304358051d49",
+    "stopCondition": "User instruction: major published asset integrity mismatch stops later release stages",
+    "releaseDecision": "The existing 1.36.0 mismatch is documented. All three isolated paths to staged 1.36.1 passed."
+  },
+  "migrationVerification": {
+    "sources": [
+      "current public 1.36.0 bytes",
+      "hash-matching historical newline representation for a valid cached 1.36.0 installation",
+      "actual v1.35.1 Git snapshot",
+      "actual staged v1.36.1 blobs"
+    ],
+    "cases": [
+      {
+        "scenario": "failed-public",
+        "initial": {
+          "state": "redundant",
+          "caches": []
+        },
+        "upgraded": {
+          "active": "activated",
+          "caches": [
+            "chatai-pwa-cache-v1.36.1-shell-6ad1738e304358051d49-742bb7c5-97c4-4352-88de-bce511968d2b",
+            "chatai-pwa-cache-v1.36.1"
+          ]
+        },
+        "offline": {
+          "version": "ChatAI PWA v1.36.1 / cache v1.36.1",
+          "sanitizer": "3.4.17"
+        },
+        "failedUpdateRetainsOldWorker": false,
+        "twoTabRebuild": "PASS",
+        "dataRetained": true,
+        "result": "PASS"
+      },
+      {
+        "scenario": "retained-1360",
+        "initial": {
+          "state": "installed",
+          "active": "activated",
+          "caches": [
+            "chatai-pwa-cache-v1.36.0-shell-de3970c70dd93c2ca82e-58a1ef11-3ce2-4a7f-80fb-4c043e897115",
+            "chatai-pwa-cache-v1.36.0"
+          ]
+        },
+        "upgraded": {
+          "active": "activated",
+          "caches": [
+            "chatai-pwa-cache-v1.36.0-shell-de3970c70dd93c2ca82e-58a1ef11-3ce2-4a7f-80fb-4c043e897115",
+            "chatai-pwa-cache-v1.36.1-shell-6ad1738e304358051d49-a9914444-ad32-4428-97cf-ce5d7696674a",
+            "chatai-pwa-cache-v1.36.1"
+          ]
+        },
+        "offline": {
+          "version": "ChatAI PWA v1.36.1 / cache v1.36.1",
+          "sanitizer": "3.4.17"
+        },
+        "failedUpdateRetainsOldWorker": true,
+        "twoTabRebuild": "PASS",
+        "dataRetained": true,
+        "result": "PASS"
+      },
+      {
+        "scenario": "retained-1351",
+        "initial": {
+          "state": "installed",
+          "active": "activated",
+          "caches": [
+            "chatai-pwa-cache-v1.35.1"
+          ]
+        },
+        "upgraded": {
+          "active": "activated",
+          "caches": [
+            "chatai-pwa-cache-v1.36.1-shell-6ad1738e304358051d49-51c4d0ec-4200-4887-bfb3-a06923d39157",
+            "chatai-pwa-cache-v1.36.1"
+          ]
+        },
+        "offline": {
+          "version": "ChatAI PWA v1.36.1 / cache v1.36.1",
+          "sanitizer": "3.4.17"
+        },
+        "failedUpdateRetainsOldWorker": true,
+        "twoTabRebuild": "PASS",
+        "dataRetained": true,
+        "result": "PASS"
+      }
+    ],
+    "result": "PASS",
+    "notes": "The diagnostic helper was corrected to wait for a new installing/waiting candidate instead of treating the previous active worker as the candidate. Final runs used unmodified staged SW bytes."
+  }
+}

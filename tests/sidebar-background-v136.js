@@ -29,7 +29,7 @@
         if(kind==='search'||kind==='replace') {
             await ui.openChatSearch(); $('chat-search-query').value='Alpha';ui.runChatSearch({scrollToFirst:false});
             if(kind==='replace') {ui.setChatReplacePreviewOpen(true);$('chat-replace-input').value='Beta';$('chat-replace-target').value='both';ui.updateChatReplacePreview();}
-        } else if(kind==='system') app.openSystemPromptDialog();
+        } else if(kind==='system') await app.openSystemPromptDialog();
         else if(kind==='format') app.openTextFormattingDialog();
         else if(kind==='summary') app._showSummaryDialog('物語のここまでの展開を圧縮したテキスト。',1200);
         else if(kind==='character') await app.openCharacterProfileDialog();
@@ -50,7 +50,7 @@
     };
     window.prepareBackgroundReviewV136 = async (screen, scenario) => {
         for(const d of document.querySelectorAll('dialog[open]'))d.close();
-        ui.closeChatSearch({restoreFocus:false});$('system-prompt-dialog').hidden=true;
+        ui.closeChatSearch({restoreFocus:false});if($('system-prompt-dialog').open)await app.closeSystemPromptDialog({skipSave:true});
         window.settingsUiV136.closePopover(false);ui.closeChatSidebar();
         const dark=scenario.startsWith('dark'), image=!scenario.endsWith('plain');
         st.settings.darkMode=dark;document.body.classList.toggle('dark-mode',dark);

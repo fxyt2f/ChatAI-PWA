@@ -1,0 +1,16 @@
+# Pin the published app shell to LF even when core.autocrlf is enabled.
+/index.html text eol=lf
+/style.css text eol=lf
+/app.js text eol=lf
+/settings-v136.js text eol=lf
+/settings-ui-v136.js text eol=lf
+/dropbox.js text eol=lf
+/function-calling.js text eol=lf
+/marked.js text eol=lf
+/purify.min.js text eol=lf
+/prism.js text eol=lf
+/prism.css text eol=lf
+/CHANGELOG.md text eol=lf
+/manifest.json text eol=lf
+/sw.js text eol=lf
+/icon-192x192.png -text

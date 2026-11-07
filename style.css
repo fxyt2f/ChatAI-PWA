@@ -1132,6 +1132,7 @@ body.dark-mode .new-chat-button {
 }
 
 #chat-screen .chat-workspace {
+    --composer-bottom: max(10px, var(--safe-bottom));
     position: relative;
     display: flex;
     flex-direction: column;
@@ -1356,7 +1357,7 @@ body.dark-mode .new-chat-button {
 .chat-sidebar-item:hover,
 .chat-sidebar-item:focus-within,
 .chat-sidebar-item.menu-active {
-    background: var(--bg-secondary);
+    background: var(--bg-tertiary);
 }
 
 :root, body { --sidebar-selected-bg: color-mix(in srgb, var(--bg-button) 14%, var(--bg-primary)); }
@@ -1387,13 +1388,46 @@ body.dark-mode .new-chat-button {
     text-align: left;
 }
 
+.chat-sidebar-item .chat-sidebar-item-open:hover:not(:disabled) {
+    background: transparent;
+    color: var(--text-primary);
+    box-shadow: none;
+}
+
 .chat-sidebar-item-menu {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 40px;
+    height: 40px;
     padding: 0;
+    border-radius: 50%;
     color: var(--text-secondary);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.chat-sidebar-item:hover .chat-sidebar-item-menu,
+.chat-sidebar-item:focus-within .chat-sidebar-item-menu,
+.chat-sidebar-item.menu-active .chat-sidebar-item-menu {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.chat-sidebar-item .chat-sidebar-item-menu:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-tertiary));
+    color: var(--text-secondary);
+    box-shadow: none;
+}
+
+/* Keep touch and hybrid devices operable without hover. Opacity preserves
+   the grid column and keyboard tab order on mouse-only devices. */
+@media (hover: none), (any-pointer: coarse) {
+    .chat-sidebar-item-menu {
+        opacity: 1;
+        pointer-events: auto;
+    }
 }
 
 .chat-sidebar-item-title,
@@ -1542,8 +1576,8 @@ body.dark-mode #settings-screen::after {
 #chat-screen .main-content {
     background-color: transparent;
     touch-action: pan-x pan-y pinch-zoom;
-    padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
-    scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
+    padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom) + var(--composer-viewport-inset, 0px));
+    scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom) + var(--composer-viewport-inset, 0px));
 }
 #history-screen .main-content,
 #settings-screen .main-content {
@@ -1618,29 +1652,15 @@ body.dark-mode #settings-screen::after {
 }
 
 /* --- System Prompt --- */
-.system-prompt-dialog {
-    position: absolute;
-    top: var(--chat-prompt-center-y, 50%);
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 10020;
+.custom-dialog.system-prompt-dialog {
+    width: min(720px, calc(100vw - 32px));
+    max-height: min(700px, var(--chat-dialog-height, calc(100dvh - 32px)));
+    overflow-y: auto;
+}
+.custom-dialog.system-prompt-dialog[open] {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    width: min(720px, calc(100% - 32px));
-    max-height: min(760px, var(--chat-prompt-height, calc(100dvh - 32px)));
-    overflow: auto;
-    padding: 18px;
-    box-sizing: border-box;
-    color: var(--text-primary);
-    background-color: var(--bg-primary);
-    border: 1px solid var(--border-primary);
-    border-radius: var(--border-radius-md);
-    box-shadow: var(--shadow-4);
-    pointer-events: auto;
-}
-.system-prompt-dialog[hidden] {
-    display: none;
 }
 .system-prompt-dialog-header,
 .system-prompt-dialog-footer {
@@ -1648,12 +1668,11 @@ body.dark-mode #settings-screen::after {
     align-items: center;
     gap: 8px;
 }
-.system-prompt-dialog-title {
+.system-prompt-dialog .system-prompt-dialog-title {
+    margin: 0;
     min-width: 0;
     flex: 1;
     overflow: hidden;
-    font-size: 0.95rem;
-    font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -1674,7 +1693,7 @@ body.dark-mode #settings-screen::after {
     cursor: pointer;
     pointer-events: auto;
 }
-.system-prompt-close-btn:hover,
+.system-prompt-close-btn:hover:not(:disabled),
 .system-prompt-close-btn:focus-visible {
     color: var(--text-primary);
     background-color: var(--bg-tertiary);
@@ -1685,9 +1704,9 @@ body.dark-mode #settings-screen::after {
 .system-prompt-editor {
     display: block;
     width: 100%;
-    min-height: min(360px, max(48px, calc(var(--chat-prompt-height, 600px) - 130px)));
+    min-height: min(320px, max(48px, calc(var(--chat-dialog-height, 600px) - 180px)));
     flex: 1 1 auto;
-    max-height: min(560px, 64dvh);
+    max-height: min(560px, max(48px, calc(var(--chat-dialog-height, 600px) - 160px)));
     margin: 0;
     padding: 12px;
     box-sizing: border-box;
@@ -1713,16 +1732,10 @@ body.dark-mode #settings-screen::after {
 }
 
 @media screen and (max-width: 600px) {
-    .system-prompt-dialog {
-        width: calc(100% - 16px - var(--safe-left) - var(--safe-right));
-        max-height: min(640px, var(--chat-prompt-height, calc(100dvh - 16px)));
+    .custom-dialog.system-prompt-dialog {
         padding: 12px;
     }
 
-    .system-prompt-editor {
-        min-height: min(320px, max(48px, calc(var(--chat-prompt-height, 560px) - 110px)));
-        max-height: min(500px, 62dvh);
-    }
 }
 
 /* --- Message Bubbles --- */
@@ -1766,7 +1779,7 @@ body.dark-mode #settings-screen::after {
 #chat-screen .chat-workspace > footer.chat-input-area {
     position: absolute;
     left: 50%;
-    bottom: max(10px, var(--safe-bottom));
+    bottom: calc(var(--composer-bottom) + var(--composer-viewport-inset, 0px));
     transform: translateX(-50%);
     z-index: 50;
     display: grid;
@@ -1795,7 +1808,7 @@ body.dark-mode #settings-screen::after {
     width: 100%;
     min-width: 0;
     min-height: 52px;
-    max-height: 520px;
+    max-height: var(--composer-textarea-max-height, 520px);
     height: var(--composer-textarea-height, 52px);
     margin: 0;
     padding: 12px 8px 10px;
@@ -1875,8 +1888,11 @@ body.dark-mode #attach-file-btn {
 }
 
 @media screen and (max-width: 600px) {
+    #chat-screen .chat-workspace {
+        --composer-bottom: max(8px, var(--safe-bottom));
+    }
+
     #chat-screen .chat-workspace > footer.chat-input-area {
-        bottom: max(8px, var(--safe-bottom));
         width: calc(100% - 16px);
         padding: 7px 8px 9px;
         column-gap: 6px;
@@ -1890,10 +1906,6 @@ body.dark-mode #attach-file-btn {
         padding: 11px 8px 9px;
     }
 
-    #chat-screen .main-content {
-        padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
-        scroll-padding-bottom: calc(var(--composer-height, 150px) + 32px + var(--safe-bottom));
-    }
 }
 
 /* --- Settings Screen --- */
@@ -3925,6 +3937,50 @@ body.header-auto-hide.header-force-show #chat-screen .app-header {
     to {
         transform: rotate(360deg);
     }
+}
+
+/* Centered in the workspace so sidebar layout needs no coordinate offsets. */
+.scroll-to-bottom-button {
+    position: absolute;
+    left: 50%;
+    bottom: calc(var(--composer-height, 150px) + var(--composer-bottom) + var(--composer-viewport-inset, 0px) + 16px);
+    transform: translateX(-50%);
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border-primary);
+    border-radius: 50%;
+    background-color: rgba(231, 231, 231, 0.88);
+    color: #181818;
+    box-shadow: var(--shadow-2);
+}
+.scroll-to-bottom-button[hidden] {
+    display: none;
+}
+.scroll-to-bottom-button .material-symbols-outlined {
+    font-size: 20px;
+}
+.scroll-to-bottom-button:hover:not(:disabled) {
+    background-color: #cfcfcf;
+    color: #181818;
+    box-shadow: var(--shadow-3);
+}
+.scroll-to-bottom-button:focus-visible {
+    outline: 2px solid var(--bg-button);
+    outline-offset: 3px;
+}
+body.dark-mode .scroll-to-bottom-button {
+    background-color: rgba(24, 24, 24, 0.88);
+    color: #ffffff;
+    border-color: var(--border-secondary);
+}
+body.dark-mode .scroll-to-bottom-button:hover:not(:disabled) {
+    background-color: #303030;
+    color: #ffffff;
 }
 
 /* --- Floating Action Panel --- */
@@ -6320,7 +6376,7 @@ body.dark-mode .execution-popover { color-scheme:dark; }
 
 /* Top-layer chat dialogs use viewport coordinates measured from the workspace.
    Global confirmations, file operations and settings dialogs keep their rules. */
-:is(#textFormattingDialog,#summaryDialog,#characterProfileDialog,#debugLogDialog,#memoryManagementDialog).chat-workspace-dialog {
+:is(#system-prompt-dialog,#confirmDialog,#textFormattingDialog,#summaryDialog,#characterProfileDialog,#debugLogDialog,#memoryManagementDialog).chat-workspace-dialog {
     left: var(--chat-dialog-center-x, 50%);
     top: var(--chat-dialog-center-y, 50%);
     margin: 0;
@@ -6331,5 +6387,7 @@ body.dark-mode .execution-popover { color-scheme:dark; }
     overflow-y: auto;
 }
 #memoryManagementDialog { --chat-modal-preferred-width:600px; }
+#system-prompt-dialog { --chat-modal-preferred-width:720px; }
+#confirmDialog { --chat-modal-preferred-width:480px; }
 #characterProfileDialog, #debugLogDialog { --chat-modal-preferred-width:800px; }
 #chat-screen #loading-indicator { position:absolute; }

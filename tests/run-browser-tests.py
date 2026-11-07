@@ -7,8 +7,16 @@ import functools, subprocess, tempfile, threading, json, socket, base64, os, str
 sys.stdout.reconfigure(encoding='utf-8')
 parser=argparse.ArgumentParser()
 parser.add_argument('--ui',action='store_true')
+parser.add_argument('--scroll-buttons',action='store_true',help='Run v1.36.1 scroll button layout and behavior regressions')
+parser.add_argument('--sidebar-hover',action='store_true',help='Run v1.36.1 sidebar hover, focus and touch regressions')
+parser.add_argument('--theme-color',action='store_true',help='Run v1.36.1 runtime PWA theme color regressions')
+parser.add_argument('--dialogs',action='store_true',help='Run v1.36.1 native dialog and outside gesture regressions')
+parser.add_argument('--safety',action='store_true',help='Run deterministic R1-R5 security and persistence regressions')
+parser.add_argument('--dialog-races',action='store_true',help='Run deterministic F1/F2 dialog operation and gesture regressions')
+parser.add_argument('--app-source',type=Path,help='Serve an alternate app.js snapshot for controlled before/after regressions')
 parser.add_argument('--screenshots',action='store_true')
 parser.add_argument('--sw',action='store_true')
+parser.add_argument('--sw-diagnostics',type=Path,help='Write SW server, Console, Network and registration diagnostics')
 parser.add_argument('--review',action='store_true',help='Run R01-R08 integration regressions')
 parser.add_argument('--j',action='store_true',help='Run J01-J04 storage, wire and responsiveness regressions')
 parser.add_argument('--integration',action='store_true',help='Run I01-I05 storage and continuation regressions')
@@ -17,10 +25,14 @@ args=parser.parse_args()
 if args.screenshots or args.sw or args.execution_screenshots:args.ui=True
 if args.j:args.integration=True
 if args.integration:args.ui=True;args.review=True
+run_ui_matrix=args.ui
+if args.scroll_buttons or args.sidebar_hover or args.theme_color or args.dialogs or args.safety or args.dialog_races:args.ui=True
 
 class CDP:
     def __init__(self, url):
         u=urlparse(url);self.sock=socket.create_connection((u.hostname,u.port),timeout=50);self.counter=0
+        self.diagnostic_events=[]
+        self.capture_diagnostics=False
         key=base64.b64encode(os.urandom(16)).decode()
         self.sock.sendall(f'GET {u.path} HTTP/1.1\r\nHost: {u.hostname}:{u.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'.encode())
         data=b''
@@ -40,6 +52,8 @@ class CDP:
         self.sock.sendall(header+mask+bytes(b^mask[i%4] for i,b in enumerate(body)))
         return ident
     def call(self,method,params=None):
+        if self.capture_diagnostics and method in ['Network.emulateNetworkConditions','Network.setCacheDisabled']:
+            self.diagnostic_events.append({'method':'command.'+method,'params':params})
         ident=self.send(method,params)
         while True:
             h=self.read(2);length=h[1]&127
@@ -48,6 +62,9 @@ class CDP:
             payload=self.read(length)
             if (h[0]&15)==8:raise EOFError()
             result=json.loads(payload)
+            method=result.get('method','')
+            if self.capture_diagnostics and method.startswith(('Network.','Runtime.console','Runtime.exception','ServiceWorker.')):
+                self.diagnostic_events.append(result)
             if result.get('method')=='Runtime.bindingCalled' and result.get('params',{}).get('name')=='testFocusTab':
                 self.send('Page.bringToFront')
             if result.get('id')==ident:
@@ -58,9 +75,15 @@ root=Path(__file__).resolve().parents[1]
 chrome=Path('C:/Program Files/Google/Chrome/Application/chrome.exe')
 class Handler(SimpleHTTPRequestHandler):
     sw_fault=None
+    requests=[]
     def log_message(self,*args): pass
+    def send_response(self,code,message=None):
+        if hasattr(self,'request_diagnostic'):self.request_diagnostic['status']=code
+        super().send_response(code,message)
     def do_GET(self):
         pathname=urlparse(self.path).path
+        self.request_diagnostic={'path':self.path,'fault':Handler.sw_fault,'time':time.monotonic()}
+        Handler.requests.append(self.request_diagnostic)
         if pathname=='/sw.js':
             # Test-only diagnostics: preserve the failure reason in the message
             # reply without changing the application worker on disk.
@@ -70,8 +93,12 @@ class Handler(SimpleHTTPRequestHandler):
             body=body.replace(b"throw new Error('App shell release integrity mismatch')",
                 b"throw new Error('App shell release integrity mismatch: '+path)")
             self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
+        elif pathname=='/app.js' and args.app_source:
+            self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(args.app_source.read_bytes())
         elif pathname=='/__sw-test-fault':
             Handler.sw_fault=urlparse(self.path).query or None
+            self.send_response(200);self.end_headers();self.wfile.write(b'ok')
+        elif pathname=='/__sw-test-health':
             self.send_response(200);self.end_headers();self.wfile.write(b'ok')
         elif pathname=='/candidate-sw-fixture.js':
             self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write((root/'sw.js').read_bytes())
@@ -80,18 +107,25 @@ class Handler(SimpleHTTPRequestHandler):
             if fault=='network' and pathname=='/settings-v136.js':self.send_error(503);return
             file=root/('index.html' if pathname=='/' else pathname[1:])
             body=file.read_bytes()
-            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.36.0',b'1.35.1')
-            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.36.0',b'1.35.1')
+            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.36.1',b'1.36.0')
+            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.36.1',b'1.36.0')
             if fault=='css' and pathname=='/style.css':body=b'/* stale stylesheet */'+body
-            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.36.0',b'./unlisted.js?v=1.36.0')
+            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.36.1',b'./unlisted.js?v=1.36.1')
             self.send_response(200);self.send_header('Content-Type','text/html' if file.suffix=='.html' else 'text/css' if file.suffix=='.css' else 'text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
         elif self.path=='/legacy-sw-fixture.js':
             legacy=subprocess.check_output(['git','show','198c8d5b3ff130034edd1250a965febe3d2aa6b9:sw.js'],cwd=root)
             self.send_response(200);self.send_header('Content-Type','text/javascript; charset=utf-8');self.end_headers();self.wfile.write(legacy)
         else:super().do_GET()
-server=ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(root)))
-threading.Thread(target=server.serve_forever,daemon=True).start()
+class BrowserTestServer(ThreadingHTTPServer):
+    # Installation fetches the shell in parallel, alongside control requests.
+    request_queue_size=64
+
+
+server=BrowserTestServer(('127.0.0.1',0),functools.partial(Handler,directory=str(root)))
+server_thread=threading.Thread(target=server.serve_forever,daemon=True)
+server_thread.start()
 output='FAIL browser did not finish'
+failure_diagnostics={}
 with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_errors=True) as profile:
     proc=subprocess.Popen([str(chrome),'--headless=new','--disable-gpu','--no-first-run',
         '--disable-background-networking','--disable-extensions','--disable-breakpad','--disable-popup-blocking',
@@ -123,7 +157,73 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             return 'FAIL timed out: '+document.documentElement.dataset.testStatus+' / J: '+document.documentElement.dataset.jStatus;
         })()''','awaitPromise':True,'returnByValue':True})
         output=result.get('result',{}).get('value') or 'FAIL '+json.dumps(result)
-        if args.ui and 'ALL PASSED' in output and 'FAIL' not in output:
+        if args.dialog_races and 'ALL PASSED' in output and 'FAIL' not in output:
+            source=(root/'tests/dialog-races-v1361.js').read_text(encoding='utf-8')
+            races=client.call('Runtime.evaluate',{'expression':source+'\nrunDialogRacesV1361()','awaitPromise':True,'returnByValue':True})
+            if 'exceptionDetails' in races:raise RuntimeError(races['exceptionDetails'])
+            output+='\n'+races['result']['value']
+            if 'FAIL' not in output:
+                from dialog_races_v1361 import run as run_native_dialog_races
+                output+='\n'+run_native_dialog_races(client)
+        if args.safety and 'ALL PASSED' in output and 'FAIL' not in output:
+            source=(root/'tests/safety-v1361.js').read_text(encoding='utf-8')
+            safety=client.call('Runtime.evaluate',{'expression':source+'\nrunSafetyV1361()','awaitPromise':True,'returnByValue':True})
+            if 'exceptionDetails' in safety:raise RuntimeError(safety['exceptionDetails'])
+            output+='\n'+safety['result']['value']
+        if args.dialogs and 'ALL PASSED' in output and 'FAIL' not in output:
+            from dialog_ui_v1361 import run as run_dialog_ui
+            output+='\n'+run_dialog_ui(client,root)
+        if args.theme_color and 'ALL PASSED' in output and 'FAIL' not in output:
+            source=(root/'tests/theme-color-v1361.js').read_text(encoding='utf-8')
+            color=client.call('Runtime.evaluate',{'expression':source+'\nrunThemeColorV1361()','awaitPromise':True,'returnByValue':True})
+            if 'exceptionDetails' in color:raise RuntimeError(color['exceptionDetails'])
+            details=color['result']['value'];directory=root/'docs'/'theme-color-v1361';directory.mkdir(exist_ok=True)
+            (directory/'results.json').write_text(json.dumps(details,ensure_ascii=False,indent=2),encoding='utf-8')
+            output+=f"\nALL PASSED ({details['assertions']} runtime theme color assertions; light/dark, header/accent independence, settings reload, CSS source)"
+        if args.sidebar_hover and 'ALL PASSED' in output and 'FAIL' not in output:
+            from sidebar_hover_v1361 import run as run_sidebar_hover
+            output+='\n'+run_sidebar_hover(client,root)
+        if args.scroll_buttons and 'ALL PASSED' in output and 'FAIL' not in output:
+            def scroll_eval(expression):
+                result=client.call('Runtime.evaluate',{'expression':expression,'awaitPromise':True,'returnByValue':True})
+                if 'exceptionDetails' in result:raise RuntimeError(result['exceptionDetails'])
+                return result.get('result',{}).get('value')
+            scroll_eval((root/'tests/scroll-button-v1361.js').read_text(encoding='utf-8'))
+            directory=root/'docs'/'scroll-button-v1361';directory.mkdir(exist_ok=True)
+            scroll_checks=0;matrix=[]
+            for width,wide in [(360,True),(390,True),(768,True),(1024,True),(1280,True),(1440,True),(1280,False)]:
+                client.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':900,'deviceScaleFactor':1,'mobile':width<800})
+                client.call('Emulation.setTouchEmulationEnabled',{'enabled':width<800})
+                for dark in [False,True]:
+                    scroll_eval(f'prepareScrollButtonV1361({str(wide).lower()},{str(dark).lower()})')
+                    measured=scroll_eval('runScrollButtonGeometryV1361()');scroll_checks+=measured['assertions']
+                    matrix.append({'width':width,'wide':wide,'dark':dark,**measured})
+                    r=measured['button'];point={'x':r['x']+r['width']/2,'y':r['y']+r['height']/2}
+                    if width>=800:
+                        client.call('Input.dispatchMouseEvent',{'type':'mouseMoved',**point})
+                        scroll_checks+=scroll_eval('verifyScrollButtonHoverV1361()')
+                    if width in [390,1280] and wide:
+                        data=client.call('Page.captureScreenshot',{'format':'png','captureBeyondViewport':False})['data']
+                        (directory/f'{width}-{"dark" if dark else "light"}.png').write_bytes(base64.b64decode(data))
+                    if width<800:
+                        client.call('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[point]})
+                        client.call('Input.dispatchTouchEvent',{'type':'touchEnd','touchPoints':[]})
+                    else:
+                        client.call('Input.dispatchMouseEvent',{'type':'mousePressed',**point,'button':'left','clickCount':1})
+                        client.call('Input.dispatchMouseEvent',{'type':'mouseReleased',**point,'button':'left','clickCount':1})
+                    scroll_checks+=scroll_eval('verifyScrollButtonBottomV1361()')
+                if width in [390,1024,1280] and wide:
+                    scroll_checks+=scroll_eval('runScrollButtonBehaviorV1361()')
+                if width==390:
+                    scroll_eval('prepareScrollButtonV1361(true,false)')
+                    scroll_checks+=scroll_eval('runScrollButtonKeyboardV1361()')
+                    # Real browser viewport reduction in addition to visualViewport simulation.
+                    client.call('Emulation.setDeviceMetricsOverride',{'width':390,'height':500,'deviceScaleFactor':1,'mobile':True})
+                    scroll_eval('prepareScrollButtonV1361(true,false)')
+                    scroll_checks+=scroll_eval('runScrollButtonGeometryV1361()')['assertions']
+            (directory/'results.json').write_text(json.dumps({'assertions':scroll_checks,'matrix':matrix},ensure_ascii=False,indent=2),encoding='utf-8')
+            output+=f'\nALL PASSED ({scroll_checks} scroll button assertions; 14 width/wide/theme cases, reduced viewport and visual-only keyboard simulation)'
+        if run_ui_matrix and 'ALL PASSED' in output and 'FAIL' not in output:
             checks=0
             for width in [360,390,768,1280]:
                 client.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':900,'deviceScaleFactor':1,'mobile':width<800})
@@ -275,6 +375,9 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                         (directory/f'{name}-detail.png').write_bytes(base64.b64decode(detail['data']))
                 output+=f'\nSaved {len(cases)} full execution UI screenshots and 2 Chrome detail captures to {directory}'
             if args.sw:
+                client.capture_diagnostics=True
+                client.call('Network.enable')
+                client.call('ServiceWorker.enable')
                 upgrade=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const controlledBy=suffix=>new Promise((resolve,reject)=>{
                         const check=()=>{
@@ -288,16 +391,28 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                     });
                     await navigator.serviceWorker.register('/legacy-sw-fixture.js',{scope:'/'});await controlledBy('/legacy-sw-fixture.js');
                     await caches.open('unrelated-cache');
-                    await navigator.serviceWorker.register('/sw.js',{scope:'/'});await controlledBy('/sw.js');
+                    const registration=await navigator.serviceWorker.register('/sw.js',{scope:'/'});
+                    const candidate=registration.installing||registration.waiting;
+                    if(candidate){
+                        if(candidate.state!=='installed')await new Promise((resolve,reject)=>{
+                            const timer=setTimeout(()=>reject(new Error('worker install timeout')),10000);
+                            candidate.addEventListener('statechange',()=>{
+                                if(candidate.state==='installed'){clearTimeout(timer);resolve();}
+                                else if(candidate.state==='redundant'){clearTimeout(timer);reject(new Error('worker install rejected'));}
+                            });
+                        });
+                        candidate.postMessage({action:'skipWaiting'});
+                    }
+                    await controlledBy('/sw.js');
                     const names=await caches.keys();
-                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.36.0')||!names.includes('unrelated-cache')){
+                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.36.1')||!names.includes('unrelated-cache')){
                         throw new Error('cache upgrade mismatch: '+JSON.stringify(names));
                     }
-                    const primary=await caches.open('chatai-pwa-cache-v1.36.0');
+                    const primary=await caches.open('chatai-pwa-cache-v1.36.1');
                     const pointer=await primary.match(new URL('/.__active_app_shell__',location.href));
                     const shell=pointer?await caches.open(await pointer.text()):primary;
-                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.36.0'))throw new Error('missing versioned asset '+asset);
-                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.36.0'});
+                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.36.1'))throw new Error('missing versioned asset '+asset);
+                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.36.1'});
                     await dbUtils.saveSetting('dropboxTokens',null);sessionStorage.removeItem('pendingVersionNotice');
                     return true;
                 })()''','awaitPromise':True,'returnByValue':True})
@@ -334,7 +449,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                         const deadline=Date.now()+15000;
                         while(Date.now()<deadline){
                             const win=frame.contentWindow;
-                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.36.0'))return true;
+                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.36.1'))return true;
                             await new Promise(r=>setTimeout(r,50));
                         }
                         throw new Error('previous shell failed offline after rejected updates');
@@ -346,8 +461,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 concurrent=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const peer=window.open('about:blank','sw-fetch-peer');
                     try {
-                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.36.0',{cache:'no-store'}).then(async response=>{
-                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.36.0";'))throw new Error('concurrent shell read failed');
+                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.36.1',{cache:'no-store'}).then(async response=>{
+                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.36.1";'))throw new Error('concurrent shell read failed');
                         }));
                         const channel=new MessageChannel(),updated=new Promise((resolve,reject)=>{
                             const timer=setTimeout(()=>reject(new Error('concurrent rebuild timeout')),15000);
@@ -377,8 +492,11 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 boot_expression='''(async()=>{
                     const deadline=Date.now()+15000;
                     while(Date.now()<deadline){
-                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.36.0')){
+                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.36.1')){
                             if(!document.getElementById('chat-model-button'))throw new Error('picker missing');
+                            if(typeof window.DOMPurify?.sanitize!=='function')throw new Error('offline sanitizer missing');
+                            const clean=DOMPurify.sanitize('<b>offline sanitizer</b><img src=x onerror="alert(1)"><script>bad()</script>');
+                            if(!clean.includes('<b>offline sanitizer</b>')||/onerror|<script/i.test(clean))throw new Error('offline sanitizer failed');
                             return 'app booted';
                         }
                         await new Promise(r=>setTimeout(r,50));
@@ -398,9 +516,27 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 time.sleep(.3)
                 offline=client.call('Runtime.evaluate',{'expression':boot_expression,'awaitPromise':True,'returnByValue':True})
                 if 'exceptionDetails' in offline:raise RuntimeError(offline['exceptionDetails'])
-                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.36.0 boot)'
-    except Exception as error:output+='\nFAIL '+repr(error)+'\n'+traceback.format_exc()
+                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.36.1 boot and DOMPurify sanitization)'
+    except Exception as error:
+        output+='\nFAIL '+repr(error)+'\n'+traceback.format_exc()
+        if args.sw_diagnostics and client:
+            try:
+                failure_diagnostics['browser']=client.call('Runtime.evaluate',{'expression':'''(async()=>({
+                    online:navigator.onLine,controller:navigator.serviceWorker.controller?.scriptURL,
+                    workerState:navigator.serviceWorker.controller?.state,caches:await caches.keys()
+                }))()''','awaitPromise':True,'returnByValue':True})
+                with urlopen(f'http://127.0.0.1:{server.server_port}/__sw-test-health',timeout=5) as health:
+                    failure_diagnostics['serverHealthStatus']=health.status
+            except Exception as diagnostic_error:
+                failure_diagnostics['captureError']=repr(diagnostic_error)
     finally:
+        if args.sw_diagnostics:
+            args.sw_diagnostics.parent.mkdir(parents=True,exist_ok=True)
+            args.sw_diagnostics.write_text(json.dumps({'events':client.diagnostic_events if client else [],
+                'httpRequests':Handler.requests,'serverThreadAlive':server_thread.is_alive(),
+                'listenBacklog':server.request_queue_size,'serverSocket':server.socket.fileno(),
+                'swFault':Handler.sw_fault,'failureState':failure_diagnostics,
+                'output':output},ensure_ascii=False,indent=2),encoding='utf-8')
         if client:
             try:client.call('Browser.close')
             except (OSError,EOFError):pass
