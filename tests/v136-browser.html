@@ -1,12 +1,16 @@
 <!doctype html><meta charset="utf-8"><title>v136 browser tests</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <script src="../settings-v136.js"></script>
+<script src="../streaming-v136.js"></script>
 <script src="./v136-ui-tests.js"></script>
 <script src="./review-regressions-v136.js"></script>
 <script src="./review-n-regressions-v136.js"></script>
 <script src="./settings-adjustments-v136.js"></script>
 <script src="./integration-i-v136.js"></script>
 <script src="./integration-j-v136.js"></script>
+<script src="./chat-title-generation-v136.js"></script>
+<script src="./streaming-browser-v136.js"></script>
+<script src="./review-fixes-v136.js"></script>
 <script>
 window.addEventListener('load', async () => {
     const output = [];
@@ -198,7 +202,7 @@ window.addEventListener('load', async () => {
             const messages=[{role:'model',content:'',continuation:{...common,parts:[{functionCall:{name:'tool',args:{}},thoughtSignature:'opaque-signature'}]}},
                 {role:'tool',name:'tool',response:{ok:true}}, {role:'model',content:'final',continuation:{...common,parts:[{text:'final',thoughtSignature:'final-signature'}]}}];
             const aggregated=app._aggregateMessages(messages);
-            st.currentMessages=[{role:'user',content:'tool test'},aggregated];await db.saveChat();
+            st.currentMessages.splice(0,st.currentMessages.length,{role:'user',content:'tool test'},aggregated);await db.saveChat();
             const persisted=(await db.getChat(st.currentChatId)).messages;
             const prepared=await app._prepareApiHistory(persisted);
             eq(prepared.length,4);eq(prepared[1].parts[0].thoughtSignature,'opaque-signature');eq(prepared[2].role,'tool');
@@ -271,12 +275,15 @@ window.addEventListener('load', async () => {
             el.userInput.value='disabled';await app.handleSend();assert(!fetched);assert(alerts.length===1);assert(!st.isSending);
             ui.showCustomAlert=alert;window.fetch=rawFetch;await db.saveSetting('apiConfigs',configs);await app.refreshExecutionApiConfigsV136();
         });
-        await test('manual cancellation reaches the actual request signal without updating success',async()=>{
+        await test('non-streaming stop reaches the request signal and persists only the new user message',async()=>{
             const previous=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
+            const before=st.currentMessages.length;
             st.abortController=null;st.settings.enableAutoRetry=false;
             window.fetch=async(url,opts)=>new Promise((resolve,reject)=>{opts.signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError')),{once:true});setTimeout(()=>app.abortRequest(),0);});
             el.userInput.value='cancel';await app.handleSend();eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),previous);
-            eq(st.currentMessages.at(-1).role,'error');window.fetch=rawFetch;
+            eq(st.currentMessages.slice(before).map(m=>m.role),['user']);
+            eq((await db.getChat(st.currentChatId)).messages.slice(before).map(m=>m.role),['user']);
+            assert(!st.isSending && st.abortController===null && st.sendExecutionV136===null);window.fetch=rawFetch;
         });
         await test('old chat imported after migration gets independent settings without changing history metadata',async()=>{
             await new Promise((resolve,reject)=>{const tx=st.db.transaction('chats','readwrite');tx.objectStore('chats').put({id:999,title:'late legacy',messages:[{role:'model',content:'old',thinkingBudget:4096,usageMetadata:{tmExecution:oldMetadata}}],createdAt:2,updatedAt:2});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
@@ -346,8 +353,12 @@ window.addEventListener('load', async () => {
             const j=await window.runIntegrationJRegressionsV136();output.push(...j.output);
             for(const failure of j.failures)output.push(failure.error);
         }
+        await window.runChatTitleGenerationTests({app,db,st,ui,el,test,assert,eq});
+        await window.runStreamingBrowserTestsV136({app,db,st,ui,el,test,assert,eq});
+        const stage = Number(new URLSearchParams(location.search).get('fixes-stage'));
+        await window.runReviewFixesV136({app,db,st,ui,el,test,assert,eq,stage});
         if(!output.some(line=>line.startsWith('FAIL')))output.push('ALL PASSED ('+output.length+' browser tests)');
-    } catch(error) {output.push('FAIL '+error.stack);}
+    } catch(error) {output.push('FAIL '+(document.documentElement.dataset.testStatus || '')+' '+(error.stack || String(error)));}
     const preview=new URLSearchParams(location.search).has('ui');
     if(!preview)document.body.innerHTML='';
     const pre=document.createElement('pre');pre.id='test-results';pre.hidden=preview;pre.textContent=output.join('\n');document.body.append(pre);

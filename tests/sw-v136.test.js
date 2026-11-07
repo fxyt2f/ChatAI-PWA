@@ -9,7 +9,7 @@ function worker({failInstall=false}={}){
     const failed=worker({failInstall:true});await assert.rejects(failed.event('install'),/offline install/);assert.equal(failed.metrics.skip,0);
     console.log('PASS incomplete shell install does not promote the new worker');
     const good=worker();await good.event('install');assert.equal(good.metrics.skip,0);await good.event('message',{data:{action:'skipWaiting'}});assert.equal(good.metrics.skip,1);
-    for(const name of ['style.css','app.js','settings-v136.js','settings-ui-v136.js','function-calling.js','dropbox.js'])assert(good.metrics.assets.includes('./'+name+'?v=1.36.1'));
+    for(const name of ['style.css','app.js','settings-v136.js','settings-ui-v136.js','function-calling.js','dropbox.js'])assert(good.metrics.assets.includes('./'+name+'?v=1.36.2'));
     console.log('PASS versioned shell includes matching styles, core and UI');
     await good.event('activate');assert.deepEqual(good.deleted,['chatai-pwa-cache-v1.35.1']);assert.equal(good.metrics.claim,1);
     console.log('PASS activation removes old app caches and preserves unrelated caches');

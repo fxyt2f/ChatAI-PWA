@@ -90,6 +90,7 @@ window.runReviewRegressionsV136 = async ({app,db,st,ui,el,assert,eq}) => {
         const past={role:'model',content:'past',continuation:{...common,parts:[{text:'past',thoughtSignature:'past-signature'}]}};
         for(const text of ['edited','replacement','before','replacement']) {
             aggregate.content=text;st.currentChatId=803;st.currentMessages=[{role:'user',content:'first'},past,{role:'user',content:'tool request'},aggregate];
+            db.bindChatSaveOwnerV136(st.currentMessages,await db.getChat(803));
             await db.saveChat(null,null,{skipPush:true});const saved=await db.getChat(803);
             app.freezeExecutionSettings();let body;window.fetch=async(url,opts)=>{body=JSON.parse(opts.body);return response()};
             await window.testApi.callGeminiApi(await app._prepareApiHistory(saved.messages),{},'');st.currentExecutionApiConfig=null;

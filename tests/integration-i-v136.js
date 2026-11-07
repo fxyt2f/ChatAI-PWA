@@ -145,45 +145,46 @@ window.runIntegrationIRegressionsV136=async()=>{
     const oldConfirm=ui.showCustomConfirm,oldAlert=ui.showCustomAlert,oldClient=window.BedrockRuntimeClient,oldCommand=window.ConverseCommand;
     let body;
     window.ConverseCommand=class{constructor(body){this.body=body}};window.BedrockRuntimeClient=class{async send(command){body=command.body;return {output:{message:{content:[{text:'done'}]}},stopReason:'end_turn'}}};
+    const reloadChat=async()=>{const saved=await db.getChat(st.currentChatId);st.currentMessages=saved.messages;db.bindChatSaveOwnerV136(st.currentMessages,saved)};
     const model=(content,sig)=>({role:'model',content,continuation:{provider:'bedrock',apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1',displayContent:content,parts:[{text:content}],bedrock:[{reasoningContent:{reasoningText:{text:'reason',signature:sig}}}]}});
     try{
         ui.showCustomConfirm=async()=>true;ui.showCustomAlert=async()=>{};
         for(const index of [0,2,1])await run('I05 delete '+index+' strips only dependent Bedrock signatures after reload',async()=>{
             st.isSending=false;st.isEditingSystemPrompt=false;st.editingMessageIndex=null;st.currentSummarizedContext=null;st.currentSystemPrompt='';
             st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1'},thinkingEffort:'high'};
-            st.currentChatId=870000+index;st.currentMessages=[{role:'user',content:'one'},model('first','i-sig-a'),{role:'user',content:'two'},model('second','i-sig-b'),{role:'user',content:'three'},model('last','i-sig-c')];
-            await db.saveChat();await app.deleteMessage(index);st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            st.currentChatId=null;st.currentMessages=[{role:'user',content:'one'},model('first','i-sig-a'),{role:'user',content:'two'},model('second','i-sig-b'),{role:'user',content:'three'},model('last','i-sig-c')];
+            await db.saveChat();await app.deleteMessage(index);await reloadChat();
             app.freezeExecutionSettings();await api.callBedrockApi(await app._prepareApiHistory(st.currentMessages),{},'');st.currentExecutionApiConfig=null;
             const sent=JSON.stringify(body);assert(!sent.includes('i-sig-b')&&!sent.includes('i-sig-c'),'dependent signature was replayed');
             eq(sent.includes('i-sig-a'),index===2,'unchanged prefix signature preservation');
         });
         const history=()=>[{role:'user',content:'one'},model('first','i-sig-a'),{role:'user',content:'two'},model('second','i-sig-b'),{role:'user',content:'three'},model('last','i-sig-c')];
         const setup=async(id,messages)=>{st.isSending=false;st.isEditingSystemPrompt=false;st.editingMessageIndex=null;st.currentSummarizedContext=null;st.currentSystemPrompt='';st.currentExecutionApiConfig=null;
-            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1'},thinkingEffort:'high'};st.currentChatId=id;st.currentMessages=messages;await db.saveChat()};
+            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1'},thinkingEffort:'high'};st.currentChatId=null;st.currentMessages=messages;await db.saveChat()};
         const sentSignatures=async()=>{app.freezeExecutionSettings();await api.callBedrockApi(await app._prepareApiHistory(st.currentMessages.filter(m=>!m.isCascaded||m.isSelected)),{},'');st.currentExecutionApiConfig=null;return JSON.stringify(body)};
         for(const index of [3,4,5])await run('I05 deletion '+index+' preserves every signature before the changed prefix',async()=>{
-            await setup(870010+index,history());await app.deleteMessage(index);st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            await setup(870010+index,history());await app.deleteMessage(index);await reloadChat();
             const sent=await sentSignatures();assert(sent.includes('i-sig-a'));eq(sent.includes('i-sig-b'),index>=4);assert(!sent.includes('i-sig-c'));
         });
         await run('I05 unchanged signed history survives save and reload without discarding signatures',async()=>{
-            await setup(870020,history());st.currentMessages=(await db.getChat(st.currentChatId)).messages;const sent=await sentSignatures();for(const sig of ['i-sig-a','i-sig-b','i-sig-c'])assert(sent.includes(sig));
+            await setup(870020,history());await reloadChat();const sent=await sentSignatures();for(const sig of ['i-sig-a','i-sig-b','i-sig-c'])assert(sent.includes(sig));
         });
         const candidates=()=>[{role:'user',content:'one'},{...model('candidate A','candidate-a'),isCascaded:true,isSelected:true,siblingGroupId:'i-group'},
             {...model('candidate B','candidate-b'),isCascaded:true,isSelected:false,siblingGroupId:'i-group'}, {role:'user',content:'two'},model('dependent','dependent-sig')];
         await run('I05 candidate switch invalidates dependent signatures and switching back restores coherent originals',async()=>{
-            await setup(870021,candidates());await app.navigateCascade(1,'next');st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            await setup(870021,candidates());await app.navigateCascade(1,'next');await reloadChat();
             let sent=await sentSignatures();assert(sent.includes('candidate-b'));assert(!sent.includes('candidate-a')&&!sent.includes('dependent-sig'));
-            await app.navigateCascade(2,'prev');st.currentMessages=(await db.getChat(st.currentChatId)).messages;sent=await sentSignatures();assert(sent.includes('candidate-a')&&sent.includes('dependent-sig'));
+            await app.navigateCascade(2,'prev');await reloadChat();sent=await sentSignatures();assert(sent.includes('candidate-a')&&sent.includes('dependent-sig'));
         });
         for(const selected of [false,true])await run('I05 deleting '+(selected?'selected':'unselected')+' candidate follows visible-history dependencies',async()=>{
-            await setup(selected?870022:870023,candidates());await app.confirmDeleteCascadeResponse(selected?1:2);st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            await setup(selected?870022:870023,candidates());await app.confirmDeleteCascadeResponse(selected?1:2);await reloadChat();
             const sent=await sentSignatures();eq(sent.includes('dependent-sig'),!selected);assert(sent.includes(selected?'candidate-b':'candidate-a'));
         });
         await run('I05 fresh Bedrock response after deletion remains valid while older dependent signatures stay invalid',async()=>{
             await setup(870024,history());await app.deleteMessage(0);st.currentMessages.push({role:'user',content:'continue on modified history'});
             app.freezeExecutionSettings();const prepared=await app._prepareApiHistory(st.currentMessages);
             window.BedrockRuntimeClient=class{async send(command){body=command.body;return {output:{message:{content:[{reasoningContent:{reasoningText:{text:'new reasoning',signature:'fresh-signature'}}},{text:'fresh response'}]}},stopReason:'end_turn'}}};
-            try{const result=await app._internalHandleSend(prepared,{},null);st.currentMessages.push(app._aggregateMessages(result));await db.saveChat();st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            try{const result=await app._internalHandleSend(prepared,{},null);st.currentMessages.push(app._aggregateMessages(result));await db.saveChat();await reloadChat();
                 const sent=await sentSignatures();assert(sent.includes('fresh-signature'));assert(!sent.includes('i-sig-a')&&!sent.includes('i-sig-b')&&!sent.includes('i-sig-c'));
             }finally{window.BedrockRuntimeClient=class{async send(command){body=command.body;return {output:{message:{content:[{text:'done'}]}},stopReason:'end_turn'}}};st.currentExecutionApiConfig=null}
         });
@@ -195,7 +196,7 @@ window.runIntegrationIRegressionsV136=async()=>{
         await run('I05 Gemini turn dependencies preserve independent signatures after an earlier user deletion',async()=>{
             const gem=(content,sig)=>({role:'model',content,continuation:{provider:'gemini',apiConfigId:'gem',modelName:'gemini-3-pro-preview',displayContent:content,parts:[{text:content,thoughtSignature:sig}]}});
             await setup(870026,[{role:'user',content:'one'},gem('first','g-first'),{role:'user',content:'two'},gem('second','g-second')]);
-            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:'gem',modelName:'gemini-3-pro-preview'},thinkingEffort:'high'};await app.deleteMessage(0);st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:'gem',modelName:'gemini-3-pro-preview'},thinkingEffort:'high'};await app.deleteMessage(0);await reloadChat();
             app.freezeExecutionSettings();const prepared=JSON.stringify(await app._prepareApiHistory(st.currentMessages));assert(!prepared.includes('g-first'));assert(prepared.includes('g-second'));st.currentExecutionApiConfig=null;
         });
         for(const provider of ['openrouter','zai'])await run('I05 '+provider+' deletion obeys its continuation dependency policy in the final adapter request',async()=>{
@@ -203,7 +204,7 @@ window.runIntegrationIRegressionsV136=async()=>{
             const response=(content,key)=>({role:'model',content,continuation:{provider,apiConfigId:configId,modelName,displayContent:content,parts:[{text:content}],
                 openai:provider==='zai'?{reasoning_content:key}:{reasoning_details:[{type:'reasoning.encrypted',data:key,signature:key}]}}});
             await setup(provider==='zai'?870027:870028,[{role:'user',content:'one'},response('first','provider-first'),{role:'user',content:'two'},response('second','provider-second')]);
-            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:configId,modelName},thinkingEffort:null};await app.deleteMessage(0);st.currentMessages=(await db.getChat(st.currentChatId)).messages;
+            st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:configId,modelName},thinkingEffort:null};await app.deleteMessage(0);await reloadChat();
             const fetchBefore=window.fetch;let sent;
             window.fetch=async(url,options)=>{sent=JSON.parse(options.body);return {ok:true,status:200,json:async()=>({choices:[{message:{content:'done'},finish_reason:'stop'}]})}};
             try{app.freezeExecutionSettings();const prepared=await app._prepareApiHistory(st.currentMessages);await(provider==='zai'?api.callZaiApi(prepared,{},''):api.callOpenRouterApi(prepared,{},''));

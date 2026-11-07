@@ -1,4 +1,8 @@
 // --- 共通ヘルパー関数 ---
+function assertToolActiveV136(chat) {
+    chat?.signal?.throwIfAborted();
+    chat?.assertActive?.();
+}
 
 /**
  * 画像アセットDBを操作するためのヘルパーオブジェクト
@@ -10,11 +14,21 @@
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
     }),
-    save: (asset) => new Promise((resolve, reject) => {
+    save: (asset, signal) => new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
         if (!window.state || !window.state.db) return reject(new Error("データベースが初期化されていません。"));
-        const request = window.state.db.transaction('image_assets', 'readwrite').objectStore('image_assets').put(asset);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
+        const tx = window.state.db.transaction('image_assets', 'readwrite');
+        const abort = () => { try { tx.abort(); } catch { /* Already committed. */ } };
+        tx.oncomplete = () => {
+            signal?.removeEventListener('abort', abort);
+            resolve();
+        };
+        tx.onabort = () => {
+            signal?.removeEventListener('abort', abort);
+            reject(signal?.reason || tx.error);
+        };
+        tx.objectStore('image_assets').put(asset);
+        signal?.addEventListener('abort', abort, { once: true });
     }),
     delete: (name) => new Promise((resolve, reject) => {
         if (!window.state || !window.state.db) return reject(new Error("データベースが初期化されていません。"));
@@ -149,7 +163,8 @@ async function manage_image_assets({ action, asset_name, source_image_message_in
                     blob: webpBlob,
                     createdAt: new Date()
                 };
-                await assetDB.save(newAsset);
+                assertToolActiveV136(chat);
+                await assetDB.save(newAsset, chat?.signal);
                 result = { success: true, message: `画像アセット「${asset_name}」をWebP形式で保存しました。` };
                 updateCount = true;
                 break;
@@ -160,7 +175,8 @@ async function manage_image_assets({ action, asset_name, source_image_message_in
                     return { success: false, message: `画像アセット「${asset_name}」は見つかりませんでした。` };
                 }
                 
-                const tempImageId = await window.appLogic.saveImageBlob(asset.blob);
+                assertToolActiveV136(chat);
+                const tempImageId = await window.appLogic.saveImageBlob(asset.blob, chat?.signal);
 
                 // UIアクションを削除し、代わりにimageIdを返す
                 result = {
@@ -180,7 +196,7 @@ async function manage_image_assets({ action, asset_name, source_image_message_in
         }
 
         if (updateCount && window.appLogic && typeof window.appLogic.updateAssetCount === 'function') {
-            setTimeout(() => window.appLogic.updateAssetCount(), 0);
+            setTimeout(() => { if (!chat?.signal?.aborted) window.appLogic.updateAssetCount(); }, 0);
         }
         return result;
 
@@ -769,7 +785,7 @@ async function generate_random_string({ length, count = 1, use_uppercase = true,
  * @param {string} args.query - 検索キーワードまたは質問文
  * @returns {Promise<object>} 検索結果の要約またはエラー情報を含むオブジェクトを返すPromise
  */
-async function search_web({ query }) {
+async function search_web({ query }, chat) {
     console.log(`[Function Calling] search_webが呼び出されました。`, { query });
   
     const apiKey = state.settings.googleSearchApiKey;
@@ -784,8 +800,9 @@ async function search_web({ query }) {
   
     const endpoint = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${engineId}&q=${encodeURIComponent(query)}`;
   
+    const request = scopedRequestSignalV136(chat?.signal, chat?.requestTimeoutMs);
     try {
-        const response = await fetch(endpoint);
+        const response = await fetch(endpoint, { signal: request.signal });
         if (!response.ok) {
             const errorData = await response.json();
             const errorMessage = errorData.error?.message || `HTTPエラー: ${response.status}`;
@@ -819,6 +836,8 @@ async function search_web({ query }) {
     } catch (error) {
         console.error(`[Function Calling] search_webで予期せぬエラー:`, error);
         return { error: `Web検索中に予期せぬエラーが発生しました: ${error.message}` };
+    } finally {
+        request.dispose();
     }
 }
 
@@ -882,7 +901,7 @@ async function manage_style_profile({ action, character_name, profile_name, over
  * @param {number} [args.message_bubble] - メッセージ吹き出しの濃さ (0.1でほぼ透明, 1.0で不透明)
  * @returns {Promise<object>} 操作結果を含むオブジェクトを返すPromise
  */
-async function set_ui_opacity({ overlay, message_bubble }) {
+async function set_ui_opacity({ overlay, message_bubble }, chat) {
     console.log(`[Function Calling] set_ui_opacityが呼び出されました。`, { overlay, message_bubble });
 
     if (window.state && window.state.settings.allowPromptUiChanges === false) {
@@ -905,7 +924,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
     }
 
     if (window.appLogic && typeof window.appLogic.updateOpacitySettings === 'function') {
-        const success = await window.appLogic.updateOpacitySettings(newOpacities);
+        const success = await window.appLogic.updateOpacitySettings(newOpacities, chat?.signal);
         if (success) {
             const message = `${changedItems.join('、')}変更しました。`;
             return { success: true, message: message };
@@ -923,7 +942,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
  * @param {string} args.image_url - 表示したい画像のURL
  * @returns {Promise<object>} 操作結果を含むオブジェクトを返すPromise
  */
- async function set_background_image({ image_url, asset_name }) {
+ async function set_background_image({ image_url, asset_name }, chat) {
     console.log(`[Function Calling] set_background_imageが呼び出されました。`, { image_url, asset_name });
 
     if (window.state && window.state.settings.allowPromptUiChanges === false) {
@@ -935,6 +954,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
     try {
         if (asset_name) {
             const asset = await assetDB.get(asset_name);
+            assertToolActiveV136(chat);
             if (!asset || !asset.blob) {
                 return { error: `画像アセット「${asset_name}」が見つかりませんでした。` };
             }
@@ -1058,9 +1078,13 @@ async function set_ui_opacity({ overlay, message_bubble }) {
       });
   
       async function tryGenerate(genAI, req) {
+        assertToolActiveV136(chat);
+        const send = () => runToolRequestV136(chat?.signal, chat?.requestTimeoutMs,
+              abortSignal => genAI.models.generateVideos({ ...req, config: { ...req.config, abortSignal } }));
         try {
-          return await genAI.models.generateVideos(req);
+          return await send();
         } catch (e) {
+          assertToolActiveV136(chat);
           const msg = (e?.error?.message || e?.message || "").toLowerCase();
           const isPG = /persongeneration|use case|not supported/.test(msg);
           if (!isPG) throw e;
@@ -1070,15 +1094,15 @@ async function set_ui_opacity({ overlay, message_bubble }) {
           if (!hasImage) {
             if (!req.config.personGeneration) {
               req.config.personGeneration = "allow_all";
-              return await genAI.models.generateVideos(req);
+              return await send();
             } else if (req.config.personGeneration === "allow_all") {
               req.config.personGeneration = "allow_adult";
-              return await genAI.models.generateVideos(req);
+              return await send();
             }
           } else {
             if (req.config.personGeneration === "allow_adult") {
               req.config.personGeneration = "allow_all";
-              return await genAI.models.generateVideos(req);
+              return await send();
             }
           }
           throw e;
@@ -1086,6 +1110,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
       }
   
       let operation = await tryGenerate(genAI, request);
+      assertToolActiveV136(chat);
       console.log("動画生成リクエストを受け付けました。Operation:", operation);
   
       const MAX_ATTEMPTS = 18;
@@ -1094,8 +1119,11 @@ async function set_ui_opacity({ overlay, message_bubble }) {
         attempts++;
         if (attempts > MAX_ATTEMPTS) throw new Error("動画生成がタイムアウトしました（3分）。");
         console.log(`動画生成の状態を確認中... (${attempts}/${MAX_ATTEMPTS})`);
-        await new Promise(r => setTimeout(r, 10000));
-        operation = await genAI.operations.getVideosOperation({ operation });
+        await interruptibleSleep(10000, chat?.signal);
+        assertToolActiveV136(chat);
+        operation = await runToolRequestV136(chat?.signal, chat?.requestTimeoutMs,
+            abortSignal => genAI.operations.getVideosOperation({ operation, config: { abortSignal } }));
+        assertToolActiveV136(chat);
         if (operation.error) throw new Error(`動画生成処理でエラーが発生しました: ${operation.error.message}`);
       }
   
@@ -1121,22 +1149,26 @@ async function set_ui_opacity({ overlay, message_bubble }) {
         throw new Error("動画のダウンロードURLを特定できませんでした。（uri も name も無し）");
       }
   
-      const res = await fetch(`${downloadUrl}${downloadUrl.includes('?') ? '&' : '?'}key=${apiKey}`, {
-        method: 'GET',
-        redirect: 'follow'
+      const videoBlob = await runToolRequestV136(chat?.signal, chat?.requestTimeoutMs, async signal => {
+        const res = await fetch(`${downloadUrl}${downloadUrl.includes('?') ? '&' : '?'}key=${apiKey}`, {
+          method: 'GET',
+          redirect: 'follow',
+          signal
+        });
+        if (!res.ok) {
+          const t = await res.text().catch(() => "");
+          const error = new Error(`動画ダウンロードに失敗: ${res.status} ${res.statusText} ${t}`);
+          error.status = res.status;
+          throw error;
+        }
+
+        return res.blob();
       });
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        const error = new Error(`動画ダウンロードに失敗: ${res.status} ${res.statusText} ${t}`);
-        error.status = res.status;
-        throw error;
-      }
-  
-      const videoBlob = await res.blob();
-      const videoUrl = URL.createObjectURL(videoBlob);
 
       // BlobをBase64に変換するヘルパーを appLogic から呼び出す
       const videoBase64 = await window.appLogic.fileToBase64(videoBlob);
+      assertToolActiveV136(chat);
+      const videoUrl = URL.createObjectURL(videoBlob);
       console.log("動画のBlob URLとBase64データを生成しました。");
   
       return {
@@ -1162,7 +1194,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
           } 
       };
     } finally {
-      if (window.uiUtils) window.elements.loadingIndicator.classList.add('hidden');
+      if (!chat?.signal?.aborted && window.uiUtils) window.elements?.loadingIndicator?.classList.add('hidden');
     }
 }
 
@@ -1187,7 +1219,7 @@ async function set_ui_opacity({ overlay, message_bubble }) {
  *
  * @returns {Promise<object>} 処理結果
  */
-async function generate_image(args = {}) {
+async function generate_image(args = {}, chat) {
     const ai = (window.ai instanceof GoogleGenAI)
       ? window.ai
       : new GoogleGenAI({ apiKey: (window.state?.settings?.apiKey || window.GEMINI_API_KEY) });
@@ -1223,10 +1255,11 @@ async function generate_image(args = {}) {
       let responseMeta = {};
   
       if (modelName === "gemini-2.5-flash-image-preview") {
-        const resp = await ai.models.generateContent({
+        const resp = await runToolRequestV136(chat?.signal, chat?.requestTimeoutMs, abortSignal => ai.models.generateContent({
           model: "gemini-2.5-flash-image-preview",
           contents: [{ role: "user", parts: [{ text: prompt }] }],
-        });
+          config: { abortSignal },
+        }));
         
         const gen = resp?.candidates?.[0]?.content?.parts || [];
         for (const part of gen) {
@@ -1244,11 +1277,11 @@ async function generate_image(args = {}) {
           personGeneration: "allow_all",
         };
   
-        const resp = await ai.models.generateImages({
+        const resp = await runToolRequestV136(chat?.signal, chat?.requestTimeoutMs, abortSignal => ai.models.generateImages({
           model: modelName,
           prompt,
-          config: commonConfig,
-        });
+          config: { ...commonConfig, abortSignal },
+        }));
   
         for (const g of (resp?.generatedImages || [])) {
           const bytes = g?.image?.imageBytes;
@@ -1265,7 +1298,7 @@ async function generate_image(args = {}) {
       const imageIds = [];
       for (const imgData of generatedImagesBase64) {
           const imageBlob = await window.appLogic.base64ToBlob(imgData.data, imgData.mimeType);
-          const newImageId = await window.appLogic.saveImageBlob(imageBlob);
+          const newImageId = await window.appLogic.saveImageBlob(imageBlob, chat?.signal);
           imageIds.push(newImageId);
       }
 
@@ -1389,10 +1422,12 @@ async function generate_image(args = {}) {
         imageParts.push({ text: prompt });
 
         console.log(`${logPrefix} APIリクエストを送信します。使用モデル: ${model}, 画像パーツ数: ${imageParts.length - 1}`);
-        const resp = await ai.models.generateContent({
+        assertToolActiveV136(chat);
+        const resp = await runToolRequestV136(chat?.signal, chat?.requestTimeoutMs, abortSignal => ai.models.generateContent({
             model: model,
+            config: { abortSignal },
             contents: imageParts
-        });
+        }));
         console.log(`${logPrefix} APIから応答を受信しました。`, resp);
 
         const editedImagesBase64 = [];
@@ -1418,7 +1453,7 @@ async function generate_image(args = {}) {
             console.log(`${logPrefix} [${index+1}/${editedImagesBase64.length}] Base64からBlobへの変換を開始...`);
             const imageBlob = await window.appLogic.base64ToBlob(imgData.data, imgData.mimeType);
             console.log(`${logPrefix} [${index+1}/${editedImagesBase64.length}] Blob変換成功。DBへの保存を開始...`);
-            const newImageId = await window.appLogic.saveImageBlob(imageBlob);
+            const newImageId = await window.appLogic.saveImageBlob(imageBlob, chat?.signal);
             console.log(`${logPrefix} [${index+1}/${editedImagesBase64.length}] DB保存成功。新しいID: ${newImageId}`);
             imageIds.push(newImageId);
         }
@@ -1559,7 +1594,7 @@ async function generate_image(args = {}) {
  * @param {string} args.url - 取得したいコンテンツのURL
  * @returns {Promise<object>} 取得したテキストコンテンツまたはエラー情報
  */
- async function fetch_url_content({ url }) {
+ async function fetch_url_content({ url }, chat) {
     console.log(`[Function Calling] fetch_url_contentが呼び出されました。URL: ${url}`);
 
     const PROXY_URL = 'https://gemini-pwa-mk2-proxy.marine14f.workers.dev/';
@@ -1572,9 +1607,11 @@ async function generate_image(args = {}) {
         return { error: "引数 'url' は必須です。" };
     }
 
+    const request = scopedRequestSignalV136(chat?.signal, chat?.requestTimeoutMs);
     try {
         // WorkerにPOSTリクエストでURLを渡す
         const response = await fetch(PROXY_URL, {
+            signal: request.signal,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: url })
@@ -1597,6 +1634,8 @@ async function generate_image(args = {}) {
     } catch (error) {
         console.error(`[Function Calling] fetch_url_contentでエラーが発生しました:`, error);
         return { error: `URLコンテンツの取得中にエラーが発生しました: ${error.message}` };
+    } finally {
+        request.dispose();
     }
 }
 
@@ -1651,7 +1690,7 @@ window.functionCallingTools = {
         console.log(`[Function Calling] generate_image_stable_diffusionが呼び出されました。`, args);
         if (window.appLogic && typeof window.appLogic.handleStableDiffusionGeneration === 'function') {
             const responseText = args._responseTextForQc || '';
-            return await window.appLogic.handleStableDiffusionGeneration(args, responseText);
+            return await window.appLogic.handleStableDiffusionGeneration(args, responseText, chatContext?.signal);
         } else {
             return { error: "Stable Diffusion連携機能が初期化されていません。" };
         }
@@ -2278,4 +2317,3 @@ window.functionDeclarations = [
     ]
 }
 ];
-  

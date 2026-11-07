@@ -19,7 +19,8 @@ window.runNRegressionsV136=async({run,app,db,st,ui,realUi,el,assert,eq,putChat})
         const node=document.createElement('div');node.innerHTML='<div class="message-content"></div><textarea class="edit-textarea">edited</textarea>';el.messageContainer.append(node);
         try {
             await verify(false);await app.saveEditMessage(editedIndex,node);
-            const saved=await db.getChat(st.currentChatId);st.currentMessages=saved.messages;await verify(true);
+            const saved=await db.getChat(st.currentChatId);st.currentMessages=saved.messages;
+            db.bindChatSaveOwnerV136(st.currentMessages,saved);await verify(true);
             eq(saved.messages[5].continuation.bedrock[0].reasoningContent.reasoningText.signature,'sig-c');
             await app.undoLatestChangeForMessage(editedIndex,st.currentMessages[editedIndex].role);await verify(false);
             await app.redoLatestChangeForMessage(editedIndex,st.currentMessages[editedIndex].role);await verify(true);

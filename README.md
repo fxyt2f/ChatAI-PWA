@@ -6,7 +6,7 @@ ChatAI PWA は、MIT ライセンスの既存 PWA クライアントをベース
 
 ## 現在のリリース
 
-v1.36.1。変更点・検証結果・既知の問題は[リリース記録](docs/v1.36.1-release.md)と[CHANGELOG](CHANGELOG.md)を参照してください。
+v1.36.2。変更点・検証結果・既知の制約は[リリース記録](docs/v1.36.2-release.md)と[CHANGELOG](CHANGELOG.md)を参照してください。
 
 ## 主な機能
 
