@@ -22,12 +22,14 @@ window.addEventListener('load', async () => {
             const link=document.createElement('link');link.rel='stylesheet';link.href=original.getAttribute('href');document.head.append(link);
         }
         document.body.innerHTML = parsed.body.innerHTML;
+        document.head.append(parsed.head.querySelector('meta[name="theme-color"]').cloneNode(true));
         document.querySelectorAll('script').forEach(s=>s.remove());
         let source = await (await fetch('../app.js')).text();
         source = source.slice(source.indexOf('// --- 定数 ---'));
-        (0,eval)(source + '\nwindow.testApi=apiUtils;window.testUi=uiUtils;window.testElements=elements;window.testDebug=DebugLogger;');
+        (0,eval)(source + '\nwindow.testApi=apiUtils;window.testUi=uiUtils;window.testElements=elements;window.testDebug=DebugLogger;window.testSidebarUiState=chatSidebarUiState;');
         const app=window.appLogic, db=window.dbUtils, st=window.state, api=window.testApi, ui=window.testUi, el=window.testElements;
         const realUi={...ui};
+        window.testRealUi=realUi;
         const realAppFunctions={renderApiConfigList:app.renderApiConfigList,scrollToBottom:app.scrollToBottom};
         window.testRealAppFunctions=realAppFunctions;
         // Exercise real application methods against real IndexedDB; DOM painting and sync are stubbed.
@@ -285,10 +287,32 @@ window.addEventListener('load', async () => {
         await test('switching chats waits for the cancelled generation to finish saving',async()=>{
             app.startNewChat();await st.executionSettingsReady;await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
             st.settings.enableAutoRetry=false;
-            window.fetch=async(url,opts)=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError')),{once:true}));
-            el.userInput.value='switch during request';const sending=app.handleSend();
-            while(!st.isSending)await new Promise(r=>setTimeout(r,1));
-            await app.loadChat(100);await sending;eq(st.currentChatId,100);eq(st.currentMessages[0].content,'old response');
+            let requestReady;
+            const requestStarted=new Promise(resolve=>requestReady=resolve);
+            window.fetch=async(url,opts)=>new Promise((resolve,reject)=>{
+                const abort=()=>reject(new DOMException('cancelled','AbortError'));
+                if(opts.signal.aborted)abort();
+                else opts.signal.addEventListener('abort',abort,{once:true});
+                requestReady();
+            });
+            let sendFailure=null,sendFinished=false;
+            el.userInput.value='switch during request';const sending=app.handleSend().catch(error=>{sendFailure=error}).finally(()=>{sendFinished=true});
+            const sendDeadline=Date.now()+3000;
+            while(!st.isSending){
+                if(sendFailure)throw sendFailure;
+                if(sendFinished||Date.now()>sendDeadline)throw new Error('Send did not enter sending state: '+JSON.stringify({sendFinished,isEditingSystemPrompt:st.isEditingSystemPrompt,openDialogs:[...document.querySelectorAll('dialog[open]')].map(d=>d.id),input:el.userInput.value}));
+                await new Promise(r=>setTimeout(r,1));
+            }
+            // isSending precedes the initial DB save and AbortController setup.
+            // This case exercises cancellation of an actual in-flight request.
+            await Promise.race([requestStarted,new Promise((_,reject)=>setTimeout(()=>reject(new Error('Request never started')),3000))]);
+            const switched=await app.loadChat(100);
+            if (!switched?.ok) {
+                app.abortRequest(); await sending;
+                throw new Error('Chat switch did not complete: '+JSON.stringify(switched));
+            }
+            await sending;eq(st.currentChatId,100);eq(st.currentMessages[0].content,'old response');
+            if(sendFailure)throw sendFailure;
             eq((await db.getChat(100)).messages[0].usageMetadata.tmExecution,oldMetadata);window.fetch=rawFetch;
         });
         if(new URLSearchParams(location.search).has('review')) {

@@ -22,10 +22,14 @@ with tempfile.TemporaryDirectory(prefix='chatai-sidebar-',ignore_cleanup_errors=
     client=None
     try:
         deadline=time.monotonic()+15
-        while not (Path(profile)/'DevToolsActivePort').exists():
+        while True:
+            try:
+                port=(Path(profile)/'DevToolsActivePort').read_text().splitlines()[0]
+                if port.isdigit():break
+            except (FileNotFoundError,PermissionError,IndexError):pass
             if time.monotonic()>deadline:raise TimeoutError('Chrome startup')
             time.sleep(.05)
-        port=(Path(profile)/'DevToolsActivePort').read_text().splitlines()[0];targets=json.load(urlopen(f'http://127.0.0.1:{port}/json/list'));client=CDP(next(t['webSocketDebuggerUrl'] for t in targets if t['type']=='page'))
+        targets=json.load(urlopen(f'http://127.0.0.1:{port}/json/list'));client=CDP(next(t['webSocketDebuggerUrl'] for t in targets if t['type']=='page'))
         def ev(expr):
             r=client.call('Runtime.evaluate',{'expression':expr,'awaitPromise':True,'returnByValue':True})
             if 'exceptionDetails' in r:raise RuntimeError(r['exceptionDetails'])
@@ -103,7 +107,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-sidebar-',ignore_cleanup_errors=
                 client.call('Emulation.setDeviceMetricsOverride',{'width':390,'height':480,'deviceScaleFactor':1,'mobile':False})
                 m=ev(f'prepareSidebarReviewV136({json.dumps(kind)},false)');r=m['panel']
                 check(r['top']>=0 and r['bottom']<=481,f'{kind} fits reduced viewport')
-                if kind=='system':check(ev("document.getElementById('system-prompt-dialog').getBoundingClientRect().bottom<=document.querySelector('#chat-workspace footer').getBoundingClientRect().top"),'prompt avoids composer in reduced viewport')
+                if kind=='system':check(ev("document.getElementById('system-prompt-dialog').matches('dialog:modal')"),'prompt uses native modal in reduced viewport')
             client.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
             ev("(async()=>{(0,eval)(await(await fetch('/tests/sidebar-background-regressions-v136.js')).text());return true})()")
             extra=ev('runSidebarBackgroundRegressionsV136()');records.append({'regressions':extra});failures.extend(extra['failures']);assertions+=extra['assertions']

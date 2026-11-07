@@ -176,7 +176,7 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
     await test('profile default prompt, chat prompt editing and local draft remain independent',async()=>{
         await ui.showScreen('chat',true);app.startNewChat();await st.executionSettingsReady;
         st.currentSystemPrompt='chat prompt';event('system-prompt-default','profile default');await wait(async()=> (await db.getProfile(st.activeProfileId)).settings.systemPrompt==='profile default');eq(st.currentSystemPrompt,'chat prompt');
-        app.openSystemPromptDialog();$('system-prompt-editor').value='edited chat prompt';await app.saveCurrentSystemPrompt({keepOpen:false});eq(st.currentSystemPrompt,'edited chat prompt');eq(st.activeProfile.settings.systemPrompt,'profile default');
+        await app.openSystemPromptDialog();$('system-prompt-editor').value='edited chat prompt';await app.saveCurrentSystemPrompt({keepOpen:false});eq(st.currentSystemPrompt,'edited chat prompt');eq(st.activeProfile.settings.systemPrompt,'profile default');
         $('user-input').value='local input draft';app.flushInputDraft();$('user-input').value='';await app.restoreInputDraftForCurrentContext(true);eq($('user-input').value,'local input draft');
     });
     await test('late model capability results cannot change a newer chat selection',async()=>{
