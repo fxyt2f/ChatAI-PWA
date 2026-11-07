@@ -46,7 +46,7 @@ window.runIntegrationJRegressionsV136=async()=>{
     let bodies=[],serial=0;
     const config={bedrock:['aws','us.anthropic.claude-opus-4-6-v1'],gemini:['gem','gemini-3-pro-preview'],openrouter:['or','test/reasoner'],zai:['zai','glm-4.6']};
     const setup=(provider='bedrock')=>{
-        const [id,modelName]=config[provider];st.currentChatId=880000+(++serial);st.currentMessages=[];st.currentSystemPrompt='';st.currentSummarizedContext=null;st.currentExecutionApiConfig=null;
+        const [id,modelName]=config[provider];st.currentChatId=null;st.currentMessages=[];st.currentSystemPrompt='';st.currentSummarizedContext=null;st.currentExecutionApiConfig=null;
         st.currentExecutionSettings={schemaVersion:1,modelRef:{apiConfigId:id,modelName},thinkingEffort:null};st.isSending=false;st.isEditingSystemPrompt=false;st.editingMessageIndex=null;st.abortController=new AbortController();
         st.settings={...st.settings,dummyUser:'',dummyModel:'',enableMemory:false,enableProofreading:false,enableThoughtTranslation:false,enableAutoRetry:false,maxRetries:0,reverseDummyOrder:false,concatDummyModel:false};app.freezeExecutionSettings();bodies=[];
     };
@@ -58,18 +58,20 @@ window.runIntegrationJRegressionsV136=async()=>{
         window.BedrockRuntimeClient=class{async send(command){bodies.push(structuredClone(command.body));const a=answer();return {output:{message:{content:[{reasoningContent:{reasoningText:{text:'reason',signature:a.key}}},{text:a.text}]}},stopReason:'end_turn'}}};
         window.fetch=async(url,options)=>{bodies.push(JSON.parse(options.body));const a=answer();return {ok:true,status:200,json:async()=>provider==='gemini'?{candidates:[{content:{parts:[{text:a.text,thoughtSignature:a.key}]},finishReason:'STOP'}]}:{choices:[{message:{content:a.text,...(provider==='zai'?{reasoning_content:a.key}:{reasoning_details:[{type:'reasoning.encrypted',data:a.key,signature:a.key}]})},finish_reason:'stop'}]}}};
     };
-    const generate=async(provider,system=null)=>{const prepared=await app._prepareApiHistory(st.currentMessages,system);const results=await app._internalHandleSend(prepared,{},system);const message=app._aggregateMessages(results);st.currentMessages.push(message);await db.saveChat();st.currentMessages=(await db.getChat(st.currentChatId)).messages;return message;};
+    const reload=async()=>{const saved=await db.getChat(st.currentChatId);st.currentMessages=saved.messages;db.bindChatSaveOwnerV136(st.currentMessages,saved);};
+    const generate=async(provider,system=null)=>{const prepared=await app._prepareApiHistory(st.currentMessages,system);const results=await app._internalHandleSend(prepared,{},system);const message=app._aggregateMessages(results);st.currentMessages.push(message);await db.saveChat();await reload();return message;};
     try{
         ui.showCustomConfirm=async()=>true;ui.showCustomAlert=async()=>{};
         await run('J02 unknown edited legacy suffix stays invalid through delete, reload and repeated saves',async()=>{
             setup();mock('bedrock');st.currentMessages=[{role:'user',content:'one'},bed('edited','edited-signature','original'),{role:'user',content:'two'},bed('later','legacy-later'),{role:'user',content:'three'},bed('last','legacy-last')];
-            await db.saveChat(null,{id:st.currentChatId,title:'legacy',messages:structuredClone(st.currentMessages),systemPrompt:''});
-            await app.deleteMessage(1);for(let i=0;i<2;i++){st.currentMessages=(await db.getChat(st.currentChatId)).messages;await db.saveChat()}
+            st.currentChatId=await db.saveChat(null,{id:880000+(++serial),title:'legacy',messages:structuredClone(st.currentMessages),systemPrompt:''});
+            await reload();
+            await app.deleteMessage(1);for(let i=0;i<2;i++){await reload();await db.saveChat()}
             await adapter('bedrock',await app._prepareApiHistory(st.currentMessages),null);const sent=JSON.stringify(bodies.at(-1));assert(!sent.includes('legacy-later')&&!sent.includes('legacy-last'));
             for(const m of st.currentMessages.filter(m=>m.role==='model'))assert(m.continuation.historyPrefixInvalidV136,'invalid state not persisted');
         });
         await run('J02 unchanged unknown legacy signatures remain usable after repeated persistence',async()=>{
-            setup();mock('bedrock');st.currentMessages=[{role:'user',content:'one'},bed('first','unchanged-legacy')];await db.saveChat();st.currentMessages=(await db.getChat(st.currentChatId)).messages;await db.saveChat();
+            setup();mock('bedrock');st.currentMessages=[{role:'user',content:'one'},bed('first','unchanged-legacy')];await db.saveChat();await reload();await db.saveChat();
             await adapter('bedrock',await app._prepareApiHistory(st.currentMessages),null);assert(JSON.stringify(bodies.at(-1)).includes('unchanged-legacy'));
         });
         for(const provider of ['bedrock','openrouter'])await run('J03 '+provider+' native tool IDs stay identical between fingerprint and adapter',async()=>{
@@ -108,9 +110,9 @@ window.runIntegrationJRegressionsV136=async()=>{
             }finally{node.remove()}
         });
         await run('J03 fresh signed candidate switch invalidates only its dependent suffix and restores on return',async()=>{
-            setup();mock('bedrock');const user={role:'user',content:'choose'};st.currentMessages=[user];const a=await generate('bedrock');st.currentMessages=[user];const b=await generate('bedrock');
+            setup();mock('bedrock');const user={role:'user',content:'choose'};st.currentMessages=[user];const a=await generate('bedrock');st.currentMessages.splice(0,st.currentMessages.length,user);const b=await generate('bedrock');
             Object.assign(a,{isCascaded:true,isSelected:true,siblingGroupId:'j-group'});Object.assign(b,{isCascaded:true,isSelected:false,siblingGroupId:'j-group'});
-            st.currentMessages=[user,a,b,{role:'user',content:'next'}];const c=await generate('bedrock'),signature=JSON.stringify(c.continuation).match(/j-sig-\d+/)[0];
+            st.currentMessages.splice(0,st.currentMessages.length,user,a,b,{role:'user',content:'next'});const c=await generate('bedrock'),signature=JSON.stringify(c.continuation).match(/j-sig-\d+/)[0];
             await app.navigateCascade(1,'next');let prepared=await app._prepareApiHistory(st.currentMessages.filter(m=>!m.isCascaded||m.isSelected));assert(!JSON.stringify(prepared).includes(signature));
             await app.navigateCascade(2,'prev');prepared=await app._prepareApiHistory(st.currentMessages.filter(m=>!m.isCascaded||m.isSelected));assert(JSON.stringify(prepared).includes(signature));
         });

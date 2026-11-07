@@ -36,7 +36,8 @@ window.runSafetyV1361 = async function () {
         st.currentMessages = app.parseImportedHistory('<|#|model|#|>'+attack+'<|#|/model|#|>').messages;
         st.currentMessages[0].thoughtSummary = attack;
         // Exercise the same explicit-record persistence path used for restored history.
-        await db.saveChat(null, {id:st.currentChatId, messages:st.currentMessages, systemPrompt:st.currentSystemPrompt});
+        const snapshot = await db.getChat(st.currentChatId);
+        await db.saveChat(null, {...snapshot, messages:st.currentMessages});
         const record = await db.getChat(st.currentChatId);
         st.currentMessages = record.messages;
         const node = ui.createMessageElement('model',record.messages[0].content,0);
@@ -62,7 +63,8 @@ window.runSafetyV1361 = async function () {
         check(!streaming.querySelector('.message-content img'), 'streaming interpreted untrusted HTML');
     });
     await run('R1 editing a restored model message uses the same sanitizer',async()=>{
-        st.currentMessages=[{role:'model',content:'before edit',timestamp:Date.now()}];await db.saveChat();
+        st.currentMessages.splice(0,st.currentMessages.length,{role:'model',content:'before edit',timestamp:Date.now()});
+        await db.saveChat();
         const node=ui.createMessageElement('model','before edit',0);$('message-container').replaceChildren(node);
         await app.startEditMessage(0,node);
         const editor=node.querySelector('.edit-textarea');check(editor,'message editor missing');

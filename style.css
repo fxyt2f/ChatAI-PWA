@@ -1383,6 +1383,7 @@ body.dark-mode .new-chat-button {
     grid-template-columns: minmax(0, 1fr);
     width: 100%;
     gap: 2px;
+    align-content: center;
     justify-content: stretch;
     justify-items: stretch;
     text-align: left;
@@ -1430,6 +1431,20 @@ body.dark-mode .new-chat-button {
     }
 }
 
+.chat-sidebar-title-line {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.chat-sidebar-title-line .chat-pin-icon {
+    flex-shrink: 0;
+}
+
+.chat-sidebar-title-dot {
+    margin-left: 6px;
+}
+
 .chat-sidebar-item-title,
 .chat-sidebar-item-snippet {
     display: block;
@@ -1441,6 +1456,7 @@ body.dark-mode .new-chat-button {
 }
 
 .chat-sidebar-item-title {
+    width: auto;
     font-size: 0.875rem;
     line-height: 1.45;
     white-space: nowrap;
@@ -1611,6 +1627,12 @@ body.dark-mode #settings-screen::after {
     align-items: center;
 }
 
+#chat-screen .generation-placeholder .streaming-plain-text {
+    display: block;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 #chat-screen .generation-placeholder-content {
     display: inline-flex;
     align-items: center;
@@ -1621,7 +1643,7 @@ body.dark-mode #settings-screen::after {
     white-space: nowrap;
 }
 
-#chat-screen .generation-status-dot {
+.generation-status-dot {
     width: 7px;
     height: 7px;
     flex: 0 0 auto;
@@ -1645,7 +1667,7 @@ body.dark-mode #settings-screen::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    #chat-screen .generation-status-dot {
+    .generation-status-dot {
         animation: none;
         opacity: 0.8;
     }

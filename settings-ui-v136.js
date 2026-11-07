@@ -184,7 +184,14 @@
                 sdQcModel: 'sdQcModelRef', sdPromptImproveModel: 'sdPromptImproveModelRef' };
             for (const [key, control] of Object.entries(this.app.globalSettingControlsV136 || {})) {
                 if (control === document.activeElement && this.editedGlobalInputs.has(control)) continue;
-                let value = key === 'includeThoughts' ? global.showThoughtProcess : global[key];
+                let value = key === 'includeThoughts' ? global.showThoughtProcess : global[key] ?? SettingsV136.chatTitleDefaults[key];
+                if (key === 'chatTitleModelRef') {
+                    const ref = value;
+                    value = this.app.encodeModelRefValue(ref || {});
+                    if (value && !Array.from(control.options).some(option => option.value === value)) {
+                        control.add(new Option(this.app.getModelRefDisplayLabel(ref), value));
+                    }
+                }
                 if (refs[key]) {
                     const ref = this.app.getGlobalAuxiliaryModelRefV136(refs[key], key);
                     value = key === 'sdQcModel' || key === 'sdPromptImproveModel' ? ref?.modelName || value : this.app.encodeModelRefValue(ref || {});

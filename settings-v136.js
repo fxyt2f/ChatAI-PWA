@@ -13,6 +13,15 @@
         'reverseDummyOrder', 'concatDummyModel', 'applyDummyToProofread', 'applyDummyToTranslate',
         'geminiEnableFunctionCalling', 'geminiEnableGrounding', 'forceFunctionCalling', 'allowPromptUiChanges',
         'enableMemory', 'memoryAutoSaveInterval', 'useCustomTheme', 'useCustomAppearance', 'theme', 'appearance'];
+    const chatTitleDefaults = Object.freeze({
+        enableChatTitleGeneration: false,
+        chatTitleModelRef: null,
+        chatTitleSystemPrompt: '次のユーザーメッセージを端的に表す、日本語の短いチャットタイトルを作成してください。20文字程度を目安に、重要な固有名詞を保持してください。タイトルのみを出力し、説明・引用符・改行は不要です。'
+    });
+    const legacyChatTitlePrompt = `${chatTitleDefaults.chatTitleSystemPrompt}\n\n{message}`;
+    const migrateChatTitlePrompt = settings => settings?.chatTitleSystemPrompt === legacyChatTitlePrompt
+        ? { ...settings, chatTitleSystemPrompt: chatTitleDefaults.chatTitleSystemPrompt }
+        : settings;
     const globalKeys = ['showThoughtProcess', 'enableThoughtTranslation', 'thoughtTranslationModelRef',
         'thoughtTranslationModel', 'enableProofreading', 'proofreadingModelRef', 'proofreadingModelName',
         'proofreadingSystemInstruction', 'enableSummaryButton', 'summaryModelRef', 'summaryModelName',
@@ -21,9 +30,21 @@
         'googleSearchApiKey', 'googleSearchEngineId', 'sdApiUrl', 'sdApiUser', 'sdApiPassword',
         'memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef',
         'sdEnableQualityChecker', 'sdQcModel', 'sdQcPrompt', 'sdQcRetries', 'sdPromptImproveModel',
-        'sdPromptImproveSystemPrompt', 'theme', 'appearance'];
+        'sdPromptImproveSystemPrompt', 'theme', 'appearance', 'enableStreamingOutput', ...Object.keys(chatTitleDefaults)];
     const pick = (source = {}, keys = []) => Object.fromEntries(keys.filter(key =>
         Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, structuredClone(source[key])]));
+    function chatContentVersion(chat) {
+        return { recordGenerationId: chat?.recordGenerationId ?? null, contentRevision: chat?.contentRevision ?? 0 };
+    }
+    function sameChatContentVersion(chat, expected) {
+        const actual = chatContentVersion(chat);
+        return actual.recordGenerationId === expected.recordGenerationId && actual.contentRevision === expected.contentRevision;
+    }
+    function nextChatContentVersion(chat) {
+        const { recordGenerationId, contentRevision } = chatContentVersion(chat);
+        return { recordGenerationId: recordGenerationId || root.crypto.getRandomValues(new Uint32Array(4)).join('-'),
+            contentRevision: contentRevision + 1 };
+    }
     const modelRef = value => value?.apiConfigId && value?.modelName
         ? { apiConfigId: String(value.apiConfigId), modelName: String(value.modelName) } : null;
     function profileSettings(source = {}, legacyThemeScoped = false) {
@@ -670,10 +691,14 @@
         const importedBackgrounds = new WeakMap();
         const profileReads = new Map();
         const notify = (type, detail = {}) => root.dispatchEvent?.(new CustomEvent('execution-settings-changed', { detail: { type, ...detail } }));
-        const transaction = (stores, write) => new Promise((resolve, reject) => {
+        const transaction = (stores, write, signal) => new Promise((resolve, reject) => {
+            signal?.throwIfAborted();
             const tx = state.db.transaction(stores, 'readwrite');
-            tx.oncomplete = resolve;
-            tx.onabort = tx.onerror = () => reject(tx.error || new Error('保存が中断されました。'));
+            const abort = () => { try { tx.abort(); } catch { /* Already committed. */ } };
+            const cleanup = () => signal?.removeEventListener('abort', abort);
+            tx.oncomplete = () => { cleanup(); resolve(); };
+            tx.onabort = () => { cleanup(); reject(signal?.reason || tx.error || new Error('保存が中断されました。')); };
+            signal?.addEventListener('abort', abort, { once: true });
             try { write(tx); } catch (error) { tx.abort(); reject(error); }
         });
         return {
@@ -681,7 +706,7 @@
                 const [global, success, version] = await Promise.all([GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY].map(k => dbUtils.getSetting(k)));
                 if (version?.value > 136) throw new Error('保存データは新しいアプリで開いてください。');
                 state.settingsSchemaVersion = version?.value || 0;
-                state.globalSettingsV136 = global?.value || null;
+                state.globalSettingsV136 = migrateChatTitlePrompt(global?.value) || null;
                 state.lastSuccessfulExecution = success?.value || null;
                 state.modelMetadataV136 = {};
                 state.modelMetadataStatusV136 = {};
@@ -705,6 +730,13 @@
                                 try {
                                     const currentProfiles = profilesRequest.result;
                                     if (legacy[MIGRATION_KEY] === 136) {
+                                        const stored = legacy[GLOBAL_KEY];
+                                        const migrated = migrateChatTitlePrompt(stored);
+                                        if (migrated !== stored) {
+                                            migrated.revision = (stored.revision || 0) + 1;
+                                            legacy[GLOBAL_KEY] = migrated;
+                                            store.put({ key: GLOBAL_KEY, value: migrated });
+                                        }
                                         committed = { legacy, profiles: currentProfiles };
                                         return;
                                     }
@@ -727,8 +759,8 @@
                                         recovered.name = `${profile.name} / ${this.getProviderDisplayName(provider)} (旧設定)`;
                                         configs.push(recovered);
                                     }
-                                    const global = { ...pick(defaults, globalKeys), ...pick(legacy, globalKeys), ...pick(active, globalKeys),
-                                        ...pick(legacy[GLOBAL_KEY] || {}, globalKeys), schemaVersion: 1 };
+                                    const global = migrateChatTitlePrompt({ ...pick(defaults, globalKeys), ...pick(legacy, globalKeys), ...pick(active, globalKeys),
+                                        ...pick(legacy[GLOBAL_KEY] || {}, globalKeys), schemaVersion: 1 });
                                     global.showThoughtProcess ??= active.includeThoughts ?? legacy.includeThoughts ?? defaults.includeThoughts;
                                     global.theme ||= { ...pick(defaults, themeKeys), ...pick(legacy.globalThemeSettings || active, themeKeys) };
                                     global.appearance ||= { overlayOpacity: active.overlayOpacity ?? legacy.overlayOpacity ?? defaults.overlayOpacity,
@@ -758,6 +790,7 @@
                                             if (!chat.executionSettings) {
                                                 const meta = [...(chat.messages || [])].reverse().find(m => m.role === 'model' && (!m.isCascaded || m.isSelected) && m.usageMetadata?.tmExecution?.modelName)?.usageMetadata.tmExecution;
                                                 chat.executionSettings = { schemaVersion: 1, modelRef: modelRef(meta) || modelRef(chat.defaultModelRef) || legacyRef, thinkingEffort: null, updatedAt: Date.now() };
+                                                Object.assign(chat, nextChatContentVersion(chat));
                                                 cursor.update(chat);
                                             }
                                             cursor.continue();
@@ -785,7 +818,7 @@
             },
             applyGlobalSettingsV136() {
                 if (!state.globalSettingsV136) return;
-                Object.assign(state.settings, pick(state.globalSettingsV136, globalKeys));
+                Object.assign(state.settings, chatTitleDefaults, { enableStreamingOutput: false }, pick(state.globalSettingsV136, globalKeys));
                 state.settings.includeThoughts = state.globalSettingsV136.showThoughtProcess === true;
                 this.applyProfileAppearanceV136();
             },
@@ -823,11 +856,11 @@
             async reloadGlobalSettingsV136() {
                 const latest = (await dbUtils.getSetting(GLOBAL_KEY))?.value;
                 if (latest && (latest.revision || 0) >= (state.globalSettingsV136?.revision || 0)) {
-                    state.globalSettingsV136 = latest;
+                    state.globalSettingsV136 = migrateChatTitlePrompt(latest);
                     this.applyGlobalSettingsV136(); notify('global');
                 }
             },
-            async saveGlobalSettingsV136(updates) {
+            async saveGlobalSettingsV136(updates, signal) {
                 const changes = pick(updates, globalKeys);
                 for (const kind of ['theme', 'appearance']) if (changes[kind])
                     changes[kind] = pick(changes[kind], kind === 'theme' ? themeKeys : appearanceKeys);
@@ -839,7 +872,7 @@
                         const store = tx.objectStore('settings'), req = store.get(GLOBAL_KEY);
                         req.onsuccess = () => {
                             const current = req.result?.value || {};
-                            next = { ...current, ...changes, schemaVersion: 1, revision: (current.revision || 0) + 1 };
+                            next = migrateChatTitlePrompt({ ...current, ...changes, schemaVersion: 1, revision: (current.revision || 0) + 1 });
                             for (const kind of ['theme', 'appearance']) if (changes[kind])
                                 next[kind] = { ...current[kind], ...changes[kind] };
                             const publish = () => {
@@ -851,7 +884,7 @@
                                 asset.onsuccess = () => { if (asset.result?.blob) publish(); else tx.abort(); };
                             } else publish();
                         };
-                    });
+                    }, signal);
                     state.globalSettingsV136 = next;
                     if (changes.theme) state.globalThemeSettings = { ...next.theme };
                     this.applyGlobalSettingsV136();
@@ -909,7 +942,7 @@
                 }
                 return latest;
             },
-            async mutateProfileV136(profileId, mutate) {
+            async mutateProfileV136(profileId, mutate, signal) {
                 if (profileId == null) throw new Error('保存対象のプロファイルがありません。');
                 let missing = false;
                 await transaction(['profiles', 'settings', 'image_store'], tx => {
@@ -933,21 +966,21 @@
                         } catch { tx.abort(); }
                     };
                     profileRequest.onsuccess = globalRequest.onsuccess = versionRequest.onsuccess = update;
-                }).catch(async error => { if (missing) { await this.reloadProfileSettingsV136(profileId); throw new Error('保存対象のプロファイルは削除されています。'); } throw error; });
+                }, signal).catch(async error => { if (missing) { await this.reloadProfileSettingsV136(profileId); throw new Error('保存対象のプロファイルは削除されています。'); } throw error; });
                 const latest = await this.reloadProfileSettingsV136(profileId);
                 this.ensureProfileSettingsChannelV136();
                 state.profileSettingsChannelV136?.postMessage({ database: state.db.name, profileId });
                 this.markAsDirtyAndSchedulePush('structural');
                 return latest;
             },
-            async patchProfileSettingsV136(profileId, updates) {
+            async patchProfileSettingsV136(profileId, updates, signal) {
                 const changes = pick(updates, profileKeys);
                 return this.mutateProfileV136(profileId, profile => {
                     const settings = { ...profile.settings, ...changes };
                     for (const kind of ['theme', 'appearance']) if (changes[kind])
                         settings[kind] = { ...profile.settings?.[kind], ...pick(changes[kind], kind === 'theme' ? themeKeys : appearanceKeys) };
                     return { ...profile, settings };
-                });
+                }, signal);
             },
             async setProfileOverride(kind, enabled, profileId = state.activeProfileId) {
                 if (!['theme', 'appearance'].includes(kind)) return;
@@ -971,8 +1004,8 @@
             async saveAppearanceValues(kind, updates, options = {}) {
                 const target = this.captureAppearanceTargetV136(kind, options);
                 const changes = pick(updates, kind === 'theme' ? themeKeys : appearanceKeys);
-                if (target.scope === 'profile') await this.patchProfileSettingsV136(target.profileId, { [kind]: changes });
-                else await this.saveGlobalSettingsV136({ [kind]: changes });
+                if (target.scope === 'profile') await this.patchProfileSettingsV136(target.profileId, { [kind]: changes }, options.signal);
+                else await this.saveGlobalSettingsV136({ [kind]: changes }, options.signal);
                 notify(kind);
             },
             async saveBackgroundBlobV136(blob, options = {}) {
@@ -1200,6 +1233,14 @@
                     || modelRef(state.legacyInitialModelRefV136) || this.getCurrentChatModelRef(), thinkingEffort: null, updatedAt: Date.now() };
             },
             async waitForGenerationCompletionV136() {
+                const session = state.sendExecutionV136;
+                if (session?.finished) {
+                    let timer;
+                    try {
+                        await Promise.race([session.finished, new Promise(resolve => { timer = setTimeout(resolve, 10000); })]);
+                        return !state.isSending;
+                    } finally { clearTimeout(timer); }
+                }
                 const deadline = Date.now() + 10000;
                 while (state.isSending && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
                 return !state.isSending;
@@ -1315,7 +1356,8 @@
             }
         };
     }
-    root.SettingsV136 = { GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY, BACKUP_KEY, DRAFT_KEY, profileKeys, globalKeys,
+    root.SettingsV136 = { GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY, BACKUP_KEY, DRAFT_KEY, profileKeys, globalKeys, chatTitleDefaults,
+        chatContentVersion, sameChatContentVersion, nextChatContentVersion,
         themeKeys, appearanceKeys, pick, modelRef, profileSettings, capability, normalizeEffort, executionSettings,
         applyThinking, imageInputCapability, assertCompatible, createMethods,
         hashV136, historySeedV136, historyStepV136, historyContextV136, rememberHistoryContextsV136,

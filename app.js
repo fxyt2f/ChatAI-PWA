@@ -149,9 +149,11 @@ const MODEL_REF_USAGE_LABELS = {
     defaultModelRef: '基本モデル',
     thoughtTranslationModelRef: '思考翻訳モデル',
     summaryModelRef: '要約モデル',
-    proofreadingModelRef: '校正モデル'
+    proofreadingModelRef: '校正モデル',
+    chatTitleModelRef: 'タイトル生成用モデル'
 };
 const MODEL_REF_USAGE_KEYS = Object.keys(MODEL_REF_USAGE_LABELS);
+const CHAT_TITLE_GENERATION_TIMEOUT_MS = 15000;
 const API_CONFIG_LEGACY_SYNC_KEYS = new Set([
     'apiProvider',
     'apiKey',
@@ -194,8 +196,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.1";
-const APP_CACHE_VERSION = "v1.36.1";
+const APP_VERSION = "1.36.2";
+const APP_CACHE_VERSION = "v1.36.2";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -280,6 +282,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.36.2": [
+        "新規チャットの最初のメッセージからタイトルを自動生成できます。生成用のモデルと指示を設定できます。",
+        "Gemini直APIとOpenRouterで、回答と思考プロセスを生成中に表示できます。",
+        "生成を停止すると、受信済みの回答と思考プロセスが履歴に残ります。",
+        "別タブでの保存、再生成候補、ツール呼び出しの整合性を改善しました。"
+    ],
     "1.36.1": [
         "フローティングボタン、スクロールボタン、サイドバーの表示と操作を改善しました。",
         "システムプロンプトの編集画面を統一し、ダイアログの外側クリック・タップに対応しました。",
@@ -833,6 +841,10 @@ try {
         enableProofreadingCheckbox: document.getElementById('enable-proofreading'),
         proofreadingOptionsDiv: document.getElementById('proofreading-options'),
         proofreadingModelNameSelect: document.getElementById('proofreading-model-name'),
+        enableChatTitleGenerationCheckbox: document.getElementById('enable-chat-title-generation'),
+        enableStreamingOutputCheckbox: document.getElementById('enable-streaming-output'),
+        chatTitleModelSelect: document.getElementById('chat-title-model'),
+        chatTitleSystemPromptTextarea: document.getElementById('chat-title-system-prompt'),
         proofreadingSystemInstructionTextarea: document.getElementById('proofreading-system-instruction'),
         attachFileBtn: document.getElementById('attach-file-btn'),
         fileUploadDialog: document.getElementById('fileUploadDialog'),
@@ -1062,6 +1074,7 @@ const state = {
     isEditingChatTitle: false,
     isSavingChatTitle: false,
     chatTitleBeforeEdit: '',
+    chatTitleGenerations: new Map(),
     profiles: [], // 全プロファイルのリスト
     activeProfileId: null, // 現在アクティブなプロファイルのID
     activeProfile: null, // 現在アクティブなプロファイルの完全なデータ
@@ -1071,6 +1084,8 @@ const state = {
     videoUrlCache: new Map(),
     imageUrlCache: new Map(),
     settings: {
+        ...SettingsV136.chatTitleDefaults,
+        enableStreamingOutput: false,
         apiProvider: 'gemini', // 'gemini' | 'zai' | 'bedrock' | 'openrouter'
         apiConfigs: [],
         apiConfigsMigratedV1310: false,
@@ -1199,6 +1214,7 @@ Reason: [NGの場合の理由]`,
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
+    sendExecutionV136: null,
     abortController: null,
     editingMessageIndex: null,
     isEditingSystemPrompt: false,
@@ -1303,7 +1319,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  function interruptibleSleep(ms, signal) {
     return new Promise((resolve, reject) => {
         // 待機開始前にもし既に中断されていたら、即座にエラーを投げる
-        if (signal.aborted) {
+        if (signal?.aborted) {
             const error = new Error("Sleep aborted");
             error.name = "AbortError";
             return reject(error);
@@ -1321,12 +1337,12 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
         // 指定時間後にPromiseを成功させるタイマーを設定
         timeoutId = setTimeout(() => {
-            signal.removeEventListener('abort', onAbort); // 成功したので中断リスナーは不要
+            signal?.removeEventListener('abort', onAbort); // 成功したので中断リスナーは不要
             resolve();
         }, ms);
 
         // 中断イベントを監視開始
-        signal.addEventListener('abort', onAbort, { once: true });
+        signal?.addEventListener('abort', onAbort, { once: true });
     });
 }
 
@@ -1388,6 +1404,53 @@ function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = fal
 // Base64文字列をBlobオブジェクトに変換 (Promise)
 function base64ToBlob(base64, mimeType) {
     return fetch(`data:${mimeType};base64,${base64}`).then(res => res.blob());
+}
+
+function scopedRequestSignalV136(parent, timeoutMs) {
+    if (!timeoutMs) return { signal: parent, dispose() {} };
+    const controller = new AbortController();
+    const abort = () => controller.abort(parent.reason);
+    if (parent?.aborted) abort();
+    else parent?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new DOMException('APIタイムアウト', 'TimeoutError')), timeoutMs);
+    return {
+        signal: controller.signal,
+        dispose() {
+            clearTimeout(timer);
+            parent?.removeEventListener('abort', abort);
+        }
+    };
+}
+
+function configuredApiTimeoutV136() {
+    return state.settings.enableApiTimeout ? (state.settings.apiTimeoutSeconds || 90) * 1000 : null;
+}
+
+// A client SDK can ignore abort while awaiting an external operation. The tool
+// still receives the signal and checks ownership before any further side effects.
+async function waitForToolV136(operation, signal) {
+    if (!signal) return operation;
+    let abort;
+    try {
+        return await new Promise((resolve, reject) => {
+            abort = () => reject(signal.reason);
+            Promise.resolve(operation).then(resolve, reject);
+            if (signal.aborted) abort();
+            else signal.addEventListener('abort', abort, { once: true });
+        });
+    } finally {
+        signal.removeEventListener('abort', abort);
+    }
+}
+
+async function runToolRequestV136(parent, timeoutMs, request) {
+    const scope = scopedRequestSignalV136(parent, timeoutMs);
+    try {
+        scope.signal?.throwIfAborted();
+        return await waitForToolV136(request(scope.signal), scope.signal);
+    } finally {
+        scope.dispose();
+    }
 }
 
 // --- Service Worker関連 ---
@@ -1790,14 +1853,22 @@ const dbUtils = {
         });
     },
 
+    bindChatSaveOwnerV136(messages, chat) {
+        this.chatSaveOwners ||= new WeakMap();
+        const owner = { id: chat.id, ...SettingsV136.chatContentVersion(chat) };
+        this.chatSaveOwners.set(messages, owner);
+    },
+
     async saveChat(optionalTitle = null, chatObjectToSave = null, options = {}) {
         appLogic.ensureHistoryWorkerV136();
         // Capture the owner and contents before the first async boundary. A prompt
         // save may still be finishing when navigation changes the active chat.
         const contextMessages = state.currentMessages;
         let contextChatId = state.currentChatId;
-        let targetChatId = contextChatId, savedChatId = null;
+        let targetChatId = chatObjectToSave ? chatObjectToSave.id : contextChatId, savedChatId = null;
+        let committedVersion, conflict = false;
         let savedUiState = null;
+        let titleGenerationToStart = null;
         const ownsContext = () => state.currentMessages === contextMessages && state.currentChatId === contextChatId
             && (!chatObjectToSave || chatObjectToSave.id === contextChatId);
 
@@ -1819,7 +1890,9 @@ const dbUtils = {
                 return state.currentChatId;
             }
 
-            const messagesToSave = state.currentMessages.map(msg => ({
+            const placeholder = options.sendSession?.placeholder;
+            const snapshot = placeholder ? contextMessages.filter(message => message !== placeholder) : contextMessages;
+            const messagesToSave = snapshot.map(msg => ({
                 ...SettingsV136.pick(msg, ['geminiFunctionCallId', 'name', 'response', '_toolCallId', 'tool_call_id',
                     'thinkingBudget', 'thinkingConfig', 'thoughtParts', 'thoughtSignature',
                     'reasoning_details', 'reasoning_content', 'reasoningContent']),
@@ -1827,6 +1900,7 @@ const dbUtils = {
                 content: msg.content,
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
+                ...(msg.incomplete === true && { incomplete: true }),
                 continuation: msg.continuation || null,
                 thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
                 proofreadingModelInfo: msg.proofreadingModelInfo || null,
@@ -1882,9 +1956,10 @@ const dbUtils = {
         this.chatSaveOwners ||= new WeakMap();
         let owner = this.chatSaveOwners.get(contextMessages);
         if (!chatObjectToSave && !owner) {
-            owner = { id: contextChatId };
+            owner = { id: contextChatId, ...SettingsV136.chatContentVersion() };
             this.chatSaveOwners.set(contextMessages, owner);
         }
+        const expectedVersion = chatObjectToSave ? SettingsV136.chatContentVersion(chatDataToSave) : owner;
         const commit = async () => {
             if (!chatObjectToSave && !targetChatId && owner.id) {
                 targetChatId = contextChatId = owner.id;
@@ -1901,26 +1976,25 @@ const dbUtils = {
                     const now = Date.now();
 
                     const processSave = (existingChatData = null) => {
-                        let title;
-                        if (optionalTitle !== null) {
-                            title = optionalTitle;
-                        } else if (existingChatData && existingChatData.title) {
-                            title = existingChatData.title;
-                        } else {
-                            const firstUserMessage = (chatDataToSave.messages || []).find(m => m.role === 'user' && !m.isHidden);
-                            title = firstUserMessage ? firstUserMessage.content.substring(0, 50) : "無題のチャット";
-                        }
+                        const firstUserMessage = chatDataToSave.messages?.find(m => m.role === 'user' && !m.isHidden);
+                        const isNewDraft = !chatObjectToSave && !existingChatData && !owner.id;
+                        // A system-prompt-only draft can already have an ID before its first send.
+                        const canGenerateTitle = isNewDraft || (existingChatData?.titleSource === 'fallback'
+                            && existingChatData.titleGenerationEligible === true);
+                        const hasFinalTitle = existingChatData?.titleSource === 'manual' || existingChatData?.titleSource === 'auto';
+                        const fallbackTitle = firstUserMessage ? String(firstUserMessage.content ?? '').substring(0, 50) : "無題のチャット";
+                        const previousTitle = canGenerateTitle && firstUserMessage ? null : existingChatData?.title ?? chatObjectToSave?.title;
+                        const title = hasFinalTitle ? existingChatData.title : optionalTitle ?? (previousTitle || fallbackTitle);
 
-                        const chatIdForOperation = existingChatData ? existingChatData.id : targetChatId;
-                        const pinSource = chatObjectToSave
-                            ? chatDataToSave
-                            : existingChatData || chatDataToSave;
-                        const pinState = normalizeChatPinState(pinSource);
+                        const chatIdForOperation = existingChatData?.id ?? targetChatId;
+                        const pinState = normalizeChatPinState(existingChatData || chatDataToSave);
+                        committedVersion = SettingsV136.nextChatContentVersion(existingChatData);
                         const finalChatData = {
                             ...existingChatData,
                             ...chatDataToSave,
+                            ...committedVersion,
                             updatedAt: chatObjectToSave && chatObjectToSave.updatedAt ? chatObjectToSave.updatedAt : now,
-                            createdAt: existingChatData ? existingChatData.createdAt : now,
+                            createdAt: existingChatData ? existingChatData.createdAt : chatObjectToSave?.createdAt ?? now,
                             title: title,
                             stats: stats,
                             isPinned: pinState.isPinned,
@@ -1929,6 +2003,25 @@ const dbUtils = {
                         };
                         if (chatIdForOperation) {
                             finalChatData.id = chatIdForOperation;
+                        }
+                        if (chatObjectToSave) {
+                            // Explicit content snapshots can carry old title metadata.
+                            for (const key of ['titleSource', 'titleGenerationId', 'titleGenerationEligible']) {
+                                delete finalChatData[key];
+                                if (Object.hasOwn(existingChatData || {}, key)) finalChatData[key] = existingChatData[key];
+                            }
+                        }
+                        if (isNewDraft) {
+                            finalChatData.titleSource = 'fallback';
+                            if (!firstUserMessage) finalChatData.titleGenerationEligible = true;
+                        }
+                        if (canGenerateTitle && firstUserMessage) {
+                            delete finalChatData.titleGenerationEligible;
+                            const generation = options.titleGeneration;
+                            if (generation && generation.text === firstUserMessage.content && generation.timestamp === firstUserMessage.timestamp) {
+                                finalChatData.titleGenerationId = generation.id;
+                                titleGenerationToStart = generation;
+                            }
                         }
 
                         const putRequest = store.put(finalChatData);
@@ -1950,14 +2043,14 @@ const dbUtils = {
                         };
                     };
 
-                    if (targetChatId && !chatObjectToSave) {
+                    if (targetChatId) {
                         const getRequest = store.get(targetChatId);
                         getRequest.onsuccess = (event) => {
                             const existingChat = event.target.result;
-                            if (!existingChat) {
-                                console.warn(`ID ${targetChatId} のチャットが見つかりません(保存時)。新規として保存します。`);
-                                if (ownsContext()) state.currentChatId = contextChatId = null;
-                                targetChatId = null;
+                            const canInsert = chatObjectToSave && !options.existingSnapshot && !expectedVersion.recordGenerationId;
+                            if (existingChat ? !SettingsV136.sameChatContentVersion(existingChat, expectedVersion) : !canInsert) {
+                                conflict = true;
+                                return;
                             }
                             processSave(existingChat);
                         };
@@ -1965,11 +2058,20 @@ const dbUtils = {
                             console.error("既存チャットの取得エラー(更新用):", event.target.error);
                         };
                     } else {
-                        processSave(chatObjectToSave);
+                        processSave();
                     }
 
                     transaction.oncomplete = () => {
-                        if (!chatObjectToSave) owner.id = savedChatId;
+                        if (conflict) {
+                            if (options.sendSession) {
+                                options.sendSession.discarded = true;
+                                resolve(null);
+                            } else {
+                                reject(new DOMException('別の操作で会話が更新されました。履歴を開き直してください。', 'ChatContentConflict'));
+                            }
+                            return;
+                        }
+                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId });
                         try {
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) state.currentChatId = contextChatId = savedChatId;
@@ -1986,6 +2088,7 @@ const dbUtils = {
                             // A committed write must resolve even if a view/storage side effect fails.
                             console.error('チャット保存後の表示更新に失敗しました:', error);
                         }
+                        if (titleGenerationToStart) void appLogic.generateChatTitleV136(savedChatId, titleGenerationToStart);
                         resolve(savedChatId);
                     };
                     transaction.onerror = (event) => {
@@ -2069,29 +2172,40 @@ const dbUtils = {
     },
 
     // チャットタイトルをDBで更新
-    async updateChatTitleDb(id, newTitle) {
+    async updateChatTitleDb(id, newTitle, generation = null) {
         await this.openDB();
-        return new Promise((resolve, reject) => {
+        const updated = await new Promise((resolve, reject) => {
             const store = this._getStore(CHATS_STORE, 'readwrite');
+            let result = null;
             const getRequest = store.get(id);
-            getRequest.onsuccess = (event) => {
-                const chatData = event.target.result;
-                if (chatData) {
-                    chatData.title = newTitle;
-                    chatData.updatedAt = Date.now(); // 更新日時も更新
-                    const putRequest = store.put(chatData);
-                    putRequest.onsuccess = () => {
-                        appLogic.markAsDirtyAndSchedulePush(true);
-                        resolve();
-                    };
-                    putRequest.onerror = (event) => reject(`タイトル更新エラー: ${event.target.error}`);
-                } else {
-                    reject(`チャットが見つかりません: ${id}`);
+            getRequest.onsuccess = () => {
+                const chat = getRequest.result;
+                if (generation) {
+                    if (chat?.titleSource !== 'fallback' || chat.titleGenerationId !== generation.id) return;
+                    const firstUser = chat.messages?.find(m => m.role === 'user' && !m.isHidden);
+                    if (firstUser?.content !== generation.text || firstUser?.timestamp !== generation.timestamp) return;
+                } else if (!chat) {
+                    reject(new Error(`チャットが見つかりません: ${id}`));
+                    return;
                 }
+                delete chat.titleGenerationId;
+                delete chat.titleGenerationEligible;
+                if (newTitle !== null) {
+                    chat.title = newTitle;
+                    chat.titleSource = generation ? 'auto' : 'manual';
+                    chat.updatedAt = Date.now();
+                    result = { title: chat.title, updatedAt: chat.updatedAt };
+                }
+                store.put(chat);
             };
-            getRequest.onerror = (event) => reject(`タイトル更新用チャット取得エラー: ${event.target.error}`);
-            store.transaction.onerror = (event) => reject(`タイトル更新トランザクション失敗: ${event.target.error}`);
+            store.transaction.oncomplete = () => resolve(result);
+            store.transaction.onabort = () => reject(store.transaction.error || new Error('タイトル更新が中断されました。'));
         });
+        if (updated && !generation) {
+            state.chatTitleGenerations.get(String(id))?.abort();
+            appLogic.markAsDirtyAndSchedulePush(true);
+        }
+        return updated;
     },
 
     // 指定IDのチャットを取得
@@ -2175,22 +2289,26 @@ const dbUtils = {
         await this.openDB();
         const remoteById = new Map((Array.isArray(remoteChats) ? remoteChats : []).map(chat => [String(chat.id), chat]));
         if (remoteById.size === 0) return [];
-        const localChats = await this.getAllChats('updatedAt');
-        const updates = localChats.filter(localChat => {
-            const remoteChat = remoteById.get(String(localChat.id));
-            if (!remoteChat) return false;
-            const localPin = normalizeChatPinState(localChat);
-            const remotePin = normalizeChatPinState(remoteChat);
-            return Boolean(remotePin.pinStateUpdatedAt && (!localPin.pinStateUpdatedAt || remotePin.pinStateUpdatedAt > localPin.pinStateUpdatedAt));
-        }).map(localChat => {
-            const remotePin = normalizeChatPinState(remoteById.get(String(localChat.id)));
-            return applyNormalizedChatPinState(localChat, remotePin);
-        });
-        if (updates.length === 0) return [];
+        const updates = [];
         await new Promise((resolve, reject) => {
             const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
-            const store = transaction.objectStore(CHATS_STORE);
-            updates.forEach(chat => store.put(chat));
+            const request = transaction.objectStore(CHATS_STORE).openCursor();
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) return;
+                const current = cursor.value;
+                const remote = remoteById.get(String(current.id));
+                if (remote) {
+                    const localPin = normalizeChatPinState(current);
+                    const remotePin = normalizeChatPinState(remote);
+                    if (remotePin.pinStateUpdatedAt && remotePin.pinStateUpdatedAt > (localPin.pinStateUpdatedAt || 0)) {
+                        const updated = applyNormalizedChatPinState(current, remotePin);
+                        cursor.update(updated);
+                        updates.push(updated);
+                    }
+                }
+                cursor.continue();
+            };
             transaction.oncomplete = resolve;
             transaction.onerror = event => reject(event.target.error || transaction.error);
             transaction.onabort = () => reject(transaction.error || new Error('Dropboxピン状態の反映を中断しました。'));
@@ -2237,6 +2355,7 @@ const dbUtils = {
 
     // 指定IDのチャットを削除
     async deleteChat(id, { markDirty = true } = {}) {
+        await appLogic.stopSendBeforeDataChangeV136(id);
         await this.openDB();
         
         // Step 1: 削除対象のチャットから画像IDを収集
@@ -2281,6 +2400,7 @@ const dbUtils = {
 
             transaction.oncomplete = async () => {
                 console.log(`チャット削除完了 (ID: ${id})`);
+                state.chatTitleGenerations.get(String(id))?.abort();
                 if (markDirty) appLogic.markAsDirtyAndSchedulePush(true);
                 try { await appLogic.cleanupBackgroundAssetsV136(); }
                 catch (error) { console.warn('背景整理を次回へ延期しました:', error); }
@@ -2296,6 +2416,7 @@ const dbUtils = {
 
     // 全データ (設定とチャット) をクリア
     async clearAllData() {
+        await appLogic.stopSendBeforeDataChangeV136();
         await this.openDB();
         return new Promise((resolve, reject) => {
             // DBに存在するすべてのストア名をトランザクションの対象にする
@@ -2313,6 +2434,7 @@ const dbUtils = {
 
             transaction.oncomplete = () => {
                 console.log("IndexedDBの全データ削除完了");
+                for (const controller of state.chatTitleGenerations.values()) controller.abort();
                 resolve();
             };
             transaction.onerror = (event) => {
@@ -2480,11 +2602,18 @@ const dbUtils = {
      * [V2] メタデータを受け取り、アセットをDLしてからDBをクリア＆インポートする
      */
      async clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds) {
+        await appLogic.stopSendBeforeDataChangeV136();
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
         uiUtils.showProgressDialog('データベースを準備中...');
 
         const { profiles, chats, memories, assets, settings } = data;
-        const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => applyNormalizedChatPinState(chat));
+        const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => {
+            const restored = applyNormalizedChatPinState(chat);
+            delete restored.titleGenerationId;
+            delete restored.titleGenerationEligible;
+            Object.assign(restored, SettingsV136.nextChatContentVersion());
+            return restored;
+        });
         
         const allAvailableAssets = new Map([...localAssetsBeforeClear, ...downloadedAssets]);
         for (const id of requiredAssetIds) {
@@ -2634,6 +2763,7 @@ const dbUtils = {
                 mainTx.onerror = () => reject(mainTx.error);
             });
             console.log("[DB Import V2] メインデータベースの更新が正常に完了しました。");
+            for (const controller of state.chatTitleGenerations.values()) controller.abort();
 
             // 処理結果を返す
             return { removedAssetInfo: missingAssetInfo };
@@ -2761,7 +2891,7 @@ const uiUtils = {
 
     isGenerationPlaceholderMessage(message, index) {
         if (!this.isResponseGenerationActive()) return false;
-        if (!message || message.role !== 'model') return false;
+        if (!message || message.role !== 'model' || message.incomplete) return false;
         if (String(message.content || '').trim() !== '') return false;
         return index === state.currentMessages.length - 1;
     },
@@ -3389,9 +3519,6 @@ const uiUtils = {
             });
 
             await dbUtils.saveChat(newTitleForSave);
-            if (newTitleForSave) {
-                uiUtils.updateChatTitle(newTitleForSave);
-            }
 
             const historyResult = await appendChangeHistory(chatId, {
                 id: createChangeHistoryId(),
@@ -4295,6 +4422,63 @@ renderChatMessages(options = {}) {
     const renderEndTime = performance.now();
 },
 
+createThoughtProcessDetails(message, plainText = false) {
+    const details = document.createElement('details');
+    details.className = 'thought-summary-details';
+    const summary = document.createElement('summary');
+    const modelLabel = this.formatModelMetaLabel(message.thoughtTranslationMeta, '思考翻訳');
+    summary.textContent = modelLabel ? `思考プロセス（${modelLabel}）` : '思考プロセス';
+    const content = document.createElement('div');
+    content.className = 'thought-summary-content';
+    if (plainText) {
+        content.classList.add('streaming-plain-text');
+        content.textContent = message.thoughtSummary;
+    } else {
+        try { htmlUtils.renderMarkdownInto(content, message.thoughtSummary); }
+        catch (error) {
+            console.error('Thought Summary Markdownパースエラー:', error);
+            content.textContent = message.thoughtSummary;
+        }
+    }
+    details.append(summary, content);
+    return details;
+},
+
+getStreamingScrollTarget() {
+    if (!state.settings.autoScroll || state.suppressAutoScrollForCollapse) return null;
+    const scroll = elements.chatScreen.querySelector('.main-content');
+    return scroll?.clientHeight && scroll.scrollHeight - scroll.clientHeight - Math.max(0, scroll.scrollTop) <= 48
+        ? scroll : null;
+},
+
+updateStreamingMessage(index, { content, thoughtSummary }) {
+    const body = document.getElementById(`streaming-content-${index}`);
+    if (!body || !elements.messageContainer.contains(body)) return;
+    const scroll = this.getStreamingScrollTarget();
+    if (content) {
+        body.classList.add('streaming-plain-text');
+        if (body.textContent !== content) body.textContent = content;
+    }
+    const message = body.closest('.message');
+    const thoughts = message.querySelector('.thought-summary-details');
+    if (thoughtSummary?.trim() && appLogic.getShowThoughtProcess()) {
+        if (!thoughts) message.insertBefore(this.createThoughtProcessDetails({ thoughtSummary }, true), body);
+        else {
+            const text = thoughts.querySelector('.thought-summary-content');
+            if (text.textContent !== thoughtSummary) text.textContent = thoughtSummary;
+        }
+    } else {
+        thoughts?.remove();
+    }
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+},
+
+renderStreamingResult() {
+    const scroll = this.getStreamingScrollTarget();
+    this.renderChatMessages();
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+},
+
 createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
     const messageData = state.currentMessages[index];
     if (!messageData) return null;
@@ -4312,28 +4496,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     messageDiv.dataset.role = role;
     
     if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
-        const thoughtDetails = document.createElement('details');
-        thoughtDetails.classList.add('thought-summary-details');
-        const thoughtSummaryElem = document.createElement('summary');
-        const thoughtMetaLabel = this.formatModelMetaLabel(messageData.thoughtTranslationMeta, '思考翻訳');
-        const thoughtLabel = (messageData.usageMetadata?.tmExecution?.provider || messageData.continuation?.provider) === 'gemini'
-            ? '思考要約' : '思考プロセス';
-        thoughtSummaryElem.textContent = thoughtMetaLabel ? `${thoughtLabel}（${thoughtMetaLabel}）` : thoughtLabel;
-        thoughtDetails.appendChild(thoughtSummaryElem);
-        const thoughtContentDiv = document.createElement('div');
-        thoughtContentDiv.classList.add('thought-summary-content');
-        if (isStreamingPlaceholder) {
-            thoughtContentDiv.id = `streaming-thought-summary-${index}`;
-        } else {
-            try {
-                htmlUtils.renderMarkdownInto(thoughtContentDiv, messageData.thoughtSummary || '');
-            } catch (e) {
-                console.error("Thought Summary Markdownパースエラー:", e);
-                thoughtContentDiv.textContent = messageData.thoughtSummary || '';
-            }
-        }
-        thoughtDetails.appendChild(thoughtContentDiv);
-        messageDiv.appendChild(thoughtDetails);
+        messageDiv.appendChild(this.createThoughtProcessDetails(messageData, isStreamingPlaceholder));
     }
 
     const contentDiv = document.createElement('div');
@@ -5404,6 +5567,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         item?.querySelector(`[data-sidebar-action="${action}"]`)?.focus();
     },
 
+    syncChatSidebarTitleGeneration(chatId, openButton = elements.chatSidebarList?.querySelector(
+        `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`
+    )) {
+        if (!openButton) return;
+        const generating = state.chatTitleGenerations.has(String(chatId));
+        const dot = openButton.querySelector('.chat-sidebar-title-dot');
+        const title = openButton.querySelector('.chat-sidebar-item-title').title;
+        dot.hidden = !generating;
+        openButton.setAttribute('aria-label', `「${title}」を開く${generating ? '（タイトル生成中）' : ''}`);
+    },
+
     createChatSidebarItem(model, { isSearch = false } = {}) {
         const item = document.createElement('div');
         item.className = 'chat-sidebar-item';
@@ -5416,8 +5590,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         openButton.className = 'chat-sidebar-item-open';
         openButton.dataset.sidebarAction = 'open';
         openButton.dataset.chatId = model.id;
-        openButton.setAttribute('aria-label', `「${model.title}」を開く`);
 
+        const titleLine = document.createElement('span');
+        titleLine.className = 'chat-sidebar-title-line';
         const title = document.createElement('span');
         title.className = 'chat-sidebar-item-title';
         if (model.isPinned) {
@@ -5425,11 +5600,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             pinIcon.className = 'material-symbols-outlined chat-pin-icon';
             pinIcon.setAttribute('aria-hidden', 'true');
             pinIcon.textContent = 'push_pin';
-            title.appendChild(pinIcon);
+            titleLine.appendChild(pinIcon);
         }
-        title.append(document.createTextNode(model.title));
+        title.textContent = model.title;
         title.title = model.title;
-        openButton.appendChild(title);
+        const dot = document.createElement('span');
+        dot.className = 'generation-status-dot chat-sidebar-title-dot';
+        dot.setAttribute('aria-hidden', 'true');
+        titleLine.append(title, dot);
+        openButton.appendChild(titleLine);
+        this.syncChatSidebarTitleGeneration(model.id, openButton);
         if (isSearch) {
             if (model.snippet) {
                 const snippet = document.createElement('span');
@@ -6748,14 +6928,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // ユーザー指定モデルをコンボボックスに反映
     updateUserModelOptions() {
-        const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '') => {
+        const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '', optional = false) => {
             if (!selectElement) return;
             const currentRef = state.settings[refKey];
             const choices = appLogic.buildModelRefOptions({
                 currentRefs: currentRef?.apiConfigId && currentRef?.modelName ? [currentRef] : []
             });
-            const effectiveRef = appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
+            const effectiveRef = optional ? currentRef : appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
             selectElement.innerHTML = '';
+            if (optional) selectElement.add(new Option('選択してください', ''));
             choices.forEach(choice => {
                 const option = document.createElement('option');
                 option.value = choice.value;
@@ -6772,7 +6953,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (effectiveRef) {
                 selectElement.value = appLogic.encodeModelRefValue(effectiveRef);
             }
-            if (!selectElement.value && selectElement.options.length > 0) {
+            if (!optional && !selectElement.value && selectElement.options.length > 0) {
                 selectElement.selectedIndex = 0;
             }
         };
@@ -6780,6 +6961,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         populateModelRefSelect(elements.modelNameSelect, 'defaultModelRef', state.settings.modelName || DEFAULT_MODEL, state.settings.apiConfigId);
         populateModelRefSelect(elements.thoughtTranslationModelSelect, 'thoughtTranslationModelRef', state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite');
         populateModelRefSelect(elements.proofreadingModelNameSelect, 'proofreadingModelRef', state.settings.proofreadingModelName || state.settings.modelName || DEFAULT_MODEL);
+        populateModelRefSelect(elements.chatTitleModelSelect, 'chatTitleModelRef', '', '', true);
         populateModelRefSelect(elements.summaryModelNameSelect, 'summaryModelRef', state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL);
         appLogic.updateModelRouteNotes();
 
@@ -8557,103 +8739,7 @@ const apiUtils = {
     },
 
     _extractOpenAIReasoningText(message) {
-        const reasoningTexts = [];
-        const addText = (value) => {
-            if (typeof value === 'string' && value.trim()) {
-                reasoningTexts.push(value.trim());
-            }
-        };
-
-        addText(message?.reasoning);
-        addText(message?.reasoning_content);
-
-        const reasoningDetails = message?.reasoning_details;
-        if (Array.isArray(reasoningDetails)) {
-            reasoningDetails.forEach(detail => addText(this._extractReasoningDetailText(detail)));
-        } else if (reasoningDetails && typeof reasoningDetails === 'object') {
-            addText(this._extractReasoningDetailText(reasoningDetails));
-        }
-
-        return this._dedupeReasoningTextParts(reasoningTexts).join('\n\n');
-    },
-
-    _normalizeReasoningTextForDedupe(text) {
-        return String(text || '')
-            .replace(/\r\n?/g, '\n')
-            .split('\n')
-            .map(line => line.trim())
-            .join('\n')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-    },
-
-    _dedupeConsecutiveReasoningParagraphs(text) {
-        const paragraphs = String(text || '').split(/\n{2,}/);
-        const deduped = [];
-        let previousKey = '';
-
-        for (const paragraph of paragraphs) {
-            const trimmed = paragraph.trim();
-            const key = this._normalizeReasoningTextForDedupe(trimmed);
-
-            if (!key || key === previousKey) {
-                continue;
-            }
-
-            deduped.push(trimmed);
-            previousKey = key;
-        }
-
-        return deduped.join('\n\n');
-    },
-
-    _dedupeReasoningTextParts(parts) {
-        const seen = new Set();
-        const deduped = [];
-
-        for (const part of parts) {
-            if (typeof part !== 'string') {
-                continue;
-            }
-
-            const text = this._dedupeConsecutiveReasoningParagraphs(part);
-            const key = this._normalizeReasoningTextForDedupe(text);
-
-            if (!key || seen.has(key)) {
-                continue;
-            }
-
-            seen.add(key);
-            deduped.push(text);
-        }
-
-        return deduped;
-    },
-
-    _extractReasoningDetailText(detail) {
-        if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
-            return '';
-        }
-
-        if (detail.type === 'reasoning.encrypted') {
-            return '';
-        }
-
-        if (detail.type === 'reasoning.summary' && typeof detail.summary === 'string') {
-            return detail.summary.trim();
-        }
-
-        if (detail.type === 'reasoning.text' && typeof detail.text === 'string') {
-            return detail.text.trim();
-        }
-
-        for (const key of ['summary', 'text', 'content']) {
-            if (typeof detail[key] === 'string' && detail[key].trim()) {
-                return detail[key].trim();
-            }
-        }
-
-        return '';
+        return window.StreamingV136.reasoningText(message);
     },
 
     // OpenAI形式からGemini形式への変換（レスポンス用）
@@ -9005,7 +9091,7 @@ const apiUtils = {
     },
 
     // Gemini APIを呼び出す
-    async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+    async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
         appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callGeminiApi: 現在の設定値を確認します。`, {
@@ -9034,7 +9120,8 @@ const apiUtils = {
 
         const isImageGenModel = model === 'gemini-2.5-flash-image-preview';
 
-        const endpointMethod = 'generateContent?';
+        const stream = onStream && StreamingV136.canStream('gemini', model, generationConfig);
+        const endpointMethod = stream ? 'streamGenerateContent?alt=sse&' : 'generateContent?';
 
         const geminiBaseUrl = executionConfig?.provider === 'gemini' && executionConfig.baseUrl
             ? executionConfig.baseUrl.replace(/\/$/, '') + '/'
@@ -9105,6 +9192,7 @@ const apiUtils = {
         console.log("Geminiリクエストモデル:", model);
 
         try {
+            signal.throwIfAborted();
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to Gemini API...`);
 
@@ -9134,6 +9222,10 @@ const apiUtils = {
                 error.status = response.status;
                 error.data = errorData;
                 throw error;
+            }
+            if (stream && !response.headers?.get('content-type')?.includes('application/json')) {
+                const data = await StreamingV136.collectResponse('gemini', response.body, signal, onStream);
+                return { ok: true, status: response.status, json: async () => data };
             }
             return response;
         } catch (error) {
@@ -9165,7 +9257,8 @@ const apiUtils = {
      * @param {string} translationModelName - 翻訳に使用するモデル名
      * @returns {Promise<string>} 翻訳された日本語テキスト。失敗した場合は元の英語テキストを返す。
      */
-     async translateText(textToTranslate, translationModelName) {
+     async translateText(textToTranslate, translationModelName, signal = state.abortController?.signal) {
+        signal?.throwIfAborted();
         if (!textToTranslate || textToTranslate.trim() === '') {
             return textToTranslate;
         }
@@ -9183,13 +9276,13 @@ const apiUtils = {
             : appLogic.resolveThoughtTranslationApiConfig(translationModelName);
         const provider = appLogic.normalizeApiProvider(translationConfig.provider);
         if (provider === 'openrouter') {
-            return await this.translateTextWithOpenRouter(textToTranslate, translationConfig);
+            return await this.translateTextWithOpenRouter(textToTranslate, translationConfig, signal);
         }
         if (provider === 'zai') {
-            return await this.translateTextWithOpenAICompatible(textToTranslate, translationConfig, 'Z.ai');
+            return await this.translateTextWithOpenAICompatible(textToTranslate, translationConfig, 'Z.ai', signal);
         }
         if (provider === 'bedrock') {
-            return await this.translateTextWithBedrock(textToTranslate, translationConfig);
+            return await this.translateTextWithBedrock(textToTranslate, translationConfig, signal);
         }
 
         console.log("--- 思考プロセスの翻訳処理開始 ---");
@@ -9237,10 +9330,9 @@ const apiUtils = {
         const maxTranslationRetries = state.settings.enableAutoRetry ? state.settings.maxRetries : 0;
 
         for (let attempt = 0; attempt <= maxTranslationRetries; attempt++) {
+            let request;
             try {
-                if (state.abortController?.signal.aborted) {
-                    throw new Error("リクエストがキャンセルされました。");
-                }
+                signal?.throwIfAborted();
 
                 if (attempt > 0) {
                     let delay;
@@ -9253,7 +9345,7 @@ const apiUtils = {
                     }
                     uiUtils.setLoadingIndicatorText(`翻訳エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`翻訳APIリトライ ${attempt}: ${delay}ms待機...`);
-                    await interruptibleSleep(delay, state.abortController.signal);
+                    await interruptibleSleep(delay, signal);
                 }
 
                 if (attempt > 0) {
@@ -9262,17 +9354,14 @@ const apiUtils = {
                     uiUtils.setLoadingIndicatorText('思考プロセスを翻訳中...');
                 }
 
-                const timeoutController = new AbortController();
-                const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
+                request = scopedRequestSignalV136(signal, Math.min(15000, configuredApiTimeoutV136() ?? Infinity));
 
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
                     body: JSON.stringify(requestBody),
-                    signal: timeoutController.signal
+                    signal: request.signal
                 });
-
-                clearTimeout(timeoutId);
 
                 if (!response.ok) {
                     let errorBody = await response.text();
@@ -9284,6 +9373,7 @@ const apiUtils = {
                 }
 
                 const responseData = await response.json();
+                request.signal.throwIfAborted();
                 if (responseData.candidates?.[0]?.content?.parts?.[0]?.text) {
                     const translatedText = responseData.candidates[0].content.parts[0].text;
                     console.log("--- 翻訳処理成功 ---");
@@ -9296,17 +9386,15 @@ const apiUtils = {
                     throw new Error("翻訳APIの応答形式が不正です。");
                 }
             } catch (error) {
+                signal?.throwIfAborted();
                 lastError = error;
-                if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-                    if (state.abortController?.signal.aborted) {
-                        break;
-                    }
-                }
                 if (error.status && error.status >= 400 && error.status < 500) {
                     console.error(`リトライ不可の翻訳エラー (ステータス: ${error.status})。`);
                     break;
                 }
                 console.warn(`翻訳API呼び出し試行 ${attempt + 1} が失敗。`, error);
+            } finally {
+                request?.dispose();
             }
         }
 
@@ -9336,7 +9424,7 @@ const apiUtils = {
         return `${config.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions');
     },
 
-    async translateTextWithOpenRouter(textToTranslate, translationConfig = {}) {
+    async translateTextWithOpenRouter(textToTranslate, translationConfig = {}, signal = state.abortController?.signal) {
         console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
 
         const apiKey = translationConfig.apiKey || '';
@@ -9353,15 +9441,11 @@ const apiUtils = {
             reasoning: { exclude: true }
         };
 
+        const request = scopedRequestSignalV136(signal, Math.min(15000, configuredApiTimeoutV136() ?? Infinity));
         try {
-            if (state.abortController?.signal.aborted) {
-                throw new Error("リクエストがキャンセルされました。");
-            }
+            request.signal.throwIfAborted();
 
             uiUtils.setLoadingIndicatorText('思考プロセスをOpenRouterで翻訳中...');
-
-            const timeoutController = new AbortController();
-            const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
 
             const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, OPENROUTER_API_BASE_URL), {
                 method: 'POST',
@@ -9372,10 +9456,8 @@ const apiUtils = {
                     'X-Title': 'ChatAI PWA'
                 },
                 body: JSON.stringify(requestBody),
-                signal: timeoutController.signal
+                signal: request.signal
             });
-
-            clearTimeout(timeoutId);
 
             if (!response.ok) {
                 let errorBody = await response.text();
@@ -9385,6 +9467,7 @@ const apiUtils = {
             }
 
             const responseData = await response.json();
+            request.signal.throwIfAborted();
             const translatedText = responseData.choices?.[0]?.message?.content;
             if (typeof translatedText === 'string' && translatedText.trim() !== '') {
                 console.log("--- OpenRouter 翻訳処理成功 ---");
@@ -9394,12 +9477,16 @@ const apiUtils = {
             console.warn("OpenRouter翻訳APIの応答形式が不正、またはコンテンツが空です。", sanitizeApiRequestBodyForLog(responseData));
             return textToTranslate;
         } catch (error) {
+            signal?.throwIfAborted();
             console.error("OpenRouterでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
             return textToTranslate;
+        } finally {
+            request.dispose();
         }
     },
 
-    async translateTextWithOpenAICompatible(textToTranslate, translationConfig = {}, providerLabel = 'OpenAI互換API') {
+    async translateTextWithOpenAICompatible(textToTranslate, translationConfig = {}, providerLabel = 'OpenAI互換API',
+        signal = state.abortController?.signal) {
         console.log(`--- ${providerLabel} 思考プロセス翻訳処理開始 ---`);
 
         const apiKey = translationConfig.apiKey || '';
@@ -9414,15 +9501,12 @@ const apiUtils = {
             temperature: 0.1
         };
 
+        const request = scopedRequestSignalV136(signal, Math.min(15000, configuredApiTimeoutV136() ?? Infinity));
         try {
-            if (state.abortController?.signal.aborted) {
-                throw new Error("リクエストがキャンセルされました。");
-            }
+            request.signal.throwIfAborted();
 
             uiUtils.setLoadingIndicatorText(`思考プロセスを${providerLabel}で翻訳中...`);
 
-            const timeoutController = new AbortController();
-            const timeoutId = setTimeout(() => timeoutController.abort(), 15000);
             const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, ZAI_API_BASE_URL), {
                 method: 'POST',
                 headers: {
@@ -9430,10 +9514,8 @@ const apiUtils = {
                     'Authorization': `Bearer ${apiKey}`
                 },
                 body: JSON.stringify(requestBody),
-                signal: timeoutController.signal
+                signal: request.signal
             });
-
-            clearTimeout(timeoutId);
 
             if (!response.ok) {
                 let errorBody = await response.text();
@@ -9443,6 +9525,7 @@ const apiUtils = {
             }
 
             const responseData = await response.json();
+            request.signal.throwIfAborted();
             const translatedText = responseData.choices?.[0]?.message?.content;
             if (typeof translatedText === 'string' && translatedText.trim() !== '') {
                 console.log(`--- ${providerLabel} 翻訳処理成功 ---`);
@@ -9452,12 +9535,15 @@ const apiUtils = {
             console.warn(`${providerLabel}翻訳APIの応答形式が不正、またはコンテンツが空です。`, sanitizeApiRequestBodyForLog(responseData));
             return textToTranslate;
         } catch (error) {
+            signal?.throwIfAborted();
             console.error(`${providerLabel}での思考プロセス翻訳中にエラーが発生しました。原文を返します。`, error);
             return textToTranslate;
+        } finally {
+            request.dispose();
         }
     },
 
-    async translateTextWithBedrock(textToTranslate, translationConfig = {}) {
+    async translateTextWithBedrock(textToTranslate, translationConfig = {}, signal = state.abortController?.signal) {
         console.log("--- Amazon Bedrock 思考プロセス翻訳処理開始 ---");
 
         const accessKey = translationConfig.bedrockAccessKey || translationConfig.apiKey || '';
@@ -9472,10 +9558,9 @@ const apiUtils = {
             return textToTranslate;
         }
 
+        const request = scopedRequestSignalV136(signal, Math.min(15000, configuredApiTimeoutV136() ?? Infinity));
         try {
-            if (state.abortController?.signal.aborted) {
-                throw new Error("リクエストがキャンセルされました。");
-            }
+            request.signal.throwIfAborted();
 
             uiUtils.setLoadingIndicatorText('思考プロセスをAmazon Bedrockで翻訳中...');
             const client = new window.BedrockRuntimeClient({
@@ -9498,7 +9583,7 @@ const apiUtils = {
                 }
             };
             const command = new window.ConverseCommand(requestBody);
-            const response = await client.send(command);
+            const response = await waitForToolV136(client.send(command, { abortSignal: request.signal }), request.signal);
             const translatedText = response?.output?.message?.content
                 ?.map(part => part?.text || '')
                 .join('')
@@ -9510,8 +9595,11 @@ const apiUtils = {
             console.warn("Bedrock翻訳APIの応答形式が不正、またはコンテンツが空です。", response);
             return textToTranslate;
         } catch (error) {
+            signal?.throwIfAborted();
             console.error("Amazon Bedrockでの思考プロセス翻訳中にエラーが発生しました。原文を返します。", error);
             return textToTranslate;
+        } finally {
+            request.dispose();
         }
     },
 
@@ -9696,7 +9784,7 @@ const apiUtils = {
                             console.log(`    [${idx}] id: ${tc.id}, name: ${tc.function?.name}`);
                         });
                     }
-                    if (choice.message.content) {
+                    if (typeof choice.message.content === 'string' && choice.message.content) {
                         console.log(`  - content: ${choice.message.content.substring(0, 50)}...`);
                     }
                 }
@@ -9720,7 +9808,7 @@ const apiUtils = {
     },
 
     // OpenRouter APIを呼び出す
-    async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+    async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
         appLogic.ensureHistoryWorkerV136();
         const executionConfig = appLogic.getExecutionApiConfig();
         console.log(`[Debug] callOpenRouterApi: OpenRouter APIを呼び出します。`);
@@ -9737,6 +9825,7 @@ const apiUtils = {
         }
 
         const model = executionConfig?.provider === 'openrouter' ? (executionConfig.modelName || state.settings.modelName || DEFAULT_OPENROUTER_MODEL) : (state.settings.modelName || DEFAULT_OPENROUTER_MODEL);
+        const stream = onStream && StreamingV136.canStream('openrouter', model, generationConfig);
 
         // Gemini形式のメッセージをOpenAI形式に変換
         const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || state.settings.apiProvider,messages:messagesForApi,model});
@@ -9756,7 +9845,8 @@ const apiUtils = {
         // リクエストボディの構築
         const requestBody = {
             model: model,
-            messages: openAIMessages
+            messages: openAIMessages,
+            ...(stream && { stream: true })
         };
 
         appLogic.applyExecutionThinking(requestBody, 'openrouter');
@@ -9849,6 +9939,7 @@ const apiUtils = {
         console.log("ターゲットエンドポイント:", sanitizeApiRequestBodyForLog(openRouterEndpoint));
 
         try {
+            signal.throwIfAborted();
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to OpenRouter API...`);
 
@@ -9904,7 +9995,10 @@ const apiUtils = {
             }
 
             // レスポンスを取得してGemini形式に変換
-            const openAIResponse = await response.json();
+            const openAIResponse = stream && !response.headers?.get('content-type')?.includes('application/json')
+                ? await StreamingV136.collectResponse('openrouter', response.body, signal, onStream)
+                : await response.json();
+            if (openAIResponse.error) throw new Error(openAIResponse.error.message || 'OpenRouter APIエラー');
             
             // デバッグ用：OpenRouter APIからのレスポンス構造を確認
             if (openAIResponse.choices && openAIResponse.choices[0]) {
@@ -10091,17 +10185,17 @@ const apiUtils = {
     },
 
     // プロバイダーに応じて適切なAPIを呼び出すラッパー関数
-    async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+    async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
         const provider = appLogic.getExecutionProvider();
         
         if (provider === 'zai') {
             return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
         } else if (provider === 'openrouter') {
-            return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
+            return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream);
         } else if (provider === 'bedrock') {
             return await this.callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
         } else {
-            return await this.callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
+            return await this.callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream);
         }
     }
 };
@@ -11098,9 +11192,6 @@ const appLogic = {
             setHistoryChangeTargetContent(target, target.nextContent);
 
             await dbUtils.saveChat(newTitleForSave);
-            if (newTitleForSave) {
-                uiUtils.updateChatTitle(newTitleForSave);
-            }
 
             const nextHistory = updateChangeHistoryChangeStatus(
                 history,
@@ -11198,9 +11289,6 @@ const appLogic = {
             });
 
             await dbUtils.saveChat(newTitleForSave);
-            if (newTitleForSave) {
-                uiUtils.updateChatTitle(newTitleForSave);
-            }
 
             const nextHistory = updateChangeHistoryEntryStatus(history, entry, direction);
             const saved = await saveChangeHistory(chatId, nextHistory);
@@ -11465,7 +11553,7 @@ const appLogic = {
     getCurrentModelRefsForOptions() {
         const refs = [];
         const collect = (settings = {}) => {
-            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef', 'proofreadingModelRef'].forEach(key => {
+            MODEL_REF_USAGE_KEYS.forEach(key => {
                 const ref = settings?.[key];
                 if (ref?.apiConfigId && ref?.modelName) refs.push(ref);
             });
@@ -12558,12 +12646,66 @@ const appLogic = {
 
         const confirmed = await uiUtils.showCustomConfirm(`API設定「${target.name}」を削除しますか？`);
         if (!confirmed) return;
-        await this.saveApiConfigs(configs.filter(config => config.id !== configId));
-        state.apiConfigDeletedIds = [...new Set([...(state.apiConfigDeletedIds || []), configId])];
-        await dbUtils.saveSetting(API_CONFIG_DELETED_IDS_KEY, state.apiConfigDeletedIds);
+        const result = await this.deleteUnreferencedApiConfigV136(configId);
+        if (result.reason === 'used') {
+            await uiUtils.showCustomAlert('このAPI設定は使用中のため削除できません。');
+            return;
+        }
+        if (result.reason === 'last') {
+            await uiUtils.showCustomAlert('最後のAPI設定は削除できません。');
+            return;
+        }
+        if (!result.configs) return;
+        state.apiConfigs = state.settings.apiConfigs = result.configs;
+        state.apiConfigDeletedIds = result.deletedIds;
         this.syncActiveApiConfigState();
         this.renderApiConfigList();
+        uiUtils.updateUserModelOptions();
+        window.settingsUiV136?.refresh();
         this.markAsDirtyAndSchedulePush('structural');
+    },
+
+    async deleteUnreferencedApiConfigV136(configId) {
+        const matches = ref => ref?.apiConfigId === configId;
+        const keys = [...MODEL_REF_USAGE_KEYS, 'memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef'];
+        const usesConfig = settings => keys.some(key => matches(settings?.[key]));
+        await dbUtils.openDB();
+        return new Promise((resolve, reject) => {
+            const tx = state.db.transaction([SETTINGS_STORE, PROFILES_STORE, CHATS_STORE], 'readwrite');
+            const settings = tx.objectStore(SETTINGS_STORE);
+            let result = {}, configs, deletedIds, pending = 5;
+            let used = matches(this.getCurrentChatModelRef()) || matches(this.readExecutionDraft()?.modelRef);
+            tx.oncomplete = () => resolve(result);
+            tx.onabort = () => reject(tx.error || new Error('API設定を削除できませんでした。'));
+            const complete = () => {
+                if (--pending !== 0) return;
+                if (used) { result = { reason: 'used' }; return; }
+                if (!configs.some(config => config.id === configId)) return;
+                if (configs.length <= 1) { result = { reason: 'last' }; return; }
+                result = { configs: configs.filter(config => config.id !== configId),
+                    deletedIds: [...new Set([...deletedIds, configId])] };
+                settings.put({ key: 'apiConfigs', value: result.configs });
+                settings.put({ key: API_CONFIG_DELETED_IDS_KEY, value: result.deletedIds });
+            };
+            const readSetting = (key, use) => {
+                const request = settings.get(key);
+                request.onsuccess = () => { use(request.result?.value); complete(); };
+            };
+            const scan = (store, isUsed) => {
+                const request = tx.objectStore(store).openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (cursor) used ||= isUsed(cursor.value);
+                    if (cursor && !used) cursor.continue();
+                    else complete();
+                };
+            };
+            readSetting('apiConfigs', value => { configs = this.normalizeApiConfigs(value || []); });
+            readSetting(API_CONFIG_DELETED_IDS_KEY, value => { deletedIds = Array.isArray(value) ? value : []; });
+            readSetting(window.SettingsV136.GLOBAL_KEY, value => { used ||= usesConfig(value); });
+            scan(PROFILES_STORE, profile => usesConfig(profile.settings));
+            scan(CHATS_STORE, chat => matches(chat.executionSettings?.modelRef) || usesConfig(chat));
+        });
     },
 
     async toggleApiConfigEnabled(configId, enabled) {
@@ -12664,7 +12806,7 @@ const appLogic = {
     collectModelRefCandidatesByApiConfigId() {
         const refsByConfigId = new Map();
         const collect = (settings = {}) => {
-            ['defaultModelRef', 'thoughtTranslationModelRef', 'summaryModelRef', 'proofreadingModelRef'].forEach(key => {
+            MODEL_REF_USAGE_KEYS.forEach(key => {
                 const ref = settings?.[key];
                 if (!ref?.apiConfigId || !ref?.modelName) return;
                 if (!refsByConfigId.has(ref.apiConfigId)) {
@@ -13795,7 +13937,7 @@ const appLogic = {
         console.log("[API Prep] 履歴をAPIフォーマットに変換します。");
 
         // ディープコピーで元のメッセージ配列を保護する
-        const messagesForApi = structuredClone(baseMessages.filter(m=>!m.isCascaded || m.isSelected));
+        const messagesForApi = structuredClone(baseMessages.filter(m => !m.incomplete && (!m.isCascaded || m.isSelected)));
 
         let historyToProcess;
 
@@ -13940,7 +14082,8 @@ const appLogic = {
      * @param {Blob} blob - 保存対象の画像Blob
      * @returns {Promise<string>} 保存された画像のユニークID
      */
-     async saveImageBlob(blob) {
+     async saveImageBlob(blob, signal) {
+        signal?.throwIfAborted();
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -13969,10 +14112,21 @@ const appLogic = {
 
                         try {
                             await dbUtils.openDB();
-                            const store = dbUtils._getStore(IMAGE_STORE, 'readwrite');
-                            const request = store.put(imageData);
-                            request.onsuccess = () => resolve(imageId);
-                            request.onerror = (event) => reject(event.target.error);
+                            signal?.throwIfAborted();
+                            const transaction = state.db.transaction(IMAGE_STORE, 'readwrite');
+                            const onAbort = () => {
+                                try { transaction.abort(); } catch { /* Already committed. */ }
+                            };
+                            transaction.oncomplete = () => {
+                                signal?.removeEventListener('abort', onAbort);
+                                resolve(imageId);
+                            };
+                            transaction.onabort = () => {
+                                signal?.removeEventListener('abort', onAbort);
+                                reject(signal?.reason || transaction.error || new Error('画像を保存できませんでした。'));
+                            };
+                            transaction.objectStore(IMAGE_STORE).put(imageData);
+                            signal?.addEventListener('abort', onAbort, { once: true });
                         } catch (dbError) {
                             reject(dbError);
                         }
@@ -14055,7 +14209,7 @@ const appLogic = {
 
                 if (chatModified) {
                     console.log(`[DB Migration] チャット(id:${chat.id})を更新します。`);
-                    await dbUtils.saveChat(chat.title, chat);
+                    await dbUtils.saveChat(null, chat, { existingSnapshot: true });
                 }
             }
 
@@ -16048,6 +16202,11 @@ const appLogic = {
                 }
             },
             proofreadingSystemInstruction: { element: elements.proofreadingSystemInstructionTextarea, event: 'input' },
+            enableChatTitleGeneration: { element: elements.enableChatTitleGenerationCheckbox, event: 'change' },
+            enableStreamingOutput: { element: elements.enableStreamingOutputCheckbox, event: 'change' },
+            chatTitleModelRef: { element: elements.chatTitleModelSelect, event: 'change',
+                getValue: () => this.decodeModelRefValue(elements.chatTitleModelSelect.value) },
+            chatTitleSystemPrompt: { element: elements.chatTitleSystemPromptTextarea, event: 'input' },
             enableAutoRetry: { element: elements.enableAutoRetryCheckbox, event: 'change' },
             maxRetries: { element: elements.maxRetriesInput, event: 'input' },
             useFixedRetryDelay: { element: elements.useFixedRetryDelayCheckbox, event: 'change' },
@@ -16932,7 +17091,6 @@ const appLogic = {
         state.executionInitializingV136 = true;
         window.settingsUiV136?.renderExecution();
         uiUtils.closeChatSearch({ restoreFocus: false });
-        state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         state.currentChatId = null;
         state.currentChatIsPinned = false;
         state.currentChatPinnedAt = null;
@@ -17005,6 +17163,33 @@ const appLogic = {
             return { ok: false, notFound: true, reason: 'not-found' };
         }
 
+        // ここから先は対象チャットの読み込み成功後にだけ実行する。
+        this.flushInputDraft();
+        this.cancelSendPreparationV136();
+        const waitsForSend = state.isSending;
+        if (waitsForSend) {
+            this.abortRequest();
+            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
+        }
+        if (editingMessageIndex !== null) {
+            const messageElement = state.mobileMessageEditor.messageElement
+                || elements.messageContainer.querySelector(`.message[data-index="${editingMessageIndex}"]`);
+            this.cancelEditMessage(editingMessageIndex, messageElement);
+        }
+        if (shouldCloseSystemPrompt) {
+            if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
+        }
+        if (shouldDiscardAttachments) {
+            state.pendingAttachments = [];
+            uiUtils.updateAttachmentBadgeVisibility();
+        }
+        // A partial response or title may have been saved while waiting.
+        if ((waitsForSend && normalizedId === state.currentChatId)
+            || (chat.titleGenerationId && (waitsForSend || shouldCloseSystemPrompt))) {
+            const latest = await dbUtils.getChat(chat.id);
+            if (!latest) return { ok: false, notFound: true, reason: 'not-found' };
+            chat = latest;
+        }
         const nextMessages = chat.messages?.map(msg => ({
             ...msg,
             attachments: msg.attachments || []
@@ -17022,29 +17207,8 @@ const appLogic = {
                 needsSave = true;
             }
         });
-
-        // ここから先は対象チャットの読み込み成功後にだけ実行する。
-        this.flushInputDraft();
-        this.cancelSendPreparationV136();
-        if (state.isSending) {
-            this.abortRequest();
-            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
-        }
-        if (editingMessageIndex !== null) {
-            const messageElement = state.mobileMessageEditor.messageElement
-                || elements.messageContainer.querySelector(`.message[data-index="${editingMessageIndex}"]`);
-            this.cancelEditMessage(editingMessageIndex, messageElement);
-        }
-        if (shouldCloseSystemPrompt) {
-            if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
-        }
-        if (shouldDiscardAttachments) {
-            state.pendingAttachments = [];
-            uiUtils.updateAttachmentBadgeVisibility();
-        }
         uiUtils.closeChatSearch({ restoreFocus: false });
 
-        state.pendingCascadeResponses = null;
         state.syncMessageCounter = 0;
         this.cancelAttachmentOperation();
         this.attachmentSession = null;
@@ -17060,6 +17224,7 @@ const appLogic = {
         state.currentChatPinnedAt = loadedPinState.isPinned ? loadedPinState.pinnedAt : null;
         state.currentChatPinStateUpdatedAt = loadedPinState.pinStateUpdatedAt;
         state.currentMessages = nextMessages;
+        dbUtils.bindChatSaveOwnerV136(nextMessages, chat);
         state.currentPersistentMemory = chat.persistentMemory || {};
         state.currentSummarizedContext = chat.summarizedContext || null;
         state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
@@ -17095,7 +17260,15 @@ const appLogic = {
     // チャットを複製
     async duplicateChat(id) {
         // 送信中・編集中・他チャット保存の確認 (loadChatと同様)
-        if (state.isSending) { const conf = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; this.abortRequest(); }
+        const session = state.sendExecutionV136;
+        if (state.isSending) {
+            const confirmed = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？");
+            if (!confirmed) return { ok: false, cancelled: true };
+            if (state.isSending && state.sendExecutionV136 !== session) return { ok: false, cancelled: true };
+            this.abortRequest();
+            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
+            if (session?.saveFailed || session?.discarded) return { ok: false, reason: 'generation-save-failed' };
+        }
         if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
         if (state.isEditingSystemPrompt) {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
@@ -17149,6 +17322,7 @@ const appLogic = {
 
                 // 新しいチャットデータを作成
                 const newChatData = {
+                    ...SettingsV136.nextChatContentVersion(),
                     messages: duplicatedMessages,
                     systemPrompt: chat.systemPrompt || '', // システムプロンプトもコピー
                     // 永続メモリもディープコピーで複製
@@ -17394,6 +17568,7 @@ const appLogic = {
                         if (msg.role === 'model') {
                             if (msg.isCascaded) attributes += ' isCascaded';
                             if (msg.isSelected) attributes += ' isSelected';
+                            if (msg.incomplete) attributes += ' incomplete';
                             if (msg.imageIds && msg.imageIds.length > 0) {
                                 attributes += ` imageIds="${msg.imageIds.join(',')}"`;
                             }
@@ -17609,7 +17784,7 @@ const appLogic = {
             if (generationConfig.topP !== undefined && !modelName.includes('claude-sonnet-4-5')) {
                 requestBody.inferenceConfig.topP = generationConfig.topP;
             }
-            const response = await client.send(new window.ConverseCommand(requestBody));
+            const response = await waitForToolV136(client.send(new window.ConverseCommand(requestBody), { abortSignal: signal }), signal);
             const proofreadContent = response?.output?.message?.content
                 ?.map(part => part?.text || '')
                 .join('')
@@ -17675,7 +17850,7 @@ const appLogic = {
         throw new Error("校正APIの応答に有効なコンテンツが含まれていません。");
     },
 
-    async proofreadTextWithInfo(textToProofread) {
+    async proofreadTextWithInfo(textToProofread, signal = state.abortController?.signal) {
         console.log("--- 校正処理開始 ---");
         const {
             proofreadingSystemInstruction,
@@ -17697,10 +17872,9 @@ const appLogic = {
         const maxProofreadRetries = enableAutoRetry ? maxRetries : 0;
 
         for (let attempt = 0; attempt <= maxProofreadRetries; attempt++) {
+            let request;
             try {
-                if (state.abortController?.signal.aborted) {
-                    throw new Error("リクエストがキャンセルされました。");
-                }
+                signal?.throwIfAborted();
 
                 if (attempt > 0) {
                     let delay;
@@ -17714,7 +17888,7 @@ const appLogic = {
                     
                     uiUtils.setLoadingIndicatorText(`校正エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`校正APIリトライ ${attempt}: ${delay}ms待機...`);
-                    await interruptibleSleep(delay, state.abortController.signal);
+                    await interruptibleSleep(delay, signal);
                 }
 
                 if (attempt === 0) {
@@ -17725,12 +17899,14 @@ const appLogic = {
                     uiUtils.setLoadingIndicatorText(`校正処理${attempt}回目の再試行中...`);
                 }
 
+                request = scopedRequestSignalV136(signal, configuredApiTimeoutV136());
                 const proofreadContent = await this.callProofreadingModel(textToProofread, {
                     apiConfig: proofreadingConfig,
                     systemPrompt: proofreadingSystemInstruction,
                     generationConfig,
-                    signal: state.abortController?.signal
+                    signal: request.signal
                 });
+                request.signal?.throwIfAborted();
                 console.log("--- 校正処理成功 ---");
                 return {
                     content: proofreadContent,
@@ -17738,6 +17914,7 @@ const appLogic = {
                 };
 
             } catch (error) {
+                signal?.throwIfAborted();
                 lastError = error;
                 if (error.name === 'AbortError') {
                     throw error;
@@ -17747,6 +17924,8 @@ const appLogic = {
                     throw error;
                 }
                 console.warn(`校正API呼び出し試行 ${attempt + 1} が失敗。`, error);
+            } finally {
+                request?.dispose();
             }
         }
 
@@ -17773,14 +17952,19 @@ const appLogic = {
             ...(message.geminiFunctionCallId != null && { id: message.geminiFunctionCallId }),
             _toolCallId: message._toolCallId || message.tool_call_id };
     },
-     async _internalHandleSend(messagesForApi, generationConfig, systemInstruction) {
+     async _internalHandleSend(messagesForApi, generationConfig, systemInstruction, session) {
         this.ensureHistoryWorkerV136();
         const requestOwner = {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
         const wasAborted = requestOwner.signal?.aborted;
         const requestContext = await SettingsV136.historyTaskV136('wire',{provider:this.getExecutionProvider(),messages:messagesForApi,model:this.getExecutionModelName(),system:systemInstruction});
 
-        if (requestOwner.messages !== state.currentMessages || requestOwner.chatId !== state.currentChatId || requestOwner.profileId !== state.activeProfileId
-            || (!wasAborted && requestOwner.signal?.aborted)) throw new DOMException('送信準備が中断されました。','AbortError');
+        const assertOwner = () => {
+            this.assertSendExecutionV136(session);
+            if (requestOwner.messages !== state.currentMessages || requestOwner.chatId !== state.currentChatId || requestOwner.profileId !== state.activeProfileId
+                || (!wasAborted && requestOwner.signal?.aborted)) throw new DOMException('送信準備が中断されました。', 'AbortError');
+        };
+        const signal = session?.controller.signal || requestOwner.signal;
+        assertOwner();
         const rememberRequest = result => {
             if (requestContext && result.continuation) Object.assign(result.continuation, {
                 historyWireV136: requestContext });
@@ -17789,6 +17973,7 @@ const appLogic = {
         // Z.ai API(OpenAI互換)は1回のレスポンスで1つのtool_callしか返さないため、
         // Gemini APIよりも多くのループが必要
         const MAX_LOOPS = 20;
+        const terminalTools = new Set(['generate_image', 'generate_image_stable_diffusion', 'generate_video', 'edit_image', 'display_layered_image']);
         const finalTurnResults = [];
         let currentTurnHistory = [...messagesForApi];
         let aggregatedSearchResults = [];
@@ -17803,9 +17988,11 @@ const appLogic = {
                 generationConfig,
                 systemInstruction,
                 tools: window.functionDeclarations,
-                isFirstCall: (loopCount === 1)
+                isFirstCall: (loopCount === 1),
+                session
             });
 
+            assertOwner();
             rememberRequest(result);
             const modelMessage = {
                 role: 'model',
@@ -17826,14 +18013,19 @@ const appLogic = {
                 console.log("[_internalHandleSend] ツール呼び出しがないため、ループを終了します。");
                 break;
             }
+            const containsTerminalAction = result.toolCalls.some(({ functionCall }) => terminalTools.has(functionCall.name));
+            if (loopCount === MAX_LOOPS && !(containsTerminalAction && result.content)) {
+                throw new Error('AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。');
+            }
+            this.validateToolCallIdsV136(result.toolCalls);
             
             const historyForFunctions = state.currentMessages.slice(0, -1);
             const responseTextForQc = result.content || '';
             
             const toolResults = [];
-            let containsTerminalAction = false;
             
             for (const toolCall of result.toolCalls) {
+                assertOwner();
                 const functionName = toolCall.functionCall.name;
                 const functionArgs = toolCall.functionCall.args;
                 
@@ -17850,22 +18042,19 @@ const appLogic = {
                 let toolResult;
                 try {
                     const argsWithContext = { ...functionArgs, _responseTextForQc: responseTextForQc };
-                    toolResult = await window.functionCallingTools[functionName](argsWithContext, {
+                    toolResult = await waitForToolV136(window.functionCallingTools[functionName](argsWithContext, {
                         messages: historyForFunctions.filter(m => m.role !== 'tool'),
-                        persistentMemory: state.currentPersistentMemory
-                    });
+                        persistentMemory: state.currentPersistentMemory,
+                        signal,
+                        requestTimeoutMs: configuredApiTimeoutV136(),
+                        assertActive: assertOwner
+                    }), signal);
                 } catch (toolError) {
+                    assertOwner();
                     console.error(`[_internalHandleSend] ${functionName}の実行中に予期せぬエラー:`, toolError);
                     toolResult = { error: { message: `ツール実行中に予期せぬエラーが発生しました: ${toolError.message}` } };
                 }
-
-                if (['generate_image', 'generate_image_stable_diffusion', 'generate_video', 'edit_image', 'display_layered_image'].includes(functionName)) {
-                    containsTerminalAction = true;
-                    console.log(`[Function Calling] 終端アクション (${functionName}) を検出しました。`);
-                } else if (['generate_image', 'generate_video', 'edit_image', 'display_layered_image'].includes(functionName)) {
-                    containsTerminalAction = true; 
-                    console.log(`[Function Calling] 終端アクション (${functionName}) を検出しました。`);
-                }
+                assertOwner();
 
                 const responseForAI = { ...toolResult };
                 if (toolResult.search_results) {
@@ -17918,6 +18107,7 @@ const appLogic = {
                         console.log(`[Bedrock] レート制限回避のため ${delayMs}ms 待機します...`);
                         uiUtils.setLoadingIndicatorText(`レート制限回避のため ${delayMs/1000}秒待機中...`);
                         await interruptibleSleep(delayMs, state.abortController.signal);
+                        assertOwner();
                     }
 
                     const textResult = await this.callApiWithRetry({ 
@@ -17925,9 +18115,11 @@ const appLogic = {
                         generationConfig,
                         systemInstruction,
                         tools: null,
-                        isFirstCall: false
+                        isFirstCall: false,
+                        session
                     });
                     
+                    assertOwner();
                     rememberRequest(textResult);
                     finalTurnResults.push({ role: 'model', content: textResult.content || '',
                         thoughtSummary: textResult.thoughtSummary, continuation: textResult.continuation,
@@ -17953,21 +18145,12 @@ const appLogic = {
                 console.log(`[Bedrock] レート制限回避のため ${delayMs}ms 待機します...`);
                 uiUtils.setLoadingIndicatorText(`レート制限回避のため ${delayMs/1000}秒待機中...`);
                 await interruptibleSleep(delayMs, state.abortController.signal);
+                assertOwner();
             }
             
             uiUtils.setLoadingIndicatorText('応答生成中...');
         }
 
-        if (loopCount >= MAX_LOOPS) {
-            console.warn("Function Callingのループが上限に達しました。");
-            const finalErrorMessage = {
-                role: 'model',
-                content: 'AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。',
-                timestamp: Date.now(),
-            };
-            throw new Error(finalErrorMessage.content);
-        }
-        
         // 後処理（翻訳や校正）
         const finalModelMessages = finalTurnResults.filter(m => m.role === 'model');
         if (finalModelMessages.length > 0) {
@@ -17981,7 +18164,8 @@ const appLogic = {
                 if (lastTextResponse) {
                     try {
                         uiUtils.setLoadingIndicatorText('校正中...');
-                        const proofreadingResult = await this.proofreadTextWithInfo(lastTextResponse.content);
+                        const proofreadingResult = await this.proofreadTextWithInfo(lastTextResponse.content, signal);
+                        assertOwner();
                         lastTextResponse.content = proofreadingResult.content;
                         if (proofreadingResult.modelInfo) {
                             lastTextResponse.proofreadingModelInfo = proofreadingResult.modelInfo;
@@ -17989,8 +18173,10 @@ const appLogic = {
                             delete lastTextResponse.proofreadingModelInfo;
                         }
                     } catch (proofreadError) {
+                        assertOwner();
                         console.error("校正処理中にエラーが発生しました。校正前のテキストを使用します。", proofreadError);
                         await uiUtils.showCustomAlert(proofreadError?.message || '校正モデルの設定が無効です。設定画面で校正モデルを選び直してください。');
+                        assertOwner();
                     }
                 }
             }
@@ -18007,14 +18193,17 @@ const appLogic = {
                                 apiConfigName: translationConfig.name,
                                 model: translationConfig.modelName
                             };
-                            const translatedThoughtSummary = await apiUtils.translateText(msg.thoughtSummary, translationConfig);
+                            const translatedThoughtSummary = await apiUtils.translateText(msg.thoughtSummary, translationConfig, signal);
+                            assertOwner();
                             msg.thoughtSummary = translatedThoughtSummary;
                             if (translatedThoughtSummary !== originalThoughtSummary) {
                                 msg.thoughtTranslationMeta = translationMeta;
                             }
                         } catch (translateError) {
+                            assertOwner();
                             console.error("思考プロセスの翻訳中にエラーが発生しました。原文を使用します。", translateError);
                             await uiUtils.showCustomAlert(translateError?.message || '思考翻訳モデルの設定が無効です。設定画面で思考翻訳モデルを選び直してください。');
+                            assertOwner();
                         }
                     }
                 }
@@ -18094,11 +18283,13 @@ const appLogic = {
 
     
     cancelSendPreparationV136() {
+        state.sendPreparationV136?.controller?.abort();
         state.sendPreparationV136 = null;
     },
     beginSendPreparationV136() {
         if (state.isSending || state.sendPreparationV136) return null;
         const preparation = {
+            controller: new AbortController(),
             chatId: state.currentChatId, messages: state.currentMessages, profileId: state.activeProfileId,
             initGeneration: state.executionInitGeneration, selectionGeneration: state.executionSelectionGenerationV136,
             execution: structuredClone(state.currentExecutionSettings), input: elements.userInput.value,
@@ -18122,16 +18313,81 @@ const appLogic = {
                 || state.pendingAttachments.length !== preparation.attachments.length
                 || state.pendingAttachments.some((a,i) => a !== preparation.attachments[i]))))
             throw new DOMException('送信準備の対象が変更されました。', 'AbortError');
+        preparation.controller.signal.throwIfAborted();
+    },
+    startSendExecutionV136(session) {
+        session.originalMessages = session.messages.slice();
+        session.finished = new Promise(resolve => { session.resolveFinished = resolve; });
+        session.streaming = state.settings.enableStreamingOutput === true
+            && StreamingV136.canStream(this.getExecutionProvider(), this.getExecutionModelName());
+        state.sendPreparationV136 = null;
+        state.sendExecutionV136 = session;
+        state.abortController = session.controller;
+        uiUtils.setSendingState(true);
+    },
+    ownsSendExecutionV136(session) {
+        return !session.discarded && state.sendExecutionV136 === session && state.currentMessages === session.messages
+            && state.currentChatId === session.chatId && state.activeProfileId === session.profileId;
+    },
+    assertSendExecutionV136(session) {
+        if (!session) return;
+        if (!this.ownsSendExecutionV136(session)) throw new DOMException('送信対象が変更されました。', 'AbortError');
+        session.controller.signal.throwIfAborted();
+    },
+    updateSendStreamV136(session, { content, getThoughtSummary }) {
+        this.assertSendExecutionV136(session);
+        session.receivedStreamData = true;
+        if (content) session.streamContent = content;
+        session.getStreamThought = getThoughtSummary;
+        if (session.streamFrame) return;
+        session.streamFrame = requestAnimationFrame(() => {
+            session.streamFrame = 0;
+            if (!this.ownsSendExecutionV136(session) || session.controller.signal.aborted
+                || session.messages[session.modelIndex] !== session.placeholder) return;
+            uiUtils.updateStreamingMessage(session.modelIndex, {
+                content: session.streamContent, thoughtSummary: session.getStreamThought?.()
+            });
+        });
+    },
+    getIncompleteStreamMessageV136(session) {
+        const thoughtSummary = session.getStreamThought?.();
+        if (!session.streamContent && !thoughtSummary) return null;
+        return { role: 'model', content: session.streamContent || '', thoughtSummary: thoughtSummary || null,
+            incomplete: true, timestamp: Date.now() };
+    },
+    finishSendExecutionV136(session) {
+        cancelAnimationFrame(session.streamFrame);
+        if (state.sendExecutionV136 !== session) return;
+        state.sendExecutionV136 = null;
+        state.abortController = null;
+        state.currentExecutionApiConfig = null;
+        const showConflict = session.discarded && state.currentMessages === session.messages
+            && state.currentChatId === session.chatId && state.activeProfileId === session.profileId;
+        try {
+            if (showConflict) {
+                session.messages.length = 0;
+                for (const message of session.originalMessages) session.messages.push(message);
+                uiUtils.renderChatMessages();
+            }
+        } finally {
+            try { uiUtils.setSendingState(false); }
+            finally { session.resolveFinished?.(); }
+        }
+        if (showConflict) void uiUtils.showCustomAlert('別の操作で会話が更新されました。履歴を開き直してください。');
+    },
+    async stopSendBeforeDataChangeV136(chatId = state.currentChatId) {
+        if (state.currentChatId !== chatId || (!state.isSending && !state.sendPreparationV136)) return;
+        this.abortRequest();
+        if (!await this.waitForGenerationCompletionV136()) throw new Error('応答生成の停止を確認できませんでした。');
     },
     async handleSend() {
         const preparation = this.beginSendPreparationV136();
         if (!preparation) return;
         try { await this._handleSendPreparedV136(preparation); }
         catch (error) { if (error.name !== 'AbortError') throw error; }
-        finally { if (state.sendPreparationV136 === preparation) state.sendPreparationV136 = null; }
+        finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
     },
     async _handleSendPreparedV136(preparation) {
-        state.pendingCascadeResponses = null; // 保留中のカスケードデータをクリア
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
         if (state.isEditingSystemPrompt) {
@@ -18165,11 +18421,12 @@ const appLogic = {
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
-        uiUtils.setSendingState(true);
-        this.cancelSendPreparationV136();
+        this.startSendExecutionV136(preparation);
         uiUtils.setLoadingIndicatorText('応答生成中...');
+        const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
+        const titleGeneration = this.createChatTitleGenerationV136(userMessage);
         state.currentMessages.push(userMessage);
         uiUtils.appendMessage(userMessage.role, userMessage.content, state.currentMessages.length - 1, false, null, userMessage.attachments);
         
@@ -18178,6 +18435,8 @@ const appLogic = {
         const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
         state.currentMessages.push(modelMessage);
         const modelMessageIndex = state.currentMessages.length - 1;
+        preparation.placeholder = modelMessage;
+        preparation.modelIndex = modelMessageIndex;
         uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
 
         state.pendingAttachments = [];
@@ -18185,13 +18444,18 @@ const appLogic = {
         uiUtils.updateAttachmentBadgeVisibility();
         elements.userInput.value = '';
         uiUtils.adjustTextareaHeight();
-        if (state.settings.autoScroll) {
+        if (preparation.streaming) {
+            if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
+        } else if (state.settings.autoScroll) {
             this.scrollToBottom();
         }
         
         try {
-            await dbUtils.saveChat(null, null, { skipPush: true });
-            this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
+            const savedId = await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
+            if (preparation.chatId == null && savedId != null) preparation.chatId = savedId;
+            if (this.ownsSendExecutionV136(preparation))
+                this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
+            this.assertSendExecutionV136(preparation);
 
             const generationConfig = {};
             if (state.settings.temperature !== null) generationConfig.temperature = state.settings.temperature;
@@ -18208,6 +18472,7 @@ const appLogic = {
 
             if (state.settings.enableMemory && state.isMemoryEnabledForChat && state.activeProfileId) {
                 const memoryData = await dbUtils.getMemory(state.activeProfileId);
+                this.assertSendExecutionV136(preparation);
                 if (memoryData && memoryData.items && memoryData.items.length > 0) {
                     const memoryBlock = `[長期記憶]\n- ${memoryData.items.join('\n- ')}\n---\n\n`;
                     finalSystemPrompt = memoryBlock + finalSystemPrompt;
@@ -18218,16 +18483,21 @@ const appLogic = {
             const systemInstruction = finalSystemPrompt ? { role: "system", parts: [{ text: finalSystemPrompt }] } : null;
 
             const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
-            const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
+            this.assertSendExecutionV136(preparation);
+            const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
+            this.assertSendExecutionV136(preparation);
             
             const finalAggregatedMessage = this._aggregateMessages(newMessages);
             this.attachExecutionMetadataToModelMessage(finalAggregatedMessage, this.completeExecutionMetadata(executionMetadata, finalAggregatedMessage));
             state.currentMessages[modelMessageIndex] = finalAggregatedMessage;
 
-            uiUtils.renderChatMessages();
+            if (preparation.streaming) uiUtils.renderStreamingResult();
+            else uiUtils.renderChatMessages();
 
             // Commit the response and success default atomically.
-            await dbUtils.saveChat(null, null, { skipPush: true, successfulExecution: this.successfulExecutionRecord(finalAggregatedMessage) });
+            await dbUtils.saveChat(null, null, { skipPush: true, sendSession: preparation,
+                successfulExecution: this.successfulExecutionRecord(finalAggregatedMessage) });
+            if (!this.ownsSendExecutionV136(preparation)) return;
 
             this.updateCharacterProfileButtonVisibility();
 
@@ -18242,26 +18512,31 @@ const appLogic = {
             // -------------------------
 
         } catch(error) {
-            console.error("--- handleSend: 最終catchブロックでエラー捕捉 ---", error);
-            const errorMessage = (error.name !== 'AbortError') ? (error.message || "不明なエラーが発生しました。") : "リクエストがキャンセルされました。";
+            if (!this.ownsSendExecutionV136(preparation)) return;
+            const partial = this.getIncompleteStreamMessageV136(preparation);
+            const replacement = partial ? [partial] : [];
+            if (error.name !== 'AbortError') {
+                console.error("--- handleSend: 最終catchブロックでエラー捕捉 ---", error);
+                replacement.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
+                    timestamp: Date.now(), ...(partial && { incomplete: true }) });
+            }
+            state.currentMessages.splice(modelMessageIndex, 1, ...replacement);
+            if (preparation.streaming) uiUtils.renderStreamingResult();
+            else uiUtils.renderChatMessages(() => uiUtils.scrollToBottom());
             
-            state.currentMessages[modelMessageIndex] = { role: 'error', content: errorMessage, timestamp: Date.now() };
-            uiUtils.renderChatMessages(() => uiUtils.scrollToBottom());
-            
-            // エラー発生時もDBに保存
-            await dbUtils.saveChat(null, null, { skipPush: true });
+            // 中断・失敗時も、プレースホルダー除去と取得済み内容を保存する。
+            try {
+                await dbUtils.saveChat(null, null, { skipPush: true, sendSession: preparation });
+            } catch (saveError) {
+                preparation.saveFailed = true;
+                throw saveError;
+            }
         } finally {
-            uiUtils.setSendingState(false);
-            state.abortController = null;
-            state.currentExecutionApiConfig = null;
-            
-            // 処理が完了したこのタイミングで、安全に同期処理をトリガーする
-            this.markAsDirtyAndSchedulePush('message');
-
-            if (state.settings.autoScroll) {
-                requestAnimationFrame(() => {
-                    this.scrollToBottom();
-                });
+            const stillOwner = this.ownsSendExecutionV136(preparation);
+            this.finishSendExecutionV136(preparation);
+            if (stillOwner) {
+                this.markAsDirtyAndSchedulePush('message');
+                if (!preparation.streaming && state.settings.autoScroll) requestAnimationFrame(() => this.scrollToBottom());
             }
         }
     },
@@ -18370,6 +18645,7 @@ const appLogic = {
                 const newTitle = IMPORT_PREFIX + (fileNameWithoutExt || `Imported_${Date.now()}`);
 
                 const newChatData = {
+                    ...SettingsV136.nextChatContentVersion(),
                     messages: importedMessages,
                     systemPrompt: importedSystemPrompt || '',
                     persistentMemory: importedMemory || {},
@@ -19484,10 +19760,6 @@ const appLogic = {
                 newTitleForSave = newRawContent.substring(0, 50) || "無題のチャット";
             }
             await dbUtils.saveChat(newTitleForSave);
-
-            if (requiresTitleUpdate) {
-                uiUtils.updateChatTitle(newTitleForSave);
-            }
             if (
                 hasChangeHistoryChatId(chatIdForHistory) &&
                 CHANGE_HISTORY_ROLES.has(originalRoleForHistory) &&
@@ -19657,20 +19929,13 @@ const appLogic = {
                 uiUtils.renderChatMessages();
     
                 let newTitleForSave = null;
-                const currentChatData = state.currentChatId ? await dbUtils.getChat(state.currentChatId) : null;
     
                 if (requiresTitleUpdate) {
                     const newFirstUserMessage = newFirstUserMsgIndex !== -1 ? state.currentMessages[newFirstUserMsgIndex] : null;
                     newTitleForSave = newFirstUserMessage ? newFirstUserMessage.content.substring(0, 50) : "無題のチャット";
-                } else if (currentChatData) {
-                    newTitleForSave = currentChatData.title;
                 }
     
                 await dbUtils.saveChat(newTitleForSave);
-    
-                if (requiresTitleUpdate) {
-                    uiUtils.updateChatTitle(newTitleForSave);
-                }
     
                 if (state.currentMessages.length === 0 && !state.currentSystemPrompt && state.currentChatId) {
                     console.log("チャットが空になったためリセットします。");
@@ -19698,7 +19963,7 @@ const appLogic = {
         if (!preparation) return;
         try { await this._retryFromMessagePreparedV136(index, preparation); }
         catch (error) { if (error.name !== 'AbortError') throw error; }
-        finally { if (state.sendPreparationV136 === preparation) state.sendPreparationV136 = null; }
+        finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
     },
     async _retryFromMessagePreparedV136(index, preparation) {
         if (await this.guardGenerationMutableAction()) return;
@@ -19720,49 +19985,43 @@ const appLogic = {
             if (state.isSending) return;
             try { this.freezeExecutionSettings(); }
             catch (error) { await uiUtils.showCustomAlert(error.message); return; }
-            uiUtils.setSendingState(true);
-            this.cancelSendPreparationV136();
+            this.startSendExecutionV136(preparation);
             const executionMetadata = this.createExecutionMetadataSnapshot();
     
-            let originalResponses = [];
-            // 保留中のカスケード応答があれば、それを使用する
-            if (state.pendingCascadeResponses) {
-                originalResponses = state.pendingCascadeResponses;
-                console.log("保留中のカスケード応答を復元しました。");
-            } else {
-                const futureMessages = state.currentMessages.slice(index + 1);
-                const firstModelResponse = futureMessages.find(msg => msg.role === 'model');
-                if (firstModelResponse && firstModelResponse.isCascaded && firstModelResponse.siblingGroupId) {
-                    const groupId = firstModelResponse.siblingGroupId;
-                    originalResponses = state.currentMessages.filter(
-                        msg => msg.siblingGroupId === groupId
-                    );
-                } else if (firstModelResponse) {
-                    originalResponses.push(firstModelResponse);
-                }
-            }
-    
-            // 次の再生成に備えて、元の応答をstateに待避させる
-            state.pendingCascadeResponses = originalResponses;
+            const originalSuffix = preparation.originalMessages.slice(index + 1);
+            const nextTurn = originalSuffix.findIndex(message => message.role === 'user');
+            const originalTurn = nextTurn === -1 ? originalSuffix : originalSuffix.slice(0, nextTurn);
+            const firstModel = originalTurn.find(message => message.role === 'model' && !message.incomplete);
+            const originalResponses = firstModel?.siblingGroupId
+                ? originalTurn.filter(message => message.siblingGroupId === firstModel.siblingGroupId)
+                : firstModel ? [firstModel] : [];
             
-            // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
-            appLogic.ensureHistoryWorkerV136();
-        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
-            state.currentMessages.splice(index + 1);
-            uiUtils.renderChatMessages();
-    
-            let modelMessage;
-    
+            let truncated = false;
             try {
+                // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
+                this.ensureHistoryWorkerV136();
+                await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
+                this.assertSendExecutionV136(preparation);
+                state.currentMessages.splice(index + 1);
+                truncated = true;
+                if (preparation.streaming) uiUtils.renderStreamingResult();
+                else uiUtils.renderChatMessages();
+
                 const systemInstruction = state.currentSystemPrompt?.trim() ? { role: "system", parts: [{ text: state.currentSystemPrompt.trim() }] } : null;
                 const baseHistory = state.currentMessages.filter(msg => !msg.isCascaded || msg.isSelected);
                 const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
+                this.assertSendExecutionV136(preparation);
     
-                modelMessage = { role: 'model', content: '', timestamp: Date.now() };
+                const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
+                const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
                 state.currentMessages.push(modelMessage);
                 const modelMessageIndex = state.currentMessages.length - 1;
+                preparation.placeholder = modelMessage;
+                preparation.modelIndex = modelMessageIndex;
                 uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
-                this.scrollToBottom();
+                if (preparation.streaming) {
+                    if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
+                } else this.scrollToBottom();
     
                 const generationConfig = {};
                 if (state.settings.temperature !== null) generationConfig.temperature = state.settings.temperature;
@@ -19771,13 +20030,12 @@ const appLogic = {
                 if (state.settings.topP !== null) generationConfig.topP = state.settings.topP;
 
     
-                const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction);
+                const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
+                this.assertSendExecutionV136(preparation);
                 const newAggregatedMessage = this._aggregateMessages(newMessages);
                 this.attachExecutionMetadataToModelMessage(newAggregatedMessage, this.completeExecutionMetadata(executionMetadata, newAggregatedMessage));
     
-                // 成功したので、待避していたデータを取得し、待避領域をクリア
-                const finalOriginalResponses = state.pendingCascadeResponses || [];
-                state.pendingCascadeResponses = null;
+                const finalOriginalResponses = originalResponses.map(message => ({ ...message }));
 
                 const siblingGroupId = (finalOriginalResponses.length > 0 && finalOriginalResponses[0].siblingGroupId)
                     ? finalOriginalResponses[0].siblingGroupId
@@ -19814,46 +20072,52 @@ const appLogic = {
                 newAggregatedMessage.siblingGroupId = siblingGroupId;
 
                 state.currentMessages.splice(modelMessageIndex, 1, ...finalOriginalResponses, newAggregatedMessage);
-                uiUtils.renderChatMessages();
-                this.scrollToBottom();
-                await dbUtils.saveChat(null, null, { successfulExecution: this.successfulExecutionRecord(newAggregatedMessage) });
+                if (preparation.streaming) uiUtils.renderStreamingResult();
+                else {
+                    uiUtils.renderChatMessages();
+                    this.scrollToBottom();
+                }
+                await dbUtils.saveChat(null, null, { sendSession: preparation,
+                    successfulExecution: this.successfulExecutionRecord(newAggregatedMessage) });
     
             } catch(error) {
-                console.error("再生成エラー:", error);
-                const errorMessage = (error.name !== 'AbortError') ? (error.message || "不明なエラーが発生しました。") : "リクエストがキャンセルされました。";
-                
+                if (!this.ownsSendExecutionV136(preparation)) return;
+                const interrupted = error.name === 'AbortError';
     
-                // 1. プレースホルダーを履歴から削除
-                const placeholderIndex = state.currentMessages.indexOf(modelMessage);
-                if (placeholderIndex !== -1) {
-                    state.currentMessages.splice(placeholderIndex, 1);
+                // Restore this operation's original history and keep any incomplete response in its turn.
+                if (truncated) {
+                    const partial = this.getIncompleteStreamMessageV136(preparation);
+                    state.currentMessages.splice(index + 1);
+                    for (const message of originalTurn) state.currentMessages.push(message);
+                    if (partial) state.currentMessages.push(partial);
+                    if (nextTurn !== -1) for (const message of originalSuffix.slice(nextTurn)) state.currentMessages.push(message);
+                    try {
+                        await dbUtils.saveChat(null, null, { sendSession: preparation });
+                    } catch (saveError) {
+                        preparation.saveFailed = true;
+                        throw saveError;
+                    }
+                    if (!this.ownsSendExecutionV136(preparation)) return;
                 }
     
-                // Restore original response candidates after a failed regeneration.
-                state.currentMessages.push(...(state.pendingCascadeResponses || []));
-                // 2. DBにはエラーメッセージを含まない現在の履歴を保存
-                await dbUtils.saveChat();
+                // 実際のエラーだけを一時表示する。
+                if (!interrupted) {
+                    console.error("再生成エラー:", error);
+                    state.currentMessages.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
+                        timestamp: Date.now(), isNonPersistent: true });
+                }
     
-                // 3. UI表示のためだけに、エラーメッセージを現在のメッセージリストに追加
-                state.currentMessages.push({ role: 'error', content: errorMessage, timestamp: Date.now(), isNonPersistent: true });
+                if (preparation.streaming) uiUtils.renderStreamingResult();
+                else uiUtils.renderChatMessages();
     
-                // 4. UIを再描画（これで「ユーザープロンプト → エラー」表示になる）
-                uiUtils.renderChatMessages();
-    
-                // 5. 次の操作に備え、UI表示用に追加したエラーメッセージを履歴から削除
-                state.currentMessages = state.currentMessages.filter(m => !m.isNonPersistent);
+                if (!interrupted) state.currentMessages.pop();
                 
-                this.scrollToBottom();
+                if (!preparation.streaming) this.scrollToBottom();
     
             } finally {
-                uiUtils.setSendingState(false);
-                state.abortController = null; 
-                state.currentExecutionApiConfig = null;
-                if (state.settings.autoScroll) {
-                    requestAnimationFrame(() => {
-                        this.scrollToBottom();
-                    });
-                }
+                const stillOwner = this.ownsSendExecutionV136(preparation);
+                this.finishSendExecutionV136(preparation);
+                if (stillOwner && !preparation.streaming && state.settings.autoScroll) requestAnimationFrame(() => this.scrollToBottom());
             }
         }
     },    
@@ -20194,8 +20458,21 @@ const appLogic = {
         uiUtils.updateAttachmentBadgeVisibility();
     },
 
+    validateToolCallIdsV136(toolCalls) {
+        const ids = new Set();
+        for (const { functionCall } of toolCalls) {
+            const { _toolCallId, id: nativeId } = functionCall;
+            if (_toolCallId && nativeId && _toolCallId !== nativeId) throw new Error('ツール呼び出しIDが一致しません。');
+            const id = _toolCallId ?? nativeId;
+            if (id == null || id === '') continue; // Gemini may omit the ID.
+            if (typeof id !== 'string' || !id.trim()) throw new Error('ツール呼び出しIDが不正です。');
+            if (ids.has(id)) throw new Error('同じIDのツール呼び出しが応答に複数含まれています。');
+            ids.add(id);
+        }
+    },
+
     async callApiWithRetry(apiParams) {
-        const { messagesForApi, generationConfig, systemInstruction, tools, isFirstCall } = apiParams;
+        const { messagesForApi, generationConfig, systemInstruction, tools, isFirstCall, session } = apiParams;
         let lastError = null;
         const maxRetries = state.settings.enableAutoRetry ? state.settings.maxRetries : 0;
         const forceCalling = state.settings.forceFunctionCalling && isFirstCall;
@@ -20204,6 +20481,18 @@ const appLogic = {
         if (!state.abortController) {
             state.abortController = new AbortController();
         }
+        const userSignal = session?.controller.signal || state.abortController.signal;
+        let receivedStreamData = false;
+        const previousContent = session?.streamContent;
+        const previousThought = session?.getStreamThought?.();
+        const joinTurns = (previous, current) => previous && current ? previous + '\n\n' + current : previous || current;
+        const onStream = (session?.streaming ?? state.settings.enableStreamingOutput === true) ? progress => {
+            receivedStreamData = true;
+            if (session) this.updateSendStreamV136(session, {
+                content: joinTurns(previousContent, progress.content),
+                getThoughtSummary: () => joinTurns(previousThought, progress.getThoughtSummary?.() || progress.thoughtSummary)
+            });
+        } : null;
         
         // タイムアウト設定の取得
         const timeoutEnabled = state.settings.enableApiTimeout || false;
@@ -20218,15 +20507,13 @@ const appLogic = {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             // このリトライ専用のAbortController
             const attemptController = new AbortController();
-            const userSignal = state.abortController.signal;
             const cancelAttempt = () => attemptController.abort();
             userSignal.addEventListener('abort', cancelAttempt, { once: true });
             let timeoutId = null;
             
             try {
-                if (state.abortController?.signal.aborted) {
-                    throw new DOMException("リクエストがキャンセルされました。", "AbortError");
-                }
+                this.assertSendExecutionV136(session);
+                userSignal.throwIfAborted();
 
                 if (attempt > 0) {
                     let delay;
@@ -20240,7 +20527,8 @@ const appLogic = {
 
                     uiUtils.setLoadingIndicatorText(`APIエラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`API呼び出し失敗。${delay}ms後にリトライします... (試行 ${attempt + 1}/${maxRetries + 1})`);
-                    await interruptibleSleep(delay, state.abortController.signal);
+                    await interruptibleSleep(delay, userSignal);
+                    this.assertSendExecutionV136(session);
                 }
 
                 if (attempt === 1) {
@@ -20259,7 +20547,9 @@ const appLogic = {
                     }, timeoutMs);
                 }
 
-                const response = await apiUtils.callApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, attemptController.signal);
+                const response = await apiUtils.callApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling,
+                    attemptController.signal, onStream);
+                this.assertSendExecutionV136(session);
 
                 const getFinishReasonError = (candidate) => {
                     const reason = candidate?.finishReason;
@@ -20289,8 +20579,10 @@ const appLogic = {
                     return null;
                 };
 
-                // 非ストリーミングの処理に統一
+                // Both transports expose the same completed response shape.
                 const responseData = await response.json();
+                this.assertSendExecutionV136(session);
+                attemptController.signal.throwIfAborted();
                 
                 // タイマークリア（成功時）
                 if (timeoutId) {
@@ -20300,7 +20592,8 @@ const appLogic = {
                     console.log(`[API Call] レスポンス取得成功 (所要時間: ${elapsed}ms)`);
                 }
                 
-                if (responseData.promptFeedback) {
+                if (responseData.error) throw new Error(responseData.error.message || 'APIエラー');
+                if (responseData.promptFeedback?.blockReason || (responseData.promptFeedback && !responseData.candidates?.length)) {
                     const blockReason = responseData.promptFeedback.blockReason || 'SAFETY';
                     throw new Error(`APIが応答をブロックしました (理由: ${blockReason})`);
                 }
@@ -20363,6 +20656,11 @@ const appLogic = {
                     throw new Error("APIから空の応答が返されました。");
                 }
 
+                if (session && !receivedStreamData) {
+                    // A complete JSON response may still be interrupted during post-processing.
+                    session.streamContent = joinTurns(previousContent, finalContent);
+                    session.getStreamThought = () => joinTurns(previousThought, finalThoughtSummary.trim());
+                }
                 return {
                     content: finalContent,
                     thoughtSummary: finalThoughtSummary.trim() || null,
@@ -20389,7 +20687,7 @@ const appLogic = {
                 lastError = error;
                 
                 // タイムアウトによるAbortの判定
-                if (error.name === 'AbortError' && attemptController.signal.aborted && !state.abortController?.signal.aborted) {
+                if (attemptController.signal.aborted && !userSignal.aborted) {
                     // attemptControllerによるAbort = タイムアウト
                     const timeoutError = new Error(`APIタイムアウト: ${timeoutMs}ms以内にレスポンスが返りませんでした。`);
                     timeoutError.isTimeout = true;
@@ -20399,10 +20697,11 @@ const appLogic = {
                 }
                 
                 // ユーザーによる手動キャンセル
-                if (state.abortController?.signal.aborted) {
-                    console.error("待機中または通信中に中断されました。リトライを中止します。", error);
+                if (userSignal.aborted) {
                     throw new DOMException('リクエストがキャンセルされました。', 'AbortError');
                 }
+                if (session && !this.ownsSendExecutionV136(session)) throw error;
+                if (receivedStreamData || session?.receivedStreamData) throw lastError;
                 
                 // 4xx系エラーは即座に終了
                 if (error.status && error.status >= 400 && error.status < 500) {
@@ -20453,20 +20752,21 @@ const appLogic = {
     },
 
     // --- Function Calling用ヘルパー ---
-    async updateOpacitySettings(opacitySettings) {
+    async updateOpacitySettings(opacitySettings, signal) {
+        signal?.throwIfAborted();
         let settingsChanged = false;
         const changedItems = [];
 
         if (typeof opacitySettings.overlay === 'number' && opacitySettings.overlay >= 0 && opacitySettings.overlay <= 1) {
-            state.settings.overlayOpacity = opacitySettings.overlay;
-            await this.saveAppearanceValues('appearance', { overlayOpacity: opacitySettings.overlay });
+            await this.saveAppearanceValues('appearance', { overlayOpacity: opacitySettings.overlay }, { signal });
+            signal?.throwIfAborted();
             document.documentElement.style.setProperty('--overlay-opacity-value', state.settings.overlayOpacity);
             changedItems.push(`オーバーレイの濃さを${Math.round(opacitySettings.overlay * 100)}%に`);
             settingsChanged = true;
         }
         if (typeof opacitySettings.message_bubble === 'number' && opacitySettings.message_bubble >= 0.1 && opacitySettings.message_bubble <= 1) {
-            state.settings.messageOpacity = opacitySettings.message_bubble;
-            await this.saveAppearanceValues('appearance', { messageOpacity: opacitySettings.message_bubble });
+            await this.saveAppearanceValues('appearance', { messageOpacity: opacitySettings.message_bubble }, { signal });
+            signal?.throwIfAborted();
             changedItems.push(`メッセージバブルの濃さを${Math.round(opacitySettings.message_bubble * 100)}%に`);
             settingsChanged = true;
         }
@@ -21443,6 +21743,84 @@ const appLogic = {
     },
 
 
+    createChatTitleGenerationV136({ content, timestamp }) {
+        const settings = state.globalSettingsV136 || state.settings;
+        if (settings.enableChatTitleGeneration !== true || !content.trim()
+            || state.currentMessages.some(m => m.role === 'user' && !m.isHidden)) return null;
+        const ref = settings.chatTitleModelRef;
+        if (!this.validateModelRef(ref).valid) return null;
+        return {
+            id: crypto.getRandomValues(new Uint32Array(4)).join('-'),
+            text: content,
+            timestamp,
+            config: this.resolveApiConfigForModelRef(ref),
+            prompt: settings.chatTitleSystemPrompt ?? SettingsV136.chatTitleDefaults.chatTitleSystemPrompt
+        };
+    },
+
+    async generateChatTitleV136(chatId, generation) {
+        const controller = new AbortController();
+        const key = String(chatId);
+        const finish = () => {
+            if (state.chatTitleGenerations.get(key) !== controller) return;
+            state.chatTitleGenerations.delete(key);
+            uiUtils.syncChatSidebarTitleGeneration(chatId);
+        };
+        state.chatTitleGenerations.set(key, controller);
+        controller.signal.addEventListener('abort', finish, { once: true });
+        uiUtils.syncChatSidebarTitleGeneration(chatId);
+        const timeout = setTimeout(() => controller.abort(), CHAT_TITLE_GENERATION_TIMEOUT_MS);
+        let title = null;
+        try {
+            const prompt = generation.prompt;
+            const response = await this.callAuxiliaryApiV136(generation.config, {
+                ...(prompt && { systemInstruction: { parts: [{ text: prompt }] } }),
+                contents: [{ role: 'user', parts: [{ text: generation.text }] }]
+            }, controller.signal);
+            if (!controller.signal.aborted && typeof response === 'string') {
+                const wrappers = [['**', '**'], ['__', '__'], ['~~', '~~'], ['*', '*'], ['_', '_'], ['`', '`'],
+                    ['"', '"'], ["'", "'"], ['“', '”'], ['‘', '’'], ['「', '」'], ['『', '』'], ['＂', '＂'], ['＇', '＇']];
+                const stripDecoration = value => {
+                    let line = value.trim();
+                    for (;;) {
+                        const pair = wrappers.find(([open, close]) => line.length >= open.length + close.length
+                            && line.startsWith(open) && line.endsWith(close));
+                        if (!pair) return line;
+                        line = line.slice(pair[0].length, -pair[1].length).trim();
+                    }
+                };
+                const lines = response.trim().replace(/^```[^\r\n]*\r?\n/, '').split(/\r?\n|\r/);
+                for (const rawLine of lines) {
+                    let line = stripDecoration(rawLine.replace(/^\s*(?:#{1,6}\s+|>\s*|[-+]\s+|\d+\.\s+)/, ''));
+                    line = stripDecoration(line.replace(/^(?:(?:チャット)?タイトル|(?:chat\s+)?title)\s*[:：]\s*/i, ''))
+                        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                        .replace(/(\*\*|__|~~|`|\*)(\S(?:.*?\S)?)\1/g, '$2');
+                    if (!line || /^[*_`~]+$/.test(line)) continue;
+                    title = Array.from(line.replace(/\s+/g, ' ')).slice(0, 50).join('');
+                    break;
+                }
+            }
+        } catch (error) {
+            if (!controller.signal.aborted) console.warn('チャットタイトルの生成に失敗しました。', error);
+        } finally {
+            clearTimeout(timeout);
+        }
+        try {
+            const updated = await dbUtils.updateChatTitleDb(chatId, title, generation);
+            if (!updated) return;
+            if (state.currentChatId === chatId) {
+                if (state.isEditingChatTitle) state.chatTitleBeforeEdit = updated.title;
+                uiUtils.updateChatTitle(updated.title);
+            }
+            this.markAsDirtyAndSchedulePush(state.isSending ? 'message' : 'structural');
+            await chatListChangeController.notify({ type: 'rename', chatId, ...updated });
+        } catch (error) {
+            console.warn('自動生成したチャットタイトルの保存に失敗しました。', error);
+        } finally {
+            finish();
+        }
+    },
+
     async resolveAuxiliaryApiConfigV136(refKey, legacyKey, fallbackModel) {
         const stored = await dbUtils.getSetting('apiConfigs');
         state.apiConfigs = this.normalizeApiConfigs(stored?.value || []);
@@ -21470,8 +21848,9 @@ const appLogic = {
             ? '品質判定モデルは画像入力に対応していません。設定で画像対応モデルを選び直してください。'
             : '品質判定モデルの画像入力能力を確認できません。接続を確認するか、確認済みの画像対応モデルを選び直してください。');
     },
-    async callAuxiliaryApiV136(config, requestBody) {
+    async callAuxiliaryApiV136(config, requestBody, signal) {
         if (requestBody.contents?.some(m => m.parts?.some(p => p.inlineData))) await this.assertAuxiliaryImageInputV136(config);
+        signal?.throwIfAborted();
         let body = structuredClone(requestBody), endpoint, headers = { 'Content-Type': 'application/json' };
         if (config.provider === 'gemini') {
             if (!config.apiKey) throw new Error(this.getApiKeyMissingMessage(config, 'gemini'));
@@ -21497,10 +21876,11 @@ const appLogic = {
                     ? { image: { format: p.inlineData.mimeType.split('/')[1], source: { bytes: Uint8Array.from(atob(p.inlineData.data), c => c.charCodeAt(0)) } } }
                     : { text: p.text || '' }) })),
                 ...(body.systemInstruction && { system: body.systemInstruction.parts }),
-                inferenceConfig: { temperature: body.generationConfig?.temperature ?? 0.5 } }));
+                inferenceConfig: { temperature: body.generationConfig?.temperature ?? 0.5 } }),
+                signal ? { abortSignal: signal } : undefined);
             return (result.output?.message?.content || []).map(p => p.text || '').join('');
         } else throw new Error('補助機能のAPIプロバイダーに対応していません。');
-        const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+        const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
         if (!response.ok) throw new Error(`補助機能のAPIエラー (${response.status})`);
         const data = await response.json();
         return config.provider === 'gemini' ? (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('')
@@ -21520,7 +21900,7 @@ const appLogic = {
                 return;
             }
             const firstUserMessageIndex = state.currentMessages.indexOf(userMessagesInInterval[0]);
-            const historyToSummarize = state.currentMessages.slice(firstUserMessageIndex);
+            const historyToSummarize = state.currentMessages.slice(firstUserMessageIndex).filter(message => !message.incomplete);
 
             const conversationText = historyToSummarize.map(msg => {
                 return `${msg.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${msg.content}`;
@@ -22027,9 +22407,6 @@ const appLogic = {
                 message.timestamp = Date.now();
             });
             const savedChatId = await dbUtils.saveChat(newTitleForSave);
-            if (newTitleForSave) {
-                uiUtils.updateChatTitle(newTitleForSave);
-            }
 
             const chatIdForHistory = savedChatId || state.currentChatId || chatIdBeforeSave;
             let historySaved = false;
@@ -22432,7 +22809,8 @@ const appLogic = {
 
         // フィルタリング後のメッセージリストから要約対象を切り出す
         const messagesToSummarize = visibleMessages.slice(start, end);
-        const originalText = messagesToSummarize.map(m => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.content}`).join('\n\n');
+        const originalText = messagesToSummarize.filter(message => !message.incomplete)
+            .map(m => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.content}`).join('\n\n');
 
         const confirmed = await uiUtils.showCustomConfirm(
             `履歴を要約しますか？\n\n要約を実行すると、対象範囲のメッセージ（${messagesToSummarize.length}件）は編集・削除・再生成ができなくなります。この操作は元に戻せません。`,
@@ -23019,11 +23397,10 @@ const appLogic = {
             }
 
             console.log("[Data Export V2] チャット履歴内の添付ファイルのアセット化とデータクレンジングを開始します...");
-            const blobsToSaveToImageStore = [];
-
-            // DBから直接読み込んだデータを操作し、stateを汚染しないようにする
-            const allDbChats = await dbUtils.getAllChats();
-            for (const chat of allDbChats) {
+            const chatAssets = new Map();
+            for (const chat of chats) {
+                // Keep inline attachments while the editor owns this snapshot.
+                if (chat.id === state.currentChatId) continue;
                 if (chat.messages) {
                     for (const message of chat.messages) {
                         if (message.imageIds && Array.isArray(message.imageIds)) {
@@ -23034,14 +23411,13 @@ const appLogic = {
                             const newImageIdsForMessage = [];
                             for (const attachment of message.attachments) {
                                 if (!attachment.assetId && attachment.base64Data) {
-                                    attachment.assetId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-                                    if (!chat._needsUpdate) chat._needsUpdate = true;
-                                    
                                     try {
                                         const blob = await this.base64ToBlob(attachment.base64Data, attachment.mimeType);
+                                        attachment.assetId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
                                         addAsset(attachment.assetId, blob);
                                         newImageIdsForMessage.push(attachment.assetId);
-                                        blobsToSaveToImageStore.push({ id: attachment.assetId, blob: blob });
+                                        if (!chatAssets.has(chat.id)) chatAssets.set(chat.id, []);
+                                        chatAssets.get(chat.id).push({ id: attachment.assetId, blob });
                                     } catch (e) {
                                         console.error(`[Data Export V2] 新規添付ファイルのアセット化に失敗:`, e);
                                     }
@@ -23065,15 +23441,6 @@ const appLogic = {
             }
             console.log("[Data Export V2] アセット化とクレンジングが完了しました。");
 
-            if (blobsToSaveToImageStore.length > 0) {
-                console.log(`[Data Export V2] ${blobsToSaveToImageStore.length}件の新規アセットBlobをimage_storeに永続化します。`);
-                const tx = state.db.transaction('image_store', 'readwrite');
-                const store = tx.objectStore('image_store');
-                for (const item of blobsToSaveToImageStore) {
-                    store.put(item);
-                }
-            }
-
             const assetsToUpdate = imageAssets.filter(a => a._needsUpdate);
             if (assetsToUpdate.length > 0) {
                 console.log(`[Data Export V2] ${assetsToUpdate.length}件のimage_assetsにassetIdを永続化します。`);
@@ -23084,27 +23451,30 @@ const appLogic = {
                     store.put(asset);
                 }
             }
-            const chatsToUpdate = allDbChats.filter(c => c._needsUpdate);
+            const chatsToUpdate = chats.filter(chat => chatAssets.has(chat.id));
             if (chatsToUpdate.length > 0) {
                 console.log(`[Data Export V2] ${chatsToUpdate.length}件のチャットにattachmentのassetIdを永続化します。`);
-                const tx = state.db.transaction(CHATS_STORE, 'readwrite');
+                const tx = state.db.transaction([CHATS_STORE, IMAGE_STORE], 'readwrite');
                 const store = tx.objectStore(CHATS_STORE);
                 for (const chat of chatsToUpdate) {
 
                     // DBに保存する前にディープコピーを作成し、コピーからbase64Dataを削除する
-                    const chatForDb = JSON.parse(JSON.stringify(chat));
-                    chatForDb.messages.forEach(msg => {
+                    const messagesForDb = structuredClone(chat.messages);
+                    messagesForDb.forEach(msg => {
                         if (msg.attachments) {
-                            msg.attachments.forEach(att => delete att.base64Data);
+                            msg.attachments.forEach(att => { if (att.assetId) delete att.base64Data; });
                         }
                     });
-                    delete chatForDb._needsUpdate;
-                    store.put(chatForDb);
-
-                    // メモリ上のstate.currentMessagesは、base64Dataが削除されていない元のchatオブジェクトで更新する
-                    if (chat.id === state.currentChatId) {
-                        state.currentMessages = chat.messages;
-                    }
+                    const request = store.get(chat.id);
+                    request.onsuccess = () => {
+                        const current = request.result;
+                        if (!current || chat.id === state.currentChatId
+                            || !SettingsV136.sameChatContentVersion(current, SettingsV136.chatContentVersion(chat))) return;
+                        // Preserve the title and any metadata committed since the export read.
+                        store.put({ ...current, ...SettingsV136.nextChatContentVersion(current), messages: messagesForDb });
+                        const imageStore = tx.objectStore(IMAGE_STORE);
+                        for (const image of chatAssets.get(chat.id)) imageStore.put(image);
+                    };
                 }
             }
 
@@ -23134,6 +23504,12 @@ const appLogic = {
             }
 
             const syncId = 'sync_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+            for (const chat of chats) {
+                delete chat.titleGenerationId;
+                delete chat.titleGenerationEligible;
+                delete chat.recordGenerationId;
+                delete chat.contentRevision;
+            }
             const metadata = {
                 version: "2.0",
                 settingsSchemaVersion: 136,
@@ -23407,7 +23783,7 @@ const appLogic = {
     },
 
     // --- Stable Diffusion連携機能の本体ロジック ---
-    handleStableDiffusionGeneration: async function(args, responseText = '') {
+    handleStableDiffusionGeneration: async function(args, responseText = '', signal) {
         if (!state.settings.sdApiUrl) {
             return { error: "Stable Diffusion WebUIのURLが設定されていません。" };
         }
@@ -23422,19 +23798,25 @@ const appLogic = {
             for (let i = 0; i <= maxRetries; i++) {
                 if (i > 0) {
                     uiUtils.setLoadingIndicatorText(`プロンプト改善中... (${i}/${maxRetries})`);
-                    currentPrompt = await this._improveSdPrompt(args.prompt, currentPrompt, qualityCheckResult.reason);
+                    currentPrompt = await runToolRequestV136(signal, configuredApiTimeoutV136(),
+                        requestSignal => this._improveSdPrompt(args.prompt, currentPrompt, qualityCheckResult.reason, requestSignal));
                 }
                 
+                signal?.throwIfAborted();
                 uiUtils.setLoadingIndicatorText('SDで画像生成中...');
                 const payload = { ...args, prompt: currentPrompt };
-                generatedImageBlob = await this.callStableDiffusionApi(payload);
+                generatedImageBlob = await runToolRequestV136(signal, configuredApiTimeoutV136(),
+                    requestSignal => this.callStableDiffusionApi(payload, requestSignal));
+                signal?.throwIfAborted();
 
                 if (!isQcEnabled) {
                     break;
                 }
 
                 uiUtils.setLoadingIndicatorText('品質チェック中...');
-                qualityCheckResult = await this.runQualityChecker(generatedImageBlob, currentPrompt, responseText);
+                qualityCheckResult = await runToolRequestV136(signal, configuredApiTimeoutV136(),
+                    requestSignal => this.runQualityChecker(generatedImageBlob, currentPrompt, responseText, requestSignal));
+                signal?.throwIfAborted();
 
                 // runQualityCheckerの実行直後に、その結果をログに出力する
                 console.log(`[Quality Check Cycle ${i + 1}/${maxRetries + 1}] 判定: ${qualityCheckResult.result}。理由: ${qualityCheckResult.reason || 'N/A'}`);
@@ -23448,7 +23830,7 @@ const appLogic = {
                 }
             }
 
-            const imageId = await this.saveImageBlob(generatedImageBlob);
+            const imageId = await this.saveImageBlob(generatedImageBlob, signal);
 
             return {
                 success: true,
@@ -23565,7 +23947,7 @@ const appLogic = {
             }
         },
 
-    async _improveSdPrompt(originalPrompt, failedPrompt, ngReason) {
+    async _improveSdPrompt(originalPrompt, failedPrompt, ngReason, signal) {
         const config = await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef', 'sdPromptImproveModel', 'gemini-2.5-flash');
         const systemPrompt = state.settings.sdPromptImproveSystemPrompt;
 
@@ -23577,7 +23959,7 @@ const appLogic = {
             generationConfig: { temperature: 0.5 }
         };
 
-        const improvedPrompt = await this.callAuxiliaryApiV136(config, requestBody);
+        const improvedPrompt = await this.callAuxiliaryApiV136(config, requestBody, signal);
 
         if (!improvedPrompt) throw new Error("プロンプト改善APIから有効な応答が得られませんでした。");
         
@@ -23585,7 +23967,7 @@ const appLogic = {
         return improvedPrompt;
     },
 
-    runQualityChecker: async function(imageBlob, prompt, responseText = '') {
+    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
         const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
@@ -23603,7 +23985,7 @@ const appLogic = {
             generationConfig: { temperature: 0.1 }
         };
 
-        const text = await this.callAuxiliaryApiV136(config, requestBody);
+        const text = await this.callAuxiliaryApiV136(config, requestBody, signal);
 
         if (text.includes('Result: OK')) {
             const result = { result: 'OK', reason: '' };
@@ -23618,7 +24000,7 @@ const appLogic = {
         }
     },
 
-    callStableDiffusionApi: async function(args) {
+    callStableDiffusionApi: async function(args, signal) {
         const apiUrl = state.settings.sdApiUrl.trim().replace(/\/$/, '');
         const endpoint = `${apiUrl}/sdapi/v1/txt2img`;
 
@@ -23670,7 +24052,8 @@ const appLogic = {
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: headers,
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal
         });
 
         if (!response.ok) {
@@ -23693,7 +24076,7 @@ const appLogic = {
 
 
 
-    runQualityChecker: async function(imageBlob, prompt, responseText = '') {
+    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
         const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
@@ -23711,7 +24094,7 @@ const appLogic = {
             generationConfig: { temperature: 0.1 }
         };
 
-        const text = await this.callAuxiliaryApiV136(config, requestBody);
+        const text = await this.callAuxiliaryApiV136(config, requestBody, signal);
 
         if (text.includes('Result: OK')) {
             return { result: 'OK', reason: '' };
@@ -23769,15 +24152,14 @@ const chatHistoryActions = {
         if (normalizedId === null) throw new Error('チャットIDが無効です。');
         if (!normalizedTitle) throw new Error('タイトルが空です。');
 
-        await dbUtils.updateChatTitleDb(normalizedId, normalizedTitle);
+        const updated = await dbUtils.updateChatTitleDb(normalizedId, normalizedTitle);
         if (state.currentChatId === normalizedId) {
             uiUtils.updateChatTitle(normalizedTitle);
         }
         await chatListChangeController.notify({
             type: 'rename',
             chatId: normalizedId,
-            title: normalizedTitle,
-            updatedAt: Date.now()
+            ...updated
         });
         return { ok: true, chatId: normalizedId, title: normalizedTitle };
     },
