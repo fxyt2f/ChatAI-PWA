@@ -1431,6 +1431,16 @@ body.dark-mode .new-chat-button {
     }
 }
 
+/* In wide touch sidebars, reveal menus through selection, focus or an open
+   popup. Keep the title column stable and ignore touch-generated hover. */
+@media (hover: none), (pointer: coarse) {
+    .wide-mode-enabled :is(.chat-sidebar-mode-overlay, .chat-sidebar-mode-permanent)
+        .chat-sidebar-item:not([aria-current="page"], .menu-active, :focus-within) .chat-sidebar-item-menu {
+        opacity: 0;
+        pointer-events: none;
+    }
+}
+
 .chat-sidebar-title-line {
     display: flex;
     align-items: center;
@@ -1690,6 +1700,18 @@ body.dark-mode #settings-screen::after {
     align-items: center;
     gap: 8px;
 }
+.chat-parameter-menu.history-item-menu {
+    position: absolute;
+    inset: 52px 12px auto auto;
+    max-width: calc(100% - 24px);
+}
+.chat-parameter-menu[hidden] { display: none; }
+.system-prompt-dialog .chat-parameter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+.chat-parameter-grid > div { min-width: 0; }
+.chat-parameter-grid input { width: 100%; box-sizing: border-box; }
 .system-prompt-dialog .system-prompt-dialog-title {
     margin: 0;
     min-width: 0;
@@ -1726,7 +1748,7 @@ body.dark-mode #settings-screen::after {
 .system-prompt-editor {
     display: block;
     width: 100%;
-    min-height: min(320px, max(48px, calc(var(--chat-dialog-height, 600px) - 180px)));
+    min-height: min(220px, max(72px, calc(var(--chat-dialog-height, 600px) - 330px)));
     flex: 1 1 auto;
     max-height: min(560px, max(48px, calc(var(--chat-dialog-height, 600px) - 160px)));
     margin: 0;
@@ -1745,12 +1767,8 @@ body.dark-mode #settings-screen::after {
     color: var(--text-secondary);
     font-size: 0.78rem;
 }
-.system-prompt-char-count,
-.system-prompt-save-status {
+.system-prompt-char-count {
     min-width: 0;
-}
-.system-prompt-save-status.is-error {
-    color: var(--text-error);
 }
 
 @media screen and (max-width: 600px) {
@@ -6219,9 +6237,9 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
 }
 
 /* v1.36 settings: shared controls, independent scroll pane, mobile category navigation. */
-#settings-screen .settings-layout { display:grid; grid-template-columns:210px minmax(0,1fr); flex:1; min-height:0; overflow:hidden; position:relative; z-index:1; }
+#settings-screen .settings-layout { display:grid; grid-template-columns:240px minmax(0,1fr); flex:1; min-height:0; overflow:hidden; position:relative; z-index:1; }
 #settings-screen .settings-category-nav { padding:24px 12px; border-right:1px solid var(--border-primary); background:var(--bg-primary); overflow-y:auto; }
-.settings-category-nav button { display:flex; align-items:center; gap:12px; width:100%; min-height:48px; padding:12px; margin:0 0 6px; border:0; border-radius:12px; background:transparent; color:var(--text-secondary); text-align:left; font:inherit; font-size:14px; cursor:pointer; }
+.settings-category-nav button { display:flex; align-items:center; gap:12px; width:100%; min-height:48px; padding:12px; margin:0 0 6px; border:0; border-radius:12px; background:transparent; color:var(--text-secondary); text-align:left; white-space:nowrap; font:inherit; font-size:14px; cursor:pointer; }
 .settings-category-nav button:hover { background:var(--bg-tertiary); }
 .settings-category-nav button[aria-current] { background:var(--sidebar-selected-bg); color:var(--text-primary); font-weight:600; }
 .settings-category-nav .material-symbols-outlined { font-size:21px; }

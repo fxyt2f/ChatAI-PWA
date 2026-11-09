@@ -20,6 +20,7 @@
         };
     }
     const ids = [936101, 936102, 936103];
+    const longTitle = 'サイドバーでピンとタイトル生成を同時に表示する長いチャット名'.repeat(2);
     const row = id => document.querySelector(`#chat-sidebar-list .chat-sidebar-item[data-chat-id="${id}"]`);
     const menu = id => row(id).querySelector('.chat-sidebar-item-menu');
     const open = id => row(id).querySelector('.chat-sidebar-item-open');
@@ -66,9 +67,9 @@
             const now = Date.now() + 3600000;
             await new Promise((resolve, reject) => {
                 const tx = st.db.transaction('chats', 'readwrite');
-                ids.forEach((id, i) => tx.objectStore('chats').put({ id, title: ['選択中のチャット', 'ホバーするチャット', 'もう一つのチャット'][i],
+                ids.forEach((id, i) => tx.objectStore('chats').put({ id, title: ['選択中のチャット', 'ホバーするチャット', longTitle][i],
                     profileId: st.activeProfileId, messages: [{ role: 'user', content: `sidebar hover message ${i}`, timestamp: now }],
-                    createdAt: now - i, updatedAt: now - i, isPinned: false }));
+                    createdAt: now - i, updatedAt: now - i, isPinned: id === ids[2] }));
                 tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
             });
             await app.loadChat(ids[0], { scrollAfterLoad: false });
@@ -87,13 +88,15 @@
         },
         point(id, target = 'open') { return rect(target === 'menu' ? menu(id) : open(id)); },
         async baseline(touch) {
-            await wait(() => ids.every(id => getComputedStyle(menu(id)).opacity === (touch ? '1' : '0')), 'idle menu opacity');
+            const shown = id => touch && row(id).getAttribute('aria-current') === 'page';
+            await wait(() => ids.every(id => getComputedStyle(menu(id)).opacity === (shown(id) ? '1' : '0')), 'idle menu opacity');
             ids.forEach(id => {
-                check(getComputedStyle(menu(id)).pointerEvents === (touch ? 'auto' : 'none'), 'idle pointer handling');
+                check(getComputedStyle(menu(id)).pointerEvents === (shown(id) ? 'auto' : 'none'), 'idle pointer handling');
                 check(menu(id).tabIndex === 0, 'menu remains in keyboard tab order');
                 const b = rect(menu(id));
-                check(b.width === 40 && b.height === 40, '40px menu hit area');
-                if (!touch) check(!document.elementFromPoint(b.x + 20, b.y + 20)?.closest('.chat-sidebar-item-menu'), 'hidden menu excluded from hit testing');
+                check(b.width === 40 && b.height === 40, '40px menu column');
+                check((document.elementFromPoint(b.x + 20, b.y + 20)?.closest('.chat-sidebar-item-menu') === menu(id)) === shown(id),
+                    'only visible menu participates in hit testing');
             });
             verifyWidths();
             check(getComputedStyle(menu(ids[1])).transitionProperty.includes('opacity') &&
@@ -143,6 +146,36 @@
         focusMenu(id) {
             check(document.activeElement === menu(id), 'native Tab reaches menu button');
             check(getComputedStyle(menu(id)).pointerEvents === 'auto', 'keyboard focus reveals menu');
+        },
+        idleTap() {
+            check($('history-item-menu').classList.contains('hidden'), 'tap on hidden menu does not open popup');
+            check(st.currentChatId === ids[0], 'tap on hidden menu leaves selection unchanged');
+        },
+        async touchPinned(id) {
+            await wait(async () => (await db.getChat(id)).isPinned === true, 'touch menu action persists pin');
+            await wait(() => row(id)?.querySelector('.chat-pin-icon'), 'touch menu action updates pinned row');
+            check($('history-item-menu').classList.contains('hidden'), 'touch menu closes after action');
+        },
+        titleDecorations() {
+            const id = ids[2], button = open(id);
+            const pin = button.querySelector('.chat-pin-icon');
+            const title = button.querySelector('.chat-sidebar-item-title');
+            const dot = button.querySelector('.chat-sidebar-title-dot');
+            check(pin && rect(pin).width > 0 && dot.hidden, 'pinned icon visible and idle indicator hidden');
+            st.chatTitleGenerations.set(String(id), new AbortController());
+            try {
+                ui.syncChatSidebarTitleGeneration(id);
+                const titleRect = rect(title), dotRect = rect(dot);
+                check(!dot.hidden && dotRect.width > 0 && button.getAttribute('aria-label').includes('タイトル生成中'),
+                    'title generation indicator shown');
+                check(title.title === longTitle && title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === 'ellipsis',
+                    'long title retains ellipsis and full title');
+                check(rect(pin).right <= titleRect.left && titleRect.right <= dotRect.left && dotRect.right <= rect(menu(id)).left,
+                    'pin, title, and indicator fit before the menu');
+            } finally {
+                st.chatTitleGenerations.delete(String(id));
+                ui.syncChatSidebarTitleGeneration(id);
+            }
         },
         blur: resetFocus,
         async redraw() {

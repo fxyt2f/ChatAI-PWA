@@ -117,7 +117,7 @@
         input(value) { const editor = $('system-prompt-editor'); editor.value = value; editor.dispatchEvent(new Event('input', { bubbles: true })); },
         async autosaved() {
             await wait(async () => (await db.getChat(st.currentChatId)).systemPrompt === '700msの自動保存', '700ms autosave persists');
-            check($('system-prompt-save-status').textContent.includes('保存済み'), 'saved status shown');
+            check(!$('system-prompt-save-status'), 'save status presentation is removed');
             check($('system-prompt-char-count').textContent.includes(String('700msの自動保存'.length)), 'character count updates');
             check($('system-prompt-dialog').open, 'autosave keeps dialog open');
         },
@@ -126,6 +126,7 @@
         async failedSaveStaysOpen() {
             await wait(() => st.systemPromptSaveStatus === 'error', 'save failure status');
             check($('system-prompt-dialog').open && st.isEditingSystemPrompt, 'failed save retains editor');
+            check($('chat-parameter-save-error')?.getAttribute('role') === 'alert', 'failure is announced without a persistent status area');
             db.saveChat = oldSave;
         },
         sending(value) { st.isSending = value; ui.setSendingState(value); },

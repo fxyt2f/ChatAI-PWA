@@ -78,10 +78,21 @@ def run(client, root):
                     ev('sidebarHoverV1361.redraw()'); ev('sidebarHoverV1361.baseline(false)')
                     move(item(ids[1])); ev(f'sidebarHoverV1361.hovered({ids[1]})')
                 else:
-                    activate(item(ids[1], 'menu'), True); ev(f'sidebarHoverV1361.opened({ids[1]})')
-                    key('Escape', 'Escape', 27); ev(f'sidebarHoverV1361.escaped({ids[1]})')
+                    ev('sidebarHoverV1361.titleDecorations()')
+                    capture(f'{width}-{"dark" if dark else "light"}-touch.png')
+                    activate(item(ids[1], 'menu'), True); ev('sidebarHoverV1361.idleTap()')
+                    ev('sidebarHoverV1361.baseline(true)')
+                    ev(f'sidebarHoverV1361.focusOpen({ids[2]})'); key('Tab', 'Tab', 9)
+                    ev(f'sidebarHoverV1361.focusMenu({ids[2]})')
+                    key('Enter', 'Enter', 13); ev(f'sidebarHoverV1361.opened({ids[2]})')
+                    key('Escape', 'Escape', 27); ev(f'sidebarHoverV1361.escaped({ids[2]})')
+                    ev('sidebarHoverV1361.blur()'); ev('sidebarHoverV1361.baseline(true)')
                 activate(item(ids[1]), touch); ev('sidebarHoverV1361.switched()')
                 move(); ev('sidebarHoverV1361.blur()'); ev(f'sidebarHoverV1361.baseline({str(touch).lower()})')
+                if touch:
+                    activate(item(ids[1], 'menu'), True); ev(f'sidebarHoverV1361.opened({ids[1]})')
+                    activate('#history-item-menu [data-history-menu-action="pin"]', True)
+                    ev(f'sidebarHoverV1361.touchPinned({ids[1]})')
                 records.append({'width': width, 'touch': touch, 'dark': dark, 'media': media, **prepared,
                                 'assertions': ev('sidebarHoverV1361.count()') - before})
 

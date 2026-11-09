@@ -14,16 +14,48 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
     const wait=async fn=>{const end=Date.now()+2000;while(!await fn()){if(Date.now()>end)throw new Error('Timed out waiting for saved UI state');await new Promise(r=>setTimeout(r,10));}};
     const event=(id,value,type='input')=>{const input=$(id);if(input.type==='checkbox')input.checked=value;else input.value=value;input.dispatchEvent(new Event(type,{bubbles:true}));};
     const openModelPicker=()=>{ $('chat-model-button').click();if(view.popover?.classList.contains('thinking-popover'))view.popover.querySelector('.thinking-model-switch').click(); };
+    const categories=['general','ai-tools','appearance','profile','integrations','other'];
     await test('UI categories retain existing controls and remove obsolete budget/profile model labels',async()=>{
-        eq(document.querySelectorAll('[data-settings-category]').length,4);eq(document.querySelectorAll('[data-settings-panel]').length,4);
+        eq([...document.querySelectorAll('[data-settings-category]')].map(node=>node.dataset.settingsCategory),categories);
+        eq([...document.querySelectorAll('[data-settings-panel]')].map(node=>node.dataset.settingsPanel),categories);
+        eq([...$('settings-panel-appearance').querySelectorAll(':scope > .settings-group > h2')].map(node=>node.textContent),['テーマ','色設定','背景・表示効果','表示設定']);
         eq(document.querySelectorAll('#settings-screen details').length,1);assert($('data-danger-settings').querySelector('details'));assert(!$('thinking-budget'));assert(!$('theme-settings-profile-scoped-toggle'));
         assert(!document.querySelector('.profile-menu-model'));assert(!$('profile-display-name-sub').textContent.includes('gemini'));
-        for(const id of ['model-name','include-thoughts-toggle','enable-proofreading','summary-model-name','dark-mode-toggle','background-image-input'])assert($(id).closest('[data-settings-panel]').dataset.settingsPanel==='general',id);
-        for(const id of ['enable-memory-toggle','temperature','dummy-user','gemini-enable-function-calling-toggle'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'profile');
-        for(const id of ['dropbox-app-key-input','google-search-api-key','sd-api-url','sd-qc-model'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'integrations');
+        for(const id of ['model-name','include-thoughts-toggle','enable-proofreading','summary-model-name'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'general');
+        for(const id of ['dark-mode-toggle','theme-color-mode-select','background-image-input','chat-font-size-select','hide-system-prompt-toggle'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'appearance');
+        eq($('history-sort-order').closest('[data-settings-panel]').dataset.settingsPanel,'other');
+        eq($('history-sort-order').closest('.settings-group').querySelector('h2').textContent,'履歴管理');
+        const wide = $('enable-wide-mode-toggle').closest('.settings-field');
+        assert(wide.nextElementSibling.contains($('hide-system-prompt-toggle')));
+        const labels = {'chat-title-model':'タイトル生成用モデル:', 'chat-title-system-prompt':'タイトル生成用プロンプト:',
+            'memory-extraction-model':'記憶抽出モデル:', 'memory-extraction-prompt':'記憶抽出プロンプト:', 'chat-font-size-select':'文字サイズ:', 'chat-line-height-select':'行間:',
+            'chat-paragraph-margin-bottom-select':'段落間隔:', 'system-prompt-default':'システムプロンプト:'};
+        for (const [id, text] of Object.entries(labels)) eq(document.querySelector(`label[for="${id}"]`).textContent.trim(),text);
+        for(const id of ['enable-memory-toggle','temperature','dummy-user','memory-extraction-prompt'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'profile');
+        for(const id of ['dropbox-app-key-input','google-search-api-key','google-search-engine-id','sd-api-url','sd-qc-model'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'integrations');
         assert($('include-thoughts-toggle').parentElement.textContent.includes('思考プロセスを表示'));
         const execution=st.currentExecutionSettings;st.currentExecutionSettings=null;st.executionInitializingV136=true;view.renderExecution();assert($('chat-model-button').disabled);assert($('chat-model-button').textContent.includes('準備中'));
         st.currentExecutionSettings=execution;st.executionInitializingV136=false;view.renderExecution();
+    });
+    await test('AI tool sections preserve checkbox IDs and expose the specified labels and descriptions',()=>{
+        const normalize=text=>text.replace(/\s+/g,' ').trim();
+        const nav=document.querySelector('[data-settings-category="ai-tools"]');
+        eq(nav.children[1].textContent,'AI機能・ツール設定');
+        const sections=[...$(nav.getAttribute('aria-controls')).children];
+        eq(sections.map(section=>section.querySelector('h2').textContent),['Function Calling','検索設定']);
+        const ids=['gemini-enable-function-calling-toggle','allow-prompt-ui-changes','force-function-calling-toggle','gemini-enable-grounding-toggle'];
+        eq(sections.map(section=>[...section.querySelectorAll('input[type=checkbox]')].map(input=>input.id)),[ids.slice(0,3),ids.slice(3)]);
+        eq(ids.map(id=>document.querySelectorAll(`#${id}`).length),[1,1,1,1]);
+        assert(!$('settings-panel-profile').textContent.includes('ツール使用設定'));
+        eq(ids.map(id=>normalize($(id).labels[0].textContent)),[
+            'Function Calling を使用する','プロンプトによるUI変更を許可する','全ての応答でFunctionCallingを強制する','ネットから情報を取得させる (Google Search)'
+        ]);
+        eq(ids.map(id=>$(id).getAttribute('aria-describedby').split(' ').map(desc=>normalize($(desc).textContent)).join(' ')),[
+            'チェック時、AIは計算などのタスクを外部関数に任せようとします。 Google Searchより優先されます。',
+            'Function Callingを使い、プロンプトの指示で背景画像やUIの透明度を変更できるようにします。',
+            'チェック時、モデルは応答時に必ずFunctionCallingで関数呼び出しを行います。 応答時に必ずイラストを作成させたい時などに有効です。',
+            'チェック時、モデルは回答生成のためにWeb検索を行います。 推論モデルは推論内で検索する場合があり、引用データが帰らない場合があります。 Function Calling と Google Search は同時に使用できません。'
+        ]);
     });
     await test('chat model popover and general selector share the same saved selection',async()=>{
         await ui.showScreen('chat',true);
@@ -221,13 +253,13 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         check(Math.abs(innerWidth-width)<=1,'actual CSS viewport width');
         await ui.showScreen('settings',true);view.enter();
         check(view.media.matches ? !document.querySelector('[data-settings-panel=general]').hidden : $('settings-screen').classList.contains('settings-show-top'),'initial navigation');
-        for(const category of Object.keys(titlesForTests)){
+        for(const category of categories){
             view.selectCategory(category);const panel=document.querySelector(`[data-settings-panel=${category}]`);check(!panel.hidden,category+' accessible');
             const container=$('settings-detail');check(container.scrollWidth<=container.clientWidth+1,category+' no horizontal overflow');
             const nav=document.querySelector('.settings-category-nav'),before=nav.getBoundingClientRect().top;container.scrollTop=200;
             if(view.media.matches)check(nav.getBoundingClientRect().top===before,'sidebar fixed');container.scrollTop=0;
         }
-        if(!view.media.matches){view.selectCategory('profile');view.back();await wait(()=>view.category===null);check($('settings-screen').classList.contains('settings-show-top'),'detail back to top');}
+        if(!view.media.matches){view.selectCategory('appearance');view.back();await wait(()=>view.category===null);check($('settings-screen').classList.contains('settings-show-top'),'appearance detail back to top');}
         await ui.showScreen('chat',true);await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-flash-preview'});
         $('chat-model-button').click();const bounds=view.popover.getBoundingClientRect();check(bounds.left>=0&&bounds.right<=innerWidth+1&&bounds.top>=0&&bounds.bottom<=innerHeight+1,'popover fits viewport');view.closePopover(false);
         const input=$('user-input').getBoundingClientRect(),send=$('send-button').getBoundingClientRect();check(input.bottom<=send.top+2,'composer buttons do not overlap input');
@@ -281,7 +313,6 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         }
         return results.length;
     };
-    const titlesForTests={general:1,profile:1,integrations:1,other:1};
     window.prepareSettingsScreenshotV136=async(category,dark=false,deferOpen=false)=>{
         let trigger=null;
         view.closePopover(false);await app.saveAppearanceValues('theme',{darkMode:dark},{global:true});await app.setProfileOverride('theme',false);

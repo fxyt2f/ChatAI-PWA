@@ -10,6 +10,11 @@ parser.add_argument('--fixes-stage', choices=['1','2','3'], help='Run the reques
 parser.add_argument('--ui',action='store_true')
 parser.add_argument('--scroll-buttons',action='store_true',help='Run v1.36.1 scroll button layout and behavior regressions')
 parser.add_argument('--sidebar-hover',action='store_true',help='Run v1.36.1 sidebar hover, focus and touch regressions')
+parser.add_argument('--thinking-startup',action='store_true',help='Run F3 on the real startup page with controlled OpenRouter responses')
+parser.add_argument('--appearance-settings',action='store_true',help='Run F4 settings navigation and persistence on the real startup page')
+parser.add_argument('--memory-extraction',action='store_true',help='Run memory settings and mocked provider requests on the real startup page')
+parser.add_argument('--model-removal',action='store_true',help='Run F6 model removal with real dialogs, IndexedDB and two tabs')
+parser.add_argument('--chat-parameters',action='store_true',help='Run F7 parameter editing, copying and generation on the real page')
 parser.add_argument('--theme-color',action='store_true',help='Run v1.36.1 runtime PWA theme color regressions')
 parser.add_argument('--dialogs',action='store_true',help='Run v1.36.1 native dialog and outside gesture regressions')
 parser.add_argument('--safety',action='store_true',help='Run deterministic R1-R5 security and persistence regressions')
@@ -27,7 +32,7 @@ if args.screenshots or args.sw or args.execution_screenshots:args.ui=True
 if args.j:args.integration=True
 if args.integration:args.ui=True;args.review=True
 run_ui_matrix=args.ui
-if args.scroll_buttons or args.sidebar_hover or args.theme_color or args.dialogs or args.safety or args.dialog_races:args.ui=True
+if args.scroll_buttons or args.sidebar_hover or args.theme_color or args.dialogs or args.safety or args.dialog_races or args.model_removal or args.chat_parameters:args.ui=True
 
 class CDP:
     def __init__(self, url):
@@ -108,10 +113,10 @@ class Handler(SimpleHTTPRequestHandler):
             if fault=='network' and pathname=='/settings-v136.js':self.send_error(503);return
             file=root/('index.html' if pathname=='/' else pathname[1:])
             body=file.read_bytes()
-            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.36.2',b'1.36.1')
-            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.36.2',b'1.36.1')
+            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.36.3',b'1.36.1')
+            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.36.3',b'1.36.1')
             if fault=='css' and pathname=='/style.css':body=b'/* stale stylesheet */'+body
-            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.36.2',b'./unlisted.js?v=1.36.2')
+            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.36.3',b'./unlisted.js?v=1.36.3')
             self.send_response(200);self.send_header('Content-Type','text/html' if file.suffix=='.html' else 'text/css' if file.suffix=='.css' else 'text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
         elif self.path=='/legacy-sw-fixture.js':
             legacy=subprocess.check_output(['git','show','198c8d5b3ff130034edd1250a965febe3d2aa6b9:sw.js'],cwd=root)
@@ -149,6 +154,22 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
         client.call('Runtime.enable')
         client.call('Runtime.addBinding',{'name':'testFocusTab'})
         client.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
+        startup_output=''
+        if args.memory_extraction:
+            from memory_extraction import run as run_memory_extraction
+            startup_output+=run_memory_extraction(client, f'http://localhost:{server.server_port}/')+'\n'
+        if args.thinking_startup:
+            from thinking_startup import run as run_thinking_startup
+            startup_output+=run_thinking_startup(client, f'http://localhost:{server.server_port}/')+'\n'
+        if args.appearance_settings:
+            from appearance_settings import run as run_appearance_settings
+            startup_output+=run_appearance_settings(client, f'http://localhost:{server.server_port}/')+'\n'
+        if args.model_removal:
+            from model_removal import run as run_model_removal
+            startup_output+=run_model_removal(client, f'http://localhost:{server.server_port}/')+'\n'
+        if args.chat_parameters:
+            from chat_parameters import run as run_chat_parameters
+            startup_output+=run_chat_parameters(client, f'http://localhost:{server.server_port}/')+'\n'
         query=('ui=1&' if args.ui else '')+('review=1&' if args.review else '')+('integration=1&' if args.integration else '')+('j=1&' if args.j else '')+('fixes-stage='+args.fixes_stage if args.fixes_stage else '')
         client.call('Page.navigate',{'url':f'http://127.0.0.1:{server.server_port}/tests/v136-browser.html?'+query})
         time.sleep(0.2)
@@ -157,7 +178,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             while(Date.now()<deadline){const result=document.getElementById('test-results');if(result)return result.textContent;await new Promise(r=>setTimeout(r,50));}
             return 'FAIL timed out: '+document.documentElement.dataset.testStatus+' / J: '+document.documentElement.dataset.jStatus;
         })()''','awaitPromise':True,'returnByValue':True})
-        output=result.get('result',{}).get('value') or 'FAIL '+json.dumps(result)
+        output=startup_output+(result.get('result',{}).get('value') or 'FAIL '+json.dumps(result))
         if args.dialog_races and 'ALL PASSED' in output and 'FAIL' not in output:
             source=(root/'tests/dialog-races-v1361.js').read_text(encoding='utf-8')
             races=client.call('Runtime.evaluate',{'expression':source+'\nrunDialogRacesV1361()','awaitPromise':True,'returnByValue':True})
@@ -226,12 +247,12 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             output+=f'\nALL PASSED ({scroll_checks} scroll button assertions; 14 width/wide/theme cases, reduced viewport and visual-only keyboard simulation)'
         if run_ui_matrix and 'ALL PASSED' in output and 'FAIL' not in output:
             checks=0
-            for width in [360,390,768,1280]:
+            for width in [360,390,768,1024,1280]:
                 client.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':900,'deviceScaleFactor':1,'mobile':width<800})
                 value=client.call('Runtime.evaluate',{'expression':f'window.runSettingsViewportV136({width})','awaitPromise':True,'returnByValue':True})
                 if 'exceptionDetails' in value:raise RuntimeError(value['exceptionDetails'])
                 checks+=value['result']['value']
-            output+=f'\nALL PASSED ({checks} responsive assertions across 360/390/768/1280px)'
+            output+=f'\nALL PASSED ({checks} responsive assertions across 360/390/768/1024/1280px)'
             client.call('Runtime.evaluate',{'expression':'window.prepareSettingsResizeV136()','awaitPromise':True,'returnByValue':True})
             for width in [390,1280]:
                 client.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':900,'deviceScaleFactor':1,'mobile':width<800})
@@ -406,14 +427,14 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                     }
                     await controlledBy('/sw.js');
                     const names=await caches.keys();
-                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.36.2')||!names.includes('unrelated-cache')){
+                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.36.3')||!names.includes('unrelated-cache')){
                         throw new Error('cache upgrade mismatch: '+JSON.stringify(names));
                     }
-                    const primary=await caches.open('chatai-pwa-cache-v1.36.2');
+                    const primary=await caches.open('chatai-pwa-cache-v1.36.3');
                     const pointer=await primary.match(new URL('/.__active_app_shell__',location.href));
                     const shell=pointer?await caches.open(await pointer.text()):primary;
-                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.36.2'))throw new Error('missing versioned asset '+asset);
-                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.36.2'});
+                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.36.3'))throw new Error('missing versioned asset '+asset);
+                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.36.3'});
                     await dbUtils.saveSetting('dropboxTokens',null);sessionStorage.removeItem('pendingVersionNotice');
                     return true;
                 })()''','awaitPromise':True,'returnByValue':True})
@@ -450,7 +471,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                         const deadline=Date.now()+15000;
                         while(Date.now()<deadline){
                             const win=frame.contentWindow;
-                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.36.2'))return true;
+                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.36.3'))return true;
                             await new Promise(r=>setTimeout(r,50));
                         }
                         throw new Error('previous shell failed offline after rejected updates');
@@ -462,8 +483,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 concurrent=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const peer=window.open('about:blank','sw-fetch-peer');
                     try {
-                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.36.2',{cache:'no-store'}).then(async response=>{
-                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.36.2";'))throw new Error('concurrent shell read failed');
+                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.36.3',{cache:'no-store'}).then(async response=>{
+                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.36.3";'))throw new Error('concurrent shell read failed');
                         }));
                         const channel=new MessageChannel(),updated=new Promise((resolve,reject)=>{
                             const timer=setTimeout(()=>reject(new Error('concurrent rebuild timeout')),15000);
@@ -493,7 +514,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 boot_expression='''(async()=>{
                     const deadline=Date.now()+15000;
                     while(Date.now()<deadline){
-                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.36.2')){
+                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.36.3')){
                             if(!document.getElementById('chat-model-button'))throw new Error('picker missing');
                             if(typeof window.DOMPurify?.sanitize!=='function')throw new Error('offline sanitizer missing');
                             if(typeof window.StreamingV136?.collectResponse!=='function')throw new Error('offline SSE module missing');
@@ -518,7 +539,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 time.sleep(.3)
                 offline=client.call('Runtime.evaluate',{'expression':boot_expression,'awaitPromise':True,'returnByValue':True})
                 if 'exceptionDetails' in offline:raise RuntimeError(offline['exceptionDetails'])
-                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.36.2 boot with SSE module and DOMPurify sanitization)'
+                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.36.3 boot with SSE module and DOMPurify sanitization)'
     except Exception as error:
         output+='\nFAIL '+repr(error)+'\n'+traceback.format_exc()
         if args.sw_diagnostics and client:

@@ -196,8 +196,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.2";
-const APP_CACHE_VERSION = "v1.36.2";
+const APP_VERSION = "1.36.3";
+const APP_CACHE_VERSION = "v1.36.3";
 const DEFAULT_ZAI_MODEL = 'glm-4.6';
 const DEFAULT_OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
@@ -282,6 +282,12 @@ const DEFAULT_BEDROCK_MODEL = 'jp.anthropic.claude-sonnet-4-5-20250929-v1:0';
 const DEFAULT_BEDROCK_REGION = 'us-east-1';
 
 const VERSION_HISTORY = {
+    "1.36.3": [
+        "チャットごとにシステムプロンプトと生成パラメータを設定し、プロファイルとの間で反映できます。",
+        "テーマ・表示設定とAI機能・ツール設定を独立したカテゴリに整理しました。",
+        "記憶抽出に使うモデルとプロンプトを設定できるようになりました。",
+        "Thinking設定の起動時表示、モデル削除時の参照解除、編集ダイアログの保存を改善しました。"
+    ],
     "1.36.2": [
         "新規チャットの最初のメッセージからタイトルを自動生成できます。生成用のモデルと指示を設定できます。",
         "Gemini直APIとOpenRouterで、回答と思考プロセスを生成中に表示できます。",
@@ -743,7 +749,6 @@ try {
         systemPromptEditor: document.getElementById('system-prompt-editor'),
         systemPromptCloseBtn: document.getElementById('system-prompt-close-btn'),
         systemPromptCharCount: document.getElementById('system-prompt-char-count'),
-        systemPromptSaveStatus: document.getElementById('system-prompt-save-status'),
         apiProviderSelect: document.getElementById('api-provider'),
         apiProviderRow: document.getElementById('api-provider-row'),
         basicApiConfigNameInput: document.getElementById('basic-api-config-name'),
@@ -800,7 +805,6 @@ try {
         additionalOpenRouterModelsTextarea: document.getElementById('additional-openrouter-models'),
         enterToSendCheckbox: document.getElementById('enter-to-send'),
         historySortOrderSelect: document.getElementById('history-sort-order'),
-        darkModeToggle: document.getElementById('dark-mode-toggle'),
         debugModeToggle: document.getElementById('debug-mode-toggle'),
         fontFamilyInput: document.getElementById('font-family-input'),
         chatFontSizeSelect: document.getElementById('chat-font-size-select'),
@@ -843,7 +847,6 @@ try {
         proofreadingModelNameSelect: document.getElementById('proofreading-model-name'),
         enableChatTitleGenerationCheckbox: document.getElementById('enable-chat-title-generation'),
         enableStreamingOutputCheckbox: document.getElementById('enable-streaming-output'),
-        chatTitleModelSelect: document.getElementById('chat-title-model'),
         chatTitleSystemPromptTextarea: document.getElementById('chat-title-system-prompt'),
         proofreadingSystemInstructionTextarea: document.getElementById('proofreading-system-instruction'),
         attachFileBtn: document.getElementById('attach-file-btn'),
@@ -935,7 +938,6 @@ try {
         deleteAllAssetsBtn: document.getElementById('delete-all-assets-btn'),
         memoryToggleBtn: document.getElementById('memory-toggle-btn'),
         enableMemoryToggle: document.getElementById('enable-memory-toggle'),
-        memoryOptionsContainer: document.getElementById('memory-options-container'),
         memoryAutoSaveIntervalSelect: document.getElementById('memory-auto-save-interval'),
         manageMemoryBtn: document.getElementById('manage-memory-btn'),
         memoryManagementDialog: document.getElementById('memoryManagementDialog'),
@@ -1028,10 +1030,8 @@ try {
         sdTestConnectionBtn: document.getElementById('sd-test-connection-btn'),
         sdEnableQualityCheckerCheckbox: document.getElementById('sd-enable-quality-checker'),
         sdQualityCheckerOptionsDiv: document.getElementById('sd-quality-checker-options'),
-        sdQcModelSelect: document.getElementById('sd-qc-model'),
         sdQcPromptTextarea: document.getElementById('sd-qc-prompt'),
         sdQcRetriesInput: document.getElementById('sd-qc-retries'),
-        sdPromptImproveModelSelect: document.getElementById('sd-prompt-improve-model'),
         sdPromptImproveSystemPromptTextarea: document.getElementById('sd-prompt-improve-system-prompt'),
         debugLogBtn: document.getElementById('debug-log-btn'),
         debugLogDialog: document.getElementById('debugLogDialog'),
@@ -1069,6 +1069,8 @@ const state = {
     currentChatPinStateUpdatedAt: null,
     currentMessages: [],
     currentSystemPrompt: '',
+    currentChatGenerationParameters: null,
+    currentChatParameterRevision: 0,
     currentPersistentMemory: {}, // 現在のチャットの永続メモリ
     currentSummarizedContext: null,
     isEditingChatTitle: false,
@@ -1109,7 +1111,7 @@ const state = {
         thinkingBudget: null,
         includeThoughts: false,
         enableThoughtTranslation: true, // 思考プロセスの翻訳を有効にするか
-        thoughtTranslationModel: 'gemini-2.5-flash-lite',
+        thoughtTranslationModel: '',
         dummyUser: '',
         applyDummyToProofread: false,
         applyDummyToTranslate: false,
@@ -1137,7 +1139,7 @@ const state = {
         enableApiTimeout: false,
         apiTimeoutSeconds: 90,
         enableProofreading: false,
-        proofreadingModelName: 'gemini-2.5-flash',
+        proofreadingModelName: '',
         proofreadingSystemInstruction: 'あなたはプロの編集者です。受け取った文章の過剰な読点を抑制し、日本語として違和感のない読点の使用量に校正してください。承知しました等の応答は行わず、校正後の文章のみ出力して下さい。読点の抑制以外の編集は禁止です。読点以外の文章には絶対に手を付けないで下さい。',
         geminiEnableGrounding: false,
         geminiEnableFunctionCalling: false,
@@ -1161,7 +1163,7 @@ const state = {
         enableMemory: false,
         memoryAutoSaveInterval: 30,
         headerAutoHide: false,
-        summaryModelName: '', // 空の場合はmodelNameを使用
+        summaryModelName: '',
         summarySystemPrompt:`あなたはプロの編集者です。以下の会話履歴を、第三者の視点から見た物語の「あらすじ」として要約してください。
 「承知しました」等のAIとしての応答は不要です。要約文のみ出力して下さい。
 
@@ -1180,7 +1182,7 @@ const state = {
         sdApiUser: '',
         sdApiPassword: '',
         sdEnableQualityChecker: false,
-        sdQcModel: 'gemini-2.5-pro',
+        sdQcModel: '',
         sdQcPrompt: `あなたはプロンプトと画像を比較し、指示通りに生成されているか評価する専門家です。
 以下のプロンプトと画像の内容を厳密に比較してください。
 
@@ -1196,7 +1198,7 @@ const state = {
 Result: [OKまたはNG]
 Reason: [NGの場合の理由]`,
         sdQcRetries: 3,
-        sdPromptImproveModel: 'gemini-2.5-flash',
+        sdPromptImproveModel: '',
         sdPromptImproveSystemPrompt: `あなたはプロのプロンプトエンジニアです。提示された「元のプロンプト」と「失敗理由」に基づき、失敗理由を解決するための改善された英語の画像生成プロンプトを生成してください。余計な解説や前置きは一切含めず、改善されたプロンプト本体のみを出力してください。`,
         debugMode: false,
     },
@@ -1813,6 +1815,9 @@ const dbUtils = {
                         }
                     });
                 }
+                if (event.oldVersion === 0) {
+                    transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
+                }
             };
         });
     },
@@ -1855,8 +1860,58 @@ const dbUtils = {
 
     bindChatSaveOwnerV136(messages, chat) {
         this.chatSaveOwners ||= new WeakMap();
-        const owner = { id: chat.id, ...SettingsV136.chatContentVersion(chat) };
+        const owner = { id: chat.id, createdAt: chat.createdAt, ...SettingsV136.chatContentVersion(chat) };
         this.chatSaveOwners.set(messages, owner);
+    },
+    commitChatParametersV136(chatId, expectedVersion, save, ownsContext) {
+        return new Promise((resolve, reject) => {
+            const switching = save.profileSwitch;
+            const scopes = switching ? [CHATS_STORE, PROFILES_STORE, SETTINGS_STORE] : [CHATS_STORE];
+            const tx = state.db.transaction(scopes, 'readwrite');
+            const chats = tx.objectStore(CHATS_STORE);
+            const chat = chatId ? chats.get(chatId) : null;
+            const profile = switching ? tx.objectStore(PROFILES_STORE).get(switching) : null;
+            let failure, result, previousDraft, draftWritten = false;
+            let pending = Number(Boolean(chat)) + Number(Boolean(profile));
+            const apply = () => {
+                if (--pending > 0) return;
+                try {
+                    if (switching && (!ownsContext() || !profile.result)) throw new Error('プロファイル切り替えの対象が変更されました。');
+                    const previous = chat?.result;
+                    const recordChanged = expectedVersion.recordGenerationId
+                        ? previous?.recordGenerationId !== expectedVersion.recordGenerationId
+                        : expectedVersion.createdAt != null && previous?.createdAt !== expectedVersion.createdAt;
+                    if (chatId && (!previous || recordChanged
+                        || (previous.parameterRevision || 0) !== save.parameterRevision)) {
+                        throw new Error('別の操作でチャットが変更されました。入力内容を保持しています。');
+                    }
+                    const snapshot = switching ? appLogic.profileChatParameters(profile.result.settings)
+                        : { systemPrompt: save.value, generationParameters: save.parameters };
+                    const revision = previous ? (previous.parameterRevision || 0) + 1 : 0;
+                    if (previous) chats.put({ ...previous, ...snapshot, parameterRevision: revision });
+                    if (switching) {
+                        if (!chatId) {
+                            previousDraft = sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+                            sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(snapshot));
+                            draftWritten = true;
+                        }
+                        tx.objectStore(SETTINGS_STORE).put({ key: 'activeProfileId', value: switching });
+                    }
+                    result = { snapshot, revision, profile: profile?.result };
+                } catch (error) { failure = error; tx.abort(); }
+            };
+            if (chat) chat.onsuccess = apply;
+            if (profile) profile.onsuccess = apply;
+            tx.oncomplete = () => resolve(result);
+            tx.onabort = () => {
+                try {
+                    if (draftWritten) {
+                        if (previousDraft === null) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+                        else sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, previousDraft);
+                    }
+                } finally { reject(failure || tx.error || new Error('パラメータを保存できませんでした。')); }
+            };
+        });
     },
 
     async saveChat(optionalTitle = null, chatObjectToSave = null, options = {}) {
@@ -1883,7 +1938,7 @@ const dbUtils = {
 
         if (!chatObjectToSave) {
             const knownOwner = this.chatSaveOwners?.get(contextMessages);
-            if (!contextChatId && !knownOwner?.id && !knownOwner?.pending &&
+            if (!promptSave && !contextChatId && !knownOwner?.id && !knownOwner?.pending &&
                 (!state.currentMessages || state.currentMessages.length === 0) && !state.currentSystemPrompt) {
                 if(state.currentChatId) console.log(`saveChat: 既存チャット ${state.currentChatId} にメッセージもシステムプロンプトもないため保存せず`);
                 else console.log("saveChat: 新規チャットに保存するメッセージもシステムプロンプトもなし");
@@ -1937,6 +1992,8 @@ const dbUtils = {
                 messages: messagesToSave,
                 executionSettings: structuredClone(state.currentExecutionSettings),
                 systemPrompt: promptSave ? promptSave.value : state.currentSystemPrompt,
+                generationParameters: promptSave?.parameters || appLogic.getChatGenerationParameters(),
+                parameterRevision: state.currentChatParameterRevision,
                 persistentMemory: state.currentPersistentMemory || {},
                 summarizedContext: state.currentSummarizedContext || null,
                 isMemoryEnabledForChat: state.isMemoryEnabledForChat,
@@ -1964,15 +2021,28 @@ const dbUtils = {
             if (!chatObjectToSave && !targetChatId && owner.id) {
                 targetChatId = contextChatId = owner.id;
             }
-            if (!chatObjectToSave && !targetChatId && !chatDataToSave.messages.length && !chatDataToSave.systemPrompt) return null;
+            if (!promptSave && !chatObjectToSave && !targetChatId && !chatDataToSave.messages.length && !chatDataToSave.systemPrompt) return null;
             await SettingsV136.rememberHistoryContextsAsyncV136(chatDataToSave.messages, chatDataToSave.systemPrompt);
             await this.openDB();
+            if (promptSave && (targetChatId || promptSave.profileSwitch || (!chatDataToSave.messages.length && !chatDataToSave.systemPrompt))) {
+                const result = targetChatId || promptSave.profileSwitch
+                    ? await this.commitChatParametersV136(targetChatId, expectedVersion, promptSave, ownsContext)
+                    : { snapshot: { systemPrompt: promptSave.value, generationParameters: promptSave.parameters }, revision: 0 };
+                if (!targetChatId && !promptSave.profileSwitch && ownsContext())
+                    sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(result.snapshot));
+                promptSave.result = result;
+                if (targetChatId) appLogic.markAsDirtyAndSchedulePush();
+                return targetChatId;
+            }
             const stats = await this._calculateChatStats(messagesForStats);
 
             return new Promise((resolve, reject) => {
                 try {
                     const transaction = state.db.transaction([CHATS_STORE, SETTINGS_STORE], 'readwrite');
                     const store = transaction.objectStore(CHATS_STORE);
+                    const settingsStore = transaction.objectStore(SETTINGS_STORE);
+                    const removed = settingsStore.get(SettingsV136.REMOVED_MODELS_KEY);
+                    let savedSuccessfulExecution = null;
                     const now = Date.now();
 
                     const processSave = (existingChatData = null) => {
@@ -2001,6 +2071,23 @@ const dbUtils = {
                             pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
                             pinStateUpdatedAt: pinState.pinStateUpdatedAt
                         };
+                        const removedRefs = removed.result?.value;
+                        if (existingChatData?.parameterRevision > (chatDataToSave.parameterRevision || 0)) {
+                            finalChatData.systemPrompt = existingChatData.systemPrompt;
+                            finalChatData.generationParameters = existingChatData.generationParameters;
+                            finalChatData.parameterRevision = existingChatData.parameterRevision;
+                        }
+                        if (promptSave) finalChatData.parameterRevision = 1;
+                        const existingExecution = existingChatData?.executionSettings;
+                        if (existingExecution && (existingExecution.modelSelectionRequired || finalChatData.executionSettings?.modelSelectionRequired))
+                            finalChatData.executionSettings = existingExecution;
+                        const cleared = SettingsV136.clearRemovedExecution(finalChatData.executionSettings, removedRefs);
+                        if (cleared !== finalChatData.executionSettings) {
+                            finalChatData.executionSettings = existingExecution
+                                ? SettingsV136.clearRemovedExecution(existingExecution, removedRefs) : cleared;
+                        }
+                        if (SettingsV136.matchesRemovedModel(finalChatData.defaultModelRef, removedRefs)) finalChatData.defaultModelRef = null;
+                        if (SettingsV136.matchesRemovedModel(finalChatData, removedRefs)) finalChatData.modelName = '';
                         if (chatIdForOperation) {
                             finalChatData.id = chatIdForOperation;
                         }
@@ -2018,15 +2105,16 @@ const dbUtils = {
                         if (canGenerateTitle && firstUserMessage) {
                             delete finalChatData.titleGenerationEligible;
                             const generation = options.titleGeneration;
-                            if (generation && generation.text === firstUserMessage.content && generation.timestamp === firstUserMessage.timestamp) {
+                            if (generation && !SettingsV136.matchesRemovedModel(generation.config?.ref, removedRefs)
+                                && generation.text === firstUserMessage.content && generation.timestamp === firstUserMessage.timestamp) {
                                 finalChatData.titleGenerationId = generation.id;
                                 titleGenerationToStart = generation;
                             }
                         }
 
                         const putRequest = store.put(finalChatData);
-                        if (options.successfulExecution) {
-                            const settingsStore = transaction.objectStore(SETTINGS_STORE);
+                        if (options.successfulExecution && !SettingsV136.matchesRemovedModel(options.successfulExecution.modelRef, removedRefs)) {
+                            savedSuccessfulExecution = options.successfulExecution;
                             const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
                             successRequest.onsuccess = () => {
                                 if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt)
@@ -2036,30 +2124,32 @@ const dbUtils = {
                         putRequest.onsuccess = (event) => {
                             const savedId = event.target.result;
                             savedChatId = savedId;
-                            savedUiState = { pinState, title: finalChatData.title };
+                            savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt };
                         };
                         putRequest.onerror = (event) => {
                             console.error("チャット保存(put)エラー:", event.target.error);
                         };
                     };
 
-                    if (targetChatId) {
-                        const getRequest = store.get(targetChatId);
-                        getRequest.onsuccess = (event) => {
-                            const existingChat = event.target.result;
-                            const canInsert = chatObjectToSave && !options.existingSnapshot && !expectedVersion.recordGenerationId;
-                            if (existingChat ? !SettingsV136.sameChatContentVersion(existingChat, expectedVersion) : !canInsert) {
-                                conflict = true;
-                                return;
-                            }
-                            processSave(existingChat);
-                        };
-                        getRequest.onerror = (event) => {
-                            console.error("既存チャットの取得エラー(更新用):", event.target.error);
-                        };
-                    } else {
-                        processSave();
-                    }
+                    removed.onsuccess = () => {
+                        if (targetChatId) {
+                            const getRequest = store.get(targetChatId);
+                            getRequest.onsuccess = (event) => {
+                                const existingChat = event.target.result;
+                                const canInsert = chatObjectToSave && !options.existingSnapshot && !expectedVersion.recordGenerationId;
+                                if (existingChat ? !SettingsV136.sameChatContentVersion(existingChat, expectedVersion) : !canInsert) {
+                                    conflict = true;
+                                    return;
+                                }
+                                processSave(existingChat);
+                            };
+                            getRequest.onerror = (event) => {
+                                console.error("既存チャットの取得エラー(更新用):", event.target.error);
+                            };
+                        } else {
+                            processSave();
+                        }
+                    };
 
                     transaction.oncomplete = () => {
                         if (conflict) {
@@ -2071,7 +2161,7 @@ const dbUtils = {
                             }
                             return;
                         }
-                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId });
+                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, createdAt: savedUiState?.createdAt });
                         try {
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) state.currentChatId = contextChatId = savedChatId;
@@ -2082,13 +2172,15 @@ const dbUtils = {
                             }
                             if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush();
                             if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
-                            if (options.successfulExecution) state.lastSuccessfulExecution = options.successfulExecution;
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+                            if (savedSuccessfulExecution) state.lastSuccessfulExecution = savedSuccessfulExecution;
                             if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
                         } catch (error) {
                             // A committed write must resolve even if a view/storage side effect fails.
                             console.error('チャット保存後の表示更新に失敗しました:', error);
                         }
                         if (titleGenerationToStart) void appLogic.generateChatTitleV136(savedChatId, titleGenerationToStart);
+                        if (promptSave) promptSave.result = { revision: 1 };
                         resolve(savedChatId);
                     };
                     transaction.onerror = (event) => {
@@ -2586,6 +2678,29 @@ const dbUtils = {
                 resolve();
             };
             request.onerror = (event) => reject(`メモリ(ID: ${profileId})保存エラー: ${event.target.error}`);
+        });
+    },
+    async appendExtractedMemory(profileId, items) {
+        await this.openDB();
+        return new Promise((resolve, reject) => {
+            const tx = state.db.transaction([PROFILES_STORE, 'memory_store'], 'readwrite');
+            let added = 0;
+            tx.oncomplete = () => resolve(added);
+            tx.onabort = () => reject(tx.error || new Error('記憶を保存できませんでした。'));
+            const profile = tx.objectStore(PROFILES_STORE).getKey(profileId);
+            profile.onsuccess = () => {
+                if (profile.result === undefined) return;
+                const store = tx.objectStore('memory_store');
+                const request = store.get(profileId);
+                request.onsuccess = () => {
+                    const current = request.result || { items: [] };
+                    const existing = new Set(current.items);
+                    const additions = [...new Set(items)].filter(item => !existing.has(item));
+                    if (!additions.length) return;
+                    added = additions.length;
+                    store.put({ ...current, profileId, items: [...current.items, ...additions] });
+                };
+            };
         });
     },
     async getAllMemories() {
@@ -6781,7 +6896,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.topPInput.value = state.settings.topP === null ? '' : state.settings.topP;
         elements.includeThoughtsToggle.checked = state.settings.includeThoughts;
         elements.enableThoughtTranslationCheckbox.checked = state.settings.enableThoughtTranslation;
-        elements.thoughtTranslationModelSelect.value = state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite';
         if (elements.thoughtTranslationOptionsDiv) {
             elements.thoughtTranslationOptionsDiv.classList.toggle('hidden', !state.settings.includeThoughts);
         }
@@ -6804,7 +6918,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.themeSettingsProfileScopedToggle) {
             elements.themeSettingsProfileScopedToggle.checked = state.themeSettingsProfileScoped === true;
         }
-        elements.darkModeToggle.checked = state.settings.darkMode;
         elements.debugModeToggle.checked = state.settings.debugMode;
         elements.fontFamilyInput.value = state.settings.fontFamily || '';
         if (elements.chatFontSizeSelect) {
@@ -6821,7 +6934,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
         elements.swipeNavigationToggle.checked = state.settings.enableSwipeNavigation;
         elements.enableProofreadingCheckbox.checked = state.settings.enableProofreading;
-        elements.proofreadingModelNameSelect.value = state.settings.proofreadingModelName || 'gemini-2.5-flash';
         elements.proofreadingSystemInstructionTextarea.value = state.settings.proofreadingSystemInstruction || '';
         elements.proofreadingOptionsDiv.classList.remove('hidden');
         elements.enableAutoRetryCheckbox.checked = state.settings.enableAutoRetry;
@@ -6850,11 +6962,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.enableWideModeToggle.checked = state.settings.enableWideMode; 
         elements.enableMemoryToggle.checked = state.settings.enableMemory;
         elements.memoryAutoSaveIntervalSelect.value = state.settings.memoryAutoSaveInterval;
-        appLogic.toggleMemoryOptions(state.settings.enableMemory);
+        appLogic.toggleMemoryIconVisibility();
         
         // ヘッダー自動非表示機能のUIを更新
         elements.headerAutoHideToggle.checked = state.settings.headerAutoHide;
-        elements.summaryModelNameSelect.value = state.settings.summaryModelName || state.settings.modelName || 'gemini-2.5-flash';
         elements.summarySystemPromptTextarea.value = state.settings.summarySystemPrompt || '';
         elements.enableSummaryButtonToggle.checked = state.settings.enableSummaryButton;
         document.body.classList.toggle('header-auto-hide', state.settings.headerAutoHide);
@@ -6915,10 +7026,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.sdApiUserInput.value = state.settings.sdApiUser || '';
         elements.sdApiPasswordInput.value = state.settings.sdApiPassword || '';
         elements.sdEnableQualityCheckerCheckbox.checked = state.settings.sdEnableQualityChecker;
-        elements.sdQcModelSelect.value = state.settings.sdQcModel || 'gemini-2.5-pro';
         elements.sdQcPromptTextarea.value = state.settings.sdQcPrompt || '';
         elements.sdQcRetriesInput.value = state.settings.sdQcRetries === null ? '' : state.settings.sdQcRetries;
-        elements.sdPromptImproveModelSelect.value = state.settings.sdPromptImproveModel || 'gemini-2.5-flash';
         elements.sdPromptImproveSystemPromptTextarea.value = state.settings.sdPromptImproveSystemPrompt || '';
         elements.sdQualityCheckerOptionsDiv.classList.toggle('hidden', !state.settings.sdEnableQualityChecker);
         window.settingsUiV136?.refresh();
@@ -6928,15 +7037,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // ユーザー指定モデルをコンボボックスに反映
     updateUserModelOptions() {
-        const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '', optional = false) => {
+        const populateModelRefSelect = (selectElement, refKey, legacyModelName, preferredApiConfigId = '') => {
             if (!selectElement) return;
             const currentRef = state.settings[refKey];
             const choices = appLogic.buildModelRefOptions({
                 currentRefs: currentRef?.apiConfigId && currentRef?.modelName ? [currentRef] : []
             });
-            const effectiveRef = optional ? currentRef : appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
+            const needsSelection = state.currentExecutionSettings?.modelSelectionRequired === true || !choices.length;
+            const effectiveRef = needsSelection ? null : appLogic.getEffectiveModelRef(refKey, legacyModelName, preferredApiConfigId);
             selectElement.innerHTML = '';
-            if (optional) selectElement.add(new Option('選択してください', ''));
+            if (needsSelection) selectElement.add(new Option('選択してください', ''));
             choices.forEach(choice => {
                 const option = document.createElement('option');
                 option.value = choice.value;
@@ -6953,99 +7063,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (effectiveRef) {
                 selectElement.value = appLogic.encodeModelRefValue(effectiveRef);
             }
-            if (!optional && !selectElement.value && selectElement.options.length > 0) {
+            if (!needsSelection && !selectElement.value && selectElement.options.length > 0) {
                 selectElement.selectedIndex = 0;
             }
         };
 
         populateModelRefSelect(elements.modelNameSelect, 'defaultModelRef', state.settings.modelName || DEFAULT_MODEL, state.settings.apiConfigId);
-        populateModelRefSelect(elements.thoughtTranslationModelSelect, 'thoughtTranslationModelRef', state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite');
-        populateModelRefSelect(elements.proofreadingModelNameSelect, 'proofreadingModelRef', state.settings.proofreadingModelName || state.settings.modelName || DEFAULT_MODEL);
-        populateModelRefSelect(elements.chatTitleModelSelect, 'chatTitleModelRef', '', '', true);
-        populateModelRefSelect(elements.summaryModelNameSelect, 'summaryModelRef', state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL);
+        appLogic.updateAuxiliaryModelOptions();
         appLogic.updateModelRouteNotes();
-
-        const geminiModels = (state.settings.additionalModels || '')
-            .split(',')
-            .map(m => m.trim())
-            .filter(m => m !== ''); // カンマ区切りで分割し、空要素を除去
-        const provider = state.settings.apiProvider || 'gemini';
-        const useOpenRouterModels = provider === 'openrouter';
-        const auxiliaryModels = useOpenRouterModels ? this.getOpenRouterSelectableModels() : [...new Set(geminiModels)];
-        const auxiliaryLabel = useOpenRouterModels ? 'OpenRouter ユーザー指定' : 'ユーザー指定';
-        const auxiliaryFallback = useOpenRouterModels ? (state.settings.modelName || DEFAULT_OPENROUTER_MODEL) : null;
-
-        // 更新対象のグループとそれに対応するセレクターの設定値
-        const targetGroups = [
-            { 
-                groupId: 'user-defined-models-group', 
-                selectElement: elements.modelNameSelect, 
-                currentValue: state.settings.modelName,
-                models: [...new Set(geminiModels)],
-                label: 'ユーザー指定'
-            },
-            { 
-                groupId: 'thought-translation-user-models', 
-                selectElement: elements.thoughtTranslationModelSelect, 
-                currentValue: state.settings.thoughtTranslationModel,
-                models: auxiliaryModels,
-                label: auxiliaryLabel,
-                fallbackValue: auxiliaryFallback
-            },
-            { 
-                groupId: 'sd-qc-user-models', 
-                selectElement: elements.sdQcModelSelect, 
-                currentValue: state.settings.sdQcModel,
-                models: auxiliaryModels,
-                label: auxiliaryLabel,
-                fallbackValue: auxiliaryFallback
-            },
-            { 
-                groupId: 'sd-prompt-improve-user-models', 
-                selectElement: elements.sdPromptImproveModelSelect, 
-                currentValue: state.settings.sdPromptImproveModel,
-                models: auxiliaryModels,
-                label: auxiliaryLabel,
-                fallbackValue: auxiliaryFallback
-            },
-            { 
-                groupId: 'summary-user-models', 
-                selectElement: elements.summaryModelNameSelect, 
-                currentValue: state.settings.summaryModelName || state.settings.modelName,
-                models: auxiliaryModels,
-                label: auxiliaryLabel,
-                fallbackValue: auxiliaryFallback
-            }
-        ];
-
-        // 各グループに対してユーザー定義モデルを追加
-        targetGroups.forEach(({ groupId, selectElement, currentValue, models, label, fallbackValue }) => {
-            const group = document.getElementById(groupId);
-            if (!group) return; // グループが存在しない場合はスキップ
-            
-            group.innerHTML = ''; // 一旦クリア
-            group.label = label;
-
-            if (models.length > 0) {
-                group.disabled = false; // optgroupを有効化
-                models.forEach(modelId => {
-                    const option = document.createElement('option');
-                    option.value = modelId;
-                    option.textContent = modelId;
-                    group.appendChild(option);
-                });
-                // 現在選択中のモデル、またはOpenRouter時のフォールバックモデルを選択状態にする
-                if (selectElement) {
-                    if (models.includes(currentValue)) {
-                        selectElement.value = currentValue;
-                    } else if (fallbackValue && models.includes(fallbackValue)) {
-                        selectElement.value = fallbackValue;
-                    }
-                }
-            } else {
-                group.disabled = true; // モデルがなければoptgroupを無効化
-            }
-        });
     },
 
     getAdditionalOpenRouterModels() {
@@ -7210,9 +7235,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     getSystemPromptCharCountElement() {
         return document.getElementById('system-prompt-char-count') || elements.systemPromptCharCount;
     },
-    getSystemPromptSaveStatusElement() {
-        return document.getElementById('system-prompt-save-status') || elements.systemPromptSaveStatus;
-    },
     updateSystemPromptUI() {
         const editor = uiUtils.getSystemPromptEditorElement();
         if (editor && !state.isEditingSystemPrompt) {
@@ -7232,7 +7254,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.systemPromptOpenBtn?.classList.toggle('has-system-prompt', hasPrompt);
         elements.systemPromptOpenBtn?.classList.toggle('active', state.isEditingSystemPrompt);
         if (elements.systemPromptOpenBtn) {
-            const title = hasPrompt ? 'システムプロンプト（設定あり）' : 'システムプロンプト';
+            const title = 'パラメータ設定';
             elements.systemPromptOpenBtn.title = title;
             elements.systemPromptOpenBtn.setAttribute('aria-label', title);
         }
@@ -7245,16 +7267,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
     updateSystemPromptSaveStatus(status = 'saved') {
         state.systemPromptSaveStatus = status;
-        const saveStatus = this.getSystemPromptSaveStatusElement();
-        if (!saveStatus) return;
-        const labels = {
-            saved: '保存済み',
-            saving: '保存中…',
-            dirty: '未保存の変更があります',
-            error: '保存に失敗しました'
-        };
-        saveStatus.textContent = labels[status] || labels.saved;
-        saveStatus.classList.toggle('is-error', status === 'error');
+        if (status !== 'error') document.getElementById('chat-parameter-save-error')?.remove();
+    },
+    showChatParameterSaveError() {
+        if (document.getElementById('chat-parameter-save-error')) return;
+        const notice = document.createElement('p');
+        notice.id = 'chat-parameter-save-error';
+        notice.className = 'inline-setting-error';
+        notice.setAttribute('role', 'alert');
+        elements.systemPromptDialog.querySelector('.system-prompt-dialog-header').after(notice);
+        notice.textContent = 'パラメータを保存できませんでした。入力内容は保持しています。';
     },
     // --------------------------------
 
@@ -7381,7 +7403,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.sendButton.disabled = false;
             elements.userInput.disabled = true;
             elements.attachFileBtn.disabled = true;
-            if (elements.systemPromptEditor) elements.systemPromptEditor.disabled = true;
             elements.loadingIndicator.classList.add('hidden');
             elements.loadingIndicator.removeAttribute('aria-live');
         } else {
@@ -7391,10 +7412,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.sendButton.disabled = elements.userInput.value.trim() === '' && state.pendingAttachments.length === 0;
             elements.userInput.disabled = false;
             elements.attachFileBtn.disabled = false;
-            if (elements.systemPromptEditor) elements.systemPromptEditor.disabled = false;
             elements.loadingIndicator.classList.add('hidden');
             elements.loadingIndicator.removeAttribute('aria-live');
         }
+        appLogic.updateChatParameterControlsDisabled();
         window.settingsUiV136?.renderExecution();
         this.scheduleComposerTextareaResize(true);
         this.updateGenerationStatusIndicator();
@@ -8111,6 +8132,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }, true);
         document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
+            if (elements.systemPromptDialog.open && !document.getElementById('chat-parameter-menu').hidden
+                && elements.systemPromptDialog.contains(document.activeElement)) {
+                stop(event);
+                appLogic.closeChatParameterMenu(true);
+                return;
+            }
             if (document.querySelector('dialog:modal')) {
                 // Keep the browser's top-modal cancel action, but do not let
                 // sidebar/menu Escape handlers close UI behind that modal.
@@ -8197,7 +8224,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         await this.showCustomDialog(elements.alertDialog, elements.alertOkBtn);
     },
     // 確認ダイアログ表示
-    async showCustomConfirm(message, { placement = 'global' } = {}) {
+    async showCustomConfirm(message, { placement = 'global', confirmLabel = 'OK' } = {}) {
         elements.confirmDialog.classList.toggle('chat-workspace-dialog', placement === 'chat');
         if (placement === 'chat') this.updateChatWorkspaceLayout();
         elements.confirmMessage.textContent = message;
@@ -8209,6 +8236,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
          elements.confirmCancelBtn.parentNode.replaceChild(newCancelBtn, elements.confirmCancelBtn);
          elements.confirmCancelBtn = newCancelBtn;
 
+        elements.confirmOkBtn.textContent = confirmLabel;
         elements.confirmOkBtn.onclick = () => elements.confirmDialog.close('ok');
         elements.confirmCancelBtn.onclick = () => elements.confirmDialog.close('cancel');
         const result = await this.showCustomDialog(elements.confirmDialog, elements.confirmOkBtn);
@@ -9273,7 +9301,7 @@ const apiUtils = {
 
         const translationConfig = translationModelName && typeof translationModelName === 'object'
             ? translationModelName
-            : appLogic.resolveThoughtTranslationApiConfig(translationModelName);
+            : appLogic.resolveThoughtTranslationApiConfig();
         const provider = appLogic.normalizeApiProvider(translationConfig.provider);
         if (provider === 'openrouter') {
             return await this.translateTextWithOpenRouter(textToTranslate, translationConfig, signal);
@@ -11542,6 +11570,26 @@ const appLogic = {
         };
     },
 
+    updateAuxiliaryModelOptions() {
+        const none = SettingsV136.AUXILIARY_MODEL_NONE;
+        const choices = this.buildModelRefOptions({ registeredOnly: true })
+            .filter(choice => choice.modelName !== none && choice.apiConfigId !== none);
+        for (const [key, id] of Object.entries(SettingsV136.auxiliaryModelSelectIds)) {
+            const select = document.getElementById(id);
+            const ref = this.getGlobalAuxiliaryModelRefV136(key);
+            let value = this.encodeModelRefValue(ref);
+            const options = choices.map(choice => new Option(choice.label, choice.value));
+            if (ref && !choices.some(choice => choice.value === value)) {
+                if (!value) value = 'unavailable';
+                const option = new Option(`利用不可: ${[ref.apiConfigId, ref.modelName].filter(Boolean).join(' / ')}`, value);
+                option.disabled = true;
+                options.push(option);
+            }
+            select.replaceChildren(new Option('選択してください', ''), ...options);
+            select.value = value;
+        }
+    },
+
     getApiConfigModelCandidates(config = {}) {
         return this.normalizeModelCandidates([
             config.modelCandidates || [],
@@ -11563,9 +11611,9 @@ const appLogic = {
         return refs;
     },
 
-    buildModelRefOptions({ includeDisabled = false, currentRefs = [] } = {}) {
+    buildModelRefOptions({ includeDisabled = false, currentRefs = [], registeredOnly = false } = {}) {
         let configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
-        if (!configs.length) {
+        if (!configs.length && !registeredOnly) {
             configs = this.ensureDefaultApiConfigs(configs);
             state.apiConfigs = configs;
             state.settings.apiConfigs = configs;
@@ -11612,7 +11660,7 @@ const appLogic = {
             seen.add(key);
         });
 
-        if (!choices.length) {
+        if (!choices.length && !configs.length && !registeredOnly) {
             const fallbackConfig = this.createLegacyApiConfig(state.settings.apiProvider || 'gemini', state.settings);
             return this.getApiConfigModelCandidates(fallbackConfig).map(modelName => ({
                 apiConfigId: fallbackConfig.id,
@@ -11803,15 +11851,15 @@ const appLogic = {
     },
 
     getThoughtTranslationModelRefForExecution() {
-        return this.getGlobalAuxiliaryModelRefV136('thoughtTranslationModelRef', 'thoughtTranslationModel');
+        return this.getGlobalAuxiliaryModelRefV136('thoughtTranslationModelRef');
     },
 
     getProofreadingModelRefForExecution() {
-        return this.getGlobalAuxiliaryModelRefV136('proofreadingModelRef', 'proofreadingModelName');
+        return this.getGlobalAuxiliaryModelRefV136('proofreadingModelRef');
     },
 
     getSummaryModelRefForExecution() {
-        return this.getGlobalAuxiliaryModelRefV136('summaryModelRef', 'summaryModelName');
+        return this.getGlobalAuxiliaryModelRefV136('summaryModelRef');
     },
 
     resolveApiConfigForModelRef(modelRef = null) {
@@ -11854,79 +11902,22 @@ const appLogic = {
         return resolved;
     },
 
-    resolveThoughtTranslationApiConfig(legacyModelName = '') {
-        const modelRef = this.getThoughtTranslationModelRefForExecution();
-        this.assertModelRefForExecution(modelRef, 'thoughtTranslationModelRef');
-        const resolved = this.resolveApiConfigForModelRef(modelRef);
-        const fallbackModel = legacyModelName
-            || state.activeProfile?.settings?.thoughtTranslationModel
-            || state.activeProfile?.settings?.thoughtTranslationModelName
-            || state.settings.thoughtTranslationModel
-            || state.settings.thoughtTranslationModelName
-            || resolved.defaultModel
-            || state.settings.modelName
-            || 'gemini-2.5-flash-lite';
-        return {
-            ...resolved,
-            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
-            ref: modelRef?.apiConfigId && modelRef?.modelName
-                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
-                : resolved.ref
-        };
+    resolveSelectedAuxiliaryApiConfigV136(refKey) {
+        const ref = this.getGlobalAuxiliaryModelRefV136(refKey);
+        this.assertModelRefForExecution(ref, refKey);
+        return this.resolveApiConfigForModelRef(ref);
     },
 
-    resolveProofreadingApiConfig(legacyModelName = '') {
-        const modelRef = this.getProofreadingModelRefForExecution();
-        this.assertModelRefForExecution(modelRef, 'proofreadingModelRef');
-        const resolved = this.resolveApiConfigForModelRef(modelRef);
-        const fallbackModel = legacyModelName
-            || state.activeProfile?.settings?.proofreadingModelName
-            || state.settings.proofreadingModelName
-            || state.activeProfile?.settings?.modelName
-            || state.settings.modelName
-            || resolved.defaultModel
-            || DEFAULT_MODEL;
-        if (resolved.enabled === false) {
-            console.warn('[ModelRef] 校正モデルのAPI設定が無効です。互換fallbackとして解決結果を使用します。', {
-                apiConfigId: resolved.id,
-                provider: resolved.provider
-            });
-        }
-        return {
-            ...resolved,
-            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
-            ref: modelRef?.apiConfigId && modelRef?.modelName
-                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
-                : resolved.ref
-        };
+    resolveThoughtTranslationApiConfig() {
+        return this.resolveSelectedAuxiliaryApiConfigV136('thoughtTranslationModelRef');
     },
 
-    resolveSummaryApiConfig(legacyModelName = '') {
-        const modelRef = this.getSummaryModelRefForExecution();
-        this.assertModelRefForExecution(modelRef, 'summaryModelRef');
-        const resolved = this.resolveApiConfigForModelRef(modelRef);
-        const fallbackModel = legacyModelName
-            || state.activeProfile?.settings?.summaryModelName
-            || state.activeProfile?.settings?.summaryModel
-            || state.settings.summaryModelName
-            || state.settings.summaryModel
-            || state.activeProfile?.settings?.modelName
-            || state.settings.modelName
-            || resolved.defaultModel
-            || DEFAULT_MODEL;
-        if (resolved.enabled === false) {
-            console.warn('[ModelRef] 要約モデルのAPI設定が無効です。互換fallbackとして解決結果を使用します。', {
-                apiConfigId: resolved.id,
-                provider: resolved.provider
-            });
-        }
-        return {
-            ...resolved,
-            modelName: modelRef?.modelName || resolved.modelName || fallbackModel,
-            ref: modelRef?.apiConfigId && modelRef?.modelName
-                ? { apiConfigId: modelRef.apiConfigId, modelName: modelRef.modelName }
-                : resolved.ref
-        };
+    resolveProofreadingApiConfig() {
+        return this.resolveSelectedAuxiliaryApiConfigV136('proofreadingModelRef');
+    },
+
+    resolveSummaryApiConfig() {
+        return this.resolveSelectedAuxiliaryApiConfigV136('summaryModelRef');
     },
 
     createProofreadingModelInfo(proofreadingConfig = {}) {
@@ -12195,9 +12186,8 @@ const appLogic = {
     },
 
     async saveApiConfigs(configs = state.apiConfigs) {
-        state.apiConfigs = this.normalizeApiConfigs(configs);
-        state.settings.apiConfigs = state.apiConfigs;
-        await dbUtils.saveSetting('apiConfigs', state.apiConfigs);
+        await dbUtils.openDB();
+        state.apiConfigs = state.settings.apiConfigs = await this.persistApiConfigsWithModelRemovalsV136(configs);
         this.renderApiConfigList();
         uiUtils.updateUserModelOptions();
         window.settingsUiV136?.refresh();
@@ -12391,6 +12381,7 @@ const appLogic = {
     openApiConfigDialog(configId = '') {
         if (!elements.apiConfigDialog || !elements.apiConfigForm) return;
         const config = configId ? this.getApiConfigById(configId) : null;
+        this.apiConfigDialogBaselineV136 = config;
         const provider = config?.provider || 'gemini';
         const defaults = this.getApiConfigProviderDefaults(provider);
 
@@ -12458,7 +12449,9 @@ const appLogic = {
 
     collectApiConfigFormValues() {
         const existingId = elements.apiConfigIdInput?.value.trim() || '';
-        const existingConfig = existingId ? this.getApiConfigById(existingId) : null;
+        const existingConfig = existingId && this.apiConfigDialogBaselineV136?.id === existingId
+            ? this.apiConfigDialogBaselineV136 : (existingId ? this.getApiConfigById(existingId) : null);
+        if (existingId && !existingConfig) throw new Error('API設定が見つかりません。設定を開き直してください。');
         const provider = existingConfig?.provider || this.normalizeApiProvider(elements.apiConfigProviderSelect?.value);
         const name = (elements.apiConfigNameInput?.value || '').trim();
         if (!name) {
@@ -12597,36 +12590,58 @@ const appLogic = {
 
     async saveApiConfigFromDialog(event) {
         event?.preventDefault();
+        if (this.apiConfigSaveInProgressV136) return;
+        this.apiConfigSaveInProgressV136 = true;
         try {
             const nextConfig = this.collectApiConfigFormValues();
-            const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
-            const index = configs.findIndex(config => config.id === nextConfig.id);
-            const existingConfig = index >= 0 ? configs[index] : null;
-            const usage = await this.inspectApiConfigReferences(nextConfig.id);
-            if (existingConfig?.enabled !== false && nextConfig.enabled === false && usage.isInUse) {
-                await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
-                return;
+            const baseline = this.apiConfigDialogBaselineV136?.id === nextConfig.id
+                ? this.apiConfigDialogBaselineV136 : this.getApiConfigById(nextConfig.id);
+            if (baseline?.enabled !== false && nextConfig.enabled === false) {
+                const usage = await this.inspectApiConfigReferences(nextConfig.id);
+                if (usage.isInUse) {
+                    await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定は使用中のため無効化できません。', usage.blockingUsages));
+                    return;
+                }
             }
-            const nextCandidates = this.getApiConfigModelCandidates(nextConfig);
-            const removedUsedModels = usage.blockingUsages.filter(item => item.modelName && !nextCandidates.includes(item.modelName));
-            if (removedUsedModels.length > 0) {
-                await uiUtils.showCustomAlert(this.formatApiConfigUsageMessage('このAPI設定の使用中モデルはモデル候補から削除できません。', removedUsedModels));
-                return;
+            const peerDrafts = await this.inspectPeerApiModelDraftsV136(nextConfig, baseline);
+            const impact = await this.editApiConfigModelsV136(nextConfig, baseline, null, peerDrafts);
+            if (impact.length) {
+                const message = this.formatApiModelRemovalImpactV136(impact);
+                if (!await uiUtils.showCustomConfirm(message, { confirmLabel: 'モデルを削除' })) return;
             }
-            if (index >= 0) {
-                configs[index] = nextConfig;
-            } else {
-                configs.push(nextConfig);
-            }
-            await this.saveApiConfigs(configs);
+            await this.editApiConfigModelsV136(nextConfig, baseline, impact, await this.inspectPeerApiModelDraftsV136(nextConfig, baseline));
+            this.ensureGlobalSettingsChannelV136();
+            state.globalSettingsChannelV136?.postMessage({ apiModelsChanged: true, database: state.db.name });
+            await this.reloadAfterApiModelEditV136();
             await this.syncLegacySettingsFromDefaultApiConfig(nextConfig);
-            this.syncActiveApiConfigState();
-            this.renderApiConfigList();
             this.closeApiConfigDialog();
             this.markAsDirtyAndSchedulePush('structural');
         } catch (error) {
             await uiUtils.showCustomAlert(error?.message || 'API設定を保存できませんでした。');
+        } finally {
+            this.apiConfigSaveInProgressV136 = false;
         }
+    },
+
+    formatApiModelRemovalImpactV136(impact) {
+        const labels = { ...MODEL_REF_USAGE_LABELS, memoryModelRef: '記憶抽出モデル',
+            sdQcModelRef: '画像クオリティチェッカー用モデル', sdPromptImproveModelRef: '画像生成プロンプト改善用モデル' };
+        const names = [...new Set(impact.map(item => item.modelName))];
+        const groups = names.map(name => {
+            const items = impact.filter(item => item.modelName === name);
+            const lines = items.filter(item => item.scope !== 'chat').map(item => {
+                if (item.scope === 'profile') return `プロファイル「${item.name || item.target}」の${labels[item.key]}`;
+                if (item.scope === 'draft') return '未送信チャットの実行モデル';
+                if (item.scope === 'peerDraft') return `別タブの未送信チャット ${item.target} 件の実行モデル`;
+                if (item.scope === 'current') return '現在のチャットの実行モデル';
+                if (item.scope === 'newChatDefault') return '新規チャットの実行モデルの既定値';
+                return labels[item.key];
+            });
+            const saved = items.filter(item => item.scope === 'chat');
+            if (saved.length) lines.push(`保存済みチャット ${saved.length} 件の実行モデル${saved.some(item => item.target === state.currentChatId) ? '（現在のチャットを含む）' : ''}`);
+            return `「${name}」\n${[...new Set(lines)].map(line => `- ${line}`).join('\n')}`;
+        });
+        return `モデルの削除\n\n${groups.join('\n\n')}\n\n該当するモデル設定は「選択してください」に変更されます。チャット履歴と保存済みメモリは保持されます。`;
     },
 
     async deleteApiConfig(configId) {
@@ -12747,11 +12762,14 @@ const appLogic = {
         };
         const refs = settings => {
             const result = { ...settings };
-            for (const [key, name] of [['defaultModelRef',settings.modelName || DEFAULT_MODEL],
-                ['thoughtTranslationModelRef',settings.thoughtTranslationModel || 'gemini-2.5-flash-lite'],
-                ['proofreadingModelRef',settings.proofreadingModelName || settings.modelName || DEFAULT_MODEL],
-                ['summaryModelRef',settings.summaryModelName || settings.modelName || DEFAULT_MODEL]])
-                result[key] ||= findRef(name, settings.apiConfigId);
+            result.defaultModelRef ||= findRef(settings.modelName || DEFAULT_MODEL, settings.apiConfigId);
+            for (const key of ['thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef']) {
+                const name = settings[SettingsV136.auxiliaryLegacyModelKeys[key]];
+                if (!result[key] && name && name !== SettingsV136.AUXILIARY_MODEL_NONE) {
+                    const ref = findRef(name, settings.apiConfigId);
+                    if (ref) result[key] = ref;
+                }
+            }
             return result;
         };
         for (const profile of profiles) {
@@ -13671,20 +13689,32 @@ const appLogic = {
 
 
     async switchProfile(newProfileId) {
-        if (state.isSending) return;
         newProfileId = Number(newProfileId);
-        if (newProfileId === state.activeProfileId) return;
-        this.cancelSendPreparationV136();
-        
-        console.log(`[Profile] プロファイルを ID: ${newProfileId} に切り替えます。`);
-        this.flushInputDraft();
-        await dbUtils.saveSetting('activeProfileId', newProfileId);
-        state.activeProfileId = newProfileId;
-        
-        // プロファイル設定の適用とUI更新のみを行う
-        this.applyActiveProfile();
-        uiUtils.updateProfileSwitcherUI();
-        this.scheduleInputDraftRestore(80, true);
+        if (!newProfileId || newProfileId === state.activeProfileId) return;
+        const operation = this.beginChatParameterOperation();
+        if (!operation) return false;
+        try {
+            if (!await this.flushChatParameterEdits(operation)) return false;
+            this.flushInputDraft();
+            const save = this.chatParameterSaveRequest({ systemPrompt: state.currentSystemPrompt,
+                generationParameters: this.getChatGenerationParameters() });
+            save.profileSwitch = newProfileId;
+            await dbUtils.saveChat(null, null, { systemPromptSave: save });
+            if (!this.ownsChatParameterOperation(operation)) return false;
+            const { profile, snapshot, revision } = save.result;
+            const index = state.profiles.findIndex(item => item.id === profile.id);
+            if (index >= 0) state.profiles[index] = profile;
+            else state.profiles.push(profile);
+            state.activeProfileId = newProfileId;
+            this.applyActiveProfile();
+            this.applyChatParameterSnapshot(snapshot, revision);
+            uiUtils.updateProfileSwitcherUI();
+            this.scheduleInputDraftRestore(80, true);
+            return true;
+        } catch (error) {
+            if (this.ownsChatParameterOperation(operation)) await uiUtils.showCustomAlert(error.message || 'プロファイルを切り替えられませんでした。');
+            return false;
+        } finally { this.finishChatParameterOperation(operation); }
     },
 
     async saveNewProfile() {
@@ -13833,8 +13863,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'proofreadingModelName', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'thoughtTranslationModel', 'summaryModelName', 'summarySystemPrompt', 'dropboxAppKey'];
-        const modelRefKeys = ['defaultModelRef', 'thoughtTranslationModelRef', 'proofreadingModelRef', 'summaryModelRef'];
+        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'enableSummaryButton'];
         
@@ -13852,30 +13881,13 @@ const appLogic = {
                 settings[key] = modelRef?.modelName || state.settings.modelName || DEFAULT_MODEL;
             } else if (key === 'apiConfigId') {
                 settings[key] = state.settings.apiConfigId || state.activeProfile?.settings?.apiConfigId || this.getDefaultApiConfigIdForProvider(settings.apiProvider || state.settings.apiProvider || 'gemini');
-            } else if (key === 'thoughtTranslationModel') {
-                const modelRef = this.decodeModelRefValue(elements.thoughtTranslationModelSelect?.value || '');
-                settings[key] = modelRef?.modelName || state.settings.thoughtTranslationModel || 'gemini-2.5-flash-lite';
-            } else if (key === 'proofreadingModelName') {
-                const modelRef = this.decodeModelRefValue(elements.proofreadingModelNameSelect?.value || '');
-                settings[key] = modelRef?.modelName || state.settings.proofreadingModelName || 'gemini-2.5-flash';
-            } else if (key === 'summaryModelName') {
-                const modelRef = this.decodeModelRefValue(elements.summaryModelNameSelect?.value || '');
-                settings[key] = modelRef?.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
             } else {
                 const element = elements[key + 'Input'] || elements[key + 'Select'] || elements[key + 'Textarea'];
                 if (element) settings[key] = element.value.trim();
             }
         });
-        modelRefKeys.forEach(key => {
-            const selectByKey = {
-                defaultModelRef: elements.modelNameSelect,
-                thoughtTranslationModelRef: elements.thoughtTranslationModelSelect,
-                proofreadingModelRef: elements.proofreadingModelNameSelect,
-                summaryModelRef: elements.summaryModelNameSelect
-            };
-            const ref = this.decodeModelRefValue(selectByKey[key]?.value || '');
-            if (ref) settings[key] = ref;
-        });
+        const ref = this.decodeModelRefValue(elements.modelNameSelect.value);
+        if (ref) settings.defaultModelRef = ref;
         
         numberKeys.forEach(key => {
             let element;
@@ -14861,9 +14873,18 @@ const appLogic = {
             elements.chatScreen.style.transform = 'translateX(0)';
             elements.historyScreen.style.transform = 'translateX(-100%)';
             elements.settingsScreen.style.transform = 'translateX(100%)';
-            uiUtils.showScreen('chat', true);
-            history.replaceState({ screen: 'chat' }, '', '#chat');
-            state.currentScreen = 'chat';
+            const settingsEntry = window.settingsUiV136?.getHashEntry();
+            if (settingsEntry) {
+                const entry = history.state?.screen === 'settings' && history.state.settingsCategory === settingsEntry.settingsCategory
+                    ? history.state : settingsEntry;
+                history.replaceState(entry, '', location.hash);
+                window.settingsUiV136.restore(entry);
+                await uiUtils.showScreen('settings', true);
+            } else {
+                uiUtils.showScreen('chat', true);
+                history.replaceState({ screen: 'chat' }, '', '#chat');
+                state.currentScreen = 'chat';
+            }
             
             updateMessageMaxWidthVar();
             this.setupEventListeners();
@@ -15963,13 +15984,36 @@ const appLogic = {
             event.stopPropagation();
             this.closeSystemPromptDialog();
         });
+        const parameterMenuButton = document.getElementById('chat-parameter-menu-btn');
+        const parameterMenu = document.getElementById('chat-parameter-menu');
+        parameterMenuButton.addEventListener('click', () => {
+            if (!parameterMenu.hidden) { this.closeChatParameterMenu(true); return; }
+            parameterMenu.hidden = false;
+            parameterMenuButton.setAttribute('aria-expanded', 'true');
+            parameterMenu.querySelector('button').focus();
+        });
+        parameterMenu.addEventListener('click', event => {
+            const direction = event.target.closest('[data-parameter-copy]')?.dataset.parameterCopy;
+            if (direction) void this.copyChatParameters(direction);
+        });
+        parameterMenu.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const items = [...parameterMenu.querySelectorAll('button')];
+            const index = items.indexOf(document.activeElement);
+            items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+                : (index + items.length + (event.key === 'ArrowDown' ? 1 : -1)) % items.length].focus();
+        });
+        document.addEventListener('pointerdown', event => {
+            if (!parameterMenu.hidden && !parameterMenu.contains(event.target) && !parameterMenuButton.contains(event.target)) this.closeChatParameterMenu();
+        }, true);
         document.addEventListener('input', (event) => {
-            if (event.target?.id === 'system-prompt-editor') {
+            if (event.target?.id === 'system-prompt-editor' || event.target?.matches?.('[data-chat-parameter]')) {
                 this.handleSystemPromptInput();
             }
         }, true);
         document.addEventListener('blur', (event) => {
-            if (event.target?.id === 'system-prompt-editor' && state.isEditingSystemPrompt) {
+            if (event.target?.id === 'system-prompt-editor' && state.isEditingSystemPrompt && !this.chatParameterOperation) {
                 this.saveCurrentSystemPrompt({ keepOpen: true });
             }
         }, true);
@@ -16090,9 +16134,6 @@ const appLogic = {
                     }
                     
                     try {
-                        const refs = { modelName: 'defaultModelRef', thoughtTranslationModel: 'thoughtTranslationModelRef',
-                            proofreadingModelName: 'proofreadingModelRef', summaryModelName: 'summaryModelRef',
-                            sdQcModel: 'sdQcModelRef', sdPromptImproveModel: 'sdPromptImproveModelRef' };
                         if (key === 'thinkingBudget') return;
                         if (key === 'modelName') {
                             await this.setCurrentChatModelRef(this.decodeModelRefValue(element.value));
@@ -16110,7 +16151,6 @@ const appLogic = {
                             await this.updateGlobalOtherSetting(key, value);
                         } else if (SettingsV136.globalKeys.includes(key)) {
                             const updates = { [key]: value };
-                            if (refs[key]) updates[refs[key]] = this.decodeModelRefValue(element.value);
                             await this.saveGlobalSettingsV136(updates);
                         } else if (API_CONFIG_LEGACY_SYNC_KEYS.has(key)) {
                             state.settings[key] = value;
@@ -16173,39 +16213,18 @@ const appLogic = {
             topP: { element: elements.topPInput, event: 'input' },
             includeThoughts: { element: elements.includeThoughtsToggle, event: 'change' },
             enableThoughtTranslation: { element: elements.enableThoughtTranslationCheckbox, event: 'change' },
-            thoughtTranslationModel: {
-                element: elements.thoughtTranslationModelSelect,
-                event: 'change',
-                onUpdate: () => this.updateModelRouteNotes(),
-                getValue: () => {
-                    const modelRef = this.decodeModelRefValue(elements.thoughtTranslationModelSelect?.value || '');
-                    return modelRef?.modelName || '';
-                }
-            },
             dummyUser: { element: elements.dummyUserInput, event: 'input' },
             applyDummyToProofread: { element: elements.applyDummyToProofreadCheckbox, event: 'change' },
             applyDummyToTranslate: { element: elements.applyDummyToTranslateCheckbox, event: 'change' },
             dummyModel: { element: elements.dummyModelInput, event: 'input' },
             reverseDummyOrder: { element: elements.reverseDummyOrderCheckbox, event: 'change' },
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
-            darkMode: { element: elements.darkModeToggle, event: 'change', onUpdate: () => uiUtils.applyDarkMode() },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
             enableProofreading: { element: elements.enableProofreadingCheckbox, event: 'change' },
-            proofreadingModelName: {
-                element: elements.proofreadingModelNameSelect,
-                event: 'change',
-                onUpdate: () => this.updateModelRouteNotes(),
-                getValue: () => {
-                    const modelRef = this.decodeModelRefValue(elements.proofreadingModelNameSelect?.value || '');
-                    return modelRef?.modelName || '';
-                }
-            },
             proofreadingSystemInstruction: { element: elements.proofreadingSystemInstructionTextarea, event: 'input' },
             enableChatTitleGeneration: { element: elements.enableChatTitleGenerationCheckbox, event: 'change' },
             enableStreamingOutput: { element: elements.enableStreamingOutputCheckbox, event: 'change' },
-            chatTitleModelRef: { element: elements.chatTitleModelSelect, event: 'change',
-                getValue: () => this.decodeModelRefValue(elements.chatTitleModelSelect.value) },
             chatTitleSystemPrompt: { element: elements.chatTitleSystemPromptTextarea, event: 'input' },
             enableAutoRetry: { element: elements.enableAutoRetryCheckbox, event: 'change' },
             maxRetries: { element: elements.maxRetriesInput, event: 'input' },
@@ -16232,18 +16251,9 @@ const appLogic = {
             userMessageColor: { element: elements.userMessageColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             allowPromptUiChanges: { element: document.getElementById('allow-prompt-ui-changes'), event: 'change' },
             forceFunctionCalling: { element: elements.forceFunctionCallingToggle, event: 'change' },
-            enableMemory: { element: elements.enableMemoryToggle, event: 'change', onUpdate: (value) => this.toggleMemoryOptions(value) },
+            enableMemory: { element: elements.enableMemoryToggle, event: 'change', onUpdate: () => this.toggleMemoryIconVisibility() },
             memoryAutoSaveInterval: { element: elements.memoryAutoSaveIntervalSelect, event: 'change' },
             dropboxSyncFrequency: { element: elements.dropboxSyncFrequencySelect, event: 'change' },
-            summaryModelName: {
-                element: elements.summaryModelNameSelect,
-                event: 'change',
-                onUpdate: () => this.updateModelRouteNotes(),
-                getValue: () => {
-                    const modelRef = this.decodeModelRefValue(elements.summaryModelNameSelect?.value || '');
-                    return modelRef?.modelName || '';
-                }
-            },
             summarySystemPrompt: { element: elements.summarySystemPromptTextarea, event: 'input' },
             enableSummaryButton: { element: elements.enableSummaryButtonToggle, event: 'change', onUpdate: () => this.toggleSummaryButtonVisibility() },
             dropboxAppKey: { element: elements.dropboxAppKeyInput, event: 'change', onUpdate: (value) => {
@@ -16268,10 +16278,8 @@ const appLogic = {
                     elements.sdQualityCheckerOptionsDiv.classList.toggle('hidden', !value);
                 } 
             },
-            sdQcModel: { element: elements.sdQcModelSelect, event: 'change' },
             sdQcPrompt: { element: elements.sdQcPromptTextarea, event: 'input' },
             sdQcRetries: { element: elements.sdQcRetriesInput, event: 'input' },
-            sdPromptImproveModel: { element: elements.sdPromptImproveModelSelect, event: 'change' },
             sdPromptImproveSystemPrompt: { element: elements.sdPromptImproveSystemPromptTextarea, event: 'input' }
         };
     
@@ -16903,8 +16911,9 @@ const appLogic = {
 
     // popstateイベントハンドラ (戻るボタン/ジェスチャー)
     handlePopState(event) {
-    const targetScreen = event.state?.screen || 'chat';
-    if (targetScreen === 'settings') window.settingsUiV136?.restore(event.state);
+    const entry = event.state?.screen ? event.state : window.settingsUiV136?.getHashEntry();
+    const targetScreen = entry?.screen || 'chat';
+    if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
     else window.settingsUiV136?.closePopover(false);
     if (targetScreen === state.currentScreen) {
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
@@ -17028,6 +17037,7 @@ const appLogic = {
 
     // 新規チャット開始の確認と実行
     async confirmStartNewChat() {
+        if (this.chatParameterOperation) return false;
         const confirmed = await uiUtils.showCustomConfirm("現在のチャットを保存して新規チャットを開始しますか？");
         if (!confirmed) {
             console.log("新規チャットの開始をキャンセルしました。");
@@ -17080,7 +17090,7 @@ const appLogic = {
 
     // 新規チャットを開始する (状態リセット)
     startNewChat(options = {}) {
-        if (state.isSending) return;
+        if (state.isSending || this.chatParameterOperation) return;
         this.invalidateSystemPromptOpen();
         this.cancelAttachmentOperation();
         this.attachmentSession = null;
@@ -17096,7 +17106,12 @@ const appLogic = {
         state.currentChatPinnedAt = null;
         state.currentChatPinStateUpdatedAt = null;
         state.currentMessages = [];
-        state.currentSystemPrompt = state.settings.systemPrompt || ''; 
+        let draft = null;
+        if (options.restoreDraft) {
+            try { draft = JSON.parse(sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY)); } catch { /* use the profile defaults */ }
+        } else sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        this.applyChatParameterSnapshot({ systemPrompt: typeof draft?.systemPrompt === 'string' ? draft.systemPrompt : state.settings.systemPrompt || '',
+            generationParameters: SettingsV136.normalizeChatNumbers(draft?.generationParameters, state.settings) });
         state.pendingAttachments = [];
         state.currentPersistentMemory = {};
         state.currentSummarizedContext = null;
@@ -17120,6 +17135,7 @@ const appLogic = {
 
     // チャットの切り替え準備と読み込み。成功するまでは現在のstateを破壊しない。
     async loadChat(id, options = {}) {
+        if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
         const normalizedId = chatHistoryActions.normalizeChatId(id);
         if (normalizedId === null) {
             await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
@@ -17207,6 +17223,7 @@ const appLogic = {
                 needsSave = true;
             }
         });
+        if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
         uiUtils.closeChatSearch({ restoreFocus: false });
 
         state.syncMessageCounter = 0;
@@ -17217,8 +17234,10 @@ const appLogic = {
         state.currentExecutionSettings = this.getChatExecutionSettingsV136(chat);
         state.executionInitializingV136 = false;
         sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
+        sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
         this.syncChatExecutionToLegacySettings();
         uiUtils.applySettingsToUI();
+        void this.ensureModelThinkingCapabilities();
         const loadedPinState = normalizeChatPinState(chat);
         state.currentChatIsPinned = loadedPinState.isPinned;
         state.currentChatPinnedAt = loadedPinState.isPinned ? loadedPinState.pinnedAt : null;
@@ -17228,7 +17247,8 @@ const appLogic = {
         state.currentPersistentMemory = chat.persistentMemory || {};
         state.currentSummarizedContext = chat.summarizedContext || null;
         state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
-        state.currentSystemPrompt = chat.systemPrompt !== undefined ? chat.systemPrompt : state.settings.systemPrompt;
+        this.applyChatParameterSnapshot({ systemPrompt: typeof chat.systemPrompt === 'string' ? chat.systemPrompt : state.settings.systemPrompt || '',
+            generationParameters: SettingsV136.normalizeChatNumbers(chat.generationParameters, state.settings) }, chat.parameterRevision || 0);
         state.pendingAttachments = [];
 
         this.toggleMemoryIconVisibility();
@@ -17675,9 +17695,9 @@ const appLogic = {
     },
 
     async callProofreadingModel(textToProofread, options = {}) {
-        const proofreadingConfig = options.apiConfig || this.resolveProofreadingApiConfig(state.settings.proofreadingModelName);
+        const proofreadingConfig = options.apiConfig || this.resolveProofreadingApiConfig();
         const provider = this.normalizeApiProvider(proofreadingConfig.provider);
-        const modelName = proofreadingConfig.modelName || state.settings.proofreadingModelName || DEFAULT_MODEL;
+        const modelName = proofreadingConfig.modelName;
         const systemPrompt = options.systemPrompt || state.settings.proofreadingSystemInstruction || '';
         const generationConfig = options.generationConfig || {};
         const signal = options.signal || state.abortController?.signal;
@@ -17861,7 +17881,7 @@ const appLogic = {
             enableAutoRetry,
             maxRetries
         } = state.settings;
-        const proofreadingConfig = this.resolveProofreadingApiConfig(state.settings.proofreadingModelName);
+        const proofreadingConfig = this.resolveProofreadingApiConfig();
         const generationConfig = {};
         if (temperature !== null) generationConfig.temperature = temperature;
         if (maxTokens !== null) generationConfig.maxOutputTokens = maxTokens;
@@ -18159,7 +18179,7 @@ const appLogic = {
                 lastMessage.search_web_results = aggregatedSearchResults;
             }
 
-            if (state.settings.enableProofreading) {
+            if (state.settings.enableProofreading && this.getProofreadingModelRefForExecution()) {
                 const lastTextResponse = finalModelMessages.filter(m => m.content).pop();
                 if (lastTextResponse) {
                     try {
@@ -18181,13 +18201,13 @@ const appLogic = {
                 }
             }
 
-            if (state.settings.enableThoughtTranslation) {
+            if (state.settings.enableThoughtTranslation && this.getThoughtTranslationModelRefForExecution()) {
                 for (const msg of finalModelMessages) {
                     if (msg.thoughtSummary) {
                         try {
                             uiUtils.setLoadingIndicatorText('思考プロセスを翻訳中...');
                             const originalThoughtSummary = msg.thoughtSummary;
-                            const translationConfig = appLogic.resolveThoughtTranslationApiConfig(state.settings.thoughtTranslationModel);
+                            const translationConfig = appLogic.resolveThoughtTranslationApiConfig();
                             const translationMeta = {
                                 provider: appLogic.getProviderDisplayName(translationConfig.provider),
                                 apiConfigName: translationConfig.name,
@@ -18287,7 +18307,7 @@ const appLogic = {
         state.sendPreparationV136 = null;
     },
     beginSendPreparationV136() {
-        if (state.isSending || state.sendPreparationV136) return null;
+        if (state.isSending || state.sendPreparationV136 || this.chatParameterOperation) return null;
         const preparation = {
             controller: new AbortController(),
             chatId: state.currentChatId, messages: state.currentMessages, profileId: state.activeProfileId,
@@ -18295,6 +18315,7 @@ const appLogic = {
             execution: structuredClone(state.currentExecutionSettings), input: elements.userInput.value,
             profileSignature: JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys)),
             systemPrompt: state.currentSystemPrompt,
+            generationParameters: this.getChatGenerationParameters(),
             attachments: [...state.pendingAttachments]
         };
         state.sendPreparationV136 = preparation;
@@ -18308,6 +18329,7 @@ const appLogic = {
             || state.executionSelectionGenerationV136 !== preparation.selectionGeneration
             || preparation.profileSignature !== JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys))
             || preparation.systemPrompt !== state.currentSystemPrompt
+            || JSON.stringify(preparation.generationParameters) !== JSON.stringify(this.getChatGenerationParameters())
             || (preparation.execution && JSON.stringify(state.currentExecutionSettings) !== JSON.stringify(preparation.execution))
             || (checkInput && (elements.userInput.value !== preparation.input
                 || state.pendingAttachments.length !== preparation.attachments.length
@@ -18370,7 +18392,11 @@ const appLogic = {
                 uiUtils.renderChatMessages();
             }
         } finally {
-            try { uiUtils.setSendingState(false); }
+            try {
+                uiUtils.setSendingState(false);
+                this.applyRemovedExecutionSelectionV136();
+                void this.syncRemovedExecutionSelectionV136().catch(() => {});
+            }
             finally { session.resolveFinished?.(); }
         }
         if (showConflict) void uiUtils.showCustomAlert('別の操作で会話が更新されました。履歴を開き直してください。');
@@ -18398,6 +18424,8 @@ const appLogic = {
             }
             preparation.profileSignature = JSON.stringify(SettingsV136.pick(state.settings, SettingsV136.profileKeys));
             preparation.systemPrompt = state.currentSystemPrompt;
+            preparation.generationParameters = this.getChatGenerationParameters();
+            if (preparation.chatId == null && preparation.messages === state.currentMessages) preparation.chatId = state.currentChatId;
         }
 
         this.assertSendPreparationV136(preparation, true);
@@ -18457,15 +18485,11 @@ const appLogic = {
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
 
-            const generationConfig = {};
-            if (state.settings.temperature !== null) generationConfig.temperature = state.settings.temperature;
-            if (state.settings.maxTokens !== null) generationConfig.maxOutputTokens = state.settings.maxTokens;
-            if (state.settings.topK !== null) generationConfig.topK = state.settings.topK;
-            if (state.settings.topP !== null) generationConfig.topP = state.settings.topP;
+            const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
 
             const summaryText = this._buildSummaryForPrompt();
-            let finalSystemPrompt = state.currentSystemPrompt?.trim() || '';
+            let finalSystemPrompt = preparation.systemPrompt?.trim() || '';
             if (summaryText) {
                 finalSystemPrompt += `\n\n${summaryText}`;
             }
@@ -18975,6 +18999,132 @@ const appLogic = {
 
 
     // --- システムプロンプト編集 ---
+    closeChatParameterMenu(restoreFocus = false) {
+        const menu = document.getElementById('chat-parameter-menu');
+        const button = document.getElementById('chat-parameter-menu-btn');
+        if (!menu || !button) return;
+        menu.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) button.focus();
+    },
+    beginChatParameterOperation() {
+        if (state.isSending || this.chatParameterOperation) return null;
+        const operation = { messages: state.currentMessages, profileId: state.activeProfileId };
+        this.chatParameterOperation = operation;
+        this.cancelSendPreparationV136();
+        this.updateChatParameterControlsDisabled();
+        return operation;
+    },
+    ownsChatParameterOperation(operation) {
+        return this.chatParameterOperation === operation && operation.messages === state.currentMessages
+            && operation.profileId === state.activeProfileId;
+    },
+    finishChatParameterOperation(operation) {
+        if (this.chatParameterOperation !== operation) return;
+        this.chatParameterOperation = null;
+        this.updateChatParameterControlsDisabled();
+    },
+    async flushChatParameterEdits(operation) {
+        if (state.isEditingSystemPrompt || this.hasUnsavedSystemPrompt()) {
+            if (!await this.saveCurrentSystemPrompt()) return false;
+        }
+        return this.ownsChatParameterOperation(operation);
+    },
+    chatParameterSaveRequest(snapshot) {
+        return { messages: state.currentMessages, chatId: state.currentChatId, value: snapshot.systemPrompt,
+            parameters: snapshot.generationParameters, parameterRevision: state.currentChatParameterRevision };
+    },
+    async copyChatParameters(direction) {
+        this.closeChatParameterMenu(true);
+        if (!state.isEditingSystemPrompt || !elements.systemPromptDialog.open) return false;
+        const operation = this.beginChatParameterOperation();
+        if (!operation) return false;
+        try {
+            if (!await this.flushChatParameterEdits(operation)) return false;
+            const profile = await dbUtils.getProfile(operation.profileId);
+            if (!profile || !this.ownsChatParameterOperation(operation) || !elements.systemPromptDialog.open) return false;
+            const toProfile = direction === 'to-profile';
+            const snapshot = toProfile
+                ? { systemPrompt: state.currentSystemPrompt, generationParameters: this.getChatGenerationParameters() }
+                : this.profileChatParameters(profile.settings);
+            const { maxTokens, temperature, topK, topP } = snapshot.generationParameters;
+            const prompt = snapshot.systemPrompt.length > 160 ? `${snapshot.systemPrompt.slice(0, 160)}…` : snapshot.systemPrompt;
+            const message = toProfile ? `現在のチャットのパラメータ設定を、プロファイル「${profile.name}」に反映しますか？`
+                : `プロファイル「${profile.name}」のパラメータ設定を、現在のチャットに適用しますか？`;
+            const details = `システムプロンプト: ${prompt || '（空欄）'}\nMax Tokens: ${maxTokens ?? '未指定'}\nTemperature: ${temperature ?? '未指定'}\nTop K: ${topK ?? '未指定'}\nTop P: ${topP ?? '未指定'}`;
+            const confirmed = await uiUtils.showCustomConfirm(`${message}\n\n${details}`, {
+                placement: 'chat', confirmLabel: toProfile ? 'プロファイルに反映' : 'チャットに適用'
+            });
+            if (!confirmed || !this.ownsChatParameterOperation(operation) || !elements.systemPromptDialog.open) return false;
+            if (toProfile) {
+                await this.mutateProfileV136(operation.profileId, current => ({ ...current,
+                    settings: { ...current.settings, systemPrompt: snapshot.systemPrompt, ...snapshot.generationParameters }
+                }), undefined, { preserveStoredSettings: true });
+            } else {
+                const save = this.chatParameterSaveRequest(snapshot);
+                await dbUtils.saveChat(null, null, { systemPromptSave: save });
+                if (!this.ownsChatParameterOperation(operation)) return false;
+                this.applyChatParameterSnapshot(snapshot, save.result.revision);
+            }
+            return true;
+        } catch (error) {
+            if (this.ownsChatParameterOperation(operation)) await uiUtils.showCustomAlert(error.message || 'パラメータを反映できませんでした。');
+            return false;
+        } finally { this.finishChatParameterOperation(operation); }
+    },
+    getChatGenerationParameters() {
+        return SettingsV136.normalizeChatNumbers(state.currentChatGenerationParameters, state.settings);
+    },
+    profileChatParameters(settings = {}) {
+        return { systemPrompt: typeof settings?.systemPrompt === 'string' ? settings.systemPrompt : '',
+            generationParameters: SettingsV136.normalizeChatNumbers(settings) };
+    },
+    applyChatParameterSnapshot(snapshot, revision = 0) {
+        state.currentSystemPrompt = snapshot.systemPrompt;
+        state.currentChatGenerationParameters = snapshot.generationParameters;
+        state.currentChatParameterRevision = revision;
+        this.systemPromptSession = null;
+        uiUtils.updateSystemPromptSaveStatus('saved');
+        if (elements.systemPromptDialog.open) this.renderChatParameterInputs();
+        uiUtils.updateSystemPromptUI();
+    },
+    getChatGenerationConfig(parameters = this.getChatGenerationParameters()) {
+        const { maxTokens, temperature, topK, topP } = parameters;
+        return { ...(maxTokens !== null && { maxOutputTokens: maxTokens }), ...(temperature !== null && { temperature }),
+            ...(topK !== null && { topK }), ...(topP !== null && { topP }) };
+    },
+    renderChatParameterInputs() {
+        const editor = uiUtils.getSystemPromptEditorElement();
+        editor.value = state.currentSystemPrompt || '';
+        uiUtils.adjustTextareaHeight(editor, 200);
+        const parameters = this.getChatGenerationParameters();
+        for (const control of elements.systemPromptDialog.querySelectorAll('[data-chat-parameter]')) {
+            control.value = parameters[control.dataset.chatParameter] ?? '';
+            control.removeAttribute('aria-invalid');
+        }
+        this.updateChatParameterControlsDisabled();
+        uiUtils.updateSystemPromptCharCount();
+    },
+    updateChatParameterControlsDisabled() {
+        const disabled = Boolean(state.isSending || this.chatParameterOperation);
+        for (const control of elements.systemPromptDialog.querySelectorAll('textarea,[data-chat-parameter],#chat-parameter-menu-btn'))
+            control.disabled = disabled;
+    },
+    readChatParameterInputs() {
+        const inputs = elements.systemPromptDialog.querySelectorAll('[data-chat-parameter]');
+        const parameters = {};
+        for (const control of inputs) parameters[control.dataset.chatParameter] = control.value === '' ? null : control.valueAsNumber;
+        const normalized = SettingsV136.normalizeChatNumbers(parameters);
+        let valid = true;
+        for (const control of inputs) {
+            const key = control.dataset.chatParameter;
+            const ok = control.validity.valid && normalized[key] === parameters[key];
+            if (ok) control.removeAttribute('aria-invalid');
+            else control.setAttribute('aria-invalid', 'true');
+            valid &&= ok;
+        }
+        return valid ? { systemPrompt: uiUtils.getSystemPromptEditorElement().value.trim(), generationParameters: parameters } : null;
+    },
     startEditSystemPrompt() {
         this.openSystemPromptDialog();
     },
@@ -19003,12 +19153,7 @@ const appLogic = {
         this.getSystemPromptSaveSession();
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
-        const editor = uiUtils.getSystemPromptEditorElement();
-        if (editor) {
-            editor.value = state.currentSystemPrompt || '';
-            editor.disabled = Boolean(state.isSending);
-            uiUtils.adjustTextareaHeight(editor, 200);
-        }
+        this.renderChatParameterInputs();
         uiUtils.prepareChatDialog(elements.systemPromptDialog);
         if (elements.systemPromptDialog && !elements.systemPromptDialog.open) elements.systemPromptDialog.showModal();
         state.isEditingSystemPrompt = elements.systemPromptDialog.open;
@@ -19040,6 +19185,8 @@ const appLogic = {
                 messages: state.currentMessages, chatId: state.currentChatId,
                 value: String(state.currentSystemPrompt || ''), revision,
                 persistedValue: String(state.currentSystemPrompt || ''), persistedRevision: revision,
+                parameters: this.getChatGenerationParameters(), persistedParameters: this.getChatGenerationParameters(),
+                parameterRevision: state.currentChatParameterRevision, invalid: false,
                 pending: null, error: null
             };
         }
@@ -19048,35 +19195,48 @@ const appLogic = {
     hasUnsavedSystemPrompt() {
         const session = this.systemPromptSession;
         return this.isCurrentSystemPromptSession(session) && Boolean(session.pending || session.error ||
-            session.revision !== session.persistedRevision || session.value !== session.persistedValue);
+            session.invalid || session.revision !== session.persistedRevision || session.value !== session.persistedValue);
+    },
+    captureSystemPromptSession(session) {
+        const snapshot = state.isEditingSystemPrompt ? this.readChatParameterInputs()
+            : { systemPrompt: String(state.currentSystemPrompt || ''), generationParameters: this.getChatGenerationParameters() };
+        session.invalid = !snapshot;
+        if (!snapshot) return false;
+        if (snapshot.systemPrompt !== session.value || JSON.stringify(snapshot.generationParameters) !== JSON.stringify(session.parameters))
+            session.revision = ++state.systemPromptRevision;
+        session.value = state.currentSystemPrompt = snapshot.systemPrompt;
+        session.parameters = state.currentChatGenerationParameters = snapshot.generationParameters;
+        return true;
     },
     handleSystemPromptInput() {
+        if (state.isSending || this.chatParameterOperation) return;
         const session = this.getSystemPromptSaveSession();
-        const editor = uiUtils.getSystemPromptEditorElement();
-        if (editor) session.value = state.currentSystemPrompt = editor.value.trim();
+        const valid = this.captureSystemPromptSession(session);
         session.revision = ++state.systemPromptRevision;
         uiUtils.updateSystemPromptCharCount();
         uiUtils.updateSystemPromptButtonState();
         uiUtils.updateSystemPromptSaveStatus('dirty');
-        this.scheduleSystemPromptAutosave();
+        if (valid) this.scheduleSystemPromptAutosave();
+        else {
+            clearTimeout(state.systemPromptSaveTimer);
+            state.systemPromptSaveTimer = 0;
+        }
     },
     async saveCurrentSystemPrompt({ keepOpen = true } = {}) {
         const operation = this.systemPromptDialogOperation;
         clearTimeout(state.systemPromptSaveTimer);
         state.systemPromptSaveTimer = 0;
         const session = this.getSystemPromptSaveSession();
-        const editor = uiUtils.getSystemPromptEditorElement();
-        const value = String(state.isEditingSystemPrompt && editor ? editor.value.trim() : state.currentSystemPrompt || '');
-        if (value !== session.value) {
-            session.value = state.currentSystemPrompt = value;
-            session.revision = ++state.systemPromptRevision;
+        if (!this.captureSystemPromptSession(session)) {
+            if (!keepOpen || operation?.kind === 'close') elements.systemPromptDialog.querySelector('[data-chat-parameter]:invalid')?.reportValidity();
+            return false;
         }
-        state.currentSystemPrompt = value;
         if (!session.pending) {
             session.pending = (async () => {
                 while (this.isCurrentSystemPromptSession(session)) {
-                    const { value: prompt, revision } = session;
-                    if (session.persistedValue === prompt && !session.error) {
+                    const { value: prompt, parameters, revision } = session;
+                    if (session.invalid) return false;
+                    if (session.persistedValue === prompt && JSON.stringify(session.persistedParameters) === JSON.stringify(parameters) && !session.error) {
                         session.persistedRevision = revision;
                         uiUtils.updateSystemPromptSaveStatus('saved');
                         return true;
@@ -19084,11 +19244,13 @@ const appLogic = {
                     uiUtils.updateSystemPromptSaveStatus('saving');
                     try {
                         // saveChat snapshots this owner and all contents synchronously.
-                        const id = await dbUtils.saveChat(null, null, { systemPromptSave: {
-                            messages: session.messages, chatId: session.chatId, value: prompt, revision
-                        } });
+                        const save = { messages: session.messages, chatId: session.chatId, value: prompt, revision,
+                            parameters, parameterRevision: session.parameterRevision };
+                        const id = await dbUtils.saveChat(null, null, { systemPromptSave: save });
                         session.chatId = id;
                         session.persistedValue = prompt;
+                        session.persistedParameters = parameters;
+                        session.parameterRevision = save.result?.revision ?? session.parameterRevision;
                         session.persistedRevision = revision;
                         session.error = null;
                     } catch (error) {
@@ -19096,12 +19258,15 @@ const appLogic = {
                         if (this.isCurrentSystemPromptSession(session)) {
                             state.systemPromptLastSaveError = error;
                             uiUtils.updateSystemPromptSaveStatus('error');
+                            if (session.revision === revision && elements.systemPromptDialog.open) uiUtils.showChatParameterSaveError();
                         }
                         console.error('システムプロンプト保存エラー:', error);
                         return false;
                     }
                     if (!this.isCurrentSystemPromptSession(session)) return false;
                     state.currentSystemPrompt = session.value;
+                    state.currentChatGenerationParameters = session.parameters;
+                    state.currentChatParameterRevision = session.parameterRevision;
                     // Input may have advanced while IndexedDB/worker work was pending.
                     // Loop before reporting success, without clearing a newer input timer.
                     if (session.revision === revision) {
@@ -19154,6 +19319,7 @@ const appLogic = {
             clearTimeout(state.systemPromptSaveTimer);
             state.systemPromptSaveTimer = 0;
             state.isEditingSystemPrompt = false;
+            this.closeChatParameterMenu();
             if (elements.systemPromptDialog?.open) elements.systemPromptDialog.close('close');
             uiUtils.updateSystemPromptButtonState();
             void this.updateChangeHistoryControls();
@@ -19968,6 +20134,11 @@ const appLogic = {
     async _retryFromMessagePreparedV136(index, preparation) {
         if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) { await uiUtils.showCustomAlert("送信中です。"); return; }
+        if (state.isEditingSystemPrompt) {
+            if (!await this.saveCurrentSystemPrompt()) return;
+            preparation.systemPrompt = state.currentSystemPrompt;
+            preparation.generationParameters = this.getChatGenerationParameters();
+        }
         
         const userMessage = state.currentMessages[index];
         if (!userMessage || userMessage.role !== 'user') return;
@@ -20007,7 +20178,7 @@ const appLogic = {
                 if (preparation.streaming) uiUtils.renderStreamingResult();
                 else uiUtils.renderChatMessages();
 
-                const systemInstruction = state.currentSystemPrompt?.trim() ? { role: "system", parts: [{ text: state.currentSystemPrompt.trim() }] } : null;
+                const systemInstruction = preparation.systemPrompt?.trim() ? { role: "system", parts: [{ text: preparation.systemPrompt.trim() }] } : null;
                 const baseHistory = state.currentMessages.filter(msg => !msg.isCascaded || msg.isSelected);
                 const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
                 this.assertSendExecutionV136(preparation);
@@ -20023,11 +20194,7 @@ const appLogic = {
                     if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
                 } else this.scrollToBottom();
     
-                const generationConfig = {};
-                if (state.settings.temperature !== null) generationConfig.temperature = state.settings.temperature;
-                if (state.settings.maxTokens !== null) generationConfig.maxOutputTokens = state.settings.maxTokens;
-                if (state.settings.topK !== null) generationConfig.topK = state.settings.topK;
-                if (state.settings.topP !== null) generationConfig.topP = state.settings.topP;
+                const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
     
                 const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
@@ -21591,11 +21758,6 @@ const appLogic = {
         }
     },
     // --- Memory Feature ---
-    toggleMemoryOptions(isEnabled) {
-        elements.memoryOptionsContainer.classList.toggle('hidden', !isEnabled);
-        this.toggleMemoryIconVisibility();
-    },
-
     toggleMemoryIconVisibility() {
         const isMasterEnabled = state.settings.enableMemory;
         elements.memoryToggleBtn.classList.toggle('hidden', !isMasterEnabled);
@@ -21747,7 +21909,7 @@ const appLogic = {
         const settings = state.globalSettingsV136 || state.settings;
         if (settings.enableChatTitleGeneration !== true || !content.trim()
             || state.currentMessages.some(m => m.role === 'user' && !m.isHidden)) return null;
-        const ref = settings.chatTitleModelRef;
+        const ref = this.getGlobalAuxiliaryModelRefV136('chatTitleModelRef');
         if (!this.validateModelRef(ref).valid) return null;
         return {
             id: crypto.getRandomValues(new Uint32Array(4)).join('-'),
@@ -21821,21 +21983,16 @@ const appLogic = {
         }
     },
 
-    async resolveAuxiliaryApiConfigV136(refKey, legacyKey, fallbackModel) {
+    getMemoryExtractionPromptV136() {
+        const value = (state.globalSettingsV136 || state.settings).memoryExtractionPrompt;
+        return typeof value === 'string' ? value : SettingsV136.DEFAULT_MEMORY_EXTRACTION_PROMPT;
+    },
+    async resolveAuxiliaryApiConfigV136(refKey) {
         const stored = await dbUtils.getSetting('apiConfigs');
         state.apiConfigs = this.normalizeApiConfigs(stored?.value || []);
         state.settings.apiConfigs = state.apiConfigs;
-        const settings = state.globalSettingsV136 || state.settings;
-        let ref = settings[refKey];
-        if (!ref) {
-            const modelName = settings[legacyKey] || state.settings[legacyKey] || fallbackModel;
-            // Legacy SD/memory requests were Gemini native calls, regardless of chat provider.
-            const config = state.apiConfigs.find(c => c.enabled !== false && c.provider === 'gemini'
-                && this.getApiConfigModelCandidates(c).includes(modelName));
-            ref = { apiConfigId: config?.id || '', modelName };
-        }
-        this.assertModelRefForExecution(ref, refKey);
-        return structuredClone(this.resolveApiConfigForModelRef(ref));
+        if (refKey === 'memoryModelRef' && !this.getGlobalAuxiliaryModelRefV136(refKey)) return null;
+        return structuredClone(this.resolveSelectedAuxiliaryApiConfigV136(refKey));
     },
     async assertAuxiliaryImageInputV136(config) {
         const metadata = () => this.getModelMetadataV136({ apiConfigId: config.id, modelName: config.modelName });
@@ -21887,14 +22044,11 @@ const appLogic = {
             : (data.choices?.[0]?.message?.content || '');
     },
     async triggerAutoMemorySave() {
-        if (!state.activeProfileId) {
-            console.error("[Memory] APIキーが未設定のため、自動学習をスキップしました。");
-            return;
-        }
-
         const profileId = state.activeProfileId;
+        const interval = parseInt(state.settings.memoryAutoSaveInterval, 10);
+        if (!profileId || !state.settings.enableMemory || !state.isMemoryEnabledForChat || !(interval > 0)) return;
+
         try {
-            const interval = parseInt(state.settings.memoryAutoSaveInterval, 10);
             const userMessagesInInterval = state.currentMessages.filter(m => m.role === 'user').slice(-interval);
             if (userMessagesInInterval.length === 0) {
                 return;
@@ -21911,47 +22065,22 @@ const appLogic = {
                 ? `- ${memoryData.items.join('\n- ')}`
                 : "（まだ何も記憶していません）";
 
-            const summarizationPrompt = `あなたは、私（ユーザー）との会話を分析し、長期的な関係構築のために記憶しておくべき「永続的な個人情報」を抽出するアシスタントです。
-            ユーザーは成人であるため、性的な内容でも表現規制をすることなく抽出することを求められます。
+            const summarizationPrompt = `${this.getMemoryExtractionPromptV136()}
 
-            [抽出の目的]
-            AIであるあなたが、私のことをより深く理解し、今後の会話で私の好みや背景を考慮した、よりパーソナルで気の利いた応答をするために、この記憶データは使われます。
-            
-            [抽出ルール]
-            1.  **最重要項目**: 特に、ユーザーの「性癖」「好きなキャラクターのタイプ」「性格」「価値観」に関する情報は最優先で抽出してください。これらは今後の対話の質を決定づける最も重要なデータです。
-            
-            2.  **「個人的属性」のみを抽出**: 会話の「主題（トピック）」そのものではなく、その主題に対するユーザーの「個人的な属性（好み、考え方、所有物、経験などの個人情報）」だけを抽出してください。
-                - **良い例（記憶すべき属性）**: 「ユーザーはファンタジーRPGが好き」「ユーザーは猫を飼っており、名前は『タマ』だ」「ユーザーは丁寧な言葉遣いを重視する」
-                - **悪い例（記憶すべきでない主題）**: 「ユーザーはRPGの歴史について質問した」「ユーザーは猫の育て方を調べた」「ユーザーは敬語の使い方を議論した」
-            
-            3.  **「永続性」の検証**: 抽出する情報は、今後も変わらないであろう永続的なものに限定してください。
-                - **記憶すべき情報**: 繰り返し話題に出る嗜好、明確に所有していると述べられた物、過去の重要な経験など。
-                - **記憶すべきでない情報**: その場限りの発言、一時的な感情、単なる事実確認の質問など。
-            
-            4.  **「好み」の厳格な判断**: ユーザーが何かを「好む」「好き」と記憶するには、慎重な判断が必要です。以下のいずれかの条件を満たさない限り、安易に「好み」と断定しないでください。
-                - ユーザーが会話の中で、繰り返しその対象について**熱意を持って語っている**。
-                - ユーザーがその対象に対して、**明確かつ強い肯定的な言葉**（例：「〜が大好きだ」「〜にはこだわりがある」）を使っている。
-                - 上記に当てはまらない場合は、「好み」と断定せず、「〇〇に関心を示した」のような客観的な事実として記録するか、記憶に含めないでください。
-            
-            5.  **推測の禁止**: 会話から直接読み取れないことを推測してはいけません。「ユーザーはおそらく〇〇だろう」といった推測は不要です。
-            
-            6.  **重複の完全な排除**: 【既存の記憶】に少しでも関連する内容が既にある場合は、絶対に含めないでください。
-            
-            7.  **出力形式の厳守**:
-                - 抽出した内容は、「ユーザーは〇〇を所有している」「ユーザーは〇〇という考えを持っている」のように、必ず**三人称の客観的な事実**として記述してください。
-                - **AIとしての応答（「承知しました」など）や前置き、後書きは一切含めず**、抽出した箇条書きのリスト、または \`[追加情報なし]\` という文字列のみを出力してください。
+---
+【既存の記憶】
+${existingMemoryText}
+---
+【会話履歴】
+${conversationText}
+---
 
-            ---
-            【既存の記憶】
-            ${existingMemoryText}
-            ---
-            【会話履歴】
-            ${conversationText}
-            ---
+${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
-            [抽出結果]`;
+[抽出結果]`;
 
-            const memoryConfig = await this.resolveAuxiliaryApiConfigV136('memoryModelRef', '', 'gemini-2.5-flash');
+            const memoryConfig = await this.resolveAuxiliaryApiConfigV136('memoryModelRef');
+            if (!memoryConfig) return;
             const requestBody = {
                 contents: [{
                     role: 'user',
@@ -21984,14 +22113,9 @@ const appLogic = {
             if (newItems.length > 0) {
                 const existingItems = new Set(memoryData.items);
                 const uniqueNewItems = newItems.filter(item => !existingItems.has(item));
-                
-                if (uniqueNewItems.length > 0) {
-                    memoryData.items.push(...uniqueNewItems);
-                    await dbUtils.saveMemory(profileId, memoryData);
-                    console.log(`[Memory] 自動学習により、${uniqueNewItems.length}件の新しい記憶を追加しました。`, uniqueNewItems);
-                } else {
-                    console.log("[Memory] 自動学習で生成された記憶は、すべて既存のものでした。");
-                }
+                if (!uniqueNewItems.length) return;
+                const added = await dbUtils.appendExtractedMemory(profileId, uniqueNewItems);
+                if (added) console.log(`[Memory] 自動学習により、${added}件の新しい記憶を追加しました。`);
             }
         } catch (error) {
             console.error("[Memory] 自動学習プロセスの実行中にエラーが発生しました:", error);
@@ -22786,6 +22910,10 @@ const appLogic = {
             uiUtils.showCustomAlert("他の処理が完了してから、再度お試しください。");
             return;
         }
+        if (!this.getSummaryModelRefForExecution()) {
+            await uiUtils.showCustomAlert('設定画面で要約用モデルを選択してください。');
+            return;
+        }
 
         const visibleMessages = this.getVisibleMessages();
         let start = 0;
@@ -22844,7 +22972,7 @@ const appLogic = {
         this.summaryRequestId = requestId;
         let summaryModelLabel = '';
         try {
-            const summaryConfig = this.resolveSummaryApiConfig(state.settings.summaryModelName);
+            const summaryConfig = this.resolveSummaryApiConfig();
             const summaryMeta = {
                 provider: summaryConfig.name || this.getProviderDisplayName(summaryConfig.provider),
                 model: summaryConfig.modelName
@@ -22889,7 +23017,7 @@ const appLogic = {
                 ]
             };
 
-            const summaryModel = summaryConfig.modelName || state.settings.summaryModelName || state.settings.modelName || DEFAULT_MODEL;
+            const summaryModel = summaryConfig.modelName;
             const apiKey = summaryConfig.apiKey || '';
             if (!apiKey) {
                 throw new Error(this.getApiKeyMissingMessage(summaryConfig, 'gemini'));
@@ -23791,8 +23919,9 @@ const appLogic = {
         let currentPrompt = args.prompt;
         let generatedImageBlob = null;
         let qualityCheckResult = null;
-        const isQcEnabled = state.settings.sdEnableQualityChecker;
-        const maxRetries = isQcEnabled ? (state.settings.sdQcRetries || 0) : 0;
+        const isQcEnabled = state.settings.sdEnableQualityChecker && this.getGlobalAuxiliaryModelRefV136('sdQcModelRef');
+        const canImprovePrompt = isQcEnabled && this.getGlobalAuxiliaryModelRefV136('sdPromptImproveModelRef');
+        const maxRetries = canImprovePrompt ? (state.settings.sdQcRetries || 0) : 0;
 
         try {
             for (let i = 0; i <= maxRetries; i++) {
@@ -23948,7 +24077,7 @@ const appLogic = {
         },
 
     async _improveSdPrompt(originalPrompt, failedPrompt, ngReason, signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef', 'sdPromptImproveModel', 'gemini-2.5-flash');
+        const config = await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef');
         const systemPrompt = state.settings.sdPromptImproveSystemPrompt;
 
         const userPrompt = `元のプロンプト: ${originalPrompt}\n失敗したプロンプト: ${failedPrompt}\n失敗理由: ${ngReason}`;
@@ -23968,7 +24097,7 @@ const appLogic = {
     },
 
     runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
+        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');
@@ -24077,7 +24206,7 @@ const appLogic = {
 
 
     runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef', 'sdQcModel', 'gemini-2.5-pro');
+        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
         const qcSystemPrompt = state.settings.sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');

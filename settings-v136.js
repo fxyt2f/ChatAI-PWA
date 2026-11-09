@@ -6,6 +6,19 @@
     const MIGRATION_KEY = 'settingsSchemaVersion';
     const BACKUP_KEY = 'settingsMigrationBackupV136';
     const DRAFT_KEY = 'chatai-pwa-execution-draft-v1';
+    const REMOVED_MODELS_KEY = 'removedApiModelRefsV136';
+    const CHAT_PARAMETER_DRAFT_KEY = 'chatai-pwa-parameter-draft-v1';
+    const chatNumberRules = { maxTokens: [1, Infinity, 1], temperature: [0, 2, 0.1], topK: [1, Infinity, 1], topP: [0, 1, 0.01] };
+    const AUXILIARY_MODEL_NONE = 'none';
+    const auxiliaryModelSelectIds = {
+        thoughtTranslationModelRef: 'thought-translation-model', proofreadingModelRef: 'proofreading-model-name',
+        summaryModelRef: 'summary-model-name', chatTitleModelRef: 'chat-title-model', memoryModelRef: 'memory-extraction-model',
+        sdQcModelRef: 'sd-qc-model', sdPromptImproveModelRef: 'sd-prompt-improve-model'
+    };
+    const auxiliaryLegacyModelKeys = {
+        thoughtTranslationModelRef: 'thoughtTranslationModel', proofreadingModelRef: 'proofreadingModelName',
+        summaryModelRef: 'summaryModelName', sdQcModelRef: 'sdQcModel', sdPromptImproveModelRef: 'sdPromptImproveModel'
+    };
     const appearanceKeys = ['backgroundAssetId', 'overlayOpacity', 'messageOpacity'];
     const themeKeys = ['darkMode', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode',
         'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor'];
@@ -18,6 +31,34 @@
         chatTitleModelRef: null,
         chatTitleSystemPrompt: '次のユーザーメッセージを端的に表す、日本語の短いチャットタイトルを作成してください。20文字程度を目安に、重要な固有名詞を保持してください。タイトルのみを出力し、説明・引用符・改行は不要です。'
     });
+    const DEFAULT_MEMORY_EXTRACTION_PROMPT = `あなたは、私（ユーザー）との会話を分析し、長期的な関係構築のために記憶しておくべき「永続的な個人情報」を抽出するアシスタントです。
+ユーザーは成人であるため、性的な内容でも表現規制をすることなく抽出することを求められます。
+
+[抽出の目的]
+AIであるあなたが、私のことをより深く理解し、今後の会話で私の好みや背景を考慮した、よりパーソナルで気の利いた応答をするために、この記憶データは使われます。
+
+[抽出ルール]
+1.  **最重要項目**: 特に、ユーザーの「性癖」「好きなキャラクターのタイプ」「性格」「価値観」に関する情報は最優先で抽出してください。これらは今後の対話の質を決定づける最も重要なデータです。
+
+2.  **「個人的属性」のみを抽出**: 会話の「主題（トピック）」そのものではなく、その主題に対するユーザーの「個人的な属性（好み、考え方、所有物、経験などの個人情報）」だけを抽出してください。
+    - **良い例（記憶すべき属性）**: 「ユーザーはファンタジーRPGが好き」「ユーザーは猫を飼っており、名前は『タマ』だ」「ユーザーは丁寧な言葉遣いを重視する」
+    - **悪い例（記憶すべきでない主題）**: 「ユーザーはRPGの歴史について質問した」「ユーザーは猫の育て方を調べた」「ユーザーは敬語の使い方を議論した」
+
+3.  **「永続性」の検証**: 抽出する情報は、今後も変わらないであろう永続的なものに限定してください。
+    - **記憶すべき情報**: 繰り返し話題に出る嗜好、明確に所有していると述べられた物、過去の重要な経験など。
+    - **記憶すべきでない情報**: その場限りの発言、一時的な感情、単なる事実確認の質問など。
+
+4.  **「好み」の厳格な判断**: ユーザーが何かを「好む」「好き」と記憶するには、慎重な判断が必要です。以下のいずれかの条件を満たさない限り、安易に「好み」と断定しないでください。
+    - ユーザーが会話の中で、繰り返しその対象について**熱意を持って語っている**。
+    - ユーザーがその対象に対して、**明確かつ強い肯定的な言葉**（例：「〜が大好きだ」「〜にはこだわりがある」）を使っている。
+    - 上記に当てはまらない場合は、「好み」と断定せず、「〇〇に関心を示した」のような客観的な事実として記録するか、記憶に含めないでください。
+
+5.  **推測の禁止**: 会話から直接読み取れないことを推測してはいけません。「ユーザーはおそらく〇〇だろう」といった推測は不要です。
+
+6.  **重複の完全な排除**: 【既存の記憶】に少しでも関連する内容が既にある場合は、絶対に含めないでください。`;
+    const MEMORY_EXTRACTION_OUTPUT_FORMAT = `7.  **出力形式の厳守**:
+    - 抽出した内容は、「ユーザーは〇〇を所有している」「ユーザーは〇〇という考えを持っている」のように、必ず**三人称の客観的な事実**として記述してください。
+    - **AIとしての応答（「承知しました」など）や前置き、後書きは一切含めず**、抽出した箇条書きのリスト、または \`[追加情報なし]\` という文字列のみを出力してください。`;
     const legacyChatTitlePrompt = `${chatTitleDefaults.chatTitleSystemPrompt}\n\n{message}`;
     const migrateChatTitlePrompt = settings => settings?.chatTitleSystemPrompt === legacyChatTitlePrompt
         ? { ...settings, chatTitleSystemPrompt: chatTitleDefaults.chatTitleSystemPrompt }
@@ -28,11 +69,19 @@
         'summarySystemPrompt', 'enableAutoRetry', 'maxRetries', 'useFixedRetryDelay', 'fixedRetryDelaySeconds',
         'maxBackoffDelaySeconds', 'enableApiTimeout', 'apiTimeoutSeconds', 'dropboxAppKey', 'dropboxSyncFrequency',
         'googleSearchApiKey', 'googleSearchEngineId', 'sdApiUrl', 'sdApiUser', 'sdApiPassword',
-        'memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef',
+        'memoryModelRef', 'memoryExtractionPrompt', 'sdQcModelRef', 'sdPromptImproveModelRef',
         'sdEnableQualityChecker', 'sdQcModel', 'sdQcPrompt', 'sdQcRetries', 'sdPromptImproveModel',
         'sdPromptImproveSystemPrompt', 'theme', 'appearance', 'enableStreamingOutput', ...Object.keys(chatTitleDefaults)];
     const pick = (source = {}, keys = []) => Object.fromEntries(keys.filter(key =>
         Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, structuredClone(source[key])]));
+    function normalizeChatNumbers(source, fallback = {}) {
+        return Object.fromEntries(Object.entries(chatNumberRules).map(([key, [min, max, step]]) => {
+            const value = Object.hasOwn(source || {}, key) ? source[key] : fallback[key];
+            if (!Number.isFinite(value) || value < min || value > max) return [key, null];
+            const steps = (value - min) / step;
+            return [key, Math.abs(steps - Math.round(steps)) < 1e-8 ? value : null];
+        }));
+    }
     function chatContentVersion(chat) {
         return { recordGenerationId: chat?.recordGenerationId ?? null, contentRevision: chat?.contentRevision ?? 0 };
     }
@@ -47,6 +96,10 @@
     }
     const modelRef = value => value?.apiConfigId && value?.modelName
         ? { apiConfigId: String(value.apiConfigId), modelName: String(value.modelName) } : null;
+    const matchesRemovedModel = (ref, removed = []) => !!ref && removed.some(item =>
+        item.apiConfigId === String(ref.apiConfigId || '').trim() && item.modelName === String(ref.modelName || '').trim());
+    const clearRemovedExecution = (execution, removed) => matchesRemovedModel(execution?.modelRef, removed)
+        ? { ...execution, modelRef: null, thinkingEffort: null, modelSelectionRequired: true } : execution;
     function profileSettings(source = {}, legacyThemeScoped = false) {
         const result = pick(source, profileKeys);
         result.useCustomTheme = source.useCustomTheme ?? legacyThemeScoped;
@@ -156,12 +209,13 @@
     }
     const normalizeEffort = (value, c) => c.levels.includes(value) ? value : c.defaultEffort;
     function executionSettings(source, fallbackRef, resolveCapability, preserveUnknown = false) {
-        const ref = modelRef(source?.modelRef) || modelRef(fallbackRef);
+        const needsSelection = source?.modelSelectionRequired === true && source.modelRef === null;
+        const ref = needsSelection ? null : modelRef(source?.modelRef) || modelRef(fallbackRef);
         const c = resolveCapability(ref);
         return { schemaVersion: 1, modelRef: ref,
             thinkingEffort: c.mode === 'unknown' ? (source?.thinkingEffort ?? null)
                 : preserveUnknown && source?.thinkingEffort == null ? null : normalizeEffort(source?.thinkingEffort, c),
-            updatedAt: source?.updatedAt || Date.now() };
+            updatedAt: source?.updatedAt || Date.now(), ...(needsSelection && { modelSelectionRequired: true }) };
     }
     function applyThinking(body, provider, c, effort) {
         if (provider === 'gemini') {
@@ -703,11 +757,12 @@
         });
         return {
             async loadSettingsV136() {
-                const [global, success, version] = await Promise.all([GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY].map(k => dbUtils.getSetting(k)));
+                const [global, success, version, removed] = await Promise.all([GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY, REMOVED_MODELS_KEY].map(k => dbUtils.getSetting(k)));
                 if (version?.value > 136) throw new Error('保存データは新しいアプリで開いてください。');
                 state.settingsSchemaVersion = version?.value || 0;
                 state.globalSettingsV136 = migrateChatTitlePrompt(global?.value) || null;
                 state.lastSuccessfulExecution = success?.value || null;
+                state.removedApiModelRefsV136 = removed?.value || [];
                 state.modelMetadataV136 = {};
                 state.modelMetadataStatusV136 = {};
                 state.modelMetadataSourcesV136 = {};
@@ -851,7 +906,21 @@
                 if (state.globalSettingsChannelV136 || !root.BroadcastChannel) return;
                 const channel = new root.BroadcastChannel('chatai-global-settings-v136');
                 state.globalSettingsChannelV136 = channel;
-                channel.onmessage = () => this.reloadGlobalSettingsV136().catch(() => {});
+                channel.onmessage = event => {
+                    const data = event.data;
+                    if (data?.apiModelDraftReply) return;
+                    if (data?.apiModelDraftQuery) {
+                        if (data.database !== state.db.name || !Array.isArray(data.removed)) return;
+                        const current = !state.currentChatId && this.getCurrentChatModelRef();
+                        const draft = this.readExecutionDraft()?.modelRef;
+                        const refs = data.removed.filter(ref => matchesRemovedModel(ref, [current || {}, draft || {}]));
+                        if (refs.length) channel.postMessage({ apiModelDraftReply: data.apiModelDraftQuery, refs });
+                        return;
+                    }
+                    const reload = event.data?.apiModelsChanged && event.data.database === state.db.name
+                        ? this.reloadAfterApiModelEditV136() : this.reloadGlobalSettingsV136();
+                    reload.catch(() => {});
+                };
             },
             async reloadGlobalSettingsV136() {
                 const latest = (await dbUtils.getSetting(GLOBAL_KEY))?.value;
@@ -862,6 +931,9 @@
             },
             async saveGlobalSettingsV136(updates, signal) {
                 const changes = pick(updates, globalKeys);
+                for (const [refKey, legacyKey] of Object.entries(auxiliaryLegacyModelKeys)) {
+                    if (changes[refKey] === null && !Object.hasOwn(changes, legacyKey)) changes[legacyKey] = '';
+                }
                 for (const kind of ['theme', 'appearance']) if (changes[kind])
                     changes[kind] = pick(changes[kind], kind === 'theme' ? themeKeys : appearanceKeys);
                 const save = async () => {
@@ -879,10 +951,19 @@
                                 store.put({ key: GLOBAL_KEY, value: next });
                                 if (changes.theme) store.put({ key: 'globalThemeSettings', value: next.theme });
                             };
-                            if (changes.appearance?.backgroundAssetId) {
-                                const asset = tx.objectStore('image_store').get(changes.appearance.backgroundAssetId);
-                                asset.onsuccess = () => { if (asset.result?.blob) publish(); else tx.abort(); };
-                            } else publish();
+                            const saveValidated = () => {
+                                if (changes.appearance?.backgroundAssetId) {
+                                    const asset = tx.objectStore('image_store').get(changes.appearance.backgroundAssetId);
+                                    asset.onsuccess = () => { if (asset.result?.blob) publish(); else tx.abort(); };
+                                } else publish();
+                            };
+                            if (Object.keys(auxiliaryModelSelectIds).some(key => changes[key])) {
+                                const removed = store.get(REMOVED_MODELS_KEY);
+                                removed.onsuccess = () => {
+                                    if (Object.keys(auxiliaryModelSelectIds).some(key => matchesRemovedModel(changes[key], removed.result?.value))) tx.abort();
+                                    else saveValidated();
+                                };
+                            } else saveValidated();
                         };
                     }, signal);
                     state.globalSettingsV136 = next;
@@ -897,11 +978,22 @@
                 return globalSaveQueue;
             },
             getShowThoughtProcess() { return state.globalSettingsV136?.showThoughtProcess === true; },
-            getGlobalAuxiliaryModelRefV136(refKey, legacyKey) {
-                const global = state.globalSettingsV136 || state.settings;
+            getGlobalAuxiliaryModelRefV136(refKey, global = state.globalSettingsV136 || state.settings, configs = state.apiConfigs) {
                 const ref = global[refKey];
-                if (ref?.apiConfigId || ref?.modelName) return { apiConfigId: ref.apiConfigId || '', modelName: ref.modelName || '' };
-                return this.findModelRefForLegacyModel(global[legacyKey] || '') || null;
+                if (ref === AUXILIARY_MODEL_NONE) return null;
+                if (ref?.apiConfigId || ref?.modelName) {
+                    const apiConfigId = String(ref.apiConfigId || '').trim();
+                    const modelName = String(ref.modelName || '').trim();
+                    return apiConfigId === AUXILIARY_MODEL_NONE || modelName === AUXILIARY_MODEL_NONE ? null : { apiConfigId, modelName };
+                }
+                // Older controls could store a plain model name alongside a null ModelRef.
+                const name = global[auxiliaryLegacyModelKeys[refKey]];
+                const modelName = typeof name === 'string' ? name.trim() : '';
+                if (!modelName || modelName === AUXILIARY_MODEL_NONE) return null;
+                const geminiOnly = refKey === 'sdQcModelRef' || refKey === 'sdPromptImproveModelRef';
+                const choice = configs?.find(config => config.id !== AUXILIARY_MODEL_NONE && config.enabled !== false
+                    && (!geminiOnly || config.provider === 'gemini') && this.getApiConfigModelCandidates(config).includes(modelName));
+                return { apiConfigId: choice?.id || '', modelName };
             },
             async setShowThoughtProcess(value) {
                 await this.saveGlobalSettingsV136({ showThoughtProcess: value === true });
@@ -942,7 +1034,7 @@
                 }
                 return latest;
             },
-            async mutateProfileV136(profileId, mutate, signal) {
+            async mutateProfileV136(profileId, mutate, signal, { preserveStoredSettings = false } = {}) {
                 if (profileId == null) throw new Error('保存対象のプロファイルがありません。');
                 let missing = false;
                 await transaction(['profiles', 'settings', 'image_store'], tx => {
@@ -957,7 +1049,7 @@
                             const previousBackgroundId = profileRequest.result.settings?.appearance?.backgroundAssetId;
                             const next = mutate(profileRequest.result, globalRequest.result?.value || {});
                             if (!next || next.id !== profileId || typeof next.then === 'function') { tx.abort(); return; }
-                            if (versionRequest.result?.value === 136) next.settings = profileSettings(next.settings);
+                            if (versionRequest.result?.value === 136 && !preserveStoredSettings) next.settings = profileSettings(next.settings);
                             const backgroundId = next.settings?.appearance?.backgroundAssetId;
                             if (backgroundId && backgroundId !== previousBackgroundId) {
                                 const asset = tx.objectStore('image_store').get(backgroundId);
@@ -1178,11 +1270,23 @@
                 })();
                 return job.promise;
             },
+            ensureModelThinkingCapabilities(ref = this.getCurrentChatModelRef()) {
+                const config = this.getApiConfigById(ref?.apiConfigId);
+                if (config?.provider !== 'openrouter' || config.enabled === false
+                    || this.getModelThinkingCapability(ref).mode !== 'unknown') return;
+                return this.refreshModelThinkingCapabilities(ref.apiConfigId).catch(() => { /* Keep unverified capabilities unknown. */ });
+            },
             getCurrentChatModelRef() { return modelRef(state.currentExecutionSettings?.modelRef); },
             getCurrentChatThinkingEffort() { return state.currentExecutionSettings?.thinkingEffort ?? null; },
             syncChatExecutionToLegacySettings() {
                 const ref = this.getCurrentChatModelRef();
-                if (!ref) return;
+                if (!ref) {
+                    if (state.currentExecutionSettings?.modelSelectionRequired) {
+                        state.settings.defaultModelRef = null;
+                        state.settings.modelName = '';
+                    }
+                    return;
+                }
                 state.settings.defaultModelRef = ref;
                 state.settings.apiConfigId = ref.apiConfigId;
                 state.settings.modelName = ref.modelName;
@@ -1203,34 +1307,81 @@
                 const success = (await dbUtils.getSetting(SUCCESS_KEY))?.value;
                 state.lastSuccessfulExecution = success || state.lastSuccessfulExecution;
                 const legacy = state.legacyInitialModelRefV136 || (await dbUtils.getSetting('legacyInitialModelRefV136'))?.value;
-                const configs = (await dbUtils.getSetting('apiConfigs'))?.value;
+                const [configs, removed] = await Promise.all(['apiConfigs', REMOVED_MODELS_KEY].map(key => dbUtils.getSetting(key)));
                 if (generation !== state.executionInitGeneration || state.currentChatId) return;
-                if (configs) { state.apiConfigs = this.normalizeApiConfigs(configs); state.settings.apiConfigs = state.apiConfigs; }
+                if (configs) { state.apiConfigs = this.normalizeApiConfigs(configs.value); state.settings.apiConfigs = state.apiConfigs; }
+                state.removedApiModelRefsV136 = removed?.value || [];
                 const candidates = [success?.modelRef, legacy, ...this.getApiModelChoices()];
                 const fallback = candidates.find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
-                const draft = restoreDraft ? this.readExecutionDraft() : null;
+                const draft = restoreDraft ? clearRemovedExecution(this.readExecutionDraft(), state.removedApiModelRefsV136) : null;
                 const source = draft || (success && modelRef(success.modelRef) && JSON.stringify(success.modelRef) === JSON.stringify(modelRef(fallback)) ? success : null);
                 state.currentExecutionSettings = executionSettings(source, fallback, ref => this.getModelThinkingCapability(ref));
                 state.executionInitializingV136 = false;
                 this.syncChatExecutionToLegacySettings(); this.persistExecutionDraft();
                 uiUtils.applySettingsToUI(); notify('chat');
+                void this.ensureModelThinkingCapabilities();
             },
             async refreshExecutionApiConfigsV136() {
-                const stored = await dbUtils.getSetting('apiConfigs');
+                const [stored, removed] = await Promise.all(['apiConfigs', REMOVED_MODELS_KEY].map(key => dbUtils.getSetting(key)));
                 state.apiConfigs = this.normalizeApiConfigs(stored?.value || []);
                 state.settings.apiConfigs = state.apiConfigs;
-                const ref = this.getCurrentChatModelRef();
-                if (this.getApiConfigById(ref?.apiConfigId)?.provider === 'openrouter' && this.getModelThinkingCapability(ref).mode === 'unknown') {
-                    try { await this.refreshModelThinkingCapabilities(ref.apiConfigId); } catch { /* static fallback */ }
-                }
+                state.removedApiModelRefsV136 = removed?.value || [];
+                await this.syncRemovedExecutionSelectionV136();
+                return this.ensureModelThinkingCapabilities(clearRemovedExecution(state.currentExecutionSettings, state.removedApiModelRefsV136)?.modelRef);
+            },
+            getLegacyChatExecutionV136(chat, fallbackRef) {
+                const meta = [...(chat.messages || [])].reverse().find(m => m.role === 'model' && (!m.isCascaded || m.isSelected)
+                    && m.usageMetadata?.tmExecution?.modelName)?.usageMetadata.tmExecution;
+                return { schemaVersion: 1, modelRef: modelRef(meta) || modelRef(chat.defaultModelRef) || modelRef(chat)
+                    || modelRef(fallbackRef), thinkingEffort: null, updatedAt: Date.now() };
             },
             getChatExecutionSettingsV136(chat) {
                 if (chat.executionSettings?.schemaVersion > 1) throw new Error('新しいバージョンのチャット設定です。');
-                if (chat.executionSettings) return structuredClone(chat.executionSettings);
-                const meta = [...(chat.messages || [])].reverse().find(m => m.role === 'model' && (!m.isCascaded || m.isSelected)
-                    && m.usageMetadata?.tmExecution?.modelName)?.usageMetadata.tmExecution;
-                return { schemaVersion: 1, modelRef: modelRef(meta) || modelRef(chat.defaultModelRef)
-                    || modelRef(state.legacyInitialModelRefV136) || this.getCurrentChatModelRef(), thinkingEffort: null, updatedAt: Date.now() };
+                const execution = chat.executionSettings || this.getLegacyChatExecutionV136(chat,
+                    modelRef(state.legacyInitialModelRefV136) || this.getCurrentChatModelRef());
+                return structuredClone(clearRemovedExecution(execution, state.removedApiModelRefsV136));
+            },
+            applyRemovedExecutionSelectionV136(storedExecution = null) {
+                const removed = state.removedApiModelRefsV136;
+                if (!removed?.length) return;
+                const draft = this.readExecutionDraft(), nextDraft = clearRemovedExecution(draft, removed);
+                if (nextDraft !== draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(nextDraft));
+                if (state.isSending || state.currentExecutionApiConfig) return;
+                const execution = state.currentExecutionSettings;
+                const next = storedExecution?.modelSelectionRequired && !execution?.modelSelectionRequired
+                    ? storedExecution : clearRemovedExecution(execution, removed);
+                if (next === execution) return;
+                state.currentExecutionSettings = next;
+                this.syncChatExecutionToLegacySettings();
+                if (!state.currentChatId) this.persistExecutionDraft();
+                uiUtils.applySettingsToUI(); notify('chat');
+            },
+            async syncRemovedExecutionSelectionV136() {
+                const chatId = state.currentChatId;
+                if (chatId && state.removedApiModelRefsV136?.length && !state.isSending) {
+                    const execution = state.currentExecutionSettings;
+                    const chat = await dbUtils.getChat(chatId);
+                    if (state.currentChatId === chatId && state.currentExecutionSettings === execution)
+                        this.applyRemovedExecutionSelectionV136(chat?.executionSettings);
+                } else this.applyRemovedExecutionSelectionV136();
+            },
+            async reloadAfterApiModelEditV136() {
+                const [configs, removed, success, legacy, profiles] = await Promise.all([
+                    ...['apiConfigs', REMOVED_MODELS_KEY, SUCCESS_KEY, 'legacyInitialModelRefV136'].map(key => dbUtils.getSetting(key)),
+                    dbUtils.getAllProfiles()
+                ]);
+                state.apiConfigs = state.settings.apiConfigs = this.normalizeApiConfigs(configs?.value || []);
+                state.removedApiModelRefsV136 = removed?.value || [];
+                state.lastSuccessfulExecution = success?.value || null;
+                state.legacyInitialModelRefV136 = legacy?.value || null;
+                state.profiles = profiles;
+                state.activeProfile = profiles.find(profile => profile.id === state.activeProfileId) || null;
+                await this.reloadGlobalSettingsV136();
+                await this.syncRemovedExecutionSelectionV136();
+                this.syncActiveApiConfigState();
+                this.renderApiConfigList();
+                uiUtils.updateUserModelOptions();
+                root.settingsUiV136?.refresh();
             },
             async waitForGenerationCompletionV136() {
                 const session = state.sendExecutionV136;
@@ -1259,19 +1410,26 @@
                 const current = state.currentExecutionSettings || {};
                 const ref = modelRef(updates.modelRef || current.modelRef);
                 this.assertModelRefForExecution(ref);
-                if (this.getApiConfigById(ref.apiConfigId)?.provider === 'openrouter' && this.getModelThinkingCapability(ref).mode === 'unknown') {
-                    try { await this.refreshModelThinkingCapabilities(ref.apiConfigId); } catch { /* verified static definitions remain available */ }
-                }
+                const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
+                if (capabilityRequest) await capabilityRequest;
                 if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
                 const next = executionSettings({ ...current, ...updates, updatedAt: Date.now() }, ref, r => this.getModelThinkingCapability(r));
                 assertContext();
                 if (state.currentChatId) {
                     const id = state.currentChatId;
-                    await transaction(['chats'], tx => {
-                        const store = tx.objectStore('chats'); const req = store.get(id);
-                        req.onsuccess = () => { if (!req.result) { tx.abort(); return; } store.put({ ...req.result, executionSettings: next }); };
+                    await transaction(['chats', 'settings'], tx => {
+                        const removed = tx.objectStore('settings').get(REMOVED_MODELS_KEY);
+                        removed.onsuccess = () => {
+                            if (matchesRemovedModel(ref, removed.result?.value)) { tx.abort(); return; }
+                            const store = tx.objectStore('chats'); const req = store.get(id);
+                            req.onsuccess = () => { if (!req.result) { tx.abort(); return; } store.put({ ...req.result, executionSettings: next }); };
+                        };
                     });
                 } else {
+                    const removed = await dbUtils.getSetting(REMOVED_MODELS_KEY);
+                    assertContext();
+                    if (state.isSending || state.currentExecutionApiConfig || matchesRemovedModel(ref, removed?.value))
+                        throw new Error('選択したモデルを適用できません。設定を確認してください。');
                     sessionStorage.setItem(DRAFT_KEY, JSON.stringify(next));
                 }
                 if (contextId !== state.currentChatId || contextGeneration !== state.executionInitGeneration || selection !== state.executionSelectionGenerationV136) return next;
@@ -1285,6 +1443,7 @@
                 return this.setCurrentChatExecution({ thinkingEffort: value });
             },
             freezeExecutionSettings() {
+                this.applyRemovedExecutionSelectionV136();
                 const config = structuredClone(this.resolveDefaultExecutionApiConfig());
                 const c = this.getModelThinkingCapability(config.ref);
                 if (config.provider === 'openrouter' && c.mode === 'unknown' && this.getCurrentChatThinkingEffort() != null)
@@ -1315,6 +1474,146 @@
                 const meta = message?.usageMetadata?.tmExecution;
                 if (!meta?.completedAt || message.role !== 'model' || message.error || (!message.content && !message.imageIds?.length && !message.generated_videos?.length)) return null;
                 return { schemaVersion: 1, modelRef: modelRef(meta), thinkingEffort: meta.thinkingEffort ?? null, completedAt: meta.completedAt };
+            },
+            clearModelSettingsForRemovalV136(source, removed, configs, profileScoped = false) {
+                const patch = {}, affected = [];
+                const legacyRef = modelRef(source);
+                const basicRef = modelRef(source?.defaultModelRef) || legacyRef;
+                if (matchesRemovedModel(basicRef, removed)) {
+                    patch.defaultModelRef = null;
+                    affected.push({ key: 'defaultModelRef', modelName: basicRef.modelName });
+                }
+                if (matchesRemovedModel(legacyRef, removed)) patch.modelName = '';
+                const legacyConfigs = profileScoped && source?.apiConfigId ? configs.filter(config => config.id === source.apiConfigId) : configs;
+                for (const key of Object.keys(auxiliaryModelSelectIds)) {
+                    const ref = this.getGlobalAuxiliaryModelRefV136(key, source || {}, legacyConfigs);
+                    if (!matchesRemovedModel(ref, removed)) continue;
+                    patch[key] = null;
+                    if (auxiliaryLegacyModelKeys[key]) patch[auxiliaryLegacyModelKeys[key]] = '';
+                    affected.push({ key, modelName: ref.modelName });
+                }
+                return { patch, affected };
+            },
+            removedApiModelsForEditV136(nextConfig, baseline) {
+                const nextNames = this.getApiConfigModelCandidates(nextConfig);
+                return (baseline ? this.getApiConfigModelCandidates(baseline) : [])
+                    .filter(name => !nextNames.includes(name)).map(modelName => ({ apiConfigId: nextConfig.id, modelName }));
+            },
+            async inspectPeerApiModelDraftsV136(nextConfig, baseline) {
+                const removed = this.removedApiModelsForEditV136(nextConfig, baseline);
+                this.ensureGlobalSettingsChannelV136();
+                const channel = state.globalSettingsChannelV136;
+                if (!removed.length || !channel) return [];
+                const id = root.crypto.randomUUID(), found = [];
+                return new Promise(resolve => {
+                    const onReply = ({ data }) => {
+                        if (data?.apiModelDraftReply === id && Array.isArray(data.refs)) found.push(...data.refs.filter(ref => matchesRemovedModel(ref, removed)));
+                    };
+                    channel.addEventListener('message', onReply);
+                    channel.postMessage({ apiModelDraftQuery: id, database: state.db.name, removed });
+                    setTimeout(() => {
+                        channel.removeEventListener('message', onReply);
+                        resolve(removed.map(ref => ({ modelName: ref.modelName, count: found.filter(item => item.modelName === ref.modelName).length }))
+                            .filter(item => item.count));
+                    }, 180);
+                });
+            },
+            async editApiConfigModelsV136(nextConfig, baseline, confirmedImpact = null, peerDrafts = []) {
+                const id = nextConfig.id;
+                const nextNames = this.getApiConfigModelCandidates(nextConfig);
+                const removed = this.removedApiModelsForEditV136(nextConfig, baseline);
+                const preview = confirmedImpact === null;
+                const scopes = removed.length ? ['settings', 'profiles', 'chats'] : ['settings'];
+                let result, failure;
+                await transaction(scopes, tx => {
+                    const settings = tx.objectStore('settings');
+                    const requests = [settings.get('apiConfigs'), settings.get(REMOVED_MODELS_KEY)];
+                    if (removed.length) requests.push(settings.get(GLOBAL_KEY), settings.get(SUCCESS_KEY),
+                        settings.get('legacyInitialModelRefV136'), tx.objectStore('profiles').getAll(), tx.objectStore('chats').getAll());
+                    let pending = requests.length;
+                    requests.forEach(request => request.onsuccess = () => {
+                        if (--pending) return;
+                        try {
+                            const [stored, removals, global, success, legacy, profiles, chats] = requests.map(item => item.result);
+                            const configs = this.normalizeApiConfigs(stored?.value || []);
+                            const current = configs.find(config => config.id === id);
+                            const configSignature = config => config ? JSON.stringify({ ...config, updatedAt: undefined, createdAt: undefined }) : '';
+                            if (configSignature(current) !== configSignature(baseline)) throw new Error('API設定が別の操作で変更されました。設定を開き直してください。');
+
+                            const impact = [], writes = [];
+                            const add = (modelName, key, scope, target = null, name = null) => impact.push({ modelName, key, scope, target, name });
+                            const applySettings = (source, scope, target, name, write) => {
+                                const { patch, affected } = this.clearModelSettingsForRemovalV136(source, removed, configs, scope === 'profile');
+                                affected.forEach(item => add(item.modelName, item.key, scope, target, name));
+                                if (Object.keys(patch).length) writes.push(() => write({ ...source, ...patch }));
+                            };
+                            if (removed.length) {
+                                applySettings(global?.value, 'global', null, null, value => settings.put({ key: GLOBAL_KEY,
+                                    value: { ...value, revision: (value.revision || 0) + 1 } }));
+                                for (const profile of profiles) applySettings(profile.settings, 'profile', profile.id, profile.name,
+                                    value => tx.objectStore('profiles').put({ ...profile, settings: value }));
+                                for (const chat of chats) {
+                                    const { patch } = this.clearModelSettingsForRemovalV136(pick(chat, ['defaultModelRef', 'apiConfigId', 'modelName']), removed, configs);
+                                    const execution = chat.executionSettings || this.getLegacyChatExecutionV136(chat, legacy?.value);
+                                    const next = clearRemovedExecution(execution, removed);
+                                    if (next !== execution) {
+                                        if (execution.schemaVersion > 1) throw new Error('新しいバージョンのチャット設定が含まれています。');
+                                        patch.executionSettings = next;
+                                        add(execution.modelRef.modelName, 'defaultModelRef', 'chat', chat.id);
+                                    } else if (Object.keys(patch).length) {
+                                        const ref = modelRef(chat.defaultModelRef) || modelRef(chat);
+                                        if (matchesRemovedModel(ref, removed)) add(ref.modelName, 'defaultModelRef', 'chat', chat.id);
+                                    }
+                                    if (Object.keys(patch).length) writes.push(() => tx.objectStore('chats').put({ ...chat, ...patch }));
+                                }
+                                const currentRef = this.getCurrentChatModelRef();
+                                if (matchesRemovedModel(currentRef, removed) && !impact.some(item => item.scope === 'chat'
+                                    && item.target === state.currentChatId && item.modelName === currentRef.modelName)) {
+                                    add(currentRef.modelName, 'defaultModelRef', state.currentChatId ? 'current' : 'draft', state.currentChatId);
+                                }
+                                const draftRef = this.readExecutionDraft()?.modelRef;
+                                if (matchesRemovedModel(draftRef, removed) && !impact.some(item => item.scope === 'draft' && item.modelName === draftRef.modelName))
+                                    add(draftRef.modelName, 'defaultModelRef', 'draft');
+                                for (const draft of peerDrafts) add(draft.modelName, 'defaultModelRef', 'peerDraft', draft.count);
+                                if (matchesRemovedModel(success?.value?.modelRef, removed)) {
+                                    add(success.value.modelRef.modelName, 'defaultModelRef', 'newChatDefault');
+                                    writes.push(() => settings.put({ key: SUCCESS_KEY, value: { ...success.value, modelRef: null } }));
+                                }
+                                if (matchesRemovedModel(legacy?.value, removed)) {
+                                    add(legacy.value.modelName, 'defaultModelRef', 'newChatDefault');
+                                    writes.push(() => settings.put({ key: 'legacyInitialModelRefV136', value: null }));
+                                }
+                            }
+                            result = impact;
+                            if (preview) return;
+                            if (JSON.stringify(impact) !== JSON.stringify(confirmedImpact)) throw new Error('使用箇所が変更されました。もう一度保存して内容を確認してください。');
+                            const previous = removals?.value || [];
+                            const retained = previous.filter(ref => ref.apiConfigId !== id || !nextNames.includes(ref.modelName));
+                            if (removed.length || retained.length !== previous.length)
+                                settings.put({ key: REMOVED_MODELS_KEY, value: [...retained, ...removed.filter(ref => !matchesRemovedModel(ref, retained))] });
+                            settings.put({ key: 'apiConfigs', value: current ? configs.map(config => config.id === id ? nextConfig : config) : [...configs, nextConfig] });
+                            writes.forEach(write => write());
+                        } catch (error) { failure = error; tx.abort(); }
+                    });
+                }).catch(error => { throw failure || error; });
+                return result;
+            },
+            async persistApiConfigsWithModelRemovalsV136(configs) {
+                let next;
+                await transaction(['settings'], tx => {
+                    const settings = tx.objectStore('settings'), request = settings.get(REMOVED_MODELS_KEY);
+                    request.onsuccess = () => {
+                        const removed = request.result?.value || [];
+                        next = this.normalizeApiConfigs(configs).map(config => {
+                            const before = this.getApiConfigModelCandidates(config);
+                            const candidates = before.filter(modelName => !matchesRemovedModel({ apiConfigId: config.id, modelName }, removed));
+                            return candidates.length === before.length ? config : { ...config, modelCandidates: candidates,
+                                defaultModel: candidates[0] || '', additionalModels: this.joinModelCandidateList(candidates) };
+                        });
+                        settings.put({ key: 'apiConfigs', value: next });
+                    };
+                });
+                return next;
             },
             async inspectApiConfigReferences(configId) {
                 const chats = await dbUtils.getAllChats();
@@ -1357,6 +1656,10 @@
         };
     }
     root.SettingsV136 = { GLOBAL_KEY, SUCCESS_KEY, MIGRATION_KEY, BACKUP_KEY, DRAFT_KEY, profileKeys, globalKeys, chatTitleDefaults,
+        CHAT_PARAMETER_DRAFT_KEY, normalizeChatNumbers,
+        REMOVED_MODELS_KEY, matchesRemovedModel, clearRemovedExecution,
+        AUXILIARY_MODEL_NONE, auxiliaryLegacyModelKeys, auxiliaryModelSelectIds,
+        DEFAULT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_OUTPUT_FORMAT,
         chatContentVersion, sameChatContentVersion, nextChatContentVersion,
         themeKeys, appearanceKeys, pick, modelRef, profileSettings, capability, normalizeEffort, executionSettings,
         applyThinking, imageInputCapability, assertCompatible, createMethods,
