@@ -31,12 +31,15 @@ window.runReviewRegressionsV136 = async ({app,db,st,ui,el,assert,eq}) => {
             const waiting=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
             app.refreshExecutionApiConfigsV136=async()=>{entered();await gate;};
             let calls=0,saves=0;app._internalHandleSend=async()=>{calls++;return [{role:'model',content:'answer'}]};
-            db.saveChat=async()=>{saves++};app.flushInputDraft=()=>{};
+            db.saveChat=async function(title, record, options) {
+                if (options?.systemPromptSave?.profileSwitch) return original.db.saveChat.call(this,title,record,options);
+                saves++;
+            };app.flushInputDraft=()=>{};
             const pending=regenerate?app.retryFromMessage(0):app.handleSend();await waiting;
             if(action==='load')await app.loadChat(802);
             if(action==='new'){app.startNewChat();await st.executionSettingsReady;}
             if(action==='abort')app.abortRequest();
-            if(action==='profile')await app.switchProfile(st.profiles.find(p=>p.id!==st.activeProfileId).id);
+            if(action==='profile')assert(await app.switchProfile(st.profiles.find(p=>p.id!==st.activeProfileId).id));
             const destination=JSON.stringify(st.currentMessages);release();await pending;
             eq(calls,0);eq(saves,0);eq(JSON.stringify(st.currentMessages),destination);eq(st.isSending,false);
             if(action==='abort')eq(el.userInput.value,'origin draft');
@@ -152,9 +155,11 @@ window.runReviewRegressionsV136 = async ({app,db,st,ui,el,assert,eq}) => {
         }finally{peer.close();}
     });
     await run('R04 cold auxiliary Gemini functions use central keys and dedicated models',async()=>{
-        st.settings.apiKey='';st.settings.sdQcModel='gemini-2.5-pro';st.settings.sdPromptImproveModel='gemini-2.5-flash';
+        st.settings.apiKey='';st.globalSettingsV136.sdQcModel='gemini-2.5-pro';st.globalSettingsV136.sdPromptImproveModel='gemini-2.5-flash';
         st.apiConfigs[0].modelCandidates.push('gemini-2.5-flash');await db.saveSetting('apiConfigs',st.apiConfigs);
-        st.activeProfileId=base.activeProfileId;st.settings.memoryAutoSaveInterval=1;st.currentMessages=[{role:'user',content:'hello'}];
+        st.globalSettingsV136.memoryModelRef={apiConfigId:'gem',modelName:'gemini-2.5-flash'};
+        st.activeProfileId=base.activeProfileId;st.settings.enableMemory=true;st.isMemoryEnabledForChat=true;
+        st.settings.memoryAutoSaveInterval=1;st.currentMessages=[{role:'user',content:'hello'}];
         const sent=[];window.fetch=async(url,opts)=>{sent.push({url,headers:opts.headers});return response('Result: OK')};
         app.fileToBase64=async()=> 'AA==';await app.triggerAutoMemorySave();await app.runQualityChecker(new Blob(['image']),'prompt');await app._improveSdPrompt('a','b','c');
         eq(sent.length,3);assert(sent.every(r=>r.headers['x-goog-api-key']==='mock'));

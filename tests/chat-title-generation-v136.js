@@ -121,7 +121,8 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
             enabled.dispatchEvent(new Event('change', {bubbles: true}));
             const saved = await waitFor(async () => {
                 const value = (await db.getSetting(SettingsV136.GLOBAL_KEY)).value;
-                return value.enableChatTitleGeneration && value;
+                return value.enableChatTitleGeneration && value.chatTitleModelRef?.apiConfigId === gemini.apiConfigId
+                    && value.chatTitleSystemPrompt === '題名にする' && value;
             }, 'global form saves');
             eq(saved.chatTitleModelRef, gemini);
             eq(saved.chatTitleSystemPrompt, prompt.value);

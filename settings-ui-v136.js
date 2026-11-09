@@ -1,7 +1,7 @@
 /* Shared desktop/mobile settings and chat execution controls. Storage lives in settings-v136.js. */
 (function (root) {
     'use strict';
-    const titles = { general: '一般設定', profile: 'プロファイル設定', integrations: '外部連携', other: 'その他設定' };
+    const titles = { general: '一般設定', 'ai-tools': 'AI機能・ツール設定', appearance: 'テーマ・表示設定', profile: 'プロファイル設定', integrations: '外部連携', other: 'その他設定' };
     const themeFields = {
         'dark-mode-toggle': 'darkMode', 'theme-color-mode-select': 'themeColorMode', 'accent-color-input': 'accentColor',
         'header-color-input': 'headerColor', 'header-text-color-mode-select': 'headerTextColorMode',
@@ -31,7 +31,7 @@
             this.media.addEventListener('change', () => {
                 if (!this.media.matches && this.category && this.state.currentScreen === 'settings' && !this.mobileDetailPushed) {
                     history.replaceState({ screen: 'settings', settingsCategory: null }, '', '#settings');
-                    history.pushState({ screen: 'settings', settingsCategory: this.category }, '', `#settings/${this.category}`);
+                    history.pushState({ screen: 'settings', settingsCategory: this.category, settingsDetailPushed: true }, '', `#settings/${this.category}`);
                     this.mobileDetailPushed = true;
                 }
                 this.layout();
@@ -39,6 +39,12 @@
             for (const kind of ['theme', 'appearance']) {
                 const global = $(`global-${kind}-editor`), profile = $(`profile-${kind}-editor`);
                 for (const child of global.children) if (!/^H[1-6]$/.test(child.tagName)) profile.append(child.cloneNode(true));
+                if (kind === 'theme') {
+                    const globalColors = $('global-color-editor');
+                    const colors = globalColors.querySelector('.color-settings-section').cloneNode(true);
+                    colors.prepend(make('h3', 'color-settings-title', globalColors.querySelector('h2').textContent));
+                    profile.append(colors);
+                }
                 profile.querySelectorAll('[id]').forEach(node => { node.dataset.sourceId = node.id; node.id = `profile-${node.id}`; });
                 profile.querySelectorAll('[for]').forEach(node => node.htmlFor = `profile-${node.htmlFor}`);
                 profile.querySelectorAll('[aria-controls]').forEach(node => node.setAttribute('aria-controls', `profile-${node.getAttribute('aria-controls')}`));
@@ -51,6 +57,8 @@
             this.prepareSettingsLayout();
             this.bindPromptSizing();
             this.bindAppearanceEditors();
+            this.bindAuxiliaryModelSettings();
+            this.bindMemoryExtractionSettings();
             $('chat-model-button').addEventListener('click', event => this.openExecution(event.currentTarget));
             $('settings-thinking-button').addEventListener('change', event => {
                 const control = event.currentTarget, value = control.value;
@@ -94,12 +102,14 @@
                 this.app.reloadGlobalSettingsV136().catch(() => {}).then(() => this.syncGlobalForms());
             });
             window.addEventListener('execution-settings-changed', event => {
-                if (event.detail?.type === 'chat' || event.detail?.type === 'capabilities') {
+                const type = event.detail?.type;
+                if (type === 'capabilities' && event.detail.apiConfigId !== this.app.getCurrentChatModelRef()?.apiConfigId) return;
+                if (type === 'chat' || type === 'capabilities') {
                     this.renderExecution();
                     if (this.popover?.refreshThinking) this.popover.refreshThinking();
-                    else if (this.popover) this.closePopover(this.popover.contains(document.activeElement));
+                    else if (type === 'chat' && this.popover) this.closePopover(this.popover.contains(document.activeElement));
                 } else {
-                    if (event.detail?.type === 'global') this.syncGlobalForms();
+                    if (type === 'global') this.syncGlobalForms();
                     this.syncAppearanceEditors();
                 }
             });
@@ -180,26 +190,11 @@
         syncGlobalForms() {
             const global = this.state.globalSettingsV136;
             if (!global) return;
-            const refs = { thoughtTranslationModel: 'thoughtTranslationModelRef', proofreadingModelName: 'proofreadingModelRef', summaryModelName: 'summaryModelRef',
-                sdQcModel: 'sdQcModelRef', sdPromptImproveModel: 'sdPromptImproveModelRef' };
+            this.app.updateAuxiliaryModelOptions();
+            this.syncMemoryExtractionPrompt();
             for (const [key, control] of Object.entries(this.app.globalSettingControlsV136 || {})) {
                 if (control === document.activeElement && this.editedGlobalInputs.has(control)) continue;
-                let value = key === 'includeThoughts' ? global.showThoughtProcess : global[key] ?? SettingsV136.chatTitleDefaults[key];
-                if (key === 'chatTitleModelRef') {
-                    const ref = value;
-                    value = this.app.encodeModelRefValue(ref || {});
-                    if (value && !Array.from(control.options).some(option => option.value === value)) {
-                        control.add(new Option(this.app.getModelRefDisplayLabel(ref), value));
-                    }
-                }
-                if (refs[key]) {
-                    const ref = this.app.getGlobalAuxiliaryModelRefV136(refs[key], key);
-                    value = key === 'sdQcModel' || key === 'sdPromptImproveModel' ? ref?.modelName || value : this.app.encodeModelRefValue(ref || {});
-                    if (value && !Array.from(control.options).some(option => option.value === value)) {
-                        const option = make('option', '', this.app.getModelRefDisplayLabel(ref || {}) || value);
-                        option.value = value; control.append(option);
-                    }
-                }
+                const value = key === 'includeThoughts' ? global.showThoughtProcess : global[key] ?? SettingsV136.chatTitleDefaults[key];
                 if (control.type === 'checkbox') control.checked = value === true;
                 else if (control.value !== String(value ?? '')) control.value = value ?? '';
             }
@@ -215,25 +210,30 @@
             this.layout(); $('settings-detail').scrollTop = this.scroll[this.category] || 0;
             requestAnimationFrame(() => this.syncPromptSizes());
             if (push && this.state.currentScreen === 'settings') {
-                const entry = { screen: 'settings', settingsCategory: this.category };
+                const entry = { screen: 'settings', settingsCategory: this.category, settingsDetailPushed: this.mobileDetailPushed };
                 if (this.media.matches) history.replaceState(entry, '', `#settings/${this.category}`);
                 else {
                     if (this.category && !this.mobileDetailPushed) {
                         history.replaceState({ screen: 'settings', settingsCategory: null }, '', '#settings');
-                        history.pushState(entry, '', `#settings/${this.category}`);
+                        history.pushState({ ...entry, settingsDetailPushed: true }, '', `#settings/${this.category}`);
                         this.mobileDetailPushed = true;
                     } else history.replaceState(entry, '', this.category ? `#settings/${this.category}` : '#settings');
                 }
             }
         }
+        getHashEntry() {
+            const match = /^#settings(?:\/([^/]+))?$/.exec(location.hash);
+            if (!match || (match[1] && !Object.hasOwn(titles, match[1]))) return null;
+            return { screen: 'settings', settingsCategory: match[1] || null };
+        }
         restore(entry) {
-            this.mobileDetailPushed = !!entry?.settingsCategory;
+            this.mobileDetailPushed = entry?.settingsDetailPushed === true;
             this.selectCategory(entry?.settingsCategory || (this.media.matches ? 'general' : null), false);
         }
         back() {
             if (!this.media.matches && this.category) {
-                if (history.state?.settingsCategory) history.back();
-                else this.selectCategory(null, false);
+                if (this.mobileDetailPushed) history.back();
+                else this.selectCategory(null);
             } else this.ui.showScreen('chat');
         }
         layout() {
@@ -274,7 +274,7 @@
                     const id = control.dataset.sourceId || control.id;
                     const key = (kind === 'theme' ? themeFields : appearanceFields)[id];
                     if (key) control.addEventListener(control.type === 'color' || control.type === 'range' ? 'input' : 'change', () => {
-                        const value = control.type === 'checkbox' ? control.checked : control.type === 'range' ? Number(control.value) / 100 : control.value;
+                        const value = key === 'darkMode' ? control.value === 'dark' : control.type === 'range' ? Number(control.value) / 100 : control.value;
                         const target = this.app.captureAppearanceTargetV136(kind, scope);
                         this.save(control, () => this.app.saveAppearanceValues(kind, { [key]: value }, target), { profileId: target.profileId });
                     });
@@ -312,9 +312,9 @@
                 const values = own ? profile[kind] || {} : this.state.globalSettingsV136[kind] || {};
                 editor.querySelectorAll('input,select').forEach(control => {
                     const id = control.dataset.sourceId || control.id, key = (kind === 'theme' ? themeFields : appearanceFields)[id];
-                    if (!key || control === document.activeElement) return;
+                    if (!key || (key !== 'darkMode' && control === document.activeElement)) return;
                     const value = values[key];
-                    if (control.type === 'checkbox') control.checked = value === true;
+                    if (key === 'darkMode') control.value = value === true ? 'dark' : 'light';
                     else if (control.type === 'range') control.value = Math.round((value ?? 1) * 100);
                     else control.value = control.type === 'color' ? (value || (values.darkMode ? '#007aff' : '#1976d2')) : value || '';
                 });
@@ -354,7 +354,43 @@
                 const url = URL.createObjectURL(asset.blob); this.urls.set(editor, url); image.src = url; image.classList.remove('hidden');
             } catch (error) { this.error(image, error); }
         }
-        refresh() { this.syncAppearanceEditors(); this.renderExecution(); this.syncPromptSizes(); }
+        bindAuxiliaryModelSettings() {
+            const { auxiliaryModelSelectIds, auxiliaryLegacyModelKeys } = SettingsV136;
+            for (const [key, id] of Object.entries(auxiliaryModelSelectIds)) {
+                const select = $(id);
+                select.addEventListener('change', () => {
+                    const ref = this.app.decodeModelRefValue(select.value);
+                    this.save(select, async () => {
+                        if (ref) this.app.assertModelRefForExecution(ref, key);
+                        const updates = { [key]: ref };
+                        const legacyKey = auxiliaryLegacyModelKeys[key];
+                        if (legacyKey) updates[legacyKey] = ref?.modelName || '';
+                        await this.app.saveGlobalSettingsV136(updates);
+                    });
+                });
+            }
+        }
+        bindMemoryExtractionSettings() {
+            const prompt = $('memory-extraction-prompt');
+            const savePrompt = () => {
+                const value = prompt.value;
+                this.save(prompt, () => this.app.saveGlobalSettingsV136({ memoryExtractionPrompt: value }));
+            };
+            prompt.addEventListener('input', () => {
+                this.editedGlobalInputs.add(prompt);
+                savePrompt();
+            });
+            $('reset-memory-extraction-prompt').addEventListener('click', () => {
+                prompt.value = SettingsV136.DEFAULT_MEMORY_EXTRACTION_PROMPT;
+                savePrompt();
+            });
+        }
+        syncMemoryExtractionPrompt() {
+            const prompt = $('memory-extraction-prompt');
+            const value = this.app.getMemoryExtractionPromptV136();
+            if (prompt.value !== value && (prompt !== document.activeElement || !this.editedGlobalInputs.has(prompt))) prompt.value = value;
+        }
+        refresh() { this.syncAppearanceEditors(); this.syncMemoryExtractionPrompt(); this.renderExecution(); this.syncPromptSizes(); }
         renderExecution() {
             const ref = this.app.getCurrentChatModelRef(), config = this.app.getApiConfigById(ref?.apiConfigId);
             const pending = !ref && (this.state.executionInitializingV136 || !this.state.db);

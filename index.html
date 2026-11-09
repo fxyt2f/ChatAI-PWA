@@ -14,12 +14,12 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.36.2">
+    <link rel="stylesheet" href="./style.css?v=1.36.3">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.36.2" defer></script>
-    <script src="./dropbox.js?v=1.36.2" defer></script>
+    <script src="./function-calling.js?v=1.36.3" defer></script>
+    <script src="./dropbox.js?v=1.36.3" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -33,10 +33,10 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.36.2" defer></script>
-    <script src="./streaming-v136.js?v=1.36.2" defer></script>
-    <script src="./app.js?v=1.36.2" defer></script>
-    <script src="./settings-ui-v136.js?v=1.36.2" defer></script>
+    <script src="./settings-v136.js?v=1.36.3" defer></script>
+    <script src="./streaming-v136.js?v=1.36.3" defer></script>
+    <script src="./app.js?v=1.36.3" defer></script>
+    <script src="./settings-ui-v136.js?v=1.36.3" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -104,7 +104,7 @@
                 <button id="character-profile-btn" class="floating-action-button" title="キャラクタープロファイル">
                     <span class="material-symbols-outlined">group</span>
                 </button>
-                <button id="system-prompt-open-btn" class="floating-action-button" title="システムプロンプト" aria-label="システムプロンプト">
+                <button id="system-prompt-open-btn" class="floating-action-button" title="パラメータ設定" aria-label="パラメータ設定">
                     <span class="material-symbols-outlined">edit_note</span>
                 </button>
                 <button id="chat-search-open-btn" class="floating-action-button" title="チャット内を検索" aria-label="チャット内を検索">
@@ -180,15 +180,28 @@
 
             <dialog id="system-prompt-dialog" class="custom-dialog system-prompt-dialog" aria-labelledby="system-prompt-dialog-title">
                 <div class="system-prompt-dialog-header">
-                    <h3 id="system-prompt-dialog-title" class="dialog-title system-prompt-dialog-title">システムプロンプト</h3>
+                    <h3 id="system-prompt-dialog-title" class="dialog-title system-prompt-dialog-title">パラメータ設定</h3>
+                    <button id="chat-parameter-menu-btn" class="system-prompt-close-btn" type="button" aria-label="パラメータ設定の操作" aria-haspopup="menu" aria-expanded="false" aria-controls="chat-parameter-menu">
+                        <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+                    </button>
                     <button id="system-prompt-close-btn" class="system-prompt-close-btn" type="button" title="閉じる" aria-label="閉じる">
                         <span class="material-symbols-outlined">close</span>
                     </button>
                 </div>
-                <textarea id="system-prompt-editor" class="system-prompt-editor" aria-label="システムプロンプト編集" spellcheck="false"></textarea>
+                <div id="chat-parameter-menu" class="history-item-menu chat-parameter-menu" role="menu" aria-label="パラメータ設定の操作" hidden>
+                    <button type="button" role="menuitem" data-parameter-copy="to-chat">プロファイルの設定をチャットに適用</button>
+                    <button type="button" role="menuitem" data-parameter-copy="to-profile">チャットの設定をプロファイルに反映</button>
+                </div>
+                <label for="system-prompt-editor">システムプロンプト:</label>
+                <textarea id="system-prompt-editor" class="system-prompt-editor" spellcheck="false"></textarea>
                 <div class="system-prompt-dialog-footer">
                     <span id="system-prompt-char-count" class="system-prompt-char-count">0文字</span>
-                    <span id="system-prompt-save-status" class="system-prompt-save-status" role="status" aria-live="polite">保存済み</span>
+                </div>
+                <div class="param-grid chat-parameter-grid">
+                    <div><label for="chat-max-tokens">Max Tokens:</label><input type="number" id="chat-max-tokens" data-chat-parameter="maxTokens" step="1" min="1" placeholder="例:1024"></div>
+                    <div><label for="chat-temperature">Temperature:</label><input type="number" id="chat-temperature" data-chat-parameter="temperature" step="0.1" min="0" max="2" placeholder="例:0.9(0.0-2.0)"></div>
+                    <div><label for="chat-top-k">Top K:</label><input type="number" id="chat-top-k" data-chat-parameter="topK" step="1" min="1" placeholder="例:40(1-40)"></div>
+                    <div><label for="chat-top-p">Top P:</label><input type="number" id="chat-top-p" data-chat-parameter="topP" step="0.01" min="0" max="1" placeholder="例:0.95(0.0-1.0)"></div>
                 </div>
             </dialog>
 
@@ -363,7 +376,17 @@
                  <h1 id="settings-title">設定</h1>
 
             </header>
-            <main class="settings-layout"><nav class="settings-category-nav" aria-label="設定カテゴリ"><button type="button" data-settings-category="general" aria-controls="settings-panel-general"><span class="settings-category-icon" aria-hidden="true">⚙</span><span>一般設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button><button type="button" data-settings-category="profile" aria-controls="settings-panel-profile"><span class="settings-category-icon" aria-hidden="true">◉</span><span>プロファイル設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button><button type="button" data-settings-category="integrations" aria-controls="settings-panel-integrations"><span class="settings-category-icon" aria-hidden="true">↗</span><span>外部連携</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button><button type="button" data-settings-category="other" aria-controls="settings-panel-other"><span class="settings-category-icon" aria-hidden="true">⋯</span><span>その他設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button></nav><div id="settings-detail" class="main-content settings-detail"><div id="settings-panel-general" class="settings-category-panel" data-settings-panel="general" aria-label="一般設定" hidden><div class="settings-group" id="api-settings-group">
+            <main class="settings-layout">
+                <nav class="settings-category-nav" aria-label="設定カテゴリ">
+                    <button type="button" data-settings-category="general" aria-controls="settings-panel-general"><span class="settings-category-icon" aria-hidden="true">⚙</span><span>一般設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    <button type="button" data-settings-category="ai-tools" aria-controls="settings-panel-ai-tools"><span class="settings-category-icon" aria-hidden="true">⚒</span><span>AI機能・ツール設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    <button type="button" data-settings-category="appearance" aria-controls="settings-panel-appearance"><span class="settings-category-icon material-symbols-outlined" aria-hidden="true">palette</span><span>テーマ・表示設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    <button type="button" data-settings-category="profile" aria-controls="settings-panel-profile"><span class="settings-category-icon" aria-hidden="true">◉</span><span>プロファイル設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    <button type="button" data-settings-category="integrations" aria-controls="settings-panel-integrations"><span class="settings-category-icon" aria-hidden="true">↗</span><span>外部連携</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    <button type="button" data-settings-category="other" aria-controls="settings-panel-other"><span class="settings-category-icon" aria-hidden="true">⋯</span><span>その他設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                </nav>
+                <div id="settings-detail" class="main-content settings-detail">
+<div id="settings-panel-general" class="settings-category-panel" data-settings-panel="general" aria-label="一般設定" hidden><div class="settings-group" id="api-settings-group">
                     <h3>API設定</h3>
                     <div class="hidden" aria-hidden="true">
                         <input type="text" id="basic-api-config-name" maxlength="80" tabindex="-1">
@@ -429,7 +452,7 @@
                             思考プロセスを日本語に翻訳する
                         </label>
                         <label for="thought-translation-model">思考翻訳用モデル:</label>
-                        <select id="thought-translation-model" aria-label="思考翻訳用モデル"></select>
+                        <select id="thought-translation-model" aria-label="思考翻訳用モデル"><option value="">選択してください</option></select>
                         <p id="thought-translation-route-note" class="model-route-note hidden" aria-live="polite"></p>
 
 </section>
@@ -445,7 +468,7 @@
 
                         <div id="proofreading-options">
                             <label for="proofreading-model-name">校正モデル:</label>
-                            <select id="proofreading-model-name" aria-label="校正モデル"></select>
+                            <select id="proofreading-model-name" aria-label="校正モデル"><option value="">選択してください</option></select>
                             <p id="proofreading-route-note" class="model-route-note hidden" aria-live="polite"></p>
 
                             <label for="proofreading-system-instruction">校正用システムプロンプト:</label>
@@ -453,7 +476,7 @@
                         </div>
                     </div>
 <div class="settings-group">
-                        <h4>コンテキスト圧縮機能</h4>
+                        <h4>コンテキスト圧縮(要約)機能</h4>
                         <p class="settings-description">
                             チャット履歴が長くなった際に、AIに送信するコンテキストを圧縮して応答品質の低下を防ぎます。
                         </p>
@@ -462,7 +485,7 @@
                             チャット画面に要約ボタンを表示する
                         </label>
                         <label for="summary-model-name">要約用モデル:</label>
-                        <select id="summary-model-name" aria-label="要約用モデル"></select>
+                        <select id="summary-model-name" aria-label="要約用モデル"><option value="">選択してください</option></select>
                         <p id="summary-route-note" class="model-route-note hidden" aria-live="polite"></p>
                         <label for="summary-system-prompt">要約実行時のシステムプロンプト:</label>
                         <textarea id="summary-system-prompt" placeholder="要約を実行するAIへの指示を入力します。" aria-label="要約実行時のシステムプロンプト"></textarea>
@@ -474,9 +497,9 @@
                             <input type="checkbox" id="enable-chat-title-generation">
                             新規チャットのタイトルを自動生成する
                         </label>
-                        <label for="chat-title-model">タイトル生成用モデル</label>
-                        <select id="chat-title-model"></select>
-                        <label for="chat-title-system-prompt">タイトル生成用プロンプト</label>
+                        <label for="chat-title-model">タイトル生成用モデル:</label>
+                        <select id="chat-title-model"><option value="">選択してください</option></select>
+                        <label for="chat-title-system-prompt">タイトル生成用プロンプト:</label>
                         <textarea id="chat-title-system-prompt"></textarea>
                     </section>
                     <section class="settings-group">
@@ -488,18 +511,59 @@
                         <p class="settings-description" id="streaming-output-description">AIの回答を生成中に順次表示します。</p>
                         <p class="settings-description" id="streaming-output-support">現在はGeminiとOpenRouterに対応しています。</p>
                     </section>
-<div class="settings-group" id="global-theme-editor" data-appearance-editor="global" data-kind="theme">
-                   <h2>テーマ</h2>
-                   <div class="theme-setting-subsection">
-
-
-                       <label class="checkbox-label">
-                           <input type="checkbox" id="dark-mode-toggle">
-                           ダークモードを使用する
-                       </label>
-                   </div>
+</div>
+<div id="settings-panel-ai-tools" class="settings-category-panel" data-settings-panel="ai-tools" aria-label="AI機能・ツール設定" hidden>
+    <section class="settings-group">
+        <h2>Function Calling</h2>
+        <label class="checkbox-label">
+            <input type="checkbox" id="gemini-enable-function-calling-toggle" aria-describedby="function-calling-description">
+            Function Calling を使用する
+        </label>
+        <p class="settings-description" id="function-calling-description">
+            チェック時、AIは計算などのタスクを外部関数に任せようとします。<br>
+            Google Searchより優先されます。
+        </p>
+        <label class="checkbox-label">
+            <input type="checkbox" id="allow-prompt-ui-changes" aria-describedby="prompt-ui-changes-description">
+            プロンプトによるUI変更を許可する
+        </label>
+        <p class="settings-description" id="prompt-ui-changes-description">
+            Function Callingを使い、プロンプトの指示で背景画像やUIの透明度を変更できるようにします。
+        </p>
+        <label class="checkbox-label">
+            <input type="checkbox" id="force-function-calling-toggle" aria-describedby="force-function-calling-description">
+            全ての応答でFunctionCallingを強制する
+        </label>
+        <p class="settings-description" id="force-function-calling-description">
+            チェック時、モデルは応答時に必ずFunctionCallingで関数呼び出しを行います。<br>
+            応答時に必ずイラストを作成させたい時などに有効です。
+        </p>
+    </section>
+    <section class="settings-group" id="gemini-grounding-param">
+        <h2>検索設定</h2>
+        <label class="checkbox-label">
+            <input type="checkbox" id="gemini-enable-grounding-toggle" aria-describedby="google-search-description google-search-tool-note">
+            ネットから情報を取得させる (Google Search)
+        </label>
+        <p class="settings-description" id="google-search-description">
+            チェック時、モデルは回答生成のためにWeb検索を行います。<br>
+            推論モデルは推論内で検索する場合があり、引用データが帰らない場合があります。
+        </p>
+        <p class="settings-description" id="google-search-tool-note">Function Calling と Google Search は同時に使用できません。</p>
+    </section>
+</div>
+<div id="settings-panel-appearance" class="settings-category-panel" data-settings-panel="appearance" aria-label="テーマ・表示設定" hidden>
+<section class="settings-group" id="global-theme-editor" data-appearance-editor="global" data-kind="theme">
+    <h2>テーマ</h2>
+    <label for="dark-mode-toggle">アプリのテーマ:</label>
+    <select id="dark-mode-toggle">
+        <option value="light">ライトモード</option>
+        <option value="dark">ダークモード</option>
+    </select>
+</section>
+<section class="settings-group" id="global-color-editor" data-appearance-editor="global" data-kind="theme">
+    <h2>色設定</h2>
                    <div class="color-settings-section">
-                       <div class="color-settings-title">色設定</div>
                        <div class="color-setting-row">
                            <label class="color-setting-label" for="theme-color-mode-select">色の適用方式</label>
                            <div class="color-setting-controls">
@@ -568,7 +632,7 @@
                            </div>
                        </div>
                    </div>
-                </div>
+</section>
 <div class="settings-group" id="global-appearance-editor" data-appearance-editor="global" data-kind="appearance">
                     <h2>背景・表示効果</h2>
                     <label>チャット画面の背景画像:</label>
@@ -596,7 +660,73 @@
                         画像はブラウザ内のデータベースに保存。<br>
                         可読性のため画像の上に半透明のレイヤーを表示。
                      </p>
-                </div></div><div id="settings-panel-profile" class="settings-category-panel" data-settings-panel="profile" aria-label="プロファイル設定" hidden><div class="settings-group" id="profile-management-group">
+                </div>
+<section class="settings-group" id="display-settings"><h2>表示設定</h2>
+<div class="chat-display-settings-row" aria-label="チャット本文の表示設定">
+                       <div class="chat-display-setting">
+                           <label for="chat-font-size-select">文字サイズ:</label>
+                           <select id="chat-font-size-select" aria-label="チャット本文の文字サイズ">
+                               <option value="12">12px</option>
+                               <option value="13">13px</option>
+                               <option value="14" selected>14px</option>
+                               <option value="15">15px</option>
+                               <option value="16">16px</option>
+                               <option value="18">18px</option>
+                               <option value="20">20px</option>
+                               <option value="22">22px</option>
+                               <option value="24">24px</option>
+                           </select>
+                       </div>
+                       <div class="chat-display-setting">
+                           <label for="chat-line-height-select">行間:</label>
+                           <select id="chat-line-height-select" aria-label="チャット本文の行間">
+                               <option value="1.2">1.2</option>
+                               <option value="1.4">1.4</option>
+                               <option value="1.5" selected>1.5</option>
+                               <option value="1.6">1.6</option>
+                               <option value="1.8">1.8</option>
+                               <option value="2">2.0</option>
+                               <option value="2.2">2.2</option>
+                           </select>
+                       </div>
+                       <div class="chat-display-setting">
+                           <label for="chat-paragraph-margin-bottom-select">段落間隔:</label>
+                           <select id="chat-paragraph-margin-bottom-select" aria-label="チャット本文の段落間隔">
+                               <option value="0">0em</option>
+                               <option value="0.2">0.2em</option>
+                               <option value="0.4">0.4em</option>
+                               <option value="0.6">0.6em</option>
+                               <option value="0.8" selected>0.8em</option>
+                               <option value="1">1.0em</option>
+                               <option value="1.2">1.2em</option>
+                               <option value="1.5">1.5em</option>
+                               <option value="2">2.0em</option>
+                           </select>
+                       </div>
+                   </div><label for="font-family-input">アプリのフォント:</label>
+<input type="text" id="font-family-input" placeholder="例: 'Meiryo', sans-serif" aria-label="アプリ全体のフォント">
+<p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
+                        端末またはPCにインストールされているフォント名を指定。
+                   </p><label class="checkbox-label">
+                       <input type="checkbox" id="enable-wide-mode-toggle">
+                       PC表示時にワイドモードを有効にする
+                   </label>
+<p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
+                        画面幅が800px以上の場合に、チャット画面の横幅を広げます。
+                   </p>
+<label class="checkbox-label">
+                       <input type="checkbox" id="hide-system-prompt-toggle">
+                       チャット画面にシステムプロンプトを表示する
+                   </label>
+<p style="height:10px"></p><label for="floating-panel-behavior">フローティングボタンの表示:</label>
+<select id="floating-panel-behavior" aria-label="フローティングボタンの表示">
+                       <option value="on-click">クリック/タップで表示 (時間経過で非表示)</option>
+                       <option value="always">常時表示</option>
+                       <option value="hidden">常時非表示</option>
+                   </select>
+</section>
+</div>
+<div id="settings-panel-profile" class="settings-category-panel" data-settings-panel="profile" aria-label="プロファイル設定" hidden><div class="settings-group" id="profile-management-group">
                     <h3>プロファイル編集</h3><div id="profile-card-header-wrapper-settings" class="profile-card-wrapper">
                     <div id="profile-card-header-settings" class="profile-card" title="プロファイルを切り替え">
                         <div id="profile-card-icon-container-settings" class="profile-icon-container"></div>
@@ -648,7 +778,7 @@
                         <input type="checkbox" id="enable-memory-toggle">
                         メモリ機能を有効にする
                     </label>
-                    <div id="memory-options-container" class="hidden">
+                    <div id="memory-options-container">
                         <label for="memory-auto-save-interval">自動学習の間隔:</label>
                         <select id="memory-auto-save-interval">
                             <option value="10">10メッセージごと</option>
@@ -663,10 +793,17 @@
                         </p>
                         <button id="manage-memory-btn" class="settings-action-button" style="margin-top: 16px;">記憶を管理する</button>
                     </div>
+                    <label for="memory-extraction-model">記憶抽出モデル:</label>
+                    <select id="memory-extraction-model" aria-describedby="memory-extraction-scope"><option value="">選択してください</option></select>
+                    <p class="settings-description" id="memory-extraction-scope">モデルとプロンプトは全プロファイル共通です。モデルが未設定の場合は自動学習を実行しません。</p>
+                    <label for="memory-extraction-prompt">記憶抽出プロンプト:</label>
+                    <textarea id="memory-extraction-prompt" rows="6" aria-describedby="memory-extraction-prompt-note"></textarea>
+                    <p class="settings-description" id="memory-extraction-prompt-note">既存の記憶、会話履歴、出力形式は自動で追加されます。</p>
+                    <button id="reset-memory-extraction-prompt" class="settings-reset-button" type="button">初期プロンプトに戻す</button>
                 </div><div class="settings-group">
                     <h3>パラメータ</h3>
-                    <label for="system-prompt-default">システムプロンプト (デフォルト):</label>
-                    <textarea id="system-prompt-default" placeholder="例: あなたは親切なアシスタントです。新規チャット作成時に適用されます。" aria-label="システムプロンプト (デフォルト)"></textarea>
+                    <label for="system-prompt-default">システムプロンプト:</label>
+                    <textarea id="system-prompt-default" placeholder="例: あなたは親切なアシスタントです。新規チャット作成時に適用されます。" aria-label="システムプロンプト"></textarea>
 
                     <div class="param-grid">
                         <div>
@@ -722,45 +859,7 @@
                    </p>
 
 
-</section><div id="gemini-grounding-param" class="settings-group">
-                    <h3>ツール使用設定</h3>
-                    <p style="font-size: 12px; color: var(--text-secondary); margin-top: -10px; margin-bottom: 15px;">
-                         Function Calling と Google Search は同時に使用できません。
-                    </p>
-
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="gemini-enable-function-calling-toggle">
-                        Function Calling を使用する
-                    </label>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
-                         チェック時、AIは計算などのタスクを外部関数に任せようとします。<br>
-                         Google Searchより優先されます。
-                    </p>
-
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="gemini-enable-grounding-toggle">
-                        ネットから情報を取得させる (Google Search)
-                    </label>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
-                         チェック時、モデルは回答生成のためにWeb検索を行います。<br>
-                         推論モデルは推論内で検索する場合があり、引用データが帰らない場合がある。
-                    </p>
-                    <label class="checkbox-label" style="margin-top: 15px;">
-                        <input type="checkbox" id="allow-prompt-ui-changes">
-                        プロンプトによるUI変更を許可する
-                    </label>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 15px;">
-                         Function Callingを使い、プロンプトの指示で背景画像やUIの透明度を変更できるようにします。
-                    </p>
-                    <label class="checkbox-label" style="margin-top: 15px;">
-                        <input type="checkbox" id="force-function-calling-toggle">
-                        全ての応答でFunctionCallingを強制する
-                    </label>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 15px;">
-                         チェック時、モデルは応答時に必ずFunctionCallingで関数呼び出しを行います。<br>
-                         応答時に必ずイラストを作成させたい時などに有効です。
-                    </p>
-                </div><section class="settings-group" id="profile-theme-settings"><h2>個別テーマ</h2>
+</section><section class="settings-group" id="profile-theme-settings"><h2>個別テーマ</h2>
 <label class="checkbox-label"><input type="checkbox" id="profile-theme-override">テーマを個別に設定</label><div id="profile-theme-editor" data-appearance-editor="profile" data-kind="theme" hidden></div>
 </section><section class="settings-group" id="profile-appearance-settings"><h2>個別背景・表示効果</h2>
 <label class="checkbox-label"><input type="checkbox" id="profile-appearance-override">背景・表示効果を個別に設定</label><div id="profile-appearance-editor" data-appearance-editor="profile" data-kind="appearance" hidden></div>
@@ -872,16 +971,11 @@
                             生成画像クオリティチェッカーを有効にする
                         </label>
                         <p class="sd-description">
-                            画像生成後にGemini Visionモデルを使用し、プロンプト通りの画像が生成されたか自動で検証します。
+                            画像生成後に選択した画像対応モデルを使用し、プロンプト通りの画像が生成されたか自動で検証します。
                         </p>
                         <div id="sd-quality-checker-options" class="hidden">
                             <label for="sd-qc-model">チェック用Visionモデル:</label>
-                            <select id="sd-qc-model">
-                                <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                                <optgroup label="ユーザー指定" id="sd-qc-user-models">
-                                </optgroup>
-                            </select>
+                            <select id="sd-qc-model"><option value="">選択してください</option></select>
 
                             <label for="sd-qc-prompt">チェック用システムプロンプト:</label>
                             <textarea id="sd-qc-prompt" rows="5"></textarea>
@@ -892,17 +986,7 @@
                                 <p class="sd-description" style="margin-top: 4px;">NG判定時に、プロンプトを自動改善して再生成を試みる回数の上限です。</p>
 
                                 <label for="sd-prompt-improve-model">プロンプト改善用モデル:</label>
-                                <select id="sd-prompt-improve-model">
-                                    <optgroup label="推奨">
-                                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                                    </optgroup>
-                                     <optgroup label="その他">
-                                        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                                        <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                                     </optgroup>
-                                     <optgroup label="ユーザー指定" id="sd-prompt-improve-user-models">
-                                     </optgroup>
-                                </select>
+                                <select id="sd-prompt-improve-model"><option value="">選択してください</option></select>
 
                                 <label for="sd-prompt-improve-system-prompt">プロンプト改善用システムプロンプト:</label>
                                 <textarea id="sd-prompt-improve-system-prompt" rows="5"></textarea>
@@ -980,76 +1064,15 @@
 <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
                          PCではマウスオーバー、スマホではタップで表示されます。
                     </p>
-</section><section class="settings-group" id="display-settings"><h2>表示設定</h2>
-<div class="chat-display-settings-row" aria-label="チャット本文の表示設定">
-                       <div class="chat-display-setting">
-                           <label for="chat-font-size-select">文字サイズ</label>
-                           <select id="chat-font-size-select" aria-label="チャット本文の文字サイズ">
-                               <option value="12">12px</option>
-                               <option value="13">13px</option>
-                               <option value="14" selected>14px</option>
-                               <option value="15">15px</option>
-                               <option value="16">16px</option>
-                               <option value="18">18px</option>
-                               <option value="20">20px</option>
-                               <option value="22">22px</option>
-                               <option value="24">24px</option>
-                           </select>
-                       </div>
-                       <div class="chat-display-setting">
-                           <label for="chat-line-height-select">行間</label>
-                           <select id="chat-line-height-select" aria-label="チャット本文の行間">
-                               <option value="1.2">1.2</option>
-                               <option value="1.4">1.4</option>
-                               <option value="1.5" selected>1.5</option>
-                               <option value="1.6">1.6</option>
-                               <option value="1.8">1.8</option>
-                               <option value="2">2.0</option>
-                               <option value="2.2">2.2</option>
-                           </select>
-                       </div>
-                       <div class="chat-display-setting">
-                           <label for="chat-paragraph-margin-bottom-select">段落間隔</label>
-                           <select id="chat-paragraph-margin-bottom-select" aria-label="チャット本文の段落間隔">
-                               <option value="0">0em</option>
-                               <option value="0.2">0.2em</option>
-                               <option value="0.4">0.4em</option>
-                               <option value="0.6">0.6em</option>
-                               <option value="0.8" selected>0.8em</option>
-                               <option value="1">1.0em</option>
-                               <option value="1.2">1.2em</option>
-                               <option value="1.5">1.5em</option>
-                               <option value="2">2.0em</option>
-                           </select>
-                       </div>
-                   </div><label for="font-family-input">アプリのフォント:</label>
-<input type="text" id="font-family-input" placeholder="例: 'Meiryo', sans-serif" aria-label="アプリ全体のフォント">
-<p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
-                        端末またはPCにインストールされているフォント名を指定。
-                   </p><label class="checkbox-label">
-                       <input type="checkbox" id="enable-wide-mode-toggle">
-                       PC表示時にワイドモードを有効にする
-                   </label>
-<p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
-                        画面幅が800px以上の場合に、チャット画面の横幅を広げます。
-                   </p>
-<p style="height:10px"></p><label for="floating-panel-behavior">フローティングボタンの表示:</label>
-<select id="floating-panel-behavior" aria-label="フローティングボタンの表示">
-                       <option value="on-click">クリック/タップで表示 (時間経過で非表示)</option>
-                       <option value="always">常時表示</option>
-                       <option value="hidden">常時非表示</option>
-                   </select>
-</section><section class="settings-group" id="history-display-settings"><h2>履歴・表示管理</h2>
+</section><section class="settings-group" id="history-management-settings"><h2>履歴管理</h2>
 <label for="history-sort-order">履歴のソート順:</label>
 <select id="history-sort-order" aria-label="履歴のソート順">
                        <option value="updatedAt">更新日時 (新しい順)</option>
                        <option value="createdAt">作成日時 (新しい順)</option>
                        <option value="title">タイトル順</option>
-                   </select><label class="checkbox-label">
-                       <input type="checkbox" id="hide-system-prompt-toggle">
-                       チャット画面にシステムプロンプトを表示する
-                   </label>
-</section><div class="settings-group">
+                   </select>
+</section>
+<div class="settings-group">
                     <h3>保存済み画像アセット</h3>
                     <p id="asset-count-display" class="asset-count-display">現在 ... 枚のアセットが保存されています。</p>
                     <div class="asset-actions">
