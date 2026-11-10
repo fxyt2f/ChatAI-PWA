@@ -21,12 +21,13 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         eq([...$('settings-panel-appearance').querySelectorAll(':scope > .settings-group > h2')].map(node=>node.textContent),['テーマ','色設定','背景・表示効果','表示設定']);
         eq(document.querySelectorAll('#settings-screen details').length,1);assert($('data-danger-settings').querySelector('details'));assert(!$('thinking-budget'));assert(!$('theme-settings-profile-scoped-toggle'));
         assert(!document.querySelector('.profile-menu-model'));assert(!$('profile-display-name-sub').textContent.includes('gemini'));
-        for(const id of ['model-name','include-thoughts-toggle','enable-proofreading','summary-model-name'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'general');
-        for(const id of ['dark-mode-toggle','theme-color-mode-select','background-image-input','chat-font-size-select','hide-system-prompt-toggle'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'appearance');
+        for(const id of ['model-name','include-thoughts-toggle','enable-proofreading','summary-model-name','enable-text-formatting-toggle'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'general');
+        for(const id of ['dark-mode-toggle','theme-color-mode-select','background-image-input','chat-font-size-select'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'appearance');
         eq($('history-sort-order').closest('[data-settings-panel]').dataset.settingsPanel,'other');
         eq($('history-sort-order').closest('.settings-group').querySelector('h2').textContent,'履歴管理');
         const wide = $('enable-wide-mode-toggle').closest('.settings-field');
-        assert(wide.nextElementSibling.contains($('hide-system-prompt-toggle')));
+        assert(wide.nextElementSibling.contains($('floating-panel-behavior')));
+        assert(!$('hide-system-prompt-toggle'));
         const labels = {'chat-title-model':'タイトル生成用モデル:', 'chat-title-system-prompt':'タイトル生成用プロンプト:',
             'memory-extraction-model':'記憶抽出モデル:', 'memory-extraction-prompt':'記憶抽出プロンプト:', 'chat-font-size-select':'文字サイズ:', 'chat-line-height-select':'行間:',
             'chat-paragraph-margin-bottom-select':'段落間隔:', 'system-prompt-default':'システムプロンプト:'};

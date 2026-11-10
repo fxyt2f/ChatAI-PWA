@@ -339,6 +339,7 @@ def run(client, url):
         ev("uiUtilsV136.closeHistoryItemMenu()")
         tap('#history-search-input')
         wait("document.activeElement.id === 'history-search-input'", 'Tapping the search field focuses it')
+        unchanged(lambda: drag('#history-search-input', -104))
         client.call('Input.insertText', {'text': 'Swipe fixture'})
         wait("document.querySelector('#history-search-input').value === 'Swipe fixture'", 'History search accepts text')
         ev("document.querySelector('#history-search-input').blur()")
@@ -613,6 +614,7 @@ def run(client, url):
         ev("uiUtilsV136.showScreen('chat')")
         boot(reload=True)
         check_thinking_drag(ev, wait, screen, tap, touch)
+        check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport)
         check_history_reuse(ev, wait, screen, click, boot)
     finally:
         client.sock.settimeout(socket_timeout)
@@ -624,7 +626,217 @@ def run(client, url):
             'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False,
         })
     return ('ALL PASSED (swipe navigation, native scroll/touch, feedback and handoff, rollback and cancel, '
-            'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and history reuse)')
+            'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and history reuse)\n'
+            'ALL PASSED (chat action swipes and taps, wrapped action geometry, floating panel focus/hit-testing, and local formatting settings)')
+
+
+def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport):
+    main = '#chat-screen .main-content'
+    thought = '.thought-summary-details > summary'
+    message_action = '.message.model .tm-search-message-btn'
+    floating = '#system-prompt-open-btn'
+    scroll = '#scroll-to-bottom-btn'
+    formatting = '#enable-text-formatting-toggle'
+
+    def set_formatting(value):
+        click('#goto-settings-btn')
+        screen('settings')
+        click('[data-settings-category="general"]')
+        screen('settings', '#settings/general')
+        assert ev(f"document.querySelector('#settings-panel-general {formatting}').checked !== {value}")
+        click(formatting)
+        wait(f"(async () => (await dbUtils.getSetting('localUiSettings')).value.enableTextFormatting === {value})()",
+             'Formatting setting persisted')
+        click('#back-to-chat-from-settings')
+        screen('settings')
+        click('#back-to-chat-from-settings')
+        screen('chat')
+        boot(reload=True)
+        screen('chat')
+        assert ev(f"state.settings.enableTextFormatting === {value} && document.querySelector('{formatting}').checked === {value}")
+
+    def seed():
+        ev(r"""state.globalSettingsV136.showThoughtProcess = true;
+            state.currentMessages = [
+                {role:'user', content:'わお！  '},
+                {role:'model', content:'モデル本文。', thoughtSummary:'思考のテスト',
+                    usageMetadata:{candidatesTokenCount:4,totalTokenCount:9}},
+                {role:'model', content:'長文のテスト。\n\n'.repeat(120)}
+            ];
+            uiUtilsV136.renderChatMessages({suppressMessageAnimation:true});
+            document.querySelector('#chat-screen .main-content').scrollTop = 0;""")
+
+    ev("""(async () => {
+        await dbUtils.saveSetting('textFormattingSettings', {trimTrailing:true, indentProse:false, normalizeWidth:false, target:'user'});
+        const current = (await dbUtils.getSetting('localUiSettings')).value;
+        await dbUtils.saveSetting('localUiSettings', {...current, autoScroll:false, hideSystemPromptInChat:true});
+    })()""")
+    boot(reload=True)
+    screen('chat')
+    seed()
+    assert ev("""!state.settings.enableTextFormatting && state.textFormattingSettings.target === 'user' &&
+        !document.querySelector('#hide-system-prompt-toggle') &&
+        [...document.querySelectorAll('#text-formatting-btn, .tm-format-message-btn')].every(el => !el.getClientRects().length)""")
+    set_formatting('true')
+    seed()
+    assert ev("document.querySelector('.message.user .tm-format-message-btn').getClientRects().length === 1")
+
+    for width, wide, dark, sidebar in [(375, False, False, False), (160, False, True, False),
+                                      (768, False, True, False), (1280, True, False, True)]:
+        viewport(width)
+        ev(f"""(async () => {{
+            await appLogic.updateLocalUiSetting('enableWideMode', {str(wide).lower()});
+            appLogic.applyWideMode();
+            await appLogic.saveAppearanceValues('theme', {{darkMode:{str(dark).lower()}}}, {{global:true}});
+            if ({str(sidebar).lower()}) uiUtilsV136.openChatSidebar();
+        }})()""")
+        geometry = ev("""(() => {
+            const container = elements.messageContainer.getBoundingClientRect();
+            return [...elements.messageContainer.querySelectorAll('.message')].map(message => {
+                const actions = message.querySelector('.message-action-buttons');
+                const boxes = [...actions.querySelectorAll('button')].filter(b => b.getClientRects().length)
+                    .map(b => b.getBoundingClientRect());
+                const content = message.querySelector('.message-content').getBoundingClientRect();
+                const meta = message.querySelector('.message-action-meta')?.getBoundingClientRect();
+                const next = message.nextElementSibling?.getBoundingClientRect();
+                const buttonBounds = actions.getBoundingClientRect();
+                return {
+                    lines: new Set(boxes.map(b => b.top)).size,
+                    within: boxes.every(b => b.left >= container.left - 1 && b.right <= container.right + 1),
+                    noScroll: actions.scrollWidth <= actions.clientWidth && getComputedStyle(actions).overflowX === 'visible',
+                    noOverlap: (meta?.bottom ?? content.bottom) <= buttonBounds.top &&
+                        (!next || next.top >= buttonBounds.bottom),
+                    aligned: message.classList.contains('user')
+                        ? Math.abs(Math.max(...boxes.map(b => b.right)) - container.right) < 1
+                        : Math.abs(boxes[0].left - container.left) < 1,
+                    bodyWidth: content.width
+                };
+            });
+        })()""")
+        assert all(all(row[key] for key in ('within', 'noScroll', 'noOverlap', 'aligned')) for row in geometry), (width, geometry)
+        assert geometry[0]['bodyWidth'] < 100, (width, geometry)
+        assert geometry[0]['lines'] >= 3 if width == 160 else all(row['lines'] == 1 for row in geometry), (width, geometry)
+
+    assert ev("""(async () => {
+        const user = elements.messageContainer.querySelector('.message.user');
+        await appLogic.startEditMessage(0, user);
+        const editing = user.classList.contains('editing') &&
+            user.querySelector('.edit-textarea').getBoundingClientRect().width > 200 &&
+            !user.querySelector('.message-actions').getClientRects().length;
+        appLogic.cancelEditMessage(0, user);
+        return editing && user.querySelector('.message-actions').getClientRects().length === 1;
+    })()""")
+    assert ev("""(() => {
+        const index = state.currentMessages.length;
+        const actions = [...elements.messageContainer.querySelectorAll('.message-actions')].at(-1);
+        state.currentMessages.push({role:'model', content:''});
+        uiUtilsV136.appendMessage('model', '', index, true);
+        uiUtilsV136.updateStreamingMessage(index, {content:'生成中の本文', thoughtSummary:'生成中の思考'});
+        const message = document.getElementById('streaming-message-' + index);
+        const visible = message.getBoundingClientRect().top >= actions.getBoundingClientRect().bottom &&
+            message.querySelector('.message-content').textContent === '生成中の本文' &&
+            !message.querySelector('.message-actions').getClientRects().length;
+        message.remove();
+        state.currentMessages.pop();
+        return visible;
+    })()"""), 'Streaming message stays below the preceding actions'
+    viewport(375)
+    ev("dbUtils.saveChat('Chat action fixture')")
+    ev("uiUtilsV136.closeChatSidebar(); appLogic.updateLocalUiSetting('floatingPanelBehavior', 'always').then(() => appLogic.applyFloatingPanelBehavior())")
+    tap('#text-formatting-btn')
+    wait("document.getElementById('textFormattingDialog').open", 'Floating formatting opens')
+    ev("document.getElementById('textFormattingDialog').close()")
+    assert ev("!document.querySelector('.message.user .tm-format-message-btn').disabled")
+    click('.message.user .tm-format-message-btn')
+    wait("document.getElementById('alertDialog').open", 'Individual formatting finishes')
+    assert ev("state.currentMessages[0].content === 'わお！'"), ev(
+        "[state.currentMessages[0].content, document.querySelector('#alertDialog .dialog-message').textContent]")
+    ev("document.getElementById('alertDialog').close()")
+    wait("!elements.collapseAllMessagesBtn.disabled && elements.collapseAllMessagesBtn.textContent.includes('unfold_less')",
+         'Long message can be collapsed')
+    click('#collapse-all-messages-btn')
+    assert ev("""(() => {
+        const button = elements.collapseAllMessagesBtn;
+        const messages = uiUtilsV136.getCollapsibleMessageElements();
+        return messages.length > 0 && messages.every(message => message.classList.contains('tm-collapsed')) &&
+            !button.disabled && !button.classList.contains('active') &&
+            button.getAttribute('aria-label') === button.title && button.textContent.includes('unfold_more');
+    })()""")
+    click('#collapse-all-messages-btn')
+    assert ev("!elements.collapseAllMessagesBtn.classList.contains('active') && elements.collapseAllMessagesBtn.textContent.includes('unfold_less')")
+
+    for selector, dx, destination, tapped, undo_tap in (
+        (thought, -104, 'settings', "document.querySelector('.thought-summary-details').open",
+         "document.querySelector('.thought-summary-details').open = false"),
+        (message_action, -104, 'settings', "uiUtilsV136.isChatSearchOpen()", "uiUtilsV136.closeChatSearch()"),
+        (floating, 104, 'history', "document.querySelector('#system-prompt-dialog').open", "appLogic.closeSystemPromptDialog()"),
+        (scroll, -104, 'settings', "elements.scrollToBottomBtn.hidden", None),
+    ):
+        boot(reload=True)
+        screen('chat')
+        seed()
+        wait(f"""(() => {{
+            const node = document.querySelector('{selector}'), rect = node.getBoundingClientRect();
+            return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }})()""", f'{selector} is hittable')
+        tap(selector)
+        wait(tapped, f'Tap invokes {selector}')
+        if undo_tap is None:
+            # The scroll button hides before the final frame of its smooth scroll.
+            boot(reload=True)
+            screen('chat')
+            seed()
+        else:
+            ev(undo_tap)
+        wait(f"!({tapped})", f'{selector} is ready for swipe')
+        ev(f"window.actionTapCount = 0; document.querySelector('{selector}').addEventListener('click', () => actionTapCount++)")
+        drag(selector, dx)
+        screen(destination)
+        assert ev(f"actionTapCount === 0 && !({tapped})" if selector != scroll else "actionTapCount === 0"), selector
+        click(f'#back-to-chat-from-{destination}')
+        screen('chat')
+
+    boot(reload=True)
+    screen('chat')
+    seed()
+    ev(f"""window.floatingPoint = (() => {{
+        const rect = document.querySelector('{floating}').getBoundingClientRect();
+        return [rect.x + rect.width / 2, rect.y + rect.height / 2];
+    }})();
+        document.querySelector('{floating}').focus()""")
+    assert ev(f"document.activeElement.matches('{floating}')")
+    ev("""appLogic.updateLocalUiSetting('floatingPanelBehavior', 'on-click').then(() => {
+        appLogic.applyFloatingPanelBehavior();
+        appLogic.showActionPanel();
+        document.getElementById('system-prompt-open-btn').focus();
+    })""")
+    wait("elements.floatingActionPanel.inert && !elements.floatingActionPanel.classList.contains('visible')",
+         'Auto-hide makes the panel inert')
+    ev(f"document.querySelector('{floating}').focus()")
+    assert ev("!elements.floatingActionPanel.contains(document.activeElement)"), 'Hidden panel still owns focus'
+    assert ev(f"Boolean(document.elementFromPoint(...floatingPoint).closest('{main}'))"), ev(
+        "[floatingPoint, document.elementFromPoint(...floatingPoint)?.outerHTML.slice(0, 150)]")
+    client.call('Input.dispatchKeyEvent', {'type': 'keyDown', 'key': 'Tab', 'code': 'Tab', 'windowsVirtualKeyCode': 9})
+    client.call('Input.dispatchKeyEvent', {'type': 'keyUp', 'key': 'Tab', 'code': 'Tab', 'windowsVirtualKeyCode': 9})
+    assert ev("!elements.floatingActionPanel.contains(document.activeElement)")
+    ev("appLogic.updateLocalUiSetting('floatingPanelBehavior', 'hidden').then(() => appLogic.applyFloatingPanelBehavior())")
+    app_point = ev('floatingPoint')
+    for event in ('mousePressed', 'mouseReleased'):
+        client.call('Input.dispatchMouseEvent', {'type':event, 'x':app_point[0], 'y':app_point[1], 'button':'left', 'clickCount':1})
+    assert ev("elements.floatingActionPanel.inert && !elements.systemPromptDialog.open")
+    ev("window.getSelection().selectAllChildren(document.querySelector('.message.user .message-content'))")
+    assert ev("!window.getSelection().isCollapsed")
+    unchanged(lambda: ev(f"""swipeFixtureEvent('{thought}', 'touchstart', [[0, 205, 300]]);
+        swipeFixtureEvent('{thought}', 'touchmove', [[0, 100, 300]]);
+        swipeFixtureEvent('{thought}', 'touchend', [], [[0, 100, 300]]);"""))
+    assert ev("!window.getSelection().isCollapsed")
+    ev("window.getSelection().removeAllRanges()")
+    ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', false)")
+    unchanged(lambda: drag(thought, -104))
+    ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', true)")
+    set_formatting('false')
+    assert ev("""state.textFormattingSettings.trimTrailing && !state.textFormattingSettings.indentProse &&
+        state.textFormattingSettings.target === 'user'""")
 
 
 def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear):
@@ -913,12 +1125,20 @@ def check_history_reuse(ev, wait, screen, click, boot):
     click('#history-state-action')
     wait(f'{count} >= 520', 'Initial read retry draws the complete large history')
     assert ev('historyProbe.scans === 2')
-    ev("appLogic.updateHistoryPinFilter('pinned')")
-    ev("appLogic.updateHistorySortOrder('title')")
+    click('[data-history-pin-filter="pinned"]')
+    ev("""(() => {
+        const sort = document.getElementById('history-sort-order-toolbar');
+        sort.value = 'title';
+        sort.dispatchEvent(new Event('change', {bubbles:true}));
+    })()""")
     search('Cache fixture')
     wait(f"{count} === 260 && document.querySelector('#history-status').textContent === '検索結果 260件'",
          'History search, title sort and pinned filter render')
     assert ev(f"document.querySelector('{rows} .history-item-title').title === 'Cache fixture 0'")
+    click('#history-delete-mode-btn')
+    assert ev("!document.getElementById('history-delete-toolbar').classList.contains('hidden')")
+    click('#history-delete-cancel-btn')
+    assert ev("document.getElementById('history-delete-toolbar').classList.contains('hidden')")
     ev(f"""(() => {{
         const probe = historyProbe;
         probe.first = document.querySelector('{rows}');

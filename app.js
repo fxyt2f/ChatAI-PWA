@@ -32,8 +32,8 @@ const DEFAULT_LOCAL_UI_SETTINGS = {
     chatFontSize: DEFAULT_CHAT_FONT_SIZE,
     chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
     chatParagraphMarginBottom: DEFAULT_CHAT_PARAGRAPH_MARGIN_BOTTOM,
-    hideSystemPromptInChat: false,
     enterToSend: true,
+    enableTextFormatting: false,
     enableWideMode: true,
     autoScroll: true,
     enableSwipeNavigation: false,
@@ -50,7 +50,6 @@ const LOCAL_OTHER_SETTING_KEYS = [
     'chatFontSize',
     'chatLineHeight',
     'chatParagraphMarginBottom',
-    'hideSystemPromptInChat',
     'floatingPanelBehavior',
     'enterToSend',
     'enableWideMode',
@@ -197,8 +196,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.6";
-const APP_CACHE_VERSION = "v1.36.6";
+const APP_VERSION = "1.36.7";
+const APP_CACHE_VERSION = "v1.36.7";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -488,6 +487,10 @@ const VERSION_HISTORY = {
 };
 const SWIPE_THRESHOLD = 50; // スワイプ判定の閾値 (px)
 const SWIPE_TAP_TARGETS = 'input, button, label, a[href], summary, [role="button"], [role="link"], [role="switch"]';
+const SWIPE_CHAT_ACTION_TARGETS = `
+    .message-action-buttons > button, #floating-action-panel > button, #scroll-to-bottom-btn,
+    .thought-summary-details > summary
+`;
 const SWIPE_FOCUS_CONTROLS = `
     input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"]),
     textarea, select, [contenteditable]:not([contenteditable="false"]),
@@ -787,7 +790,7 @@ try {
         chatFontSizeSelect: document.getElementById('chat-font-size-select'),
         chatLineHeightSelect: document.getElementById('chat-line-height-select'),
         chatParagraphMarginBottomSelect: document.getElementById('chat-paragraph-margin-bottom-select'),
-        hideSystemPromptToggle: document.getElementById('hide-system-prompt-toggle'),
+        enableTextFormattingToggle: document.getElementById('enable-text-formatting-toggle'),
         geminiEnableGroundingToggle: document.getElementById('gemini-enable-grounding-toggle'),
         geminiEnableFunctionCallingToggle: document.getElementById('gemini-enable-function-calling-toggle'),
         forceFunctionCallingToggle: document.getElementById('force-function-calling-toggle'),
@@ -1106,7 +1109,6 @@ const state = {
         fontFamily: '',
         chatFontSize: DEFAULT_CHAT_FONT_SIZE,
         chatLineHeight: DEFAULT_CHAT_LINE_HEIGHT,
-        hideSystemPromptInChat: false,
         enableSwipeNavigation: false,
         enableAutoRetry: true,
         maxRetries: 30, 
@@ -6999,7 +7001,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (elements.chatParagraphMarginBottomSelect) {
             elements.chatParagraphMarginBottomSelect.value = String(uiUtils.getValidChatParagraphMarginBottom(state.settings.chatParagraphMarginBottom));
         }
-        elements.hideSystemPromptToggle.checked = !state.settings.hideSystemPromptInChat;
+        elements.enableTextFormattingToggle.checked = state.settings.enableTextFormatting;
         elements.geminiEnableGroundingToggle.checked = state.settings.geminiEnableGrounding;
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
         elements.swipeNavigationToggle.checked = state.settings.enableSwipeNavigation;
@@ -7084,7 +7086,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.applyDarkMode();
         this.applyFontFamily();
         this.applyChatTypography();
-        this.toggleSystemPromptVisibility();
+        this.updateSystemPromptButtonState();
         this.applyOverlayOpacity();
         this.applyThemeColorSettings();
         this.updateModelWarningMessage();
@@ -7226,11 +7228,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.updateSystemPromptButtonState();
         this.updateSystemPromptCharCount();
         this.updateSystemPromptSaveStatus(state.systemPromptSaveStatus || 'saved');
-    },
-    // 互換用: チャット上部の常設エリアは廃止し、ボタン状態だけ更新する
-    toggleSystemPromptVisibility() {
-        this.updateSystemPromptButtonState();
-        console.log('システムプロンプト表示はフローティングボタンへ移行済み');
     },
     updateSystemPromptButtonState() {
         const hasPrompt = Boolean(String(state.currentSystemPrompt || '').trim());
@@ -7928,7 +7925,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const title = shouldExpand ? '長文メッセージを一括展開' : '長文メッセージを一括折りたたみ';
 
         button.disabled = !canToggle;
-        button.classList.toggle('active', canToggle && shouldExpand);
         button.title = title;
         button.setAttribute('aria-label', title);
         if (icon) icon.textContent = shouldExpand ? 'unfold_more' : 'unfold_less';
@@ -12848,10 +12844,7 @@ const appLogic = {
         localUiSettings.chatFontSize = uiUtils.getValidChatFontSize(settings.chatFontSize);
         localUiSettings.chatLineHeight = uiUtils.getValidChatLineHeight(settings.chatLineHeight);
         localUiSettings.chatParagraphMarginBottom = uiUtils.getValidChatParagraphMarginBottom(settings.chatParagraphMarginBottom);
-        localUiSettings.hideSystemPromptInChat = typeof settings.hideSystemPromptInChat === 'boolean'
-            ? settings.hideSystemPromptInChat
-            : DEFAULT_LOCAL_UI_SETTINGS.hideSystemPromptInChat;
-        ['enterToSend', 'enableWideMode', 'autoScroll', 'enableSwipeNavigation', 'headerAutoHide', 'debugMode', 'isPersistentChatSidebarOpen'].forEach(key => {
+        ['enterToSend', 'enableTextFormatting', 'enableWideMode', 'autoScroll', 'enableSwipeNavigation', 'headerAutoHide', 'debugMode', 'isPersistentChatSidebarOpen'].forEach(key => {
             localUiSettings[key] = typeof settings[key] === 'boolean'
                 ? settings[key]
                 : DEFAULT_LOCAL_UI_SETTINGS[key];
@@ -12881,6 +12874,7 @@ const appLogic = {
             state.settings[key] = state.localUiSettings[key];
         });
         document.documentElement.classList.toggle('swipe-navigation-enabled', state.settings.enableSwipeNavigation);
+        document.documentElement.classList.toggle('text-formatting-enabled', state.settings.enableTextFormatting);
         if (!state.settings.enableSwipeNavigation) this.resetSwipeState();
     },
 
@@ -16124,8 +16118,8 @@ const appLogic = {
         setupLocalUiSettingSave(elements.chatFontSizeSelect, 'chatFontSize', 'change', () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatParagraphMarginBottomSelect, 'chatParagraphMarginBottom', 'change', () => uiUtils.getValidChatParagraphMarginBottom(elements.chatParagraphMarginBottomSelect?.value), () => uiUtils.applyChatTypography());
-        setupLocalUiSettingSave(elements.hideSystemPromptToggle, 'hideSystemPromptInChat', 'change', () => !elements.hideSystemPromptToggle?.checked, () => uiUtils.toggleSystemPromptVisibility());
         setupLocalUiSettingSave(elements.enterToSendCheckbox, 'enterToSend');
+        setupLocalUiSettingSave(elements.enableTextFormattingToggle, 'enableTextFormatting');
         setupLocalUiSettingSave(elements.enableWideModeToggle, 'enableWideMode', 'change', null, () => this.applyWideMode());
         setupLocalUiSettingSave(elements.autoScrollToggle, 'autoScroll');
         setupLocalUiSettingSave(elements.swipeNavigationToggle, 'enableSwipeNavigation');
@@ -16404,8 +16398,7 @@ const appLogic = {
             // パネルが表示されている場合は、タイマーを止めて非表示にする
             if (panel.classList.contains('visible')) {
                 clearTimeout(state.panelFadeOutTimer);
-                panel.classList.remove('visible');
-                uiUtils.scheduleMessageCollapseStickyTopUpdate();
+                this.setFloatingPanelVisible(false);
             } else {
                 // パネルが非表示の場合は、表示する (既存のロジックを呼び出す)
                 this.showActionPanel();
@@ -16413,7 +16406,9 @@ const appLogic = {
         });
 
         elements.floatingActionPanel.addEventListener('mouseenter', () => clearTimeout(state.panelFadeOutTimer));
-        elements.floatingActionPanel.addEventListener('mouseleave', () => this.showActionPanel());
+        elements.floatingActionPanel.addEventListener('mouseleave', () => {
+            if (elements.floatingActionPanel.classList.contains('visible')) this.showActionPanel();
+        });
         
         elements.collapseAllMessagesBtn.addEventListener('click', () => uiUtils.toggleAllMessageCollapse());
         elements.textFormattingBtn?.addEventListener('click', () => this.openTextFormattingDialog());
@@ -16690,7 +16685,8 @@ const appLogic = {
             .execution-popover, #chat-search-dialog, #chat-history-sidebar, #chat-sidebar-backdrop
         `)) return false;
         if (control instanceof HTMLSelectElement && (control.multiple || control.size > 1)) return false;
-        if (screen === elements.chatScreen && !control && !target.closest('.app-header') && target.closest(SWIPE_TAP_TARGETS)) return false;
+        if (screen === elements.chatScreen && !control && target.closest(SWIPE_TAP_TARGETS) &&
+            !target.closest('.app-header, ' + SWIPE_CHAT_ACTION_TARGETS)) return false;
 
         for (let node = target; node && node !== screen; node = node.parentElement) {
             if (node.scrollWidth <= node.clientWidth + 1) continue;
@@ -21936,20 +21932,15 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
     },
 
     applyFloatingPanelBehavior() {
-        const behavior = state.settings.floatingPanelBehavior;
-        const panel = elements.floatingActionPanel;
-
-        // 既存のタイマーがあればクリア
         clearTimeout(state.panelFadeOutTimer);
+        this.setFloatingPanelVisible(state.settings.floatingPanelBehavior === 'always');
+    },
 
-        if (behavior === 'always') {
-            panel.classList.add('visible');
-        } else if (behavior === 'hidden') {
-            panel.classList.remove('visible');
-        } else { // 'on-click'
-            // on-clickの場合は、最初は非表示にしておく
-            panel.classList.remove('visible');
-        }
+    setFloatingPanelVisible(visible) {
+        const panel = elements.floatingActionPanel;
+        panel.inert = !visible;
+        if (!visible && panel.contains(document.activeElement)) document.activeElement.blur();
+        panel.classList.toggle('visible', visible);
         uiUtils.scheduleMessageCollapseStickyTopUpdate();
     },
 
@@ -23179,22 +23170,10 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
     },
 
     showActionPanel() {
-        const behavior = state.settings.floatingPanelBehavior;
-        const panel = elements.floatingActionPanel;
-
-        // 'always' または 'hidden' の場合は何もしない
-        if (behavior === 'always' || behavior === 'hidden') {
-            return;
-        }
-
-        // 'on-click' の場合の挙動
+        if (state.settings.floatingPanelBehavior !== 'on-click') return;
         clearTimeout(state.panelFadeOutTimer);
-        panel.classList.add('visible');
-        uiUtils.scheduleMessageCollapseStickyTopUpdate();
-        state.panelFadeOutTimer = setTimeout(() => {
-            panel.classList.remove('visible');
-            uiUtils.scheduleMessageCollapseStickyTopUpdate();
-        }, 5000); // 5秒後にフェードアウト
+        this.setFloatingPanelVisible(true);
+        state.panelFadeOutTimer = setTimeout(() => this.setFloatingPanelVisible(false), 5000);
     },
 
     scheduleScrollToBottomButtonUpdate() {
