@@ -50,6 +50,16 @@ def run(client, url):
             'type': event, 'touchPoints': points, 'timestamp': time.time(),
         })
 
+    def tap(selector):
+        nonlocal touch_id
+        touch_id += 1
+        point = ev(f"""(() => {{
+            const r = document.querySelector({json.dumps(selector)}).getBoundingClientRect();
+            return {{x: r.left + r.width / 2, y: r.top + r.height / 2, id: {touch_id}}};
+        }})()""")
+        touch('touchStart', [point])
+        touch('touchEnd', [])
+
     def drag(selector, dx, dy=0, *, padding=False, cancel=False, measure=False):
         nonlocal touch_id
         touch_id += 1
@@ -57,7 +67,7 @@ def run(client, url):
             const r = document.querySelector({json.dumps(selector)}).getBoundingClientRect();
             const left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth);
             const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
-            return {{x: {('left + 6' if dx >= 0 else 'right - 8') if padding else f'(left + right - ({dx})) / 2'},
+            return {{x: {('left + 6' if dx >= 0 else 'right - 8') if padding else f'Math.max(left + 1, Math.min(right - 1, (left + right - ({dx})) / 2))'},
                 y: {('bottom - 50' if selector == settings_top else f'(top + bottom - ({dy})) / 2')} }};
         }})()""")
         point = lambda step: {'x': origin['x'] + dx * step / 8, 'y': origin['y'] + dy * step / 8, 'id': touch_id}
@@ -195,7 +205,7 @@ def run(client, url):
         click('#goto-settings-btn')
         screen('settings')
         unchanged(lambda: drag(settings_top, 104))
-        click('[data-settings-category="other"]')
+        tap('[data-settings-category="other"]')
         screen('settings', '#settings/other')
         unchanged(lambda: drag(settings_detail, 104, padding=True))
         assert ev("document.getElementById('swipe-navigation-toggle').closest('label').textContent.trim() === '左右スワイプで画面を移動する'")
@@ -213,9 +223,12 @@ def run(client, url):
         wait("document.getElementById('settings-detail').scrollTop > 0", 'Settings vertical scroll works')
         screen('settings', '#settings/other')
         depth = ev('history.length')
-        drag(settings_detail, 104, padding=True)
+        swipe_label = 'label:has(#swipe-navigation-toggle)'
+        ev(f"document.querySelector({json.dumps(swipe_label)}).scrollIntoView({{block:'center'}})")
+        drag(swipe_label, 104)
         screen('settings')
         assert ev('settingsUiV136.category') is None and ev('history.length') == depth
+        assert ev('state.settings.enableSwipeNavigation'), 'Swiping the label did not toggle its checkbox'
         ev('history.forward()')
         screen('settings', '#settings/other')
         ev('history.back()')
@@ -226,8 +239,32 @@ def run(client, url):
         screen('settings')
         click('[data-settings-category="appearance"]')
         screen('settings', '#settings/appearance')
-        for selector in ('#dark-mode-toggle', '#overlay-opacity-slider'):
-            unchanged(lambda: synthetic(selector, [(160, 300)], (205, 300)))
+        ev("document.getElementById('dark-mode-toggle').focus()")
+        unchanged(lambda: synthetic('#dark-mode-toggle', [(160, 300)], (205, 300)))
+        ev("document.getElementById('dark-mode-toggle').blur()")
+        unchanged(lambda: synthetic('#overlay-opacity-slider', [(160, 300)], (205, 300)))
+        slider = '#overlay-opacity-slider'
+        ev(f"document.querySelector('{slider}').scrollIntoView({{block:'center'}})")
+        old_value, thumb_x, slider_y, slider_dx = ev(f"""(() => {{
+            const input = document.querySelector('{slider}'), rect = input.getBoundingClientRect();
+            const fraction = (input.valueAsNumber - Number(input.min)) / (Number(input.max) - Number(input.min));
+            return [input.value, rect.left + 8 + (rect.width - 16) * fraction,
+                rect.top + rect.height / 2, fraction < 0.5 ? 70 : -70];
+        }})()""")
+        touch_id += 1
+        point = {'x': thumb_x, 'y': slider_y, 'id': touch_id}
+        touch('touchStart', [point])
+        for step in range(1, 7):
+            touch('touchMove', [{**point, 'x': thumb_x + slider_dx * step / 6}])
+        touch('touchEnd', [])
+        wait(f"document.querySelector('{slider}').value !== {json.dumps(old_value)}",
+             'The range keeps native thumb drag behavior')
+        screen('settings', '#settings/appearance')
+        ev("document.getElementById('dark-mode-toggle').scrollIntoView({block:'center'})")
+        drag('#dark-mode-toggle', 104)
+        screen('settings')
+        click('[data-settings-category="appearance"]')
+        screen('settings', '#settings/appearance')
         # Two end-to-end gestures in the same task must not queue two history.back() calls.
         assert ev(f"""(() => {{
             const target = {json.dumps(settings_detail)};
@@ -240,7 +277,7 @@ def run(client, url):
         screen('settings')
         unchanged(lambda: drag(settings_top, -104))
         assert ev('settingsUiV136.category') is None
-        drag(settings_top, 104)
+        drag('[data-settings-category="general"]', 104)
         screen('chat')
         ev('history.back()')
         screen('settings')
@@ -248,6 +285,35 @@ def run(client, url):
         screen('chat')
         # Chrome's CDP touch emulation can retain a released contact when the app
         # hides its target during touchend. Isolate subsequent native streams.
+        boot(reload=True)
+        screen('chat')
+
+        ev("""window.headerTaps = 0;
+            document.getElementById('goto-settings-btn').addEventListener('click', () => headerTaps++);""")
+        tap('#goto-settings-btn')
+        screen('settings')
+        assert ev('headerTaps === 1'), 'A normal header tap still opens settings'
+        click('#back-to-chat-from-settings')
+        screen('chat')
+        ev("document.getElementById('goto-settings-btn').focus({preventScroll:true})")
+        drag('#goto-settings-btn', -104)
+        screen('settings')
+        assert ev('headerTaps === 1'), 'A focused header button allows a swipe without another click'
+        click('#back-to-chat-from-settings')
+        screen('chat')
+        boot(reload=True)
+        screen('chat')
+        tap('#user-input')
+        wait("document.activeElement.id === 'user-input'", 'A tap focuses the composer')
+        unchanged(lambda: drag('#user-input', -104))
+        assert ev("document.activeElement.id === 'user-input'")
+        boot(reload=True)
+        screen('chat')
+        assert ev("document.activeElement.id !== 'user-input'")
+        drag('#user-input', -104)
+        screen('settings')
+        click('#back-to-chat-from-settings')
+        screen('chat')
         boot(reload=True)
         screen('chat')
 
@@ -268,6 +334,16 @@ def run(client, url):
         click('#goto-history-btn')
         screen('history')
         wait("document.querySelectorAll('#history-list .history-item').length >= 20", 'Real history rows are rendered')
+        tap('#history-list .history-item-menu-button')
+        wait("!document.querySelector('#history-item-menu').classList.contains('hidden')", 'Tapping a card menu still works')
+        ev("uiUtilsV136.closeHistoryItemMenu()")
+        tap('#history-search-input')
+        wait("document.activeElement.id === 'history-search-input'", 'Tapping the search field focuses it')
+        client.call('Input.insertText', {'text': 'Swipe fixture'})
+        wait("document.querySelector('#history-search-input').value === 'Swipe fixture'", 'History search accepts text')
+        ev("document.querySelector('#history-search-input').blur()")
+        wait("!historyUiState.searchTimer && !document.querySelector('#history-list').classList.contains('hidden')",
+             'Search is applied before testing native scrolling')
         ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', false)")
         unchanged(lambda: drag(history_list, -104, padding=True))
         ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', true)")
@@ -276,8 +352,18 @@ def run(client, url):
         drag(history_list, 0, -180, padding=True)
         wait("document.querySelector('.history-main-content').scrollTop > 0", 'History vertical scroll works')
         saved_scroll = ev("document.querySelector('.history-main-content').scrollTop")
-        drag(history_list, -104, padding=True)
+        ev("""(() => {
+            const card = [...document.querySelectorAll('#history-list .history-item-open')].find(button => {
+                const rect = button.getBoundingClientRect();
+                return rect.top > 150 && rect.bottom < innerHeight - 24;
+            });
+            card.dataset.swipeTestTarget = '';
+            window.historySwipeClicks = 0;
+            card.addEventListener('click', () => historySwipeClicks++);
+        })()""")
+        drag('[data-swipe-test-target]', -104)
         screen('chat')
+        assert ev('historySwipeClicks === 0'), 'The horizontal swipe did not click the card'
         feedback_clear()
         ev('history.back()')
         screen('history')
@@ -314,7 +400,7 @@ def run(client, url):
             ([(190, 300)], (130, 300)),             # Returned below the threshold before release.
         ]:
             unchanged(lambda: synthetic(chat, moves, end))
-        for selector in ('#user-input', '#chat-search-dialog', '#chat-replace-preview-list', '.message.model pre'):
+        for selector in ('#chat-search-dialog', '#chat-replace-preview-list', '.message.model pre'):
             if selector == '#chat-search-dialog':
                 click('#chat-search-open-btn')
             unchanged(lambda: synthetic(selector, [(160, 300)], (205, 300)))
@@ -409,14 +495,12 @@ def run(client, url):
         screen('chat')
         depth = ev('history.length')
         assert ev(f"""(() => {{
-            const chat = {json.dumps(chat)}, settings = {json.dumps(settings_top)};
+            const chat = {json.dumps(chat)};
             swipeFixtureEvent(chat, 'touchstart', [[0, 200, 300]]);
             swipeFixtureEvent(chat, 'touchend', [], [[0, 100, 300]]);
             swipeFixtureEvent(chat, 'touchend', [], [[0, 100, 300]]);
-            swipeFixtureEvent(settings, 'touchstart', [[0, 100, 300]]);
-            swipeFixtureEvent(settings, 'touchend', [], [[0, 200, 300]]);
             return location.hash === '#settings' && history.length === {depth + 1};
-        }})()"""), 'A duplicate end and a second gesture during transition cause no second navigation'
+        }})()"""), 'A duplicate touchend cannot navigate a second time'
         screen('settings')
         synthetic(settings_top, [(160, 300)], (205, 300))
         screen('chat')
@@ -523,6 +607,13 @@ def run(client, url):
                     })()""")
                     click('#chat-sidebar-close-btn')
                     wait("!document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu closes the sidebar')
+        viewport(375)
+        ev("appLogic.updateLocalUiSetting('enableWideMode', false).then(() => appLogic.applyWideMode())")
+        check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear)
+        ev("uiUtilsV136.showScreen('chat')")
+        boot(reload=True)
+        check_thinking_drag(ev, wait, screen, tap, touch)
+        check_history_reuse(ev, wait, screen, click, boot)
     finally:
         client.sock.settimeout(socket_timeout)
         client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier': injection})
@@ -533,4 +624,414 @@ def run(client, url):
             'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False,
         })
     return ('ALL PASSED (swipe navigation, native scroll/touch, feedback and handoff, rollback and cancel, '
-            'reduced motion, settings/history/back-forward, 320–1280px and menu controls in both themes)')
+            'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and history reuse)')
+
+
+def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear):
+    def route(name, pushes):
+        expression = """[window.state?.currentScreen, location.hash, history.state?.screen, window.swipeChain?.pushes,
+            [...document.querySelectorAll('.screen')].filter(el => el.classList.contains('active')).map(el => el.id),
+            [...document.querySelectorAll('.screen')].filter(el => !el.inert).map(el => el.id)]"""
+        actual = ev(expression)
+        assert actual == [name, '#' + name, name, pushes, [name + '-screen'], [name + '-screen']], (
+            actual, ev("[location.href, window.swipeFixtureTrace?.slice(-5)]"))
+
+    def positions():
+        return ev('swipeChain.lefts()')
+
+    def close_positions(before, after):
+        assert max(abs(a - b) for a, b in zip(before, after)) < 2, (before, after)
+
+    def contact(x, pointer_id):
+        return {'x': x, 'y': 390, 'id': pointer_id}
+
+    def move(x, pointer_id):
+        touch('touchMove', [contact(x, pointer_id)])
+        wait(f"""swipeFixtureTrace.some(event => event.type === 'touchmove' &&
+            event.id === {pointer_id} && Math.abs(event.x - {x}) < 1)""", 'Chrome delivered the native move')
+        ev('new Promise(requestAnimationFrame)')
+
+    def begin(origin):
+        ev("uiUtilsV136.showScreen('chat')")
+        boot(reload=True)
+        screen('chat')
+        click('#goto-history-btn' if origin == 'history' else '#goto-settings-btn')
+        screen(origin)
+        ev("""(() => {
+            const ids = ['history', 'chat', 'settings'];
+            window.swipeChain = {
+                pushes: 0,
+                lefts: () => ids.map(id => document.getElementById(id + '-screen').getBoundingClientRect().left),
+                pauseAt: time => appLogic.swipeSnap.animations.forEach(animation => {
+                    animation.pause();
+                    animation.currentTime = time;
+                })
+            };
+            // Chromium can drop older entries once the regression suite fills the stack.
+            const push = history.pushState.bind(history);
+            history.pushState = (...args) => { push(...args); swipeChain.pushes++; };
+        })()""")
+        direction = -1 if origin == 'history' else 1
+        start = 321 if direction < 0 else 54
+        touch('touchStart', [contact(start, 700)])
+        for distance in (30, 100, 175, 230):
+            move(start + direction * distance, 700)
+        touch('touchEnd', [])
+        # A long contact still commits exactly one screen, even with the next one visible.
+        route('chat', 1)
+        assert ev("Boolean(appLogic.swipeSnap?.committing) && appLogic.swipeSnap.animations[0].playState === 'running'")
+        return direction
+
+    for origin, reverse, cancel, settle_on_touch in (
+        ('history', False, False, False),
+        ('settings', False, False, False),
+        ('history', True, False, False),
+        ('settings', False, True, False),
+        ('history', False, False, True),
+    ):
+        first_direction = begin(origin)
+        direction = -first_direction if reverse else first_direction
+        # The first case uses normal elapsed time. Pausing the others at an actual
+        # interpolated frame makes pixel comparisons independent of CDP timing.
+        measured = origin == 'settings' or reverse
+        if measured:
+            ev('swipeChain.pauseAt(65)')
+        if settle_on_touch:
+            ev('swipeChain.pauseAt(100)')
+        chat_left = positions()[1]
+        if direction < 0:
+            start = min(345, chat_left + 345)
+        else:
+            start = max(30, chat_left + 24)
+        ev('swipeChain.firstSnap = appLogic.swipeSnap')
+        touch('touchStart', [contact(start, 701)])
+        assert ev("""appLogic.swipeGesture?.identifier === 701 &&
+            appLogic.swipeGesture.screen.id === 'chat-screen' && appLogic.swipeSnap === swipeChain.firstSnap""")
+        if settle_on_touch:
+            ev('swipeChain.firstSnap.animations.forEach(animation => animation.finish())')
+            feedback_clear()
+            assert ev('appLogic.swipeGesture?.identifier === 701'), 'Snap cleanup preserves the new contact'
+        handoff = positions()
+        move(start + direction * 27, 701)
+        wait('!appLogic.swipeSnap && Boolean(appLogic.swipeGesture)', 'The second native contact takes over the snap')
+        after_handoff = positions()
+        if measured:
+            close_positions(handoff, after_handoff)
+        move(start + direction * 92, 701)
+        released = positions()
+        if measured:
+            close_positions([left + direction * 65 for left in after_handoff], released)
+        assert (released[1] - after_handoff[1]) * direction > 0, (after_handoff, released)
+        touch('touchCancel' if cancel else 'touchEnd', [])
+
+        destination = 'chat' if cancel else 'settings' if direction < 0 else 'history'
+        route(destination, 1 if cancel else 2)
+        if measured:
+            ev('swipeChain.pauseAt(0)')
+            close_positions(released, positions())
+            index = {'history': 0, 'chat': 1, 'settings': 2}[destination]
+            ev('swipeChain.pauseAt(70)')
+            during_snap = positions()
+            assert abs(during_snap[index]) < abs(released[index]), (released, during_snap)
+            ev('appLogic.swipeSnap.animations.forEach(animation => animation.finish())')
+        if origin == 'history' and not reverse and not settle_on_touch:
+            # Back can supersede the second snap without introducing another history entry.
+            ev('history.back()')
+            screen('chat')
+            route('chat', 2)
+            ev('history.back()')
+            screen('history')
+            route('history', 2)
+            ev('history.forward()')
+            screen('chat')
+            ev('history.forward()')
+            screen('settings')
+            route('settings', 2)
+        feedback_clear()
+        screen(destination)
+        assert abs(positions()[{'history': 0, 'chat': 1, 'settings': 2}[destination]]) < 1
+
+
+def check_thinking_drag(ev, wait, screen, tap, touch):
+    screen('chat')
+    ev("""(async () => {
+        const modelNames = ['gemini-3.8-flash', 'gemini-3-pro-preview'];
+        await appLogic.updateLocalUiSetting('enableSwipeNavigation', false);
+        await appLogic.saveApiConfigs([{
+            id: 'thinking-drag', provider: 'gemini', apiKey: 'fixture', modelCandidates: modelNames
+        }]);
+        appLogic.startNewChat();
+        await state.executionSettingsReady;
+        await appLogic.setCurrentChatModelRef({apiConfigId:'thinking-drag', modelName:modelNames[0]});
+        await appLogic.setCurrentChatThinkingEffort('medium');
+        state.currentMessages = [{role:'user', content:'Thinking drag fixture'}];
+        const chatId = await dbUtils.saveChat('Thinking drag fixture');
+        const setEffort = appLogic.setCurrentChatThinkingEffort;
+        window.thinkingDragProbe = {chatId, setEffort, saves: []};
+        appLogic.setCurrentChatThinkingEffort = function(level) {
+            thinkingDragProbe.saves.push(level);
+            return setEffort.call(this, level);
+        };
+    })()""")
+
+    def point(level, identifier):
+        return ev(f"""(() => {{
+            const r = document.querySelector('.thinking-dot[data-level="{level}"] .thinking-mark').getBoundingClientRect();
+            return {{x:r.left+r.width/2, y:r.top+r.height/2, id:{identifier}}};
+        }})()""")
+
+    def preview(level, identifier):
+        end = point(level, identifier)
+        touch('touchMove', [end])
+        wait(f"""document.querySelector('.thinking-level-name')?.textContent === '{level.title()}' &&
+            document.querySelector('.thinking-dot[aria-checked="true"]')?.dataset.level === '{level}'""",
+             'Thinking label and radio follow the finger')
+
+    def saved(level, writes):
+        wait(f"""(async () => {{
+            await settingsUiV136.saveQueue;
+            return thinkingDragProbe.saves.join(',') === {json.dumps(writes)}
+                && (await dbUtils.getChat(thinkingDragProbe.chatId)).executionSettings.thinkingEffort === '{level}';
+        }})()""", 'The drag persists exactly its final level')
+
+    try:
+        tap('#chat-model-button')
+        wait("Boolean(document.querySelector('.thinking-dots')) && !state.settings.enableSwipeNavigation",
+             'Thinking opens independently of the screen swipe setting')
+        touch('touchStart', [point('low', 900)])
+        preview('high', 900)
+        saved('medium', '')
+        assert ev("appLogic.getCurrentChatThinkingEffort() === 'medium'"), 'A preview does not change the chat setting'
+        touch('touchEnd', [])
+        saved('high', 'high')
+
+        touch('touchStart', [point('high', 901)])
+        preview('low', 901)
+        touch('touchCancel', [])
+        wait("document.querySelector('.thinking-level-name')?.textContent === 'High'", 'Cancel restores the previous level')
+        saved('high', 'high')
+
+        touch('touchStart', [point('high', 902)])
+        preview('low', 902)
+        touch('touchEnd', [])
+        saved('low', 'high,low')
+
+        start = point('high', 903)
+        touch('touchStart', [start])
+        touch('touchMove', [{**start, 'y': start['y'] - 80}])
+        touch('touchEnd', [])
+        saved('low', 'high,low')
+        assert ev("document.querySelector('.thinking-level-name')?.textContent === 'Low'")
+
+        touch('touchStart', [point('low', 904)])
+        preview('high', 904)
+        ev("appLogic.setCurrentChatModelRef({apiConfigId:'thinking-drag', modelName:'gemini-3-pro-preview'})")
+        touch('touchEnd', [])
+        wait('!settingsUiV136.popover', 'Switching the model invalidates the old drag')
+        saved('low', 'high,low')
+
+        tap('#chat-model-button')
+        wait("document.querySelectorAll('.thinking-dot').length === 2", 'The new model has only its two supported levels')
+        touch('touchStart', [point('low', 905)])
+        preview('high', 905)
+        touch('touchEnd', [])
+        saved('high', 'high,low,high')
+
+        touch('touchStart', [point('high', 906)])
+        preview('low', 906)
+        ev('appLogic.startNewChat(); state.executionSettingsReady')
+        touch('touchEnd', [])
+        wait('!settingsUiV136.popover', 'Switching the chat invalidates the old drag')
+        saved('high', 'high,low,high')
+    finally:
+        ev("""(async () => {
+            await settingsUiV136.saveQueue;
+            appLogic.setCurrentChatThinkingEffort = thinkingDragProbe.setEffort;
+            settingsUiV136.closePopover(false);
+            await appLogic.updateLocalUiSetting('enableSwipeNavigation', true);
+        })()""")
+
+
+def check_history_reuse(ev, wait, screen, click, boot):
+    rows = '#history-list .history-item'
+    count = f"document.querySelectorAll('{rows}').length"
+    panel = "document.getElementById('history-state-panel')"
+    loading = f"(!{panel}.classList.contains('hidden') && {panel}.dataset.state === 'loading')"
+
+    def open_history():
+        click('#goto-history-btn')
+        screen('history')
+
+    def leave_history():
+        click('#back-to-chat-from-history')
+        screen('chat')
+
+    def search(query):
+        ev(f"""(() => {{
+            const input = document.getElementById('history-search-input');
+            input.value = {json.dumps(query)};
+            input.dispatchEvent(new Event('input', {{bubbles: true}}));
+        }})()""")
+        wait('!historyUiState.searchTimer', 'History search settled')
+
+    ev("""(async () => {
+        const tx = state.db.transaction(CHATS_STORE, 'readwrite');
+        const store = tx.objectStore(CHATS_STORE);
+        for (let i = 0; i < 520; i++) store.add({
+            id: 10000 + i, title: 'Cache fixture ' + i,
+            createdAt: i + 1, updatedAt: i + 1,
+            isPinned: i % 2 === 0, pinnedAt: i + 1,
+            messages: [{role: 'user', content: 'Cache fixture body ' + i}]
+        });
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = reject; });
+    })()""")
+    boot(reload=True)
+    screen('chat')
+    ev("""(() => {
+        const probe = window.historyProbe = {scans: 0, rows: 0, fail: true, hold: false};
+        const getAll = dbUtils.getAllChats;
+        dbUtils.getAllChats = async function(...args) {
+            probe.scans++;
+            if (probe.fail) { probe.fail = false; throw new Error('Controlled history read failure'); }
+            const chats = await getAll.apply(this, args);
+            if (probe.hold) {
+                probe.hold = false;
+                await new Promise(resolve => {
+                    probe.release = () => { probe.release = null; resolve(); };
+                });
+            }
+            return chats;
+        };
+        const createRow = uiUtilsV136.createHistoryItemElement;
+        uiUtilsV136.createHistoryItemElement = function(...args) {
+            probe.rows++;
+            return createRow.apply(this, args);
+        };
+    })()""")
+    open_history()
+    wait(f"{panel}.dataset.state === 'error'", 'Initial read failure offers retry')
+    click('#history-state-action')
+    wait(f'{count} >= 520', 'Initial read retry draws the complete large history')
+    assert ev('historyProbe.scans === 2')
+    ev("appLogic.updateHistoryPinFilter('pinned')")
+    ev("appLogic.updateHistorySortOrder('title')")
+    search('Cache fixture')
+    wait(f"{count} === 260 && document.querySelector('#history-status').textContent === '検索結果 260件'",
+         'History search, title sort and pinned filter render')
+    assert ev(f"document.querySelector('{rows} .history-item-title').title === 'Cache fixture 0'")
+    ev(f"""(() => {{
+        const probe = historyProbe;
+        probe.first = document.querySelector('{rows}');
+        probe.metrics = [probe.scans, probe.rows];
+        uiUtilsV136.getHistoryScrollContainer().scrollTop = 1200;
+        probe.scroll = uiUtilsV136.captureHistoryScrollPosition();
+    }})()""")
+    for _ in range(3):
+        leave_history()
+        open_history()
+        checks = ev(f"""({{
+            sameRows: historyProbe.first === document.querySelector('{rows}'),
+            noLoadingPanel: !({loading}),
+            noRescan: historyProbe.scans === historyProbe.metrics[0],
+            noNewRows: historyProbe.rows === historyProbe.metrics[1],
+            sameScroll: Math.abs(uiUtilsV136.getHistoryScrollContainer().scrollTop - historyProbe.scroll) <= 2,
+            sameQuery: document.getElementById('history-search-input').value === 'Cache fixture',
+            sameSort: document.getElementById('history-sort-order-toolbar').value === 'title',
+            sameFilter: document.querySelector('[data-history-pin-filter="pinned"]').getAttribute('aria-pressed') === 'true'
+        }})""")
+        assert all(checks.values()), checks
+
+    leave_history()
+    ev("""(async () => {
+        await chatHistoryActions.rename(10000, 'Cache fixture renamed');
+        await chatHistoryActions.setPinned(10002, false);
+    })()""")
+    open_history()
+    wait(f"{count} === 259 && document.querySelector('[data-chat-id=\"10000\"] .history-item-title')?.title === 'Cache fixture renamed'",
+         'Hidden rename and unpin update cached rows')
+    assert ev('historyProbe.scans === historyProbe.metrics[0]'), 'Local metadata changes avoid a full scan'
+
+    leave_history()
+    saved_id = ev("""(async () => {
+        appLogic.startNewChat();
+        await state.executionSettingsReady;
+        state.currentMessages = [{role: 'user', content: 'Cache fixture new body'}];
+        const id = await dbUtils.saveChat('Cache fixture new');
+        await chatHistoryActions.setPinned(id, true);
+        return id;
+    })()""")
+    ev(f"""historyProbe.hold = true;
+        historyProbe.previous = document.querySelector('{rows}');""")
+    open_history()
+    wait('Boolean(historyProbe.release)', 'A pre-update history snapshot is pending')
+    assert ev(f"historyProbe.previous.isConnected && !({loading}) && {count} === 259")
+    ev("""(async () => {
+        state.currentMessages[0].content = 'Unique edited message';
+        await dbUtils.saveChat('Cache fixture latest');
+    })()""")
+    leave_history()
+    open_history()
+    assert ev(f"historyProbe.previous.isConnected && !({loading})")
+    ev("historyProbe.release()")
+    wait(f"document.querySelector('.history-item[data-chat-id=\"{saved_id}\"] .history-item-title')?.title === 'Cache fixture latest'",
+         'A stale read cannot win after a newer save and re-entry')
+    assert ev('historyProbe.scans === historyProbe.metrics[0] + 2'), 'Overlapping views share the pending read'
+    search('Unique edited message')
+    wait(f"{count} === 1 && document.querySelector('{rows}')?.dataset.chatId === '{saved_id}'",
+         'Search uses newly saved message contents')
+
+    leave_history()
+    ev("""(async () => {
+        uiUtilsV136.showCustomAlert = async () => {};
+        uiUtilsV136.showCustomConfirm = async () => true;
+        historyProbe.duplicate = (await chatHistoryActions.duplicate(10000)).chatId;
+        await chatHistoryActions.delete(10004);
+        await appLogic.handleHistoryImport(new File(
+            ['<|#|user|#|>Imported fixture body<|#|/user|#|>'], 'Imported fixture.txt', {type:'text/plain'}));
+    })()""")
+    wait("!document.querySelector('#progressDialog[open]')", 'Single history import committed')
+    ev("appLogic.updateHistoryPinFilter('all')")
+    ev("historyProbe.previous = document.querySelector('#history-list .history-item'); historyProbe.fail = true;")
+    open_history()
+    wait(f"{panel}.dataset.state === 'error' && !{panel}.classList.contains('hidden')", 'Failed refresh offers retry')
+    assert ev("historyProbe.previous.isConnected && !document.getElementById('history-list').classList.contains('hidden')")
+    click('#history-state-action')
+    search('')
+    wait(f"""Boolean(document.querySelector('.history-item[data-chat-id="' + historyProbe.duplicate + '"]')) &&
+        !document.querySelector('.history-item[data-chat-id="10004"]') &&
+        [...document.querySelectorAll('{rows} .history-item-title')].some(el => el.title.includes('Imported fixture'))""",
+         'Retry applies hidden duplicate, delete and import')
+
+    leave_history()
+    ev("""(async () => {
+        await appLogic.importDataFromString(JSON.stringify({version: '2.0', data: {
+            profiles: await dbUtils.getAllProfiles(),
+            chats: [{id: 99999, title:'Restored cache fixture', createdAt:1, updatedAt:1, messages:[]}]
+        }}));
+        uiUtilsV136.hideProgressDialog();
+    })()""")
+    open_history()
+    wait(f"{count} === 1 && document.querySelector('{rows}')?.dataset.chatId === '99999'",
+         'Restoring a backup replaces the cached history')
+
+    leave_history()
+    ev("""(() => {
+        historyProbe.revision = historyUiState.dataRevision;
+        const peer = historyProbe.peer = document.createElement('iframe');
+        peer.hidden = true;
+        peer.src = location.pathname + location.search + '#chat';
+        document.body.appendChild(peer);
+    })()""")
+    wait('Boolean(historyProbe.peer.contentWindow.appLogic?._setupEventListenersCallCount)',
+         'Second page is connected to the same database')
+    peer_id = ev("""historyProbe.peer.contentWindow.eval(`(async () => {
+        appLogic.startNewChat();
+        await state.executionSettingsReady;
+        state.currentMessages = [{role: 'user', content: 'Saved in the second page'}];
+        return dbUtils.saveChat('Cache fixture from another page');
+    })()`)""")
+    wait('historyUiState.dataRevision > historyProbe.revision', 'History receives the cross-page invalidation')
+    open_history()
+    wait(f"{count} === 2 && Boolean(document.querySelector('.history-item[data-chat-id=\"{peer_id}\"]'))",
+         'A hidden history includes the second page’s saved chat on re-entry')
+    ev('historyProbe.peer.remove()')

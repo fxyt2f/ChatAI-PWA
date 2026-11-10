@@ -690,11 +690,16 @@
             // Keep 40px hit areas; extend the visible markers toward the rounded track ends.
             const progress = levels.length > 1 ? levels.indexOf(current) / (levels.length - 1) : .5;
             dots.style.setProperty('--thinking-progress', `calc(12px + (100% - 24px) * ${progress})`);
-            let pending = 0;
-            const update = level => {
+            let pending = 0, drag = null, suppressClick = false;
+            const canChoose = () => !this.state.isSending && !this.state.currentExecutionApiConfig && contextMatches();
+            const update = (level, preview = false) => {
                 if (this.popover !== panel) return;
-                const focusedRadio = dots.contains(document.activeElement);
-                current = level; name.textContent = levelName(level);
+                if (!preview) {
+                    current = level;
+                    if (drag?.level) return;
+                }
+                const focusedRadio = !preview && dots.contains(document.activeElement);
+                name.textContent = levelName(level);
                 const progress = levels.length > 1 ? levels.indexOf(level) / (levels.length - 1) : .5;
                 dots.style.setProperty('--thinking-progress', `calc(12px + (100% - 24px) * ${progress})`);
                 for (const button of dots.children) {
@@ -707,11 +712,20 @@
                 if (!contextMatches()) { this.closePopover(false); return; }
                 if (!pending) update(this.app.getCurrentChatThinkingEffort() || capability.defaultEffort);
             };
-            const choose = level => {
-                if (this.state.isSending || !contextMatches()) return;
+            const cancelDrag = () => {
+                const previewing = Boolean(drag?.level);
+                drag = null;
+                if (previewing) update(current);
+            };
+            const choose = (level, dragGeneration = null) => {
+                if (this.popover !== panel || !canChoose()) return;
+                cancelDrag();
                 pending++; update(level);
                 this.save(anchor, async () => {
-                    try { if (contextMatches()) await this.app.setCurrentChatThinkingEffort(level); }
+                    try {
+                        if (canChoose() && (dragGeneration === null || dragGeneration === (this.state.executionSelectionGenerationV136 ?? 0)))
+                            await this.app.setCurrentChatThinkingEffort(level);
+                    }
                     finally { pending--; if (!pending && contextMatches()) update(this.app.getCurrentChatThinkingEffort() || capability.defaultEffort); }
                 });
             };
@@ -725,6 +739,53 @@
                 const mark = make('span', 'thinking-mark'); mark.setAttribute('aria-hidden', 'true'); button.append(mark);
                 button.addEventListener('click', () => choose(level)); dots.append(button);
             });
+            const levelAt = x => {
+                const { left, width } = dots.getBoundingClientRect();
+                const position = Math.max(0, Math.min(1, (x - left - 12) / Math.max(1, width - 24)));
+                return levels[Math.round(position * (levels.length - 1))];
+            };
+            const canDrag = () => this.popover === panel && canChoose() &&
+                drag.generation === (this.state.executionSelectionGenerationV136 ?? 0);
+            dots.addEventListener('pointerdown', event => {
+                if (!event.isPrimary) { cancelDrag(); return; }
+                if (event.button !== 0) return;
+                suppressClick = false;
+                if (levels.length < 2 || !canChoose()) return;
+                drag = { id: event.pointerId, x: event.clientX, y: event.clientY,
+                    generation: this.state.executionSelectionGenerationV136 ?? 0, level: null };
+            });
+            dots.addEventListener('pointermove', event => {
+                if (drag?.id !== event.pointerId) return;
+                if (!canDrag()) { cancelDrag(); return; }
+                if (!drag.level) {
+                    const dx = Math.abs(event.clientX - drag.x), dy = Math.abs(event.clientY - drag.y);
+                    if (Math.max(dx, dy) < 8) return;
+                    suppressClick = true;
+                    if (dx <= dy * 1.5) { cancelDrag(); return; }
+                    dots.setPointerCapture(event.pointerId);
+                }
+                const level = levelAt(event.clientX);
+                if (level !== drag.level) { drag.level = level; update(level, true); }
+            });
+            dots.addEventListener('pointerup', event => {
+                if (drag?.id !== event.pointerId) return;
+                if (!drag.level || !canDrag()) { cancelDrag(); return; }
+                const level = levelAt(event.clientX), selection = drag.generation;
+                drag = null;
+                if (level === current) update(current);
+                else choose(level, selection);
+            });
+            dots.addEventListener('pointerleave', () => { if (!drag?.level) cancelDrag(); });
+            dots.addEventListener('pointercancel', event => { if (drag?.id === event.pointerId) cancelDrag(); });
+            dots.addEventListener('lostpointercapture', event => {
+                if (event.target === dots && drag?.id === event.pointerId) cancelDrag();
+            });
+            dots.addEventListener('click', event => {
+                if (!suppressClick || event.detail === 0) return;
+                suppressClick = false;
+                event.preventDefault();
+                event.stopPropagation();
+            }, true);
             dots.addEventListener('keydown', event => {
                 if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
                 event.preventDefault(); const index = levels.indexOf(current);
