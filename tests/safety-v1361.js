@@ -22,7 +22,6 @@ window.runSafetyV1361 = async function () {
         app.startNewChat(); await st.executionSettingsReady;
         st.currentMessages = empty ? [] : [{role:'user', content:'safety fixture', timestamp:Date.now()}];
         st.currentSystemPrompt = 'initial'; st.systemPromptSaveStatus = 'saved';
-        st.pendingAttachments = []; st.selectedFilesForUpload = [];
         await db.saveChat(); ui.updateSystemPromptUI();
     }
     async function run(name, fn) {
@@ -187,20 +186,18 @@ window.runSafetyV1361 = async function () {
         finally{ui.updateChatTitle=original;}
         check(await db.saveChat()===st.currentChatId,'queue did not recover after view failure');
     });
-    for(const mode of ['outside','escape','button','switch'])await run('R3 pending attachment cancelled via '+mode,async()=>{
+    for(const mode of ['cancel','switch'])await run('R3 attachment processing cancelled via '+mode,async()=>{
         const entered=gate(),release=gate(),original=app.fileToBase64;
         app.fileToBase64=async()=>{entered.resolve();return release.promise;};
-        st.selectedFilesForUpload=[{file:new File(['x'],'safety.txt',{type:'text/plain'})}];
-        ui.showFileUploadDialog(); const work=app.confirmAttachment();await entered.promise;
+        const work=app.handleFileSelection([new File(['x'],'safety.txt',{type:'text/plain'})]);
         try {
-            if(mode==='button')app.cancelAttachment();
-            else if(mode==='escape')$('fileUploadDialog').dispatchEvent(new Event('cancel',{cancelable:true}));
-            else await ui.dismissDialog($('fileUploadDialog'));
-            await frame();
-            if(mode==='switch'){app.startNewChat();await st.executionSettingsReady;}
+            await entered.promise;
+            check($('send-button').disabled,'conversion did not block send');
+            if(mode==='cancel')$('cancel-attachment-processing').click();
+            else {app.startNewChat();await st.executionSettingsReady;}
             release.resolve('eA==');await work;
             check(st.pendingAttachments.length===0,'cancelled attachment committed');
-            check(!$('confirm-attach-btn').disabled,'button did not recover');
+            check($('cancel-attachment-processing').hidden && !app.attachmentOperation,'processing controls did not recover');
         }finally{release.resolve('eA==');await work;app.fileToBase64=original;}
     });
     await run('R3 old conversion cannot reset or commit a newer attachment operation',async()=>{
@@ -208,22 +205,26 @@ window.runSafetyV1361 = async function () {
         app.fileToBase64=async file=>{const a=file.name==='a.txt';(a?enteredA:enteredB).resolve();return (a?releaseA:releaseB).promise;};
         let a,b;
         try {
-            st.selectedFilesForUpload=[{file:new File(['a'],'a.txt',{type:'text/plain'})}];ui.showFileUploadDialog();
-            a=app.confirmAttachment();await enteredA.promise;app.cancelAttachment();await frame();
-            st.selectedFilesForUpload=[{file:new File(['b'],'b.txt',{type:'text/plain'})}];ui.showFileUploadDialog();
-            b=app.confirmAttachment();await enteredB.promise;releaseA.resolve('YQ==');await a;
-            check($('confirm-attach-btn').disabled && st.pendingAttachments.length===0,'old completion affected new operation');
+            a=app.handleFileSelection([new File(['a'],'a.txt',{type:'text/plain'})]);
+            await enteredA.promise;$('cancel-attachment-processing').click();
+            b=app.handleFileSelection([new File(['b'],'b.txt',{type:'text/plain'})]);
+            await enteredB.promise;releaseA.resolve('YQ==');await a;
+            check($('send-button').disabled && !$('cancel-attachment-processing').hidden && st.pendingAttachments.length===0,'old completion affected new operation');
             releaseB.resolve('Yg==');await b;
             check(st.pendingAttachments.length===1 && st.pendingAttachments[0].name==='b.txt','new attachment did not commit');
         } finally {releaseA.resolve('YQ==');releaseB.resolve('Yg==');await Promise.allSettled([a,b]);app.fileToBase64=original;}
     });
-    await run('R3 encoding exception restores controls',async()=>{
-        const original=app.fileToBase64,alert=ui.showCustomAlert;
-        app.fileToBase64=async()=>{throw new Error('controlled encoding failure');};ui.showCustomAlert=async()=>{};
+    await run('R3 encoding exception preserves successful files and restores controls',async()=>{
+        const original=app.fileToBase64;
+        app.fileToBase64=async file=>{
+            if(file.name==='bad.txt')throw new Error('controlled encoding failure');
+            return original.call(app,file);
+        };
         try {
-            st.selectedFilesForUpload=[{file:new File(['x'],'x.txt')}];ui.showFileUploadDialog();await app.confirmAttachment();
-            check(!$('confirm-attach-btn').disabled && st.pendingAttachments.length===0,'encoding failure left busy/committed state');
-        } finally {app.fileToBase64=original;ui.showCustomAlert=alert;}
+            await app.handleFileSelection(['first.txt','bad.txt','last.txt'].map(name=>new File(['x'],name)));
+            check(!$('send-button').disabled && st.pendingAttachments.map(a=>a.name).join()==='first.txt,last.txt','encoding failure affected valid attachments');
+            check($('composer-attachment-status').textContent.includes('変換失敗'),'encoding failure was not reported inline');
+        } finally {app.fileToBase64=original;}
     });
     st.isEditingSystemPrompt=false;document.querySelectorAll('dialog[open]').forEach(d=>d.close('cancel'));
     return results.join('\n')+'\n'+(results.some(x=>x.startsWith('FAIL'))?'SAFETY FAILED':'ALL PASSED ('+results.length+' safety regressions)');

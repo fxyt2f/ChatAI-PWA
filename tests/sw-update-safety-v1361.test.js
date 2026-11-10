@@ -4,7 +4,7 @@ const region=source.slice(source.indexOf('// --- Service Worker関連 ---'),sour
 function fixture(){
     const events={},windowEvents={},timers=[],metrics={reload:0,close:0,activate:0};
     const state={db:{close(){metrics.close++;}},activeProfile:{id:'fixture'},currentMessages:[],currentSystemPrompt:'',
-        isSending:true,editingMessageIndex:null,pendingAttachments:[],selectedFilesForUpload:[],sync:{},systemPromptSaveStatus:'saved'};
+        isSending:true,editingMessageIndex:null,pendingAttachments:[],sync:{},systemPromptSaveStatus:'saved'};
     const app={_setupEventListenersCallCount:1,isGenerationBlockingActive:()=>false,flushInputDraft:()=>{},hasUnsavedSystemPrompt:()=>false};
     const sandbox={state,dbUtils:{pendingChatSaves:0},appLogic:app,uiUtils:{showCustomAlert:async()=>{}},console,
         setTimeout:fn=>(timers.push(fn),timers.length),clearTimeout:()=>{},setInterval:()=>{},
@@ -18,15 +18,16 @@ function fixture(){
         coordinator:()=>vm.runInContext('createServiceWorkerUpdateCoordinator()',sandbox)};
 }
 (async()=>{
-    for(const blocker of ['sending','prompt','attachment','message']){
+    for(const blocker of ['sending','prompt','picker','attachment','message']){
         const f=fixture();f.state.isSending=false;
         if(blocker==='sending')f.state.isSending=true;
         if(blocker==='prompt')f.app.hasUnsavedSystemPrompt=()=>true;
+        if(blocker==='picker')f.app.attachmentPickerMessages=[];
         if(blocker==='attachment')f.app.attachmentOperation={};
         if(blocker==='message')f.state.editingMessageIndex=0;
         f.events.controllerchange();await f.drain();
         assert.equal(f.metrics.reload,0,blocker+' must defer reload');assert.equal(f.metrics.close,0,'DB closed while busy');
-        f.state.isSending=false;f.state.editingMessageIndex=null;f.app.attachmentOperation=null;f.app.hasUnsavedSystemPrompt=()=>false;
+        f.state.isSending=false;f.state.editingMessageIndex=null;f.app.attachmentOperation=null;f.app.attachmentPickerMessages=null;f.app.hasUnsavedSystemPrompt=()=>false;
         await f.resume();assert.equal(f.metrics.reload,1,blocker+' must resume');
         f.events.controllerchange();await f.resume();assert.equal(f.metrics.reload,1,'reload must run once');
         console.log('PASS R4 controller replacement defers and resumes: '+blocker);

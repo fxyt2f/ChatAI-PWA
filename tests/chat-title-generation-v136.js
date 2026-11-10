@@ -1,7 +1,8 @@
 // Exercise real sends, provider adapters and IndexedDB. The gates control network completion order.
 window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, eq}) => {
     const defaults = SettingsV136.chatTitleDefaults;
-    const legacyDefault = defaults.chatTitleSystemPrompt + '\n\n{message}';
+    const previousDefault = '次のユーザーメッセージを端的に表す、日本語の短いチャットタイトルを作成してください。20文字程度を目安に、重要な固有名詞を保持してください。タイトルのみを出力し、説明・引用符・改行は不要です。';
+    const newDefault = '次のユーザーメッセージの主題や意図を的確に表す、自然で分かりやすい日本語のチャットタイトルを作成してください。20文字程度を目安に簡潔にまとめ、必要に応じて重要な固有名詞や専門用語を保持してください。名詞句に限定せず、内容に応じて疑問形、動詞を含む表現、短い文章など、最も自然で内容が伝わりやすい形式を選んでください。抽象的・一般的すぎるタイトルは避け、後からチャット一覧を見たときに内容を識別できるようにしてください。タイトルのみを1行で出力し、説明や引用符などは付けないでください。';
     const customPrompt = 'タイトルの指示に {message} と書いてもそのまま扱う';
     const globalBefore = (await db.getSetting(SettingsV136.GLOBAL_KEY)).value;
     const apiBefore = (await db.getSetting('apiConfigs')).value;
@@ -97,8 +98,8 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
         await test('chat title defaults, global controls and API reference audit', async () => {
             eq(st.settings.enableChatTitleGeneration, false);
             eq(st.settings.chatTitleModelRef, null);
-            eq(st.settings.chatTitleSystemPrompt, defaults.chatTitleSystemPrompt);
-            assert(!defaults.chatTitleSystemPrompt.includes('{message}'));
+            eq(defaults.chatTitleSystemPrompt, newDefault);
+            eq(st.settings.chatTitleSystemPrompt, newDefault);
             const section = document.getElementById('chat-title-settings');
             const heading = section.querySelector('h2');
             const description = section.querySelector('p');
@@ -109,6 +110,7 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
             const model = document.getElementById('chat-title-model');
             const prompt = document.getElementById('chat-title-system-prompt');
             const enabled = document.getElementById('enable-chat-title-generation');
+            if (window.settingsUiV136) eq(prompt.value, newDefault);
             [heading, description, enabled, model, prompt].reduce((previous, next) => {
                 assert(previous.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING);
                 return next;
@@ -131,22 +133,29 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
             assert(Object.keys(defaults).every(key => !Object.hasOwn(profile.settings, key)));
         });
         await test('old title prompt migrates once and custom settings survive', async () => {
-            const global = (await db.getSetting(SettingsV136.GLOBAL_KEY)).value;
-            const old = {...global, chatTitleSystemPrompt: legacyDefault};
-            await db.saveSetting(SettingsV136.GLOBAL_KEY, old);
-            await app.reloadGlobalSettingsV136();
-            eq(st.globalSettingsV136.chatTitleSystemPrompt, defaults.chatTitleSystemPrompt);
-            await app.ensureSettingsMigrationV136();
-            const expected = {...old, chatTitleSystemPrompt: defaults.chatTitleSystemPrompt, revision: old.revision + 1};
-            eq((await db.getSetting(SettingsV136.GLOBAL_KEY)).value, expected);
-            await app.ensureSettingsMigrationV136();
-            eq((await db.getSetting(SettingsV136.GLOBAL_KEY)).value, expected);
-            const custom = {...expected, chatTitleSystemPrompt: customPrompt};
-            await db.saveSetting(SettingsV136.GLOBAL_KEY, custom);
-            await app.ensureSettingsMigrationV136();
-            eq((await db.getSetting(SettingsV136.GLOBAL_KEY)).value, custom);
-            eq(st.globalSettingsV136.chatTitleSystemPrompt, customPrompt);
-            await app.saveGlobalSettingsV136({chatTitleSystemPrompt: '題名にする'});
+            const savedGlobal = async () => (await db.getSetting(SettingsV136.GLOBAL_KEY)).value;
+            const historyBefore = await db.getChat(100);
+            for (const prompt of [previousDefault, previousDefault + '\n\n{message}']) {
+                const old = {...await savedGlobal(), chatTitleSystemPrompt: prompt};
+                await db.saveSetting(SettingsV136.GLOBAL_KEY, old);
+                await app.reloadGlobalSettingsV136();
+                eq(st.settings.chatTitleSystemPrompt, newDefault);
+                const expected = {...old, chatTitleSystemPrompt: newDefault, revision: old.revision + 1};
+                await app.ensureSettingsMigrationV136();
+                eq(await savedGlobal(), expected);
+                await app.ensureSettingsMigrationV136();
+                eq(await savedGlobal(), expected);
+            }
+            for (const prompt of [customPrompt, previousDefault + '\n専門用語は原文で保持する。']) {
+                await app.saveGlobalSettingsV136({chatTitleSystemPrompt: prompt});
+                const saved = await savedGlobal();
+                await app.ensureSettingsMigrationV136();
+                await app.reloadGlobalSettingsV136();
+                eq(await savedGlobal(), saved);
+                eq(st.settings.chatTitleSystemPrompt, prompt);
+            }
+            eq(await db.getChat(100), historyBefore);
+            await app.saveGlobalSettingsV136({chatTitleSystemPrompt: newDefault});
         });
         app.generateChatTitleV136 = function (id, generation) {
             const job = originalGenerate.call(this, id, generation);
@@ -178,7 +187,7 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
                 eq(request.url, geminiUrl);
                 eq(request.headers['x-goog-api-key'], 'title-gem-key');
                 eq(request.body, {
-                    systemInstruction: {parts: [{text: '題名にする'}]},
+                    systemInstruction: {parts: [{text: newDefault}]},
                     contents: [{role: 'user', parts: [{text: first}]}]
                 });
                 const normalController = st.abortController;
@@ -415,6 +424,7 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
                 iframe.contentWindow.fetch = mockFetch;
                 iframe.contentWindow.peerUi.setSendingState = value => { peer.state.isSending = value; };
                 await peer.app.loadGlobalSettings();
+                eq(peer.state.settings.chatTitleSystemPrompt, newDefault);
                 assert((await peer.app.loadChat(id)).ok);
                 await send('再読み込み後の送信', peer.app, iframe.contentDocument.getElementById('user-input'));
                 eq(titles.length, count + 1);

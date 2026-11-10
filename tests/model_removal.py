@@ -97,7 +97,6 @@ def run(client, url):
             setNames('shared\nsecond\nsurvivor\nnew');
             await app.saveApiConfigFromDialog();
             eq(await names(),['shared','second','survivor','new'],'Unused removal plus addition saved without a confirmation');
-            app.openApiConfigDialog('f6-a');
             setNames('survivor\nnew');
             const before = await snapshot(), oldChat = await db.getChat(601), oldConfigs = (await db.getSetting('apiConfigs')).value;
             let operation = app.saveApiConfigFromDialog();
@@ -120,6 +119,7 @@ def run(client, url):
                 await peer.state.executionSettingsReady;
                 await peer.appLogic.setCurrentChatModelRef(a('second'));
                 stage('reference added before commit');
+                setNames('survivor\nnew');
                 operation = app.saveApiConfigFromDialog();
                 await confirm();
                 assert($('confirmDialog').textContent.includes('別タブの未送信チャット'),'Peer draft is included in the impact');
@@ -195,7 +195,7 @@ def run(client, url):
                     assert(sent === 0 && notice.includes('モデルが選択されていません'),'Next send requires an explicit model');
                 } finally { window.fetch = fetchBefore; ui.showCustomAlert = alertBefore; }
 
-                app.openApiConfigDialog('f6-a'); setNames('');
+                setNames('');
                 await app.saveApiConfigFromDialog();
                 eq(await names(),[],'Empty candidate list stays empty');
                 assert(!app.buildModelRefOptions().some(choice => choice.apiConfigId === 'f6-a'),'Empty route contributes no synthetic candidates');

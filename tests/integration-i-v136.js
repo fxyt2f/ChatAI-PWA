@@ -3,11 +3,12 @@ window.runIntegrationIRegressionsV136=async()=>{
     const assert=(v,m)=>{if(!v)throw Error(m)};
     const eq=(a,b,m)=>assert(JSON.stringify(a)===JSON.stringify(b),m||JSON.stringify({actual:a,expected:b}));
     const run=async(name,fn)=>{try{await fn();output.push('PASS '+name)}catch(e){output.push('FAIL '+name+': '+e.message);failures.push({name,error:e.stack})}};
-    const peers=async(count,fn)=>{
+    const peers=async(count,fn,full=false)=>{
         const windows=[],values=[],name='chatai-integration-i-'+crypto.randomUUID();
         try{for(let i=0;i<count;i++){
             const w=window.open('/tests/integration-i-peer-v136.html','integration-'+name+'-'+i);windows.push(w);
-            await new Promise(r=>w.addEventListener('load',r,{once:true}));values.push(await w.openIntegrationPeerV136(name));
+            await new Promise(r=>w.addEventListener('load',r,{once:true}));
+            values.push(await (full?w.openFullIntegrationPeerV136:w.openIntegrationPeerV136)(name));
         }
         await values[0].seed();for(const p of values)await p.reload();return await fn(values);
         }finally{for(let i=0;i<windows.length;i++){values[i]?.close();windows[i]?.close()}}
@@ -112,7 +113,7 @@ window.runIntegrationIRegressionsV136=async()=>{
     await run('I02 profile-import Blob and profile reference publish atomically',()=>peers(2,async([a,b])=>{
         a.app.base64ToBlob=async()=>image();const imported=await a.app.parseProfileImportV136({profileSchemaVersion:1,name:'import',settings:{useCustomAppearance:true},backgroundAsset:{data:'fixture',mimeType:'image/png'}});
         await b.app.cleanupBackgroundAssetsV136();const id=await a.app.addImportedProfileV136(imported);assert(id);await b.app.cleanupBackgroundAssetsV136();await referenced(a);
-    }));
+    },true));
     await run('I04 concurrent profile patches merge generation, prompt and nested appearance fields',()=>peers(2,async([a,b])=>{
         await Promise.all([a.app.patchProfileSettingsV136(1,{temperature:.12345,appearance:{overlayOpacity:.2}}),b.app.patchProfileSettingsV136(1,{systemPrompt:'peer prompt',appearance:{messageOpacity:.4}})]);
         const profile=await a.read('profiles',1);eq(profile.settings.temperature,.12345);eq(profile.settings.systemPrompt,'peer prompt');eq(profile.settings.appearance.overlayOpacity,.2);eq(profile.settings.appearance.messageOpacity,.4);

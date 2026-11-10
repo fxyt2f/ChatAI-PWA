@@ -14,12 +14,12 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.36.3">
+    <link rel="stylesheet" href="./style.css?v=1.36.4">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.36.3" defer></script>
-    <script src="./dropbox.js?v=1.36.3" defer></script>
+    <script src="./function-calling.js?v=1.36.4" defer></script>
+    <script src="./dropbox.js?v=1.36.4" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -33,10 +33,10 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.36.3" defer></script>
-    <script src="./streaming-v136.js?v=1.36.3" defer></script>
-    <script src="./app.js?v=1.36.3" defer></script>
-    <script src="./settings-ui-v136.js?v=1.36.3" defer></script>
+    <script src="./settings-v136.js?v=1.36.4" defer></script>
+    <script src="./streaming-v136.js?v=1.36.4" defer></script>
+    <script src="./app.js?v=1.36.4" defer></script>
+    <script src="./settings-ui-v136.js?v=1.36.4" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -46,7 +46,7 @@
             <aside id="chat-history-sidebar" class="chat-history-sidebar" aria-label="チャット履歴サイドバー" aria-hidden="true">
                 <div class="chat-sidebar-header">
                     <button id="chat-sidebar-close-btn" type="button" class="chat-sidebar-icon-button" aria-label="サイドバーを閉じる" title="サイドバーを閉じる" aria-controls="chat-history-sidebar" aria-expanded="true">
-                        <span class="material-symbols-outlined" aria-hidden="true">left_panel_close</span>
+                        <span class="material-symbols-outlined" aria-hidden="true">menu</span>
                     </button>
                     <span class="chat-sidebar-brand">ChatAI PWA</span>
                 </div>
@@ -75,7 +75,7 @@
             <div id="chat-overlay"></div>
             <div id="header-trigger-area"></div>
             <header class="app-header">
-                <button id="goto-history-btn" class="header-button" title="履歴一覧へ" aria-label="履歴一覧へ"><span class="material-symbols-outlined">left_panel_open</span></button>
+                <button id="goto-history-btn" class="header-button" title="履歴一覧へ" aria-label="履歴一覧へ"><span class="material-symbols-outlined">menu</span></button>
                 <span id="sync-status-header-icon" class="material-symbols-outlined sync-status-header-icon" title="同期ステータス"></span>
                 <h1 id="chat-title" role="button" tabindex="0" aria-label="チャットタイトル。タップして編集" title="新規チャット">新規チャット</h1>
                 <button id="new-chat-btn" class="new-chat-button" title="新規チャットを開始"><span class="material-symbols-outlined">add</span></button>
@@ -126,36 +126,38 @@
                 <div class="chat-search-compact-toolbar">
                     <div class="chat-search-toolbar-top">
                         <div class="chat-search-field">
-                            <input id="chat-search-query" class="chat-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="検索" aria-label="検索語">
-                            <span id="chat-search-count" class="chat-search-count" aria-live="polite">0件</span>
+                            <input id="chat-search-query" class="chat-search-input" type="text" enterkeyhint="search" autocomplete="off" spellcheck="false" placeholder="検索" aria-label="検索語">
+                            <span id="chat-search-count" class="chat-search-count" aria-live="polite">0/0</span>
+                            <div class="chat-search-navigation">
+                                <button id="chat-search-prev-btn" type="button" title="前の一致" aria-label="前の一致" disabled>
+                                    <span class="material-symbols-outlined">arrow_upward</span>
+                                </button>
+                                <button id="chat-search-next-btn" type="button" title="次の一致" aria-label="次の一致" disabled>
+                                    <span class="material-symbols-outlined">arrow_downward</span>
+                                </button>
+                                <button id="chat-search-close-btn" type="button" title="検索を閉じる" aria-label="検索を閉じる">
+                                    <span class="material-symbols-outlined">close</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div class="chat-search-toolbar-bottom">
-                        <button id="chat-search-prev-btn" class="floating-action-button chat-search-tool-icon" type="button" title="前の一致" aria-label="前の一致">
-                            <span class="material-symbols-outlined">arrow_upward</span>
-                        </button>
-                        <button id="chat-search-next-btn" class="floating-action-button chat-search-tool-icon" type="button" title="次の一致" aria-label="次の一致">
-                            <span class="material-symbols-outlined">arrow_downward</span>
-                        </button>
                         <label class="chat-search-toggle" title="正規表現">
-                            <input id="chat-search-regex" type="checkbox">
+                            <input id="chat-search-regex" type="checkbox" aria-label="正規表現">
                             <span class="floating-action-button chat-search-toggle-label">.*</span>
                         </label>
                         <label class="chat-search-toggle" title="大文字・小文字を区別">
-                            <input id="chat-search-case-sensitive" type="checkbox">
+                            <input id="chat-search-case-sensitive" type="checkbox" aria-label="大文字・小文字を区別">
                             <span class="floating-action-button chat-search-toggle-label">Aa</span>
                         </label>
-                        <button id="chat-search-replace-toggle-btn" class="floating-action-button chat-search-tool-icon" type="button" title="置換プレビュー" aria-label="置換プレビュー" aria-expanded="false">
+                        <button id="chat-search-replace-toggle-btn" class="floating-action-button chat-search-tool-icon" type="button" title="置換" aria-label="置換" aria-expanded="false" aria-controls="chat-replace-preview-panel">
                             <span class="material-symbols-outlined">find_replace</span>
-                        </button>
-                        <button id="chat-search-close-btn" class="floating-action-button chat-search-tool-icon" type="button" title="検索を閉じる" aria-label="検索を閉じる">
-                            <span class="material-symbols-outlined">close</span>
                         </button>
                     </div>
                 </div>
                 <div id="chat-replace-preview-panel" class="chat-replace-preview-panel" hidden>
                     <div class="chat-replace-preview-header">
-                        <span class="chat-replace-preview-title">置換プレビュー</span>
+                        <span class="chat-replace-preview-title">置換</span>
                         <button id="chat-replace-back-btn" class="chat-replace-back-btn" type="button">検索に戻る</button>
                     </div>
                     <div class="chat-replace-preview-controls">
@@ -169,11 +171,19 @@
                         </select>
                     </div>
                     <div id="chat-replace-scope" class="chat-replace-scope" hidden></div>
-                    <div id="chat-replace-summary" class="chat-replace-summary" role="status" aria-live="polite">0件</div>
-                    <div class="chat-replace-actions">
-                        <button id="chat-replace-execute-btn" class="chat-replace-execute-btn" type="button" disabled>プレビュー分を置換</button>
+                    <div class="chat-replace-footer">
+                        <div id="chat-replace-summary" class="chat-replace-summary" role="status" aria-live="polite">0件</div>
+                        <div class="chat-replace-actions">
+                            <button id="chat-replace-execute-btn" class="chat-replace-execute-btn" type="button" disabled>置換</button>
+                            <button id="chat-replace-undo-btn" class="dialog-secondary-btn" type="button" title="置換を元に戻す" aria-label="置換を元に戻す" disabled>
+                                <span class="material-symbols-outlined" aria-hidden="true">undo</span>
+                            </button>
+                            <button id="chat-replace-redo-btn" class="dialog-secondary-btn" type="button" title="置換をやり直す" aria-label="置換をやり直す" disabled>
+                                <span class="material-symbols-outlined" aria-hidden="true">redo</span>
+                            </button>
+                        </div>
                     </div>
-                    <div id="chat-replace-preview-list" class="chat-replace-preview-list" aria-live="polite"></div>
+                    <div id="chat-replace-preview-list" class="chat-replace-preview-list" role="region" aria-label="置換候補" tabindex="0"></div>
                 </div>
                 <div id="chat-search-status" class="chat-search-status" role="status" aria-live="polite"></div>
             </div>
@@ -212,6 +222,13 @@
 
 
             <footer class="chat-input-area">
+                <div class="composer-attachments" id="composer-attachments" hidden>
+                    <ul id="composer-attachment-list" aria-label="送信待ちの添付ファイル" hidden></ul>
+                    <div class="composer-attachment-feedback">
+                        <span id="composer-attachment-status" role="status"></span>
+                        <button type="button" id="cancel-attachment-processing" hidden>処理を中止</button>
+                    </div>
+                </div>
                 <div class="composer-actions">
                 <div id="chat-model-toolbar" class="chat-model-toolbar" aria-label="チャットの実行設定">
                     <div class="chat-model-controls" role="group" aria-label="モデルとThinking">
@@ -220,13 +237,12 @@
                     <span id="chat-execution-error" class="inline-setting-error" role="alert"></span>
                 </div>
                 <div id="profile-card-header-wrapper" class="profile-card-wrapper">
-                    <div id="profile-card-header" class="profile-card" title="プロファイルを切り替え">
-                        <div id="profile-card-icon-container" class="profile-icon-container"></div>
-                    </div>
-                    <div id="header-profile-menu" class="profile-menu hidden"></div>
+                    <button type="button" id="profile-card-header" class="profile-card" aria-label="プロファイルを切り替え" aria-haspopup="dialog" aria-expanded="false">
+                        <span id="profile-card-icon-container" class="profile-icon-container"></span>
+                    </button>
                 </div>
                 <!-- 添付ファイルボタンを追加 -->
-                <button id="attach-file-btn" title="ファイルを添付">
+                <button type="button" id="attach-file-btn" title="ファイルを添付" aria-label="ファイルを添付">
                     <div class="attach-icon-container">
                         <span class="material-symbols-outlined">attach_file</span>
                     </div>
@@ -234,6 +250,7 @@
                         <span class="attachment-badge"></span>
                     </div>
                 </button>
+                <input type="file" id="file-input" multiple hidden>
                 <button id="send-button" title="送信"><span class="material-symbols-outlined">send</span></button>
                 </div>
                 <textarea id="user-input" placeholder="メッセージを入力..." rows="1" aria-label="メッセージ入力"></textarea>
@@ -391,6 +408,7 @@
                     <div class="hidden" aria-hidden="true">
                         <input type="text" id="basic-api-config-name" maxlength="80" tabindex="-1">
                         <select id="api-provider" tabindex="-1">
+                            <option value="">選択してください</option>
                             <option value="gemini">Gemini</option>
                             <option value="zai">Z.ai</option>
                             <option value="openrouter">OpenRouter</option>
@@ -728,12 +746,11 @@
 </div>
 <div id="settings-panel-profile" class="settings-category-panel" data-settings-panel="profile" aria-label="プロファイル設定" hidden><div class="settings-group" id="profile-management-group">
                     <h3>プロファイル編集</h3><div id="profile-card-header-wrapper-settings" class="profile-card-wrapper">
-                    <div id="profile-card-header-settings" class="profile-card" title="プロファイルを切り替え">
-                        <div id="profile-card-icon-container-settings" class="profile-icon-container"></div>
+                    <button type="button" id="profile-card-header-settings" class="profile-card" aria-label="プロファイルを切り替え" aria-haspopup="dialog" aria-expanded="false">
+                        <span id="profile-card-icon-container-settings" class="profile-icon-container"></span>
                         <span id="profile-card-name-settings" class="profile-card-name"></span>
                         <span class="material-symbols-outlined profile-card-arrow">arrow_drop_down</span>
-                    </div>
-                    <div id="header-profile-menu-settings" class="profile-menu hidden"></div>
+                    </button>
                  </div>
                     <div id="profile-display-card" class="profile-display-card">
                         <div class="profile-display-icon-wrapper">
@@ -1055,7 +1072,7 @@
                     </label>
 <p style="height:10px"></p><label class="checkbox-label">
                        <input type="checkbox" id="swipe-navigation-toggle">
-                       チャット画面から左右スワイプで画面移動
+                       左右スワイプで画面を移動する
                    </label>
 <p style="height:10px"></p><label class="checkbox-label">
                         <input type="checkbox" id="header-auto-hide-toggle">
@@ -1098,9 +1115,11 @@
 </section><section class="settings-group" id="app-info-settings"><h2>アプリ情報</h2>
 <p style="text-align: center; color: var(--text-secondary); font-size: 12px; margin-bottom: 10px;">
                          バージョン: <span id="app-version"></span>
-                     </p><button id="release-notes-btn" class="secondary-action-button" type="button">リリースノート</button><p style="text-align: center; color: var(--text-secondary); font-size: 12px; margin-top: -5px; margin-bottom: 10px;">
-                        <a href="https://github.com/fxyt2f/ChatAI-PWA" target="_blank" rel="noopener noreferrer" style="color: var(--text-link); text-decoration: none;">GitHub Repository</a>
-                    </p><button id="update-app-btn">アプリを更新 (キャッシュクリア)</button><p style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px; text-align:center;">
+                     </p>
+                     <button id="release-notes-btn" class="secondary-action-button" type="button">リリースノート</button>
+                     <a class="app-info-action" href="https://github.com/fxyt2f/ChatAI-PWA" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+                     <button id="update-app-btn" class="app-info-action" type="button">アプリを更新 (キャッシュクリア)</button>
+                     <p style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px; text-align:center;">
                           サーバー側のhtmlファイルなどはブラウザにキャッシュされるため、<BR>
                          このボタンで明示的にサーバーがから再取得しない限り更新されない。
                      </p>
@@ -1121,31 +1140,33 @@
     </div>
 
     <!-- カスタムダイアログテンプレート -->
-    <dialog id="api-config-dialog" class="custom-dialog api-config-dialog">
-        <form id="api-config-form" class="api-config-form">
+    <dialog id="api-config-dialog" class="custom-dialog api-config-dialog" aria-labelledby="api-config-dialog-title">
+        <form id="api-config-form" class="api-config-form" novalidate>
             <div class="api-config-dialog-header">
                 <h3 id="api-config-dialog-title" class="dialog-title">API設定</h3>
                 <label class="checkbox-label api-config-enabled-row">
                     <input type="checkbox" id="api-config-enabled" checked>
                     有効
                 </label>
+                <button id="close-api-config-btn" class="api-config-icon-button" type="button" aria-label="閉じる">×</button>
             </div>
-            <p class="api-config-dialog-note">
-                API設定は、APIキー・接続先・このAPIで使えるモデル候補を管理します。用途別に使うモデルは、基本設定で選択します。
-            </p>
-            <input type="hidden" id="api-config-id">
 
             <div class="api-config-fields">
-                <label for="api-config-name">表示名</label>
-                <input type="text" id="api-config-name" maxlength="80" required>
+                <p class="api-config-dialog-note">
+                    API設定は、APIキー・接続先・このAPIで使えるモデル候補を管理します。用途別に使うモデルは、基本設定で選択します。
+                </p>
 
                 <label for="api-config-provider">プロバイダ</label>
                 <select id="api-config-provider" required>
+                    <option value="">選択してください</option>
                     <option value="gemini">Gemini</option>
                     <option value="openrouter">OpenRouter</option>
                     <option value="zai">Z.ai</option>
                     <option value="bedrock">Amazon Bedrock</option>
                 </select>
+
+                <label for="api-config-name">表示名</label>
+                <input type="text" id="api-config-name" maxlength="80" required>
 
                 <label for="api-config-api-key">APIキー</label>
                 <input type="password" autocomplete="new-password" id="api-config-api-key" placeholder="APIキーを入力">
@@ -1153,10 +1174,8 @@
                 <label for="api-config-base-url">Base URL</label>
                 <input type="text" id="api-config-base-url" placeholder="例: https://openrouter.ai/api/v1">
 
-                <input type="hidden" id="api-config-default-model">
-
                 <label for="api-config-additional-models">モデル候補</label>
-                <textarea id="api-config-additional-models" rows="5" placeholder="例: gemini-2.5-pro&#10;gemini-2.5-flash"></textarea>
+                <textarea id="api-config-additional-models" rows="5" placeholder="APIで利用できるモデルIDを1行ずつ入力"></textarea>
                 <p class="api-config-inline-note">
                     このAPI設定で選択肢に出すモデル名を登録します。基本モデル・思考翻訳モデル・要約モデル・校正モデルの候補として表示されます。
                 </p>
@@ -1166,10 +1185,7 @@
 
             <div class="dialog-actions">
                 <button id="delete-api-config-dialog-btn" type="button" class="dialog-delete-btn">削除</button>
-                <div class="dialog-actions-main">
-                    <button id="cancel-api-config-btn" type="button" class="dialog-cancel-btn">キャンセル</button>
-                    <button id="save-api-config-btn" type="submit" class="dialog-ok-btn">保存</button>
-                </div>
+                <span id="api-config-save-status" class="settings-inline-status" role="status"></span>
             </div>
         </form>
     </dialog>
@@ -1179,6 +1195,13 @@
         <div class="dialog-actions">
             <button value="ok" class="dialog-ok-btn">OK</button>
         </div>
+    </dialog>
+
+    <dialog id="releaseNotesDialog" class="custom-dialog release-notes-dialog" aria-label="リリースノート">
+        <div class="dialog-message release-notes-content" tabindex="0" autofocus></div>
+        <form method="dialog" class="dialog-actions">
+            <button value="ok" class="dialog-ok-btn">OK</button>
+        </form>
     </dialog>
 
     <dialog id="confirmDialog" class="custom-dialog">
@@ -1195,24 +1218,6 @@
         <div class="dialog-actions">
             <button value="cancel" class="dialog-cancel-btn">キャンセル</button>
             <button value="ok" class="dialog-ok-btn">OK</button>
-        </div>
-    </dialog>
-
-    <!-- ファイルアップロードダイアログ -->
-    <dialog id="fileUploadDialog" class="custom-dialog">
-        <div class="dialog-content">
-            <div class="file-upload-area">
-
-                 <label for="file-input" id="select-files-btn" class="dialog-button">ファイルを選択</label>
-            </div>
-            <ul id="selected-files-list">
-                <!-- 選択されたファイルがここに表示される -->
-            </ul>
-            <p id="file-upload-notice">画像、テキスト、PDF、動画、音声などを添付可能</p>
-        </div>
-        <div class="dialog-actions">
-            <button id="cancel-attach-btn" value="cancel" class="dialog-cancel-btn">キャンセル</button>
-            <button id="confirm-attach-btn" value="ok" class="dialog-ok-btn" disabled>添付して閉じる</button>
         </div>
     </dialog>
 

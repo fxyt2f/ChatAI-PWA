@@ -26,6 +26,7 @@ window.openIntegrationPeerV136=async name=>{
     const ui={applyOverlayOpacity(){},applyDarkMode(){},applyThemeColorSettings(){},applySettingsToUI(){},applyBackgroundImage(){}};
     const app=SettingsV136.createMethods({state,dbUtils:db,uiUtils:ui,defaults,localUiKeys:[]});
     Object.assign(app,{normalizeLocalUiSettings:v=>v,findModelRefForLegacyModel:()=>({apiConfigId:'gem',modelName:'gemini-2.5-flash'}),
+        resolveLegacyInitialModelRef:()=>null, // These storage fixtures have no saved model selection.
         createLegacyApiConfig:(provider,s)=>({id:provider,provider,apiKey:s.apiKey}),getProviderDisplayName:p=>p,markAsDirtyAndSchedulePush(){}});
     const seed=async()=>{
         await write(['settings','profiles','chats','image_store'],tx=>{

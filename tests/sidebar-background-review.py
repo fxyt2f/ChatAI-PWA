@@ -55,8 +55,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-sidebar-',ignore_cleanup_errors=
                 for kind in (args.kinds or ['panel','search','replace','system','format','summary','character','debug','memory','models','profile']):
                     m=ev(f'prepareSidebarReviewV136({json.dumps(kind)},{str(opened).lower()})');name=f'{width}-{"open" if opened else "closed"}-{kind}';shot(name,m)
                     if args.phase=='after':
-                        r=m['panel'];w=m['workspace'];blocked_model=kind=='models' and opened and 900<=width<1200
-                        check((r is None) if blocked_model else (r is not None),name+' panel visibility/inert')
+                        r=m['panel'];w=m['workspace'];blocked_picker=kind in ('models','profile') and opened and 900<=width<1200
+                        check((r is None) if blocked_picker else (r is not None),name+' panel visibility/inert')
                         if r:
                             check(r['left']>=w['left']-1 and r['right']<=w['right']+1,name+' outside workspace')
                             check(r['top']>=-1 and r['bottom']<=901,name+' outside viewport')

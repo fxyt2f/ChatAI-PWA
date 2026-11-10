@@ -45,7 +45,7 @@ window.runSidebarBackgroundRegressionsV136 = async () => {
     ui.showCustomAlert=oldAlert;
     const memory=st.isMemoryEnabledForChat;await app.toggleChatMemory();check(st.isMemoryEnabledForChat!==memory,'chat memory toggle');
     check((await db.getChat(st.currentChatId)).isMemoryEnabledForChat===st.isMemoryEnabledForChat,'chat memory toggle persists');
-    st.currentMessages=[{role:'model',content:Array.from({length:100},(_,i)=>`${i+1}行目の長い文章 Alpha`).join('\n'),timestamp:3}];
+    st.currentMessages=[{role:'model',content:Array.from({length:100},(_,i)=>`${i+1}行目の長い文章 Alpha`).join('\n\n'),timestamp:3}];
     ui.renderChatMessages();await frame();ui.applyMessageCollapseToAll();ui.updateCollapseAllMessagesButtonState();
     const collapsible=ui.getCollapsibleMessageElements();check(collapsible.length>0,'long message is collapsible');
     $('collapse-all-messages-btn').click();check(collapsible.every(n=>n.classList.contains('tm-collapsed')),'floating collapse all button');
@@ -54,10 +54,13 @@ window.runSidebarBackgroundRegressionsV136 = async () => {
     app.scrollToBottom(true);await new Promise(r=>setTimeout(r,400));
     const main=document.querySelector('#chat-workspace .main-content');check(Math.abs(main.scrollHeight-main.clientHeight-main.scrollTop)<2,'scroll to bottom');
     check(!$('scroll-to-top-btn')&&typeof app.scrollToTop==='undefined','scroll-to-top control retired');app.scrollToBottom=bottomStub;
+    $('collapse-all-messages-btn').click();
     await ui.openChatSearch();$('chat-search-query').value='Alpha';ui.runChatSearch({scrollToFirst:false});await frame();
+    check(st.chatSearch.matches.length===100&&collapsible.every(n=>!n.classList.contains('tm-collapsed')),'search expands a folded message and finds all matches');
     st.chatSearch.currentIndex=st.chatSearch.matches.length-1;ui.updateCurrentChatSearchHighlight(true);await frame();
     const lastMatch=st.chatSearch.matches[st.chatSearch.currentIndex]?.range.getBoundingClientRect();
     check(lastMatch?.top>=$('chat-search-dialog').getBoundingClientRect().bottom&&lastMatch?.bottom<document.querySelector('#chat-workspace footer').getBoundingClientRect().top,'search scroll clears panel and composer');ui.closeChatSearch({restoreFocus:false});
+    check(collapsible.every(n=>n.classList.contains('tm-collapsed')),'closing search restores the folded state');
     for(const mode of ['always','on-click','hidden']){
         st.settings.floatingPanelBehavior=mode;app.applyFloatingPanelBehavior();
         check($('floating-action-panel').classList.contains('visible')===(mode==='always'),'floating visibility '+mode);

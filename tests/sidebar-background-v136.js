@@ -10,15 +10,14 @@
         window.settingsUiV136.closePopover(false);
         if(st.isEditingSystemPrompt)await app.closeSystemPromptDialog({skipSave:true});
         ui.closeChatSearch({restoreFocus:false});
-        $('header-profile-menu').classList.add('hidden');
         st.isSending=false; st.editingMessageIndex=null; st.settings.enableWideMode=true;
         st.settings.darkMode=dark; document.body.classList.toggle('dark-mode',dark);
         document.body.classList.add('wide-mode-enabled');
         document.body.classList.remove('header-auto-hide','header-force-show');
         await ui.showScreen('chat',true);
         st.currentMessages=[{role:'user',content:'検索テスト Alpha alpha\n「こんにちは」\n次の文章です。',timestamp:1},{role:'model',content:'検索テスト Alpha\nキャラクターと物語を続けます。',timestamp:2}];
-        st.currentChatId=860001; st.currentSystemPrompt='物語の進行を手伝ってください。';
-        await window.dbUtils.saveChat();
+        st.currentChatId=null; st.currentSystemPrompt='物語の進行を手伝ってください。';
+        await window.dbUtils.saveChat('検索テスト');
         ui.renderChatMessages();
         st.currentPersistentMemory={character_memory_花:{name:'花',description:'旅の仲間',personality:'穏やか'}};
         ui.updateChatSidebarResponsiveState();
@@ -36,12 +35,12 @@
         else if(kind==='debug') app.openLogDialog();
         else if(kind==='memory') await app.openMemoryManagementDialog();
         else if(kind==='models') window.settingsUiV136.openModels($('chat-model-button'));
-        else if(kind==='profile') {ui.updateProfileSwitcherUI();ui.toggleProfileMenu('header');}
+        else if(kind==='profile') window.settingsUiV136.openProfiles($('profile-card-header'));
         await document.fonts.ready; await frame();
         return window.measureSidebarReviewV136(kind);
     };
     window.measureSidebarReviewV136 = kind => {
-        const node=$(panels[kind]||({panel:'floating-action-panel',search:'chat-search-dialog',replace:'chat-search-dialog',models:'execution-popover',profile:'header-profile-menu'}[kind]));
+        const node=$(panels[kind]||({panel:'floating-action-panel',search:'chat-search-dialog',replace:'chat-search-dialog',models:'execution-popover',profile:'execution-popover'}[kind]));
         const workspace=$('chat-workspace'), r=rect(workspace), p=node?rect(node):null;
         return {kind,width:innerWidth,workspace:r,panel:p,inert:workspace.inert,sidebarOpen:$('chat-screen').classList.contains('chat-sidebar-open'),mode:ui.getChatSidebarMode(),
             overflow:node?node.scrollWidth>node.clientWidth+1:false,

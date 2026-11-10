@@ -73,7 +73,7 @@ def run(client, root):
     # Every native dialog category, plus the custom image overlay.
     for touch, width in [(False, 1280), (True, 390)]:
         metrics(width, 844, touch); ev('dialogUiV1361.prepare(false,false)')
-        for kind in ['confirm', 'prompt', 'alert', 'api', 'file', 'conflict', 'memory', 'character', 'assets']:
+        for kind in ['confirm', 'prompt', 'alert', 'api', 'conflict', 'memory', 'character', 'assets']:
             ev(f'dialogUiV1361.open({json.dumps(kind)})')
             click(ev('dialogUiV1361.inside()'), touch); ev('dialogUiV1361.staysOpen()')
             click({'x': 3, 'y': 3}, touch); ev('dialogUiV1361.closed()')
