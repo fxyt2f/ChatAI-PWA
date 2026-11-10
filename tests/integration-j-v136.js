@@ -139,7 +139,10 @@ window.runIntegrationJRegressionsV136=async()=>{
             SettingsV136.historyTaskV136=async(...args)=>{if(once&&args[0]==='wire'){once=false;enter();await gate}return task(...args)};
             try{window.testElements.userInput.value='new prompt';const sending=app.handleSend();await required(entered,sending,'actual handleSend digest '+action);
                 const navigation=action==='chat'?app.loadChat(targetId):(app.abortRequest(),Promise.resolve());release();await Promise.all([sending,navigation]);
-                eq(bodies.length,0,'request escaped after cancellation');eq((await db.getChat(targetId)).messages.map(m=>m.content),['destination']);assert((await db.getChat(originalId)).messages.some(m=>m.content==='new prompt'));
+                eq(bodies.length,action==='abort'?0:1,'incorrect dispatch after the digest');eq((await db.getChat(targetId)).messages.map(m=>m.content),['destination']);
+                const source=(await db.getChat(originalId)).messages;
+                assert(source.some(m=>m.content==='new prompt'));
+                eq(source.some(m=>m.role==='model'),action==='chat','response must be saved in the source');
             }finally{release();SettingsV136.historyTaskV136=task;st.isSending=false}
         });
         for(const action of ['abort','chat','profile'])await run('J04 ownership checked after asynchronous digest '+action,async()=>{

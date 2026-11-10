@@ -18,18 +18,18 @@ const profile=html.slice(html.indexOf('id="settings-panel-profile"'),html.indexO
 assert(profile.includes('id="profile-card-header-wrapper-settings"'));
 assert(!html.slice(html.indexOf('id="settings-screen"'),html.indexOf('id="settings-panel-profile"')).includes('id="profile-card-header-wrapper-settings"'));
 console.log('PASS settings profile switcher belongs only to the profile category');
-assert(read('app.js').includes('const APP_VERSION = "1.36.5";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.36.5";'));
-assert(read('app.js').includes('const DB_VERSION = 13;'));
+assert(read('app.js').includes('const APP_VERSION = "1.36.6";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.36.6";'));
+assert(read('app.js').includes('const DB_VERSION = 14;'));
 const worker=read('sw.js');
-assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.36.5';"));
+assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.36.6';"));
 const shell=[...worker.split('const urlsToCache = [')[1].split('];')[0].matchAll(/'([^']+)'/g)].map(m=>m[1]);
 assert.equal(shell.length,16);assert.equal(new Set(shell).size,16);
 for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js','streaming-v136.js','dropbox.js','function-calling.js']){
-    assert(html.includes(`./${asset}?v=1.36.5`),asset);
-    assert(shell.includes(`./${asset}?v=1.36.5`),asset);
+    assert(html.includes(`./${asset}?v=1.36.6`),asset);
+    assert(shell.includes(`./${asset}?v=1.36.6`),asset);
 }
 assert(html.indexOf('./settings-v136.js?v=')<html.indexOf('./streaming-v136.js?v='));
 assert(html.indexOf('./streaming-v136.js?v=')<html.indexOf('./app.js?v='));
-assert(read('CHANGELOG.md').includes('## v1.36.5'));
-console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.36.5');
+assert(read('CHANGELOG.md').includes('## v1.36.6'));
+console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.36.6');
 console.log('4 UI/static tests passed');

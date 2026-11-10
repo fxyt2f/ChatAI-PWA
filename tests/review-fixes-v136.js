@@ -55,6 +55,8 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
             await test('F1 a stale stream cannot overwrite a peer save, restore or reused ID', async () => {
                 const {peer,peerWindow,close}=await openPeer();
                 try {
+                    const otherId=await seed([['user','unrelated destination']]);
+                    const otherBefore=await db.getChat(otherId);
                     for (const action of ['save','restore','reuse']) {
                         const id=await seed([['user','original']]);
                         const stream=channel();
@@ -64,7 +66,10 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                         const saved=await db.getChat(id);
                         const replacement=messages([['user','newer from B: '+action]]);
                         if (action==='save') {
+                            assert((await app.loadChat(otherId)).ok);
                             assert((await peer.app.loadChat(id)).ok);
+                            assert(!peer.state.isSending && !peer.state.sendJobsV136.size);
+                            eq(contents({messages:peer.state.currentMessages}),['original','request in A']);
                             peer.state.currentMessages.splice(0,peer.state.currentMessages.length,...replacement);
                             await peer.db.saveChat();
                         } else if (action==='restore') {
@@ -83,6 +88,7 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                         if(action!=='save') assert(saved.recordGenerationId!==newer.recordGenerationId);
                         stream.frame([{text:'stale response'}],'STOP');stream.close();await pending;
                         eq(contents(await db.getChat(id)),contents(newer));
+                        if (action==='save') eq(await db.getChat(otherId),otherBefore);
                         assert(!st.isSending && st.abortController===null);
                     }
                 } finally {close()}
