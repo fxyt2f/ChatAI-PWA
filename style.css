@@ -6326,6 +6326,7 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
 /* v1.36 settings: shared controls, independent scroll pane, mobile category navigation. */
 #settings-screen .settings-layout { display:grid; grid-template-columns:240px minmax(0,1fr); flex:1; min-height:0; overflow:hidden; position:relative; z-index:1; }
 #settings-screen .settings-category-nav { padding:24px 12px; border-right:1px solid var(--border-primary); background:var(--bg-primary); overflow-y:auto; }
+.swipe-navigation-enabled #settings-screen .settings-category-nav { touch-action:pan-y pinch-zoom; }
 .settings-category-nav button { display:flex; align-items:center; gap:12px; width:100%; min-height:48px; padding:12px; margin:0 0 6px; border:0; border-radius:12px; background:transparent; color:var(--text-secondary); text-align:left; white-space:nowrap; font:inherit; font-size:14px; cursor:pointer; }
 .settings-category-nav button:hover { background:var(--bg-tertiary); }
 .settings-category-nav button[aria-current] { background:var(--sidebar-selected-bg); color:var(--text-primary); font-weight:600; }
@@ -6569,7 +6570,7 @@ body.dark-mode .execution-popover { color-scheme:dark; }
 .thinking-model-switch .thinking-model-name::after { content:' ›'; }
 .thinking-level-name { font-size:14px; font-weight:600; line-height:1.4; color:var(--execution-accent); }
 .thinking-model-name { display:block; max-width:100%; font-size:11px; line-height:1.4; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.thinking-dots { display:flex; justify-content:space-between; min-width:0; position:relative; margin-top:2px; isolation:isolate; }
+.thinking-dots { display:flex; justify-content:space-between; min-width:0; position:relative; margin-top:2px; isolation:isolate; touch-action:pan-y pinch-zoom; }
 .thinking-dots::before { content:''; position:absolute; z-index:-1; left:0; right:0; top:10px; height:24px; border-radius:999px; background:linear-gradient(to right,var(--execution-accent) var(--thinking-progress),var(--bg-input) var(--thinking-progress)); }
 .execution-popover .thinking-dot { display:flex; align-items:center; justify-content:center; position:relative; flex:0 0 40px; width:40px; min-width:40px; height:44px; min-height:44px; margin:0; border:0; border-radius:999px; padding:0; background:transparent; overflow:visible; cursor:pointer; }
 .execution-popover .thinking-dot:only-child { margin-inline:auto; }

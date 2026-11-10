@@ -196,8 +196,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.4";
-const APP_CACHE_VERSION = "v1.36.4";
+const APP_VERSION = "1.36.5";
+const APP_CACHE_VERSION = "v1.36.5";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -486,6 +486,12 @@ const VERSION_HISTORY = {
     ]
 };
 const SWIPE_THRESHOLD = 50; // スワイプ判定の閾値 (px)
+const SWIPE_TAP_TARGETS = 'input, button, label, a[href], summary, [role="button"], [role="link"], [role="switch"]';
+const SWIPE_FOCUS_CONTROLS = `
+    input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"]),
+    textarea, select, [contenteditable]:not([contenteditable="false"]),
+    [role="textbox"], [role="combobox"], [role="spinbutton"]
+`;
 const SWIPE_DIRECTION_THRESHOLD = 10;
 const SWIPE_HORIZONTAL_RATIO = 1.5;
 const ZOOM_THRESHOLD = 1.01; // ズーム状態と判定するスケールの閾値 (誤差考慮)
@@ -2144,11 +2150,11 @@ const dbUtils = {
                             if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
                             if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
                             if (savedSuccessfulExecution) state.lastSuccessfulExecution = savedSuccessfulExecution;
-                            if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
                         } catch (error) {
                             // A committed write must resolve even if a view/storage side effect fails.
                             console.error('チャット保存後の表示更新に失敗しました:', error);
                         }
+                        void chatListChangeController.notify({ type: 'save', chatId: savedChatId });
                         if (titleGenerationToStart) void appLogic.generateChatTitleV136(savedChatId, titleGenerationToStart);
                         if (promptSave) promptSave.result = { revision: 1 };
                         resolve(savedChatId);
@@ -2497,6 +2503,7 @@ const dbUtils = {
             transaction.oncomplete = () => {
                 console.log("IndexedDBの全データ削除完了");
                 for (const controller of state.chatTitleGenerations.values()) controller.abort();
+                void chatListChangeController.notify({ type: 'restore' });
                 resolve();
             };
             transaction.onerror = (event) => {
@@ -2893,6 +2900,7 @@ const dbUtils = {
             });
             console.log("[DB Import V2] メインデータベースの更新が正常に完了しました。");
             for (const controller of state.chatTitleGenerations.values()) controller.abort();
+            void chatListChangeController.notify({ type: 'restore' });
 
             // 処理結果を返す
             return { removedAssetInfo: missingAssetInfo };
@@ -2927,12 +2935,21 @@ const chatListChangeController = {
         return () => this.subscribers.delete(listener);
     },
 
-    async notify(detail = {}) {
+    async notify(detail = {}, { broadcast = true } = {}) {
         const normalizedDetail = {
             type: typeof detail.type === 'string' ? detail.type : 'update',
             chatId: detail.chatId ?? null,
             ...detail
         };
+        if (broadcast && broadcastChannel) {
+            try {
+                broadcastChannel.postMessage({
+                    type: 'CHAT_LIST_CHANGED', sourceTabId: state.tabId, database: state.db?.name
+                });
+            } catch (error) {
+                console.warn('[ChatListChange] 別タブへの通知に失敗しました:', error);
+            }
+        }
         const results = await Promise.allSettled(
             [...this.subscribers].map(listener => Promise.resolve().then(() => listener(normalizedDetail)))
         );
@@ -2951,8 +2968,12 @@ const historyUiState = {
     pinFilter: 'all',
     scrollTop: 0,
     renderGeneration: 0,
+    dataRevision: 0,
+    loadedRevision: -1,
+    pendingLoad: null,
+    renderedView: null,
+    renderedChatId: null,
     cachedChats: [],
-    hasLoaded: false,
     searchTimer: null,
     menuContext: null,
     menuActionPending: false,
@@ -5298,7 +5319,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return historyUiState.scrollTop;
     },
 
-    setHistoryStatePanel(type) {
+    setHistoryStatePanel(type, { preserveList = false } = {}) {
         const states = {
             loading: { icon: 'progress_activity', title: '履歴を読み込んでいます', description: '', action: '', role: 'status' },
             empty: { icon: 'forum', title: 'まだチャット履歴がありません', description: 'チャットを開始すると、ここに表示されます', action: '', role: 'status' },
@@ -5309,7 +5330,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         };
         const config = states[type];
         if (!config) return;
-        elements.historyList.classList.add('hidden');
+        elements.historyList.classList.toggle('hidden', !preserveList);
         elements.historyStatePanel.classList.remove('hidden');
         elements.historyStatePanel.setAttribute('role', config.role);
         elements.historyStatePanel.dataset.state = type;
@@ -5532,9 +5553,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
-    openChatSidebar() {
+    openChatSidebar({ preserveSwipe = false } = {}) {
         if (chatSidebarUiState.mode === 'disabled') return false;
-        appLogic.resetSwipeState();
+        if (!preserveSwipe) appLogic.resetSwipeState();
         chatSidebarUiState.isOpen = true;
         if (chatSidebarUiState.mode === 'permanent') {
             void appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', true)
@@ -6055,6 +6076,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         historyUiState.deleteFallbackChatId = null;
         this.applyHistoryDeleteModeUi({ announce: announce ? '履歴削除モードを終了しました' : '' });
         this.renderHistoryDetail();
+        if (restoreSelection) void this.renderHistoryList({ refresh: false });
     },
 
     focusHistorySelection() {
@@ -6077,12 +6099,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         this.reconcileHistorySelection(models);
     },
 
-    createHistoryItemElement(model) {
+    createHistoryItemElement(model, deleteMode) {
         const item = elements.historyItemTemplate.content.firstElementChild.cloneNode(true);
         item.dataset.chatId = model.id;
         item.classList.toggle('is-current', model.isCurrent);
         if (model.isCurrent) item.setAttribute('aria-current', 'page');
-        item.classList.toggle('is-delete-mode', historyUiState.deleteMode);
+        item.classList.toggle('is-delete-mode', deleteMode);
         const isSelected = this.isHistoryDetailVisible() && String(historyUiState.selectedChatId) === String(model.id);
         item.classList.toggle('is-selected', isSelected);
         if (this.isHistoryDetailVisible()) item.setAttribute('aria-selected', String(isSelected));
@@ -6101,14 +6123,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         titleElement.title = model.title;
         const deleteControl = item.querySelector('.history-delete-checkbox-control');
         const deleteCheckbox = item.querySelector('.history-delete-checkbox');
-        deleteControl.classList.toggle('hidden', !historyUiState.deleteMode);
+        deleteControl.classList.toggle('hidden', !deleteMode);
         deleteCheckbox.checked = historyUiState.deleteSelection.has(String(model.id));
         deleteCheckbox.dataset.chatId = model.id;
         deleteCheckbox.setAttribute('aria-label', `「${model.title}」を削除対象に選択`);
         item.querySelector('.updated-date').textContent = `更新 ${this.formatDate(model.updatedAt) || '日時不明'}`;
         item.querySelector('.created-date').textContent = `作成 ${this.formatDate(model.createdAt) || '日時不明'}`;
         const openButton = item.querySelector('.history-item-open');
-        openButton.setAttribute('aria-label', historyUiState.deleteMode
+        openButton.setAttribute('aria-label', deleteMode
             ? `「${model.title}」の削除選択を切り替え`
             : `「${model.title}」を開く`);
         if (model.snippet) {
@@ -6119,14 +6141,28 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         const menuButton = item.querySelector('.history-item-menu-button');
         menuButton.setAttribute('aria-label', `「${model.title}」の操作メニュー`);
-        menuButton.classList.toggle('hidden', historyUiState.deleteMode);
+        menuButton.classList.toggle('hidden', deleteMode);
         item.querySelectorAll('[data-history-action]').forEach(button => {
             button.dataset.chatId = model.id;
         });
         return item;
     },
 
-    async renderHistoryDisplayModels(generation, { restoreScrollTop = 0 } = {}) {
+    syncHistoryCurrentChat() {
+        const id = state.currentChatId;
+        if (id === historyUiState.renderedChatId) return;
+        const previous = elements.historyList.querySelector('.history-item.is-current');
+        previous?.classList.remove('is-current');
+        previous?.removeAttribute('aria-current');
+        if (id != null) {
+            const current = elements.historyList.querySelector(`.history-item[data-chat-id="${CSS.escape(String(id))}"]`);
+            current?.classList.add('is-current');
+            current?.setAttribute('aria-current', 'page');
+        }
+        historyUiState.renderedChatId = id;
+    },
+
+    async renderHistoryDisplayModels(generation, { preserveScroll }) {
         if (!elements.historyScreen.classList.contains('active')) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(historyUiState.query);
@@ -6139,32 +6175,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             filterChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
             sortOrder
         );
-        const deleteTargetIds = new Set(historyUiState.deleteTargetIds.map(String));
-        const models = historyUiState.deleteMode
-            ? sortedModels.filter(model => deleteTargetIds.has(String(model.id)))
+        const { deleteMode, deleteTargetIds } = historyUiState;
+        const targetIds = new Set(deleteTargetIds.map(String));
+        const models = deleteMode
+            ? sortedModels.filter(model => targetIds.has(String(model.id)))
             : sortedModels;
-        this.reconcileHistorySelection(models, { updateRows: false });
-
-        elements.historyList.replaceChildren();
-        this.clearHistoryStatePanel();
-        if (elements.historyDeleteModeBtn) elements.historyDeleteModeBtn.disabled = models.length === 0;
-
-        if (historyUiState.cachedChats.length === 0) {
-            this.setHistoryDetailEmpty();
-            elements.historyStatus.textContent = '';
-            this.setHistoryStatePanel('empty');
-            return;
-        }
-        if (models.length === 0) {
-            this.setHistoryDetailEmpty();
-            elements.historyStatus.textContent = query ? '検索結果 0件' : '';
-            this.setHistoryStatePanel(pinFilter === 'pinned'
-                ? query ? 'pinnedNoResults' : 'pinnedEmpty'
-                : 'noResults');
-            return;
-        }
-
-        elements.historyStatus.textContent = query ? `検索結果 ${models.length}件` : `${models.length}件のチャット`;
+        const currentChatId = state.currentChatId;
+        const rows = document.createDocumentFragment();
         const groupLabels = {
             today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
         };
@@ -6196,41 +6213,59 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             list.className = 'history-group-list';
             list.setAttribute('role', this.isHistoryDetailVisible() ? 'listbox' : 'list');
             groupItem.append(heading, list);
-            elements.historyList.appendChild(groupItem);
+            rows.appendChild(groupItem);
             groups.set(key, { list, models: groupModels });
         });
 
         const descriptors = [];
         groups.forEach((group, groupKey) => group.models.forEach(model => descriptors.push({ groupKey, model })));
-        const scrollContainer = this.getHistoryScrollContainer();
         for (let index = 0; index < descriptors.length; index += HISTORY_RENDER_CHUNK_SIZE) {
             if (generation !== historyUiState.renderGeneration) return;
             const fragments = new Map();
             descriptors.slice(index, index + HISTORY_RENDER_CHUNK_SIZE).forEach(({ groupKey, model }) => {
                 if (!fragments.has(groupKey)) fragments.set(groupKey, document.createDocumentFragment());
-                fragments.get(groupKey).appendChild(this.createHistoryItemElement(model));
+                fragments.get(groupKey).appendChild(this.createHistoryItemElement(model, deleteMode));
             });
             fragments.forEach((fragment, groupKey) => groups.get(groupKey).list.appendChild(fragment));
-            if (restoreScrollTop > 0 && scrollContainer) {
-                scrollContainer.scrollTop = Math.min(restoreScrollTop, Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight));
-            }
             if (index + HISTORY_RENDER_CHUNK_SIZE < descriptors.length) {
                 await new Promise(resolve => requestAnimationFrame(resolve));
                 if (!elements.historyScreen.classList.contains('active')) return;
             }
         }
-        if (generation === historyUiState.renderGeneration && restoreScrollTop > 0 && scrollContainer) {
-            scrollContainer.scrollTop = Math.min(restoreScrollTop, Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight));
+        // Keep the previous list and its records together until the new rows are ready.
+        if (deleteTargetIds !== historyUiState.deleteTargetIds) {
+            return this.renderHistoryList({ refresh: false, preserveScroll });
         }
-        if (generation === historyUiState.renderGeneration && historyUiState.deleteMode) {
-            this.applyHistoryDeleteModeUi();
+        const scrollTop = preserveScroll ? historyUiState.scrollTop : 0;
+        this.closeHistoryItemMenu();
+        this.rebuildHistoryRecordMap();
+        elements.historyList.replaceChildren(rows);
+        historyUiState.renderedChatId = currentChatId;
+        this.syncHistoryCurrentChat();
+        this.clearHistoryStatePanel();
+        this.reconcileHistorySelection(models);
+        if (elements.historyDeleteModeBtn) elements.historyDeleteModeBtn.disabled = models.length === 0;
+        if (historyUiState.cachedChats.length === 0) {
+            elements.historyStatus.textContent = '';
+            this.setHistoryStatePanel('empty');
+        } else if (models.length === 0) {
+            elements.historyStatus.textContent = query ? '検索結果 0件' : '';
+            this.setHistoryStatePanel(pinFilter === 'pinned'
+                ? query ? 'pinnedNoResults' : 'pinnedEmpty'
+                : 'noResults');
+        } else {
+            elements.historyStatus.textContent = query ? `検索結果 ${models.length}件` : `${models.length}件のチャット`;
+            if (historyUiState.deleteMode) this.applyHistoryDeleteModeUi();
         }
+        const container = this.getHistoryScrollContainer();
+        container.scrollTop = scrollTop;
+        historyUiState.scrollTop = container.scrollTop;
     },
 
     async renderHistoryList({ refresh = true, preserveScroll = true, resetScroll = false } = {}) {
-        this.closeHistoryItemMenu();
+        if (!elements.historyScreen.classList.contains('active')) return;
         const generation = ++historyUiState.renderGeneration;
-        const restoreScrollTop = resetScroll ? 0 : preserveScroll ? historyUiState.scrollTop : 0;
+        if (refresh) historyUiState.dataRevision++;
         historyUiState.sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         historyUiState.pinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(state.localUiSettings.historyPinFilter)
             ? state.localUiSettings.historyPinFilter
@@ -6242,31 +6277,45 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === historyUiState.pinFilter));
             button.disabled = historyUiState.deleteMode;
         });
-        elements.historyTitle.textContent = '履歴';
-
         try {
-            if (refresh || !historyUiState.hasLoaded) {
-                elements.historyStatus.textContent = '';
-                elements.historyList.replaceChildren();
-                this.setHistoryStatePanel('loading');
-                const chats = await dbUtils.getAllChats('updatedAt');
+            if (historyUiState.loadedRevision < 0) this.setHistoryStatePanel('loading');
+            while (historyUiState.loadedRevision !== historyUiState.dataRevision) {
+                const pending = historyUiState.pendingLoad ||= {
+                    revision: historyUiState.dataRevision,
+                    promise: dbUtils.getAllChats('updatedAt').finally(() => { historyUiState.pendingLoad = null; })
+                };
+                let chats;
+                try {
+                    chats = await pending.promise;
+                } catch (error) {
+                    if (generation !== historyUiState.renderGeneration) return;
+                    if (pending.revision !== historyUiState.dataRevision) continue;
+                    throw error;
+                }
                 if (generation !== historyUiState.renderGeneration) return;
+                if (pending.revision !== historyUiState.dataRevision) continue;
                 historyUiState.cachedChats = Array.isArray(chats) ? chats : [];
-                historyUiState.hasLoaded = true;
+                historyUiState.loadedRevision = pending.revision;
             }
-            this.rebuildHistoryRecordMap();
-            await this.renderHistoryDisplayModels(generation, { restoreScrollTop });
-            if (resetScroll) {
-                historyUiState.scrollTop = 0;
-                const container = this.getHistoryScrollContainer();
-                if (container) container.scrollTop = 0;
+            const view = JSON.stringify([
+                historyUiState.loadedRevision, this.normalizeHistoryText(historyUiState.query),
+                historyUiState.sortOrder, historyUiState.pinFilter, this.isHistoryDetailViewport(),
+                historyUiState.deleteMode, new Date().toDateString()
+            ]);
+            if (view === historyUiState.renderedView) {
+                this.syncHistoryCurrentChat();
+                if (resetScroll) {
+                    historyUiState.scrollTop = 0;
+                    this.getHistoryScrollContainer().scrollTop = 0;
+                }
+                return;
             }
+            await this.renderHistoryDisplayModels(generation, { preserveScroll: preserveScroll && !resetScroll });
+            if (generation === historyUiState.renderGeneration) historyUiState.renderedView = view;
         } catch (error) {
             if (generation !== historyUiState.renderGeneration) return;
             console.error('履歴リストのレンダリングエラー:', error);
-            elements.historyList.replaceChildren();
-            elements.historyStatus.textContent = '';
-            this.setHistoryStatePanel('error');
+            this.setHistoryStatePanel('error', { preserveList: elements.historyList.childElementCount > 0 });
         }
     },
 
@@ -7170,9 +7219,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     // --------------------------------
 
     // 画面を表示 (スワイプアニメーション + inert対応 + 戻るボタン対応)
-    showScreen(screenName, fromPopState = false, swipeDirection = 0) {
+    showScreen(screenName, fromPopState = false, settingsEntry = null) {
         return new Promise((resolve) => {
-          const startTime = performance.now();
           window.settingsUiV136?.closePopover(false);
 
           if (screenName !== 'chat') {
@@ -7181,7 +7229,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (chatSidebarUiState.mode === 'overlay') this.closeChatSidebar({ restoreFocus: false });
           }
 
-          if (screenName !== 'history' && state.currentScreen === 'history') {
+          if (screenName !== 'history' && elements.historyScreen.classList.contains('active')) {
             this.captureHistoryScrollPosition();
             this.closeHistoryItemMenu();
             this.exitHistoryDeleteMode({ announce: true, restoreSelection: false });
@@ -7193,74 +7241,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             resolve();
             return;
           }
-          if (swipeDirection) elements.appContainer.classList.add('swipe-positioning');
-          else appLogic.resetSwipeState();
-      
-          const chat = elements.chatScreen;
-          const historyEl = elements.historyScreen;
-          const settings = elements.settingsScreen;
-          const allScreens = [chat, historyEl, settings];
-      
-          const pos = {
-            chat: {
-              chat: 'translate3d(0,0,0)',
-              history: 'translate3d(-100%,0,0)',
-              settings: 'translate3d(100%,0,0)',
-            },
-            history: {
-              chat: 'translate3d(100%,0,0)',
-              history: 'translate3d(0,0,0)',
-              settings: 'translate3d(200%,0,0)',
-            },
-            settings: {
-              chat: 'translate3d(-100%,0,0)',
-              history: 'translate3d(-200%,0,0)',
-              settings: 'translate3d(0,0,0)',
-            },
-          };
-      
-          if (screenName === 'chat') {
-            chat.style.transform = pos.chat.chat;
-            historyEl.style.transform = pos.chat.history;
-            settings.style.transform = pos.chat.settings;
-          } else if (screenName === 'history') {
-            chat.style.transform = pos.history.chat;
-            historyEl.style.transform = pos.history.history;
-            settings.style.transform = pos.history.settings;
-            this.renderHistoryList();
-          } else if (screenName === 'settings') {
-            if (!fromPopState) window.settingsUiV136?.enter();
+          const screens = [elements.historyScreen, elements.chatScreen, elements.settingsScreen];
+          const previousIndex = screens.findIndex(screen => screen.id === state.currentScreen + '-screen');
+          const nextIndex = screens.findIndex(screen => screen.id === screenName + '-screen');
+          const generation = this.screenNavigationGeneration = (this.screenNavigationGeneration || 0) + 1;
+          const preview = appLogic.swipePreview;
+          const offset = preview && !preview.detail ? appLogic.interruptSwipeSnap() : null;
+          appLogic.resetSwipeState();
 
-            chat.style.transform = pos.settings.chat;
-            historyEl.style.transform = pos.settings.history;
-            settings.style.transform = pos.settings.settings;
+          if (offset !== null) elements.appContainer.classList.add('swipe-positioning');
+          if (screenName === 'settings') {
+            if (settingsEntry) window.settingsUiV136?.restore(settingsEntry);
+            else if (!fromPopState) window.settingsUiV136?.enter();
           }
-      
-          if (swipeDirection) {
-            // Rebase the drag against the destination's layout before starting the snap.
-            const preview = appLogic.swipePreview;
-            if (preview) {
-              appLogic.setSwipeOffset(preview.offset - swipeDirection * preview.width);
-              appLogic.snapSwipePreview(0, true);
-            }
-          }
-          void elements.appContainer.offsetHeight;
-          if (swipeDirection) elements.appContainer.classList.remove('swipe-positioning');
-      
-          let activeScreen = null;
-          if (screenName === 'chat') activeScreen = chat;
-          else if (screenName === 'history') activeScreen = historyEl;
-          else if (screenName === 'settings') activeScreen = settings;
-      
-          if (activeScreen) {
-            activeScreen.classList.add('active');
-            activeScreen.inert = false;
-          }
-          allScreens.forEach((s) => {
-            if (s !== activeScreen) {
-              s.classList.remove('active');
-              s.inert = true;
-            }
+          screens.forEach((screen, index) => {
+            screen.style.transform = `translate3d(${(index - nextIndex) * 100}%,0,0)`;
+            screen.classList.toggle('active', index === nextIndex);
+            screen.inert = index !== nextIndex;
           });
       
           if (!fromPopState) {
@@ -7271,13 +7268,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
               history.pushState(entry, '', `#${screenName}`);
             }
           }
+          state.currentScreen = screenName;
+
+          if (offset !== null) {
+            // Changing the base positions must leave every screen at its sampled position.
+            appLogic.prepareSwipePreview(screenName, preview.width);
+            appLogic.setSwipeOffset(offset + (nextIndex - previousIndex) * preview.width);
+            appLogic.snapSwipePreview(0, true);
+            void elements.appContainer.offsetHeight;
+            elements.appContainer.classList.remove('swipe-positioning');
+          }
+          if (screenName === 'history') void this.renderHistoryList({ refresh: false });
       
           let finished = false;
           const finish = () => {
             if (finished) return;
             finished = true;
-            state.currentScreen = screenName;
-            if (screenName === 'chat') {
+            if (generation === this.screenNavigationGeneration && screenName === 'chat') {
                 this.updateChatSidebarResponsiveState();
                 this.syncChatSidebarCurrentSelection();
                 this.scheduleComposerTextareaResize(true);
@@ -7285,7 +7292,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 appLogic.updateMessageActionButtonStates();
                 void appLogic.updateChangeHistoryControls();
             }
-            const endTime = performance.now();
             resolve();
           };
           requestAnimationFrame(() => requestAnimationFrame(finish));
@@ -10148,6 +10154,12 @@ function updateCurrentSystemPrompt() {
                 if (sourceTabId === state.tabId) {
                     return;
                 }
+                if (type === 'CHAT_LIST_CHANGED') {
+                    if (state.db && event.data.database === state.db.name) {
+                        void chatListChangeController.notify({ type: 'external' }, { broadcast: false });
+                    }
+                    return;
+                }
 
                 console.log(`[BroadcastChannel] 他のタブからメッセージを受信:`, event.data);
 
@@ -12844,7 +12856,7 @@ const appLogic = {
         historyUiState.sortOrder = normalizedValue;
         if (elements.historySortOrderSelect) elements.historySortOrderSelect.value = normalizedValue;
         if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = normalizedValue;
-        if (render && state.currentScreen === 'history' && historyUiState.hasLoaded) {
+        if (render && elements.historyScreen.classList.contains('active')) {
             historyUiState.scrollTop = 0;
             await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
         }
@@ -12857,7 +12869,7 @@ const appLogic = {
         elements.historyPinFilterButtons?.forEach(button => {
             button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === normalizedValue));
         });
-        if (render && state.currentScreen === 'history' && historyUiState.hasLoaded) {
+        if (render && elements.historyScreen.classList.contains('active')) {
             historyUiState.scrollTop = 0;
             await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
         }
@@ -15248,9 +15260,7 @@ const appLogic = {
                 historyUiState.scrollTop = 0;
                 elements.historySearchInput.value = '';
                 elements.historySearchClearBtn.classList.add('hidden');
-                if (historyUiState.hasLoaded) {
-                    uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-                }
+                void uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
             };
 
             elements.historySearchInput.addEventListener('input', () => {
@@ -15260,9 +15270,7 @@ const appLogic = {
                 historyUiState.searchTimer = setTimeout(() => {
                     historyUiState.searchTimer = null;
                     historyUiState.scrollTop = 0;
-                    if (historyUiState.hasLoaded) {
-                        uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-                    }
+                    void uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
                 }, HISTORY_SEARCH_DEBOUNCE_MS);
             });
             elements.historySearchInput.addEventListener('keydown', event => {
@@ -15630,6 +15638,11 @@ const appLogic = {
             });
             window.addEventListener('resize', () => uiUtils.updateChatSidebarResponsiveState(), { passive: true });
             chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(detail => {
+                if (detail.type === 'save') {
+                    chatSidebarUiState.hasLoadedAll = false;
+                    if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
+                    return;
+                }
                 if (chatSidebarUiState.refreshTimer) {
                     clearTimeout(chatSidebarUiState.refreshTimer);
                     chatSidebarUiState.refreshTimer = null;
@@ -16545,21 +16558,21 @@ const appLogic = {
 
     // popstateイベントハンドラ (戻るボタン/ジェスチャー)
     handlePopState(event) {
-    this.resetSwipeState();
     clearTimeout(this.swipeSettingsBackTimer);
     this.swipeSettingsBackTimer = null;
     const entry = event.state?.screen ? event.state : window.settingsUiV136?.getHashEntry();
     const targetScreen = entry?.screen || 'chat';
     if (window.settingsUiV136?.popover?.refreshProfiles) window.settingsUiV136.closePopover(false);
-    if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
-    else window.settingsUiV136?.closePopover(false);
     if (targetScreen === state.currentScreen) {
+      this.resetSwipeState();
+      if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
+      else window.settingsUiV136?.closePopover(false);
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
       return;
     }
     console.log(`popstate event fired: Navigating to screen '${targetScreen}' from history state.`);
     // showScreenを呼び出す (fromPopState = true を渡して履歴操作を抑制)
-    uiUtils.showScreen(targetScreen, true);
+    void uiUtils.showScreen(targetScreen, true, entry);
     },
 
     // ズーム状態を更新
@@ -16578,10 +16591,10 @@ const appLogic = {
     },
 
 
-    async openHistoryFromChat(swipeDirection = 0) {
+    async openHistoryFromChat() {
         if (state.isEditingSystemPrompt && !await this.closeSystemPromptDialog()) return;
         if (chatSidebarUiState.mode !== 'disabled') return uiUtils.openChatSidebar();
-        return uiUtils.showScreen('history', false, swipeDirection);
+        return uiUtils.showScreen('history');
     },
 
     setupSwipeNavigation() {
@@ -16599,17 +16612,19 @@ const appLogic = {
         }, options);
         document.addEventListener('touchstart', event => this.handleTouchStart(event), options);
         document.addEventListener('touchmove', event => this.handleTouchMove(event), options);
-        document.addEventListener('touchend', event => this.handleTouchEnd(event), options);
+        document.addEventListener('touchend', event => this.handleTouchEnd(event), { capture: true, passive: false });
         document.addEventListener('touchcancel', () => this.resetSwipeState(true), options);
     },
 
-    isSwipeNavigationTarget(target, screen) {
+    isSwipeNavigationTarget(target, screen, control) {
         if (target.closest(`
-            input, textarea, select, button, label, a[href], summary, [draggable="true"],
-            [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"],
-            [role="textbox"], [role="menu"], [inert], dialog, [role="dialog"], [popover],
+            input:is([type="range"], [type="color"], [type="file"], [type="date"], [type="datetime-local"],
+                [type="time"], [type="month"], [type="week"]), [role="slider"], [draggable="true"],
+            [role="menu"], [inert], dialog, [role="dialog"], [popover],
             .execution-popover, #chat-search-dialog, #chat-history-sidebar, #chat-sidebar-backdrop
         `)) return false;
+        if (control instanceof HTMLSelectElement && (control.multiple || control.size > 1)) return false;
+        if (screen === elements.chatScreen && !control && !target.closest('.app-header') && target.closest(SWIPE_TAP_TARGETS)) return false;
 
         for (let node = target; node && node !== screen; node = node.parentElement) {
             if (node.scrollWidth <= node.clientWidth + 1) continue;
@@ -16619,6 +16634,11 @@ const appLogic = {
     },
 
     canContinueSwipeNavigation(gesture) {
+        if (gesture) {
+            if (gesture.control?.contains(document.activeElement)) return false;
+            const selection = window.getSelection();
+            if (selection && !selection.isCollapsed && gesture.screen.contains(selection.anchorNode)) return false;
+        }
         return Boolean(gesture && state.settings.enableSwipeNavigation && !this.swipeSettingsBackTimer &&
             !state.isZoomed && !(window.visualViewport?.scale > ZOOM_THRESHOLD) &&
             gesture.screen.id === state.currentScreen + '-screen' && gesture.hash === location.hash &&
@@ -16629,7 +16649,8 @@ const appLogic = {
     },
 
     handleTouchStart(event) {
-        if (this.swipeSnap?.committing) return;
+        // A settings-detail snap still owns the pending browser Back operation.
+        if (this.swipePreview?.detail && this.swipeSnap?.committing) return;
         if (this.swipeGesture || event.touches.length !== 1) this.resetSwipeState(true);
         if (!state.settings.enableSwipeNavigation || event.touches.length !== 1) return;
         const target = event.target;
@@ -16637,10 +16658,12 @@ const appLogic = {
         if (!screen) return;
 
         const { identifier, clientX, clientY } = event.touches[0];
-        const gesture = { identifier, clientX, clientY, screen, hash: location.hash };
-        if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen) ||
+        const control = target.closest(SWIPE_FOCUS_CONTROLS);
+        const gesture = { identifier, clientX, clientY, screen, control, hash: location.hash };
+        if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen, control) ||
             screen.getAnimations?.().some(animation => animation.transitionProperty === 'transform' && animation.playState === 'running')) return;
         gesture.width = screen.getBoundingClientRect().width;
+        gesture.suppressTap = Boolean(control || target.closest(SWIPE_TAP_TARGETS));
         this.swipeGesture = gesture;
     },
 
@@ -16668,17 +16691,18 @@ const appLogic = {
             const destination = delta && this.getSwipeDestination(delta > 0);
             if (destination && destination !== 'sidebar') {
                 if (this.swipeSnap) {
-                    // Re-grab a returning page at the position currently on screen.
-                    gesture.grabOffset = this.interruptSwipeReturn() - delta;
+                    // Keep the displayed position at the instant the finger takes over.
+                    gesture.initialOffset = this.interruptSwipeSnap();
+                    gesture.grabOffset = gesture.initialOffset - delta;
                 }
                 this.prepareSwipePreview(destination, gesture.width);
-                const offset = delta + (gesture.grabOffset || 0);
-                const visible = this.getSwipeDestination(offset > 0);
-                this.setSwipeOffset(visible && visible !== 'sidebar'
-                    ? Math.max(-gesture.width, Math.min(offset, gesture.width)) : 0);
-            } else if (!this.swipeSnap) {
-                this.setSwipeOffset(0);
             }
+            if (this.swipeSnap || !this.swipePreview) return;
+            const left = this.getSwipeDestination(false), right = this.getSwipeDestination(true);
+            const initial = gesture.initialOffset || 0;
+            const min = Math.min(initial, left && left !== 'sidebar' ? -gesture.width : 0);
+            const max = Math.max(initial, right && right !== 'sidebar' ? gesture.width : 0);
+            this.setSwipeOffset(Math.max(min, Math.min(delta + (gesture.grabOffset || 0), max)));
         });
     },
 
@@ -16700,8 +16724,9 @@ const appLogic = {
             if (!this.swipeSnap) this.snapSwipePreview(0, false);
             return;
         }
-        const direction = touch.clientX > gesture.clientX ? 1 : -1;
-        this.navigateBySwipe(destination, direction, gesture.width);
+        // A committed swipe must not produce a compatibility click on its start control.
+        if (gesture.suppressTap && event.cancelable) event.preventDefault();
+        this.navigateBySwipe(destination, gesture.width);
     },
 
     getSwipeDestination(right) {
@@ -16719,19 +16744,13 @@ const appLogic = {
         return null;
     },
 
-    navigateBySwipe(destination, direction, width) {
+    navigateBySwipe(destination, width) {
         document.body.classList.remove('header-force-show');
-        if (destination !== 'sidebar' && destination !== 'settings-top') {
-            this.prepareSwipePreview(destination, width);
-        }
-        if (destination !== 'sidebar' && this.swipeSnap) {
-            this.interruptSwipeReturn();
-        }
         if (destination === 'sidebar') {
-            void this.openHistoryFromChat();
-        } else if (destination === 'history') {
-            void this.openHistoryFromChat(direction);
+            if (!this.swipeSnap) this.snapSwipePreview(0, false);
+            uiUtils.openChatSidebar({ preserveSwipe: true });
         } else if (destination === 'settings-top') {
+            if (this.swipeSnap) this.interruptSwipeSnap();
             const settings = window.settingsUiV136;
             const back = () => {
                 if (settings.mobileDetailPushed) {
@@ -16745,7 +16764,8 @@ const appLogic = {
             };
             this.snapSwipePreview(width, true, back);
         } else {
-            void uiUtils.showScreen(destination, false, direction);
+            this.prepareSwipePreview(destination, width);
+            void uiUtils.showScreen(destination);
         }
     },
 
@@ -16759,7 +16779,7 @@ const appLogic = {
             }
         }
         const settings = window.settingsUiV136;
-        if (destination === 'settings' && settings && !this.swipePreview.settingsEntry) {
+        if (destination === 'settings' && state.currentScreen !== 'settings' && settings && !this.swipePreview.settingsEntry) {
             // Preview the same category that enter() will display, without changing history or form values.
             settings.layout(settings.media.matches ? 'general' : null);
             this.swipePreview.settingsEntry = true;
@@ -16778,7 +16798,7 @@ const appLogic = {
         if (!preview) { complete?.(); return; }
         const start = preview.offset;
         this.setSwipeOffset(target);
-        const finish = () => complete ? complete() : this.resetSwipeState();
+        const finish = () => complete ? complete() : this.clearSwipePreview();
         if (start === target || this.swipeReducedMotion?.matches) { finish(); return; }
         const fraction = Math.min(1, Math.abs(start - target) / preview.width);
         const duration = committing ? 180 + 140 * fraction : 180 + 80 * fraction;
@@ -16797,7 +16817,8 @@ const appLogic = {
         this.swipeSnap = null;
     },
 
-    interruptSwipeReturn() {
+    interruptSwipeSnap() {
+        if (!this.swipeSnap) return this.swipePreview.offset;
         const translate = getComputedStyle(this.swipePreview.elements[0]).translate;
         const offset = parseFloat(translate) || 0;
         this.cancelSwipeSnap();
@@ -16812,6 +16833,10 @@ const appLogic = {
             if (!this.swipeSnap) this.snapSwipePreview(0, false);
             return;
         }
+        this.clearSwipePreview();
+    },
+
+    clearSwipePreview() {
         this.cancelSwipeSnap();
         if (this.swipePreview?.detail) {
             elements.settingsScreen.classList.remove('swipe-detail-preview');
@@ -17135,9 +17160,9 @@ const appLogic = {
                 // 新しいチャットとしてDBに追加
                 const newChatId = await new Promise((resolve, reject) => {
                     const store = dbUtils._getStore(CHATS_STORE, 'readwrite');
-                    const request = store.add(newChatData); // addで新規追加
-                    request.onsuccess = (event) => resolve(event.target.result); // 新しいIDを返す
-                    request.onerror = (event) => reject(event.target.error);
+                    const request = store.add(newChatData);
+                    store.transaction.oncomplete = () => resolve(request.result);
+                    store.transaction.onabort = () => reject(store.transaction.error);
                 });
                 this.markAsDirtyAndSchedulePush(true);
                 console.log("チャット複製完了:", id, "->", newChatId);
@@ -18406,16 +18431,16 @@ const appLogic = {
                 const newChatId = await new Promise((resolve, reject) => {
                     const store = dbUtils._getStore(CHATS_STORE, 'readwrite');
                     const request = store.add(newChatData);
-                    request.onsuccess = (event) => resolve(event.target.result);
-                    request.onerror = (event) => reject(event.target.error);
+                    store.transaction.oncomplete = () => resolve(request.result);
+                    store.transaction.onabort = () => reject(store.transaction.error);
                 });
 
                 this.markAsDirtyAndSchedulePush(true);
 
                 console.log("履歴インポート成功:", newChatId);
                 elements.progressDialog.close();
+                void chatListChangeController.notify({ type: 'import', chatId: newChatId, title: newChatData.title });
                 await uiUtils.showCustomAlert(`履歴「${newChatData.title}」をインポートしました。`);
-                await chatListChangeController.notify({ type: 'import', chatId: newChatId, title: newChatData.title });
 
             } catch (error) {
                 console.error("履歴インポート処理エラー:", error);
@@ -23940,9 +23965,7 @@ const chatHistoryActions = {
     async togglePinned(chatId) {
         const normalizedId = this.normalizeChatId(chatId);
         if (normalizedId === null) return { ok: false, notFound: true };
-        const record = uiUtils.getHistoryRecord(normalizedId)
-            || uiUtils.getChatSidebarRecord(normalizedId)
-            || await dbUtils.getChat(normalizedId);
+        const record = await dbUtils.getChat(normalizedId);
         if (!record) return { ok: false, notFound: true };
         return this.setPinned(normalizedId, !normalizeChatPinState(record).isPinned);
     },
@@ -24049,34 +24072,26 @@ const chatHistoryActions = {
 
 // 履歴画面の購読は一度だけ登録し、検索・並び替え・スクロール状態を維持して更新する。
 chatListChangeController.subscribe(async detail => {
-    if (state.currentScreen !== 'history') return;
-    uiUtils.captureHistoryScrollPosition();
-    if (detail.type === 'rename') {
+    const wasCurrent = historyUiState.loadedRevision === historyUiState.dataRevision;
+    const revision = ++historyUiState.dataRevision;
+    if (wasCurrent && (detail.type === 'rename' || detail.type === 'pin')) {
         const cachedIndex = historyUiState.cachedChats.findIndex(chat => String(chat.id) === String(detail.chatId));
         if (cachedIndex >= 0) {
-            historyUiState.cachedChats[cachedIndex] = {
-                ...historyUiState.cachedChats[cachedIndex],
+            const patch = detail.type === 'rename' ? {
                 title: detail.title,
                 updatedAt: detail.updatedAt
-            };
-            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: true });
-            return;
-        }
-    }
-    if (detail.type === 'pin') {
-        const cachedIndex = historyUiState.cachedChats.findIndex(chat => String(chat.id) === String(detail.chatId));
-        if (cachedIndex >= 0) {
-            historyUiState.cachedChats[cachedIndex] = {
-                ...historyUiState.cachedChats[cachedIndex],
+            } : {
                 isPinned: detail.isPinned === true,
                 pinnedAt: detail.isPinned === true ? detail.pinnedAt : null,
                 pinStateUpdatedAt: detail.pinStateUpdatedAt
             };
-            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: true });
-            return;
+            historyUiState.cachedChats[cachedIndex] = { ...historyUiState.cachedChats[cachedIndex], ...patch };
+            historyUiState.loadedRevision = revision;
         }
     }
-    await uiUtils.renderHistoryList({ refresh: true, preserveScroll: true });
+    if (!elements.historyScreen.classList.contains('active')) return;
+    uiUtils.captureHistoryScrollPosition();
+    await uiUtils.renderHistoryList({ refresh: false });
 });
 
 Object.assign(appLogic, SettingsV136.createMethods({ state, dbUtils, uiUtils, defaults: INITIAL_SETTINGS_V136, localUiKeys: LOCAL_UI_SETTING_KEYS }));
