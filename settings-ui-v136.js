@@ -35,6 +35,14 @@
                     this.mobileDetailPushed = true;
                 }
                 this.layout();
+                if ((this.popover?.refreshModels || this.popover?.refreshProfiles) &&
+                    !this.popover.profileSwitchPending && (this.popover instanceof HTMLDialogElement) === this.media.matches) {
+                    const anchor = this.anchor, query = this.popover.querySelector('.model-picker-search').value;
+                    const profiles = Boolean(this.popover.refreshProfiles);
+                    this.closePopover(false);
+                    if (profiles) this.openProfiles(anchor, query);
+                    else this.openModels(anchor, query);
+                }
             });
             for (const kind of ['theme', 'appearance']) {
                 const global = $(`global-${kind}-editor`), profile = $(`profile-${kind}-editor`);
@@ -71,13 +79,15 @@
             });
             document.addEventListener('pointerdown', event => {
                 this.setInputMode('pointer');
-                if (this.popover && !this.popover.contains(event.target) && !this.anchor?.contains(event.target)) this.closePopover(false);
+                if (this.popover && !this.popover.profileSwitchPending &&
+                    !this.popover.contains(event.target) && !this.anchor?.contains(event.target)) this.closePopover(false);
             });
             document.addEventListener('keydown', event => {
                 this.setInputMode('keyboard');
-                if (!this.popover) return;
+                if (!this.popover || this.popover instanceof HTMLDialogElement) return;
+                if (event.isComposing || this.popover.profileSearchComposing) return;
                 if (event.key === 'Escape') { event.preventDefault(); this.closePopover(true); }
-                if (event.key === 'Tab') this.closePopover(false);
+                if (event.key === 'Tab' && !this.popover.refreshProfiles) this.closePopover(false);
             });
             const position = () => this.positionPopover();
             window.addEventListener('resize', position);
@@ -85,7 +95,9 @@
                 if (this.anchor?.closest('#chat-workspace')?.inert) this.closePopover(false);
                 else this.positionPopover();
             });
-            document.addEventListener('scroll', position, true);
+            document.addEventListener('scroll', event => {
+                if (!this.popover?.layoutProfiles || !this.popover.contains(event.target)) position();
+            }, true);
             window.visualViewport?.addEventListener('resize', position);
             window.visualViewport?.addEventListener('scroll', position);
             $('settings-screen').addEventListener('input', event => {
@@ -107,9 +119,10 @@
                 if (type === 'chat' || type === 'capabilities') {
                     this.renderExecution();
                     if (this.popover?.refreshThinking) this.popover.refreshThinking();
-                    else if (type === 'chat' && this.popover) this.closePopover(this.popover.contains(document.activeElement));
+                    else if (type === 'chat' && this.popover && !this.popover.refreshProfiles) this.closePopover(this.popover.contains(document.activeElement));
                 } else {
                     if (type === 'global') this.syncGlobalForms();
+                    if (type === 'profile') this.popover?.refreshProfiles?.();
                     this.syncAppearanceEditors();
                 }
             });
@@ -205,6 +218,7 @@
             $('proofreading-options').classList.remove('hidden'); this.syncPromptSizes();
         }
         selectCategory(category, push = true) {
+            this.app.resetSwipeState?.();
             if (this.category) this.scroll[this.category] = $('settings-detail').scrollTop;
             this.category = Object.hasOwn(titles, category) ? category : null;
             this.layout(); $('settings-detail').scrollTop = this.scroll[this.category] || 0;
@@ -236,8 +250,7 @@
                 else this.selectCategory(null);
             } else this.ui.showScreen('chat');
         }
-        layout() {
-            const selected = this.category || (this.media.matches ? 'general' : null);
+        layout(selected = this.category || (this.media.matches ? 'general' : null)) {
             $('settings-screen').classList.toggle('settings-show-top', !selected);
             document.querySelectorAll('[data-settings-panel]').forEach(panel => panel.hidden = panel.dataset.settingsPanel !== selected);
             document.querySelectorAll('[data-settings-category]').forEach(button => {
@@ -390,7 +403,7 @@
             const value = this.app.getMemoryExtractionPromptV136();
             if (prompt.value !== value && (prompt !== document.activeElement || !this.editedGlobalInputs.has(prompt))) prompt.value = value;
         }
-        refresh() { this.syncAppearanceEditors(); this.syncMemoryExtractionPrompt(); this.renderExecution(); this.syncPromptSizes(); }
+        refresh() { this.syncAppearanceEditors(); this.syncMemoryExtractionPrompt(); this.renderExecution(); this.syncPromptSizes(); this.popover?.refreshModels?.(); }
         renderExecution() {
             const ref = this.app.getCurrentChatModelRef(), config = this.app.getApiConfigById(ref?.apiConfigId);
             const pending = !ref && (this.state.executionInitializingV136 || !this.state.db);
@@ -423,55 +436,233 @@
         }
         setInputMode(mode) {
             // Chrome may retain :focus-visible after keyboard -> touch on the same trigger.
-            for (const node of [$('chat-model-button'), $('settings-thinking-button'), this.popover]) {
+            for (const node of [$('chat-model-button'), $('settings-thinking-button'), $('profile-card-header'), $('profile-card-header-settings'), this.popover]) {
                 if (node) node.dataset.inputMode = mode;
             }
         }
-        newPopover(anchor, label) {
+        newPopover(anchor, label, modal = false) {
             if (anchor.closest('#chat-workspace')?.inert) return null;
             if (this.anchor === anchor && this.popover) { this.closePopover(true); return null; }
+            this.app.resetSwipeState?.();
             this.closePopover(false); this.anchor = anchor;
-            const panel = make('div', 'execution-popover'); panel.id = 'execution-popover';
+            const panel = make(modal ? 'dialog' : 'div', 'execution-popover'); panel.id = 'execution-popover';
             panel.dataset.inputMode = anchor.dataset.inputMode || 'keyboard';
             panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', label);
             document.body.append(panel); this.popover = panel;
             anchor.setAttribute('aria-expanded', 'true'); anchor.setAttribute('aria-controls', panel.id);
             return panel;
         }
-        openModels(anchor) {
-            if (this.state.isSending) return;
-            const panel = this.newPopover(anchor, 'チャットモデルを選択'); if (!panel) return;
-            panel.append(make('h2', 'popover-title', 'モデル'));
-            const search = make('input', 'model-picker-search'); search.type = 'search'; search.placeholder = 'モデルを検索'; search.setAttribute('aria-label', 'モデルを検索'); panel.append(search);
+        createSearchPicker(panel, titleText, searchLabel, query) {
+            const title = make('h2', 'popover-title', titleText);
+            let close;
+            if (panel instanceof HTMLDialogElement) {
+                panel.classList.add('custom-dialog', 'execution-model-dialog');
+                const header = make('div', 'execution-model-dialog-header');
+                title.id = 'execution-picker-title';
+                panel.setAttribute('aria-labelledby', title.id);
+                close = make('button', 'api-config-icon-button', '×'); close.type = 'button';
+                close.setAttribute('aria-label', '閉じる');
+                close.addEventListener('click', () => this.closePopover(true));
+                header.append(title, close); panel.append(header);
+                panel.addEventListener('close', () => {
+                    if (this.popover === panel) this.closePopover(true);
+                });
+            } else panel.append(title);
+            const search = make('input', 'model-picker-search');
+            search.type = 'search';
+            search.placeholder = searchLabel;
+            search.setAttribute('aria-label', searchLabel);
+            panel.append(search);
+            search.value = query;
             const list = make('div', 'model-picker-list'); panel.append(list);
-            const choices = this.app.buildModelRefOptions({ includeDisabled: false });
+            return { close, search, list };
+        }
+        openModels(anchor, query = '') {
+            if (this.state.isSending) return;
+            const modal = !this.media.matches;
+            const panel = this.newPopover(anchor, 'チャットモデルを選択', modal); if (!panel) return;
+            const { close, search, list } = this.createSearchPicker(panel, 'モデル', 'モデルを検索', query);
             const render = () => {
+                const focused = list.contains(document.activeElement) ? document.activeElement.dataset.modelRefValue : null;
                 list.replaceChildren(); let group = null;
                 const current = this.app.getCurrentChatModelRef();
-                choices.filter(c => c.label.toLowerCase().includes(search.value.toLowerCase())).forEach(choice => {
+                const filter = search.value.toLowerCase();
+                this.app.buildModelRefOptions().filter(c => c.label.toLowerCase().includes(filter)).forEach(choice => {
                     if (group !== choice.apiConfigId) { list.append(make('h3', 'model-picker-group', choice.apiConfigName)); group = choice.apiConfigId; }
                     const button = make('button', 'model-picker-choice', choice.modelName); button.type = 'button';
+                    button.dataset.modelRefValue = choice.value;
                     const selected = current?.apiConfigId === choice.apiConfigId && current?.modelName === choice.modelName;
                     button.setAttribute('aria-pressed', String(selected));
                     button.addEventListener('click', () => {
                         const chatId = this.state.currentChatId, generation = this.state.executionInitGeneration;
-                        this.save($('chat-model-button'), async () => {
-                            if (chatId !== this.state.currentChatId || generation !== this.state.executionInitGeneration) return;
+                        this.save(modal ? list : anchor, async () => {
+                            if (this.popover !== panel || chatId !== this.state.currentChatId || generation !== this.state.executionInitGeneration) return;
                             await this.app.setCurrentChatModelRef({ apiConfigId: choice.apiConfigId, modelName: choice.modelName });
-                            this.closePopover(true);
+                            if (this.popover === panel) this.closePopover(true);
                         });
                     }); list.append(button);
+                    if (choice.value === focused) button.focus({ preventScroll: true });
                 });
                 if (!list.querySelector('button')) list.append(make('p', 'settings-description', '選択できるモデルがありません。一般設定でAPI設定を追加してください。'));
             };
+            panel.refreshModels = render;
             search.addEventListener('input', render); render();
             panel.addEventListener('keydown', event => {
                 if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                if (event.target === search && ['Home', 'End'].includes(event.key)) return;
                 const buttons = [...list.querySelectorAll('button')]; if (!buttons.length) return;
                 event.preventDefault(); const index = buttons.indexOf(document.activeElement);
                 buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length].focus();
             });
-            this.positionPopover(); (list.querySelector('[aria-pressed=true]') || list.querySelector('button') || search).focus();
+            if (modal) panel.showModal();
+            this.positionPopover();
+            (list.querySelector('[aria-pressed=true]') || list.querySelector('button') || close || search).focus();
+        }
+        openProfiles(anchor, query = '') {
+            if (this.state.isSending) return;
+            const modal = !this.media.matches;
+            const panel = this.newPopover(anchor, 'プロファイル', modal);
+            if (!panel) return;
+            panel.classList.add('profile-picker-panel');
+            const { close, search, list } = this.createSearchPicker(panel, 'プロファイル', 'プロファイルを検索', query);
+            list.classList.add('profile-picker-list');
+            list.setAttribute('role', 'group');
+            list.setAttribute('aria-label', 'プロファイル一覧');
+            list.tabIndex = -1;
+            const status = make('p', 'settings-inline-status profile-picker-status');
+            status.setAttribute('role', 'status');
+            panel.append(status);
+
+            const rowHeight = 44, overscan = 4;
+            list.style.setProperty('--profile-picker-row-height', `${rowHeight}px`);
+            let results = [], first = -1, end = -1;
+            const spacer = height => {
+                const node = make('div');
+                node.style.height = `${height}px`;
+                node.setAttribute('aria-hidden', 'true');
+                return node;
+            };
+            const render = (force = false) => {
+                const visibleStart = Math.floor(list.scrollTop / rowHeight);
+                const visibleEnd = Math.ceil((list.scrollTop + list.clientHeight) / rowHeight);
+                const start = Math.max(0, visibleStart - overscan);
+                const finish = Math.min(results.length, visibleEnd + overscan);
+                if (!force && start === first && finish === end) return;
+                first = start; end = finish;
+                const focused = list.contains(document.activeElement) ? document.activeElement.dataset.profileId : null;
+                const visible = results.slice(start, finish);
+                const tabTarget = visible.find(profile => String(profile.id) === focused)
+                    || visible.find(profile => profile.id === this.state.activeProfileId) || results[visibleStart];
+                const rows = visible.map(profile => {
+                    const row = make('button', 'model-picker-choice profile-picker-choice');
+                    row.type = 'button';
+                    row.dataset.profileId = String(profile.id);
+                    row.title = profile.name;
+                    row.tabIndex = profile === tabTarget ? 0 : -1;
+                    row.setAttribute('aria-pressed', String(profile.id === this.state.activeProfileId));
+                    row.setAttribute('aria-disabled', String(Boolean(panel.profileSwitchPending)));
+                    const icon = make('span', 'profile-picker-icon');
+                    this.ui.renderProfileIcon(icon, profile);
+                    row.append(icon, make('span', 'profile-picker-name', profile.name));
+                    return row;
+                });
+                list.replaceChildren(spacer(start * rowHeight), ...rows, spacer((results.length - finish) * rowHeight));
+                this.ui.retainProfileIconUrls(visible.map(profile => profile.id));
+                if (focused) (rows.find(row => row.dataset.profileId === focused) || list).focus({ preventScroll: true });
+            };
+            const filter = (resetScroll = false) => {
+                const term = search.value.trim().toLowerCase();
+                results = this.state.profiles.filter(profile => String(profile.name ?? '').toLowerCase().includes(term));
+                list.hidden = !results.length;
+                if (resetScroll) list.scrollTop = 0;
+                else list.scrollTop = Math.min(list.scrollTop, Math.max(0, results.length * rowHeight - list.clientHeight));
+                if (!panel.profileSwitchPending) status.textContent = results.length ? '' : '該当するプロファイルがありません';
+                render(true);
+                this.positionPopover();
+            };
+            const focusRow = index => {
+                if (index < 0 || index >= results.length) return;
+                const top = index * rowHeight;
+                if (top < list.scrollTop) list.scrollTop = top;
+                if (top + rowHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + rowHeight - list.clientHeight;
+                render();
+                list.querySelector(`[data-profile-id="${results[index].id}"]`)?.focus({ preventScroll: true });
+            };
+            panel.refreshProfiles = filter;
+            panel.layoutProfiles = render;
+            list.addEventListener('scroll', () => render());
+            list.addEventListener('focusin', event => {
+                const row = event.target.closest('.profile-picker-choice');
+                if (!row) return;
+                list.querySelector('[tabindex="0"]')?.setAttribute('tabindex', '-1');
+                row.tabIndex = 0;
+            });
+            list.addEventListener('click', async event => {
+                const row = event.target.closest('.profile-picker-choice');
+                if (!row || panel.profileSwitchPending) return;
+                const id = Number(row.dataset.profileId);
+                if (id === this.state.activeProfileId) { this.closePopover(true); return; }
+                panel.profileSwitchPending = true;
+                list.setAttribute('aria-busy', 'true');
+                status.textContent = 'プロファイルを切り替え中…';
+                render(true);
+                this.positionPopover();
+                let switched = false;
+                try { switched = await this.app.switchProfile(id); }
+                catch (error) { console.error('プロファイル切り替えエラー:', error); }
+                finally {
+                    if (this.popover === panel) {
+                        panel.profileSwitchPending = false;
+                        list.setAttribute('aria-busy', 'false');
+                        if (switched) this.closePopover(true);
+                        else {
+                            status.textContent = 'プロファイルを切り替えられませんでした。';
+                            render(true);
+                            this.positionPopover();
+                        }
+                    }
+                }
+            });
+            list.addEventListener('contextmenu', event => {
+                const name = event.target.closest('.profile-picker-choice')?.querySelector('.profile-picker-name');
+                if (!name || name.scrollWidth <= name.clientWidth || panel.profileSwitchPending) return;
+                event.preventDefault();
+                status.textContent = name.textContent;
+                this.positionPopover();
+            });
+            search.addEventListener('compositionstart', () => { panel.profileSearchComposing = true; });
+            search.addEventListener('compositionend', () => { panel.profileSearchComposing = false; filter(true); });
+            search.addEventListener('input', event => {
+                if (!panel.profileSearchComposing && !event.isComposing) filter(true);
+            });
+            panel.addEventListener('keydown', event => {
+                if (panel.profileSearchComposing || event.isComposing || !results.length) return;
+                const fromSearch = event.target === search;
+                if (!(fromSearch ? ['ArrowDown', 'ArrowUp'] : ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageUp', 'PageDown']).includes(event.key)) return;
+                if (!fromSearch && !list.contains(event.target)) return;
+                const index = results.findIndex(profile => String(profile.id) === event.target.dataset.profileId);
+                const page = Math.max(1, Math.floor(list.clientHeight / rowHeight));
+                const delta = { ArrowDown: 1, ArrowUp: -1, PageDown: page, PageUp: -page };
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? results.length - 1 :
+                    index < 0 ? (event.key === 'ArrowUp' ? results.length - 1 : 0) : index + delta[event.key];
+                event.preventDefault();
+                focusRow(Math.max(0, Math.min(results.length - 1, next)));
+            });
+            if (!modal) panel.addEventListener('focusout', event => {
+                // A trusted focus change can run microtasks before the next element becomes active.
+                if (panel.contains(event.relatedTarget) || event.relatedTarget === anchor) return;
+                queueMicrotask(() => {
+                    if (this.popover === panel && !panel.profileSwitchPending &&
+                        !panel.contains(document.activeElement) && document.activeElement !== anchor) this.closePopover(false);
+                });
+            });
+
+            filter();
+            if (modal) panel.showModal();
+            this.positionPopover();
+            const selected = results.findIndex(profile => profile.id === this.state.activeProfileId);
+            if (selected >= 0) focusRow(selected);
+            if (!modal || selected < 0) (close || search).focus({ preventScroll: true });
         }
         openThinking(anchor) {
             if (this.state.isSending) return;
@@ -549,25 +740,51 @@
             if (!this.popover || !this.anchor?.isConnected) return;
             const vp = window.visualViewport, left = vp?.offsetLeft || 0, top = vp?.offsetTop || 0;
             const width = vp?.width || innerWidth, height = vp?.height || innerHeight;
-            const controls = this.anchor.closest('.chat-model-controls');
-            const rect = (controls || this.anchor).getBoundingClientRect();
-            // Follow the control row, allowing the panel to cover the textarea like Codex.
-            const edge = rect;
+            if (this.popover instanceof HTMLDialogElement) {
+                const root = this.popover.layoutProfiles ? getComputedStyle(document.documentElement) : null;
+                const safeTop = parseFloat(root?.getPropertyValue('--safe-top')) || 0;
+                const safeBottom = parseFloat(root?.getPropertyValue('--safe-bottom')) || 0;
+                this.popover.style.width = `${Math.min(420, width - 24)}px`;
+                this.popover.style.maxHeight = `${Math.max(0, Math.min(620, height - 24 - safeTop - safeBottom))}px`;
+                this.popover.style.left = `${left + width / 2}px`;
+                this.popover.style.top = `${top + (height + safeTop - safeBottom) / 2}px`;
+                this.popover.layoutProfiles?.();
+                return;
+            }
             const size = Math.min(this.popover.classList.contains('thinking-popover') ? 280 : 340, width - 16);
             this.popover.style.width = `${size}px`;
+            if (this.popover.layoutProfiles && this.anchor.id === 'profile-card-header') {
+                const button = this.anchor.getBoundingClientRect();
+                const topLimit = top + 8;
+                const bottom = Math.min(button.top - 6, top + height - 8);
+                this.popover.style.maxHeight = `${Math.max(0, bottom - topLimit)}px`;
+                this.popover.dataset.placement = 'above';
+                this.popover.style.left = `${Math.max(left + 8, Math.min(button.left, left + width - size - 8))}px`;
+                this.popover.style.top = `${Math.max(topLimit, bottom - this.popover.getBoundingClientRect().height)}px`;
+                this.popover.layoutProfiles();
+                return;
+            }
+            const controls = this.anchor.closest('.chat-model-controls');
+            const rect = (controls || this.anchor).getBoundingClientRect();
             this.popover.style.maxHeight = `${Math.max(0, height - 16)}px`;
             const measured = this.popover.getBoundingClientRect().height;
-            const above = Math.max(0, edge.top - top - 18), below = Math.max(0, top + height - edge.bottom - 18);
+            const above = Math.max(0, rect.top - top - 18), below = Math.max(0, top + height - rect.bottom - 18);
             const useAbove = above >= measured || above >= below;
             this.popover.style.maxHeight = `${useAbove ? above : below}px`;
             const panelHeight = this.popover.getBoundingClientRect().height;
             this.popover.dataset.placement = useAbove ? 'above' : 'below';
             this.popover.style.left = `${Math.max(left + 8, Math.min(controls ? rect.right - size : rect.left, left + width - size - 8))}px`;
-            this.popover.style.top = `${Math.max(top + 8, Math.min(useAbove ? edge.top - panelHeight - 10 : edge.bottom + 10, top + height - panelHeight - 8))}px`;
+            this.popover.style.top = `${Math.max(top + 8, Math.min(useAbove ? rect.top - panelHeight - 10 : rect.bottom + 10, top + height - panelHeight - 8))}px`;
+            this.popover.layoutProfiles?.();
         }
         closePopover(restoreFocus) {
             if (!this.popover) return;
-            const anchor = this.anchor; anchor?.setAttribute('aria-expanded', 'false'); this.popover.remove(); this.popover = null; this.anchor = null;
+            const anchor = this.anchor, panel = this.popover;
+            this.popover = null; this.anchor = null;
+            anchor?.setAttribute('aria-expanded', 'false'); anchor?.removeAttribute('aria-controls');
+            if (panel instanceof HTMLDialogElement && panel.open) panel.close();
+            panel.remove();
+            if (panel.refreshProfiles) this.ui.retainProfileIconUrls();
             if (restoreFocus && anchor?.isConnected && !anchor.disabled) anchor.focus({ preventScroll: true });
         }
     }

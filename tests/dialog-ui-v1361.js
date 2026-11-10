@@ -4,7 +4,7 @@
     const $ = id => document.getElementById(id);
     const ids = { system: 'system-prompt-dialog', format: 'textFormattingDialog', debug: 'debugLogDialog', summary: 'summaryDialog',
         compression: 'confirmDialog', confirm: 'confirmDialog', prompt: 'promptDialog', alert: 'alertDialog', api: 'api-config-dialog',
-        file: 'fileUploadDialog', conflict: 'assetConflictDialog', memory: 'memoryManagementDialog', character: 'characterProfileDialog',
+        conflict: 'assetConflictDialog', memory: 'memoryManagementDialog', character: 'characterProfileDialog',
         assets: 'assetManagementDialog', progress: 'progressDialog' };
     let assertions = 0, current, pending, opener, contents, originalSummary, apiCalls = 0, oldSave, late, releaseLate, oldResolver, oldProvider, viewportDescriptors, clipboardWrite, copied;
     const check = (ok, message) => { assertions++; if (!ok) throw new Error(message); };
@@ -65,7 +65,6 @@
                 case 'prompt': pending = ui.showCustomPrompt('名前を入力してください。', '未確定の入力'); break;
                 case 'alert': pending = ui.showCustomAlert('アラートの内容です。'); break;
                 case 'api': app.openApiConfigDialog(); break;
-                case 'file': ui.showFileUploadDialog(); break;
                 case 'conflict': pending = app.showAssetConflictDialog('fixture.webp'); break;
                 case 'memory': await app.openMemoryManagementDialog(); break;
                 case 'character': await app.openCharacterProfileDialog(); break;
@@ -110,7 +109,6 @@
             if (kind === 'format') check(st.currentMessages.map(message => message.content).join('\n') === contents, 'format cancel does not modify messages');
             if (kind === 'system') check(!st.isEditingSystemPrompt, 'prompt editing ends after save');
             if (kind === 'api') check(!$('api-config-provider').disabled, 'API dialog cancel cleanup');
-            if (kind === 'file') check(st.selectedFilesForUpload.length === 0, 'attachment cancel cleanup');
             await frame();
             check(document.activeElement === opener || !opener.isConnected || opener.closest('[inert]'), 'focus restores to opener');
         },

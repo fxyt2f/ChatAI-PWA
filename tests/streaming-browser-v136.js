@@ -126,6 +126,128 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             await settings({showThoughtProcess: true});
         });
 
+        await test('Japanese-majority thought still translates its English paragraph in one request', async () => {
+            const japanese = '既に日本語で書かれた説明はそのままにする。'.repeat(8);
+            const source = `${japanese}\n\nCheck the remaining results.`;
+            const start = calls.length;
+            reply = () => json(geminiResult([{text: '{"1":"残りの結果を確認する。"}'}], 'STOP'));
+            const translated = await window.testApi.translateText(source, {provider: 'gemini', modelName: gemini.modelName, apiKey: 'mock'});
+            eq(translated, {text: `${japanese}\n\n残りの結果を確認する。`, complete: true});
+            eq(calls.length - start, 1);
+        });
+
+        const translationConfig = {provider: 'gemini', modelName: 'gemini-2.5-pro', apiKey: 'mock'};
+        const translate = (source, config = translationConfig, signal) => window.testApi.translateText(source, config, signal);
+        const translationResponse = entries => json(geminiResult([{text: JSON.stringify(entries)}], 'STOP'));
+
+        await test('translate only prose and keep Markdown, CRLF, literals and existing Japanese', async () => {
+            const technical = 'Gemini 2.5 Pro / OpenAI API / Amazon Bedrock / getFoo() / foo_bar / model-name';
+            const unchanged = `日本語で既に説明しています。${technical}\n${technical}\n\`\`\`js\nDo not translate this code.\n\`\`\``;
+            const before = calls.length;
+            eq(await translate(unchanged), {text: unchanged, complete: true});
+            eq(calls.length, before);
+            const source = '## Next steps\r\n- Verify inputs.  \r\n\r\n既存の説明。\r\n> Check `getFoo()` again.\r\n' + unchanged;
+            const result = {1: '次の手順', 2: '入力を確認する。', 3: '`getFoo()` を再確認する。'};
+            reply = ({body}) => {
+                eq(JSON.parse(body.contents[0].parts[0].text), {1:'Next steps', 2:'Verify inputs.', 3:'Check `getFoo()` again.'});
+                return translationResponse(result);
+            };
+            eq(await translate(source), {text:'## 次の手順\r\n- 入力を確認する。  \r\n\r\n既存の説明。\r\n> `getFoo()` を再確認する。\r\n' + unchanged, complete:true});
+            eq(calls.length - before, 1);
+        });
+
+        await test('partial, omitted, and altered-literal rows get one bounded repair; accepted rows survive', async () => {
+            const source = 'Check inputs.\n\n日本語の説明。\nCheck outputs.\nKeep all details.\nCall `getFoo()` now.';
+            const before = calls.length;
+            reply = ({body}) => {
+                const rows = JSON.parse(body.contents[0].parts[0].text);
+                if (calls.length === before + 1) {
+                    eq(Object.keys(rows), ['1','2','3','4']);
+                    return translationResponse({1:'入力を確認する。', 2:'確認する。 Check outputs.', 4:'`getBar()` を呼ぶ。'});
+                }
+                eq(Object.keys(rows), ['2','3','4']);
+                return translationResponse({2:'出力を確認する。', 3:'Keep all details.', 4:'`getFoo()` を呼ぶ。'});
+            };
+            eq(await translate(source), {text:'入力を確認する。\n\n日本語の説明。\n出力を確認する。\nKeep all details.\n`getFoo()` を呼ぶ。', complete:false});
+            eq(calls.length - before, 2);
+        });
+
+        await test('all four translation routes use the chosen model and extract only final text', async () => {
+            const source = 'Check the final result.';
+            const expected = {text:'最終結果を確認する。', complete:true};
+            const data = JSON.stringify({1:expected.text});
+            const before = calls.length;
+            for (const provider of ['gemini','openrouter','zai']) {
+                const config = {...translationConfig, provider, modelName: `${provider}-chosen`};
+                reply = ({url, body}) => {
+                    if (provider === 'gemini') {
+                        assert(url.includes('/gemini-chosen:generateContent'));
+                        eq(JSON.parse(body.contents[0].parts[0].text), {1:source});
+                        return json(geminiResult([{thought:true, text:'Private fixture'}, {text:data.slice(0, 5)}, {text:data.slice(5)}], 'STOP'));
+                    }
+                    eq(body.model, config.modelName);
+                    eq(JSON.parse(body.messages[1].content), {1:source});
+                    const content = provider === 'openrouter' ? [{type:'reasoning', text:'private fixture'}, {type:'text', text:data}] : data;
+                    return json({choices:[{finish_reason:'stop', message:{content, reasoning_content:'private fixture'}}]});
+                };
+                eq(await translate(source, config), expected);
+            }
+            eq(calls.length - before, 3);
+            const {BedrockRuntimeClient, ConverseCommand} = window;
+            try {
+                window.ConverseCommand = class { constructor(input) { this.input = input; } };
+                window.BedrockRuntimeClient = class {
+                    async send(command) {
+                        eq(command.input.modelId, 'bedrock-chosen');
+                        eq(JSON.parse(command.input.messages[0].content[0].text), {1:source});
+                        return {stopReason:'end_turn', output:{message:{content:[{reasoningContent:{reasoningText:{text:'private fixture'}}}, {text:data}]}}};
+                    }
+                };
+                eq(await translate(source, {...translationConfig, provider:'bedrock', modelName:'bedrock-chosen', bedrockSecretKey:'mock'}), expected);
+            } finally {
+                Object.assign(window, {BedrockRuntimeClient, ConverseCommand});
+            }
+        });
+
+        await test('output cap, empty response, network error, timeout and cancellation preserve originals', async () => {
+            const rows = Array.from({length:24}, (_, index) => `Check item ${index}. ` + 'Review all related input carefully. '.repeat(10).trim());
+            const translatedRow = index => `項目${index}を確認する。` + '関連する入力をすべて注意深く見直す。'.repeat(10);
+            const source = rows.join('\n\n');
+            const before = calls.length;
+            const started = performance.now();
+            reply = ({body}) => {
+                const sent = JSON.parse(body.contents[0].parts[0].text);
+                if (calls.length === before + 1) {
+                    eq(Object.keys(sent).length, 24);
+                    return json(geminiResult([{text:'{"1":"途中'}], 'MAX_TOKENS'));
+                }
+                eq(Object.keys(sent).length, 12);
+                return translationResponse(Object.fromEntries(Object.keys(sent).map(key => [key, translatedRow(Number(key) - 1)])));
+            };
+            eq(await translate(source), {text:[...rows.slice(0, 12).map((_, index) => translatedRow(index)), ...rows.slice(12)].join('\n\n'), complete:false});
+            eq(calls.length - before, 2);
+            console.log('Long thought fixture (mock) ms:', Math.round(performance.now() - started));
+
+            const short = 'Check inputs.';
+            const fallback = {text:short, complete:false};
+            st.settings.enableAutoRetry = false;
+            st.settings.enableApiTimeout = false;
+            reply = () => json(geminiResult([{thought:true, text:'reasoning only'}], 'STOP'));
+            eq(await translate(short), fallback);
+            reply = () => new Response('', {status:500});
+            eq(await translate(short), fallback);
+            reply = ({signal}) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), {once:true}));
+            window.setTimeout = (fn, ms, ...args) => rawTimeout(fn, ms === 15000 ? 12 : ms, ...args);
+            try { eq(await translate(short), fallback); }
+            finally { window.setTimeout = rawTimeout; }
+            const controller = new AbortController();
+            const running = translate(short, translationConfig, controller.signal);
+            controller.abort();
+            const error = await running.catch(reason => reason);
+            eq(error.name, 'AbortError');
+            eq(calls.length - before, 6);
+        });
+
         await test('Gemini streams safe text and thoughts into one placeholder, follows only near bottom and finishes as Markdown', async () => {
             const channel = sse();
             const begin = calls.length;
@@ -171,6 +293,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
 
         await test('Gemini executes signed tools only after stream completion and matches non-streaming continuation', async () => {
             const parts = [
+                {text: 'Check the location.', thought: true},
                 {functionCall: {name: 'stream_fixture', args: {city: '東京'}, id: 'tool-id'}, thoughtSignature: 'tool-signature'}
             ];
             window.functionDeclarations = [{function_declarations: [{name: 'stream_fixture', parameters: {type: 'object'}}]}];
@@ -178,8 +301,19 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             window.functionCallingTools = {stream_fixture: async args => { executed.push(args.city); return {answer: 'fixture'}; }};
             const initial = sse(), followup = sse();
             const begin = calls.length;
-            reply = () => calls.length === begin + 1 ? initial.response : followup.response;
-            await start(gemini, {geminiEnableFunctionCalling: true});
+            const translation = call => {
+                assert(call.url.includes('/gemini-2.5-pro:generateContent'));
+                eq(JSON.parse(call.body.contents[0].parts[0].text), {1:'Check the location.', 2:'Review the tool result.'});
+                return translationResponse({1:'場所を確認する。', 2:'ツール結果を確認する。'});
+            };
+            reply = call => {
+                if (calls.length === begin + 1) return initial.response;
+                if (calls.length === begin + 2) return followup.response;
+                return translation(call);
+            };
+            await settings({thoughtTranslationModelRef:{apiConfigId:'gem', modelName:'gemini-2.5-pro'}});
+            const options = {geminiEnableFunctionCalling: true, enableThoughtTranslation: true};
+            await start(gemini, options);
             const running = send('ツールを使用');
             await waitFor(() => calls.length === begin + 1, 'first tool stream');
             initial.frame(geminiResult(parts, 'STOP'));
@@ -191,20 +325,34 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             const contents = calls.at(-1).body.contents;
             eq(contents.find(entry => entry.role === 'model').parts, parts);
             eq(contents.at(-1).parts[0].functionResponse.id, 'tool-id');
-            const finalParts = [{text: 'ツール結果', thoughtSignature: 'answer-signature'}];
+            const finalParts = [{text:'Review the tool result.', thought:true}, {text: 'ツール結果', thoughtSignature: 'answer-signature'}];
             followup.frame(geminiResult(finalParts, 'STOP'));
             followup.close();
             await running;
             const streamed = (await chat()).messages.at(-1);
+            eq(calls.length - begin, 3);
+            eq(streamed.thoughtSummary, '場所を確認する。\n\nツール結果を確認する。');
+            eq(streamed.thoughtTranslationMeta.model, 'gemini-2.5-pro');
+            assert(el.messageContainer.querySelector('.thought-summary-content').textContent.includes('場所を確認する。'));
             toolId = st.currentChatId;
             await settings({enableStreamingOutput: false});
-            await start(gemini, {geminiEnableFunctionCalling: true});
+            await start(gemini, options);
             const baseline = calls.length;
-            reply = () => json(calls.length === baseline + 1 ? geminiResult(parts, 'STOP') : geminiResult(finalParts, 'STOP'));
-            await send('ツールを使用');
-            assert(calls.slice(baseline).every(call => call.url.includes(':generateContent?')));
+            reply = call => calls.length > baseline + 2 ? translation(call)
+                : json(calls.length === baseline + 1 ? geminiResult(parts, 'STOP') : geminiResult(finalParts, 'STOP'));
+            el.userInput.value = 'ツールを使用';
+            el.userInput.dispatchEvent(new Event('input', {bubbles:true}));
+            el.sendButton.click();
+            const nonstreamed = await waitFor(async () => st.currentChatId && (await chat())?.messages.find(message =>
+                message.role === 'model' && message.thoughtTranslationMeta), 'send button persists the translated response');
+            await waitFor(() => !st.isSending, 'send button action completed');
+            eq(calls.length - baseline, 3);
+            assert(calls.slice(baseline, baseline + 2).every(call => call.url.includes(':generateContent?')));
             eq(calls[begin].body, calls[baseline].body);
-            eq((await chat()).messages.at(-1).continuation.turns, streamed.continuation.turns);
+            eq(nonstreamed.continuation.turns, streamed.continuation.turns);
+            eq(nonstreamed.thoughtSummary, streamed.thoughtSummary);
+            assert((await app.loadChat(toolId)).ok);
+            eq(st.currentMessages.at(-1).thoughtSummary, streamed.thoughtSummary);
             await settings({enableStreamingOutput: true});
         });
 
@@ -444,11 +592,19 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             assert((await app.loadChat(toolId)).ok);
             assertQuietStop();
             const replacement = sse();
-            replacement.frame(geminiResult([{text: '再生成成功'}], 'STOP'));
+            replacement.frame(geminiResult([{text:'Check the new answer.', thought:true}, {text: '再生成成功'}], 'STOP'));
             replacement.close();
-            reply = () => replacement.response;
+            await settings({enableThoughtTranslation: true});
+            reply = call => {
+                if (call.url.includes(':streamGenerateContent')) return replacement.response;
+                eq(JSON.parse(call.body.contents[0].parts[0].text), {1:'Check the new answer.'});
+                return translationResponse({1:'新しい回答を確認する。'});
+            };
             await app.retryFromMessage(0);
-            assert((await chat()).messages.some(message => message.isSelected && message.content === '再生成成功'));
+            const responses = (await chat()).messages;
+            eq(responses.find(message => message.isSelected && message.content === '再生成成功')?.thoughtSummary, '新しい回答を確認する。');
+            assert(responses.some(message => !message.isSelected && message.thoughtSummary === original.thoughtSummary));
+            await settings({enableThoughtTranslation: globalBefore.enableThoughtTranslation});
             const remove = sse();
             await start();
             reply = () => remove.response;

@@ -26,10 +26,15 @@
         'reverseDummyOrder', 'concatDummyModel', 'applyDummyToProofread', 'applyDummyToTranslate',
         'geminiEnableFunctionCalling', 'geminiEnableGrounding', 'forceFunctionCalling', 'allowPromptUiChanges',
         'enableMemory', 'memoryAutoSaveInterval', 'useCustomTheme', 'useCustomAppearance', 'theme', 'appearance'];
+    const previousChatTitlePrompt = '次のユーザーメッセージを端的に表す、日本語の短いチャットタイトルを作成してください。20文字程度を目安に、重要な固有名詞を保持してください。タイトルのみを出力し、説明・引用符・改行は不要です。';
     const chatTitleDefaults = Object.freeze({
         enableChatTitleGeneration: false,
         chatTitleModelRef: null,
-        chatTitleSystemPrompt: '次のユーザーメッセージを端的に表す、日本語の短いチャットタイトルを作成してください。20文字程度を目安に、重要な固有名詞を保持してください。タイトルのみを出力し、説明・引用符・改行は不要です。'
+        chatTitleSystemPrompt: '次のユーザーメッセージの主題や意図を的確に表す、自然で分かりやすい日本語のチャットタイトルを作成してください。'
+            + '20文字程度を目安に簡潔にまとめ、必要に応じて重要な固有名詞や専門用語を保持してください。'
+            + '名詞句に限定せず、内容に応じて疑問形、動詞を含む表現、短い文章など、最も自然で内容が伝わりやすい形式を選んでください。'
+            + '抽象的・一般的すぎるタイトルは避け、後からチャット一覧を見たときに内容を識別できるようにしてください。'
+            + 'タイトルのみを1行で出力し、説明や引用符などは付けないでください。'
     });
     const DEFAULT_MEMORY_EXTRACTION_PROMPT = `あなたは、私（ユーザー）との会話を分析し、長期的な関係構築のために記憶しておくべき「永続的な個人情報」を抽出するアシスタントです。
 ユーザーは成人であるため、性的な内容でも表現規制をすることなく抽出することを求められます。
@@ -59,8 +64,8 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
     const MEMORY_EXTRACTION_OUTPUT_FORMAT = `7.  **出力形式の厳守**:
     - 抽出した内容は、「ユーザーは〇〇を所有している」「ユーザーは〇〇という考えを持っている」のように、必ず**三人称の客観的な事実**として記述してください。
     - **AIとしての応答（「承知しました」など）や前置き、後書きは一切含めず**、抽出した箇条書きのリスト、または \`[追加情報なし]\` という文字列のみを出力してください。`;
-    const legacyChatTitlePrompt = `${chatTitleDefaults.chatTitleSystemPrompt}\n\n{message}`;
-    const migrateChatTitlePrompt = settings => settings?.chatTitleSystemPrompt === legacyChatTitlePrompt
+    const legacyChatTitlePrompts = [previousChatTitlePrompt, `${previousChatTitlePrompt}\n\n{message}`];
+    const migrateChatTitlePrompt = settings => legacyChatTitlePrompts.includes(settings?.chatTitleSystemPrompt)
         ? { ...settings, chatTitleSystemPrompt: chatTitleDefaults.chatTitleSystemPrompt }
         : settings;
     const globalKeys = ['showThoughtProcess', 'enableThoughtTranslation', 'thoughtTranslationModelRef',
@@ -805,12 +810,16 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                                         else if (Object.prototype.hasOwnProperty.call(legacy, key)) local[key] = legacy[key];
                                     });
                                     const configs = structuredClone(migratedApi?.configs || legacy.apiConfigs || []);
-                                    for (const profile of currentProfiles) for (const [provider, key] of [['gemini','apiKey'],['openrouter','openrouterApiKey'],['zai','zaiApiKey'],['bedrock','bedrockAccessKey']]) {
+                                    const recoverProfiles = Array.isArray(legacy.apiConfigs) && !legacy.apiConfigs.length ? [] : currentProfiles;
+                                    const deleted = new Set(legacy.apiConfigDeletedIdsV1318 || []);
+                                    for (const profile of recoverProfiles) for (const [provider, key] of [['gemini','apiKey'],['openrouter','openrouterApiKey'],['zai','zaiApiKey'],['bedrock','bedrockAccessKey']]) {
                                         const settings = profile.settings || {};
-                                        if (!settings[key] || configs.some(c => c.provider === provider && (c.apiKey || c.bedrockAccessKey) === settings[key]
-                                            && (provider !== 'bedrock' || c.bedrockSecretKey === settings.bedrockSecretKey))) continue;
+                                        const id = `api_legacy_profile_${profile.id}_${provider}`;
+                                        if (!settings[key] || deleted.has(id) || deleted.has(this.getLegacyApiConfigIdForProvider(provider)) ||
+                                            configs.some(c => c.id === id || (c.provider === provider && (c.apiKey || c.bedrockAccessKey) === settings[key]
+                                            && (provider !== 'bedrock' || c.bedrockSecretKey === settings.bedrockSecretKey)))) continue;
                                         const recovered = this.createLegacyApiConfig(provider, settings);
-                                        recovered.id = `api_legacy_profile_${profile.id}_${provider}`;
+                                        recovered.id = id;
                                         recovered.name = `${profile.name} / ${this.getProviderDisplayName(provider)} (旧設定)`;
                                         configs.push(recovered);
                                     }
@@ -820,9 +829,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                                     global.theme ||= { ...pick(defaults, themeKeys), ...pick(legacy.globalThemeSettings || active, themeKeys) };
                                     global.appearance ||= { overlayOpacity: active.overlayOpacity ?? legacy.overlayOpacity ?? defaults.overlayOpacity,
                                         messageOpacity: active.messageOpacity ?? legacy.messageOpacity ?? defaults.messageOpacity, backgroundAssetId: null };
-                                    const initialModel = active.modelName || legacy.modelName || defaults.modelName;
-                                    const initialConfig = configs.find(c=>c.id === active.apiConfigId && (c.modelCandidates || []).includes(initialModel)) || configs.find(c=>(c.modelCandidates || []).includes(initialModel));
-                                    const legacyRef = modelRef(active.defaultModelRef) || (initialConfig ? {apiConfigId:initialConfig.id,modelName:initialModel} : null);
+                                    const legacyRef = this.resolveLegacyInitialModelRef(active, legacy, configs);
                                     const profiles = currentProfiles.map(p => ({ ...p, settings: profileSettings(p.settings, (legacy.themeSettingsProfileScoped ?? state.themeSettingsProfileScoped) === true) }));
                                     const oldBlob = legacy.backgroundImageBlob instanceof Blob ? legacy.backgroundImageBlob : state.settings.backgroundImageBlob;
                                     const backgroundId = !global.appearance.backgroundAssetId && oldBlob instanceof Blob ? `background_${crypto.randomUUID()}` : null;
@@ -1026,6 +1033,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     if (latest) Object.assign(state.settings, pick(latest.settings, profileKeys));
                     this.applyProfileAppearanceV136();
                     uiUtils.applySettingsToUI?.();
+                    if (latest) uiUtils.updateProfileCardUI?.();
                 }
                 notify('profile');
                 if (draft && focused.isConnected && state.activeProfileId === profileId && root.document.activeElement === focused) {
@@ -1196,12 +1204,9 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 return result;
             },
             async addImportedProfileV136(profile) {
-                const background = importedBackgrounds.get(profile);
-                let id;
-                await transaction(['profiles', 'image_store'], tx => {
-                    if (background) tx.objectStore('image_store').put({ ...background, createdAt: Date.now() });
-                    const request = tx.objectStore('profiles').add(profile);
-                    request.onsuccess = () => { id = request.result; };
+                const id = await dbUtils.addProfile(profile, {
+                    importedBackground: importedBackgrounds.get(profile),
+                    renameOnConflict: true
                 });
                 importedBackgrounds.delete(profile);
                 return id;
@@ -1276,21 +1281,26 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     || this.getModelThinkingCapability(ref).mode !== 'unknown') return;
                 return this.refreshModelThinkingCapabilities(ref.apiConfigId).catch(() => { /* Keep unverified capabilities unknown. */ });
             },
-            getCurrentChatModelRef() { return modelRef(state.currentExecutionSettings?.modelRef); },
-            getCurrentChatThinkingEffort() { return state.currentExecutionSettings?.thinkingEffort ?? null; },
+            getCurrentChatModelRef() {
+                const ref = modelRef(state.currentExecutionSettings?.modelRef);
+                return this.isUnavailableExecutionSelection(ref) ? null : ref;
+            },
+            getCurrentChatThinkingEffort() {
+                return this.getCurrentChatModelRef() ? state.currentExecutionSettings?.thinkingEffort ?? null : null;
+            },
             syncChatExecutionToLegacySettings() {
                 const ref = this.getCurrentChatModelRef();
                 if (!ref) {
-                    if (state.currentExecutionSettings?.modelSelectionRequired) {
-                        state.settings.defaultModelRef = null;
-                        state.settings.modelName = '';
-                    }
+                    state.settings.defaultModelRef = null;
+                    state.settings.apiConfigId = '';
+                    state.settings.apiProvider = '';
+                    state.settings.modelName = '';
                     return;
                 }
                 state.settings.defaultModelRef = ref;
                 state.settings.apiConfigId = ref.apiConfigId;
                 state.settings.modelName = ref.modelName;
-                state.settings.apiProvider = this.getApiConfigById(ref.apiConfigId)?.provider || state.settings.apiProvider;
+                state.settings.apiProvider = this.getApiConfigById(ref.apiConfigId)?.provider || '';
             },
             readExecutionDraft() {
                 try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null'); } catch { return null; }
@@ -1304,16 +1314,18 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.executionInitGeneration = generation;
                 state.executionInitializingV136 = true;
                 notify('chat');
-                const success = (await dbUtils.getSetting(SUCCESS_KEY))?.value;
-                state.lastSuccessfulExecution = success || state.lastSuccessfulExecution;
-                const legacy = state.legacyInitialModelRefV136 || (await dbUtils.getSetting('legacyInitialModelRefV136'))?.value;
-                const [configs, removed] = await Promise.all(['apiConfigs', REMOVED_MODELS_KEY].map(key => dbUtils.getSetting(key)));
+                const [successEntry, legacyEntry, configs, removed] = await Promise.all(
+                    [SUCCESS_KEY, 'legacyInitialModelRefV136', 'apiConfigs', REMOVED_MODELS_KEY].map(key => dbUtils.getSetting(key)));
                 if (generation !== state.executionInitGeneration || state.currentChatId) return;
-                if (configs) { state.apiConfigs = this.normalizeApiConfigs(configs.value); state.settings.apiConfigs = state.apiConfigs; }
+                const success = successEntry?.value;
+                const legacy = legacyEntry?.value;
+                state.lastSuccessfulExecution = success || null;
+                state.legacyInitialModelRefV136 = legacy || null;
+                if (configs) state.apiConfigs = state.settings.apiConfigs = this.normalizeApiConfigs(configs.value);
                 state.removedApiModelRefsV136 = removed?.value || [];
-                const candidates = [success?.modelRef, legacy, ...this.getApiModelChoices()];
+                const candidates = [success?.modelRef, legacy];
                 const fallback = candidates.find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
-                const draft = restoreDraft ? clearRemovedExecution(this.readExecutionDraft(), state.removedApiModelRefsV136) : null;
+                const draft = restoreDraft ? this.clearUnavailableExecutionSelectionV136(this.readExecutionDraft()) : null;
                 const source = draft || (success && modelRef(success.modelRef) && JSON.stringify(success.modelRef) === JSON.stringify(modelRef(fallback)) ? success : null);
                 state.currentExecutionSettings = executionSettings(source, fallback, ref => this.getModelThinkingCapability(ref));
                 state.executionInitializingV136 = false;
@@ -1337,19 +1349,27 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             getChatExecutionSettingsV136(chat) {
                 if (chat.executionSettings?.schemaVersion > 1) throw new Error('新しいバージョンのチャット設定です。');
+                const legacy = modelRef(state.legacyInitialModelRefV136);
                 const execution = chat.executionSettings || this.getLegacyChatExecutionV136(chat,
-                    modelRef(state.legacyInitialModelRefV136) || this.getCurrentChatModelRef());
-                return structuredClone(clearRemovedExecution(execution, state.removedApiModelRefsV136));
+                    legacy && this.validateModelRef(legacy).valid ? legacy : null);
+                return structuredClone(this.clearUnavailableExecutionSelectionV136(execution));
+            },
+            clearUnavailableExecutionSelectionV136(execution) {
+                const ref = execution?.modelRef;
+                if (this.isUnavailableExecutionSelection(ref)) {
+                    // Keep the stored chat execution record. This marker makes
+                    // content saves preserve it until the user selects a model.
+                    return { ...execution, modelRef: null, thinkingEffort: null, modelSelectionRequired: true };
+                }
+                return clearRemovedExecution(execution, state.removedApiModelRefsV136);
             },
             applyRemovedExecutionSelectionV136(storedExecution = null) {
-                const removed = state.removedApiModelRefsV136;
-                if (!removed?.length) return;
-                const draft = this.readExecutionDraft(), nextDraft = clearRemovedExecution(draft, removed);
+                const draft = this.readExecutionDraft(), nextDraft = this.clearUnavailableExecutionSelectionV136(draft);
                 if (nextDraft !== draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(nextDraft));
                 if (state.isSending || state.currentExecutionApiConfig) return;
                 const execution = state.currentExecutionSettings;
                 const next = storedExecution?.modelSelectionRequired && !execution?.modelSelectionRequired
-                    ? storedExecution : clearRemovedExecution(execution, removed);
+                    ? storedExecution : this.clearUnavailableExecutionSelectionV136(execution);
                 if (next === execution) return;
                 state.currentExecutionSettings = next;
                 this.syncChatExecutionToLegacySettings();
@@ -1614,6 +1634,24 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     };
                 });
                 return next;
+            },
+            async moveApiConfigV136(id, offset) {
+                let reordered;
+                await transaction(['settings'], tx => {
+                    const settings = tx.objectStore('settings');
+                    const request = settings.get('apiConfigs');
+                    request.onsuccess = () => {
+                        const configs = request.result?.value;
+                        if (!Array.isArray(configs)) return;
+                        const index = configs.findIndex(config => config.id === id);
+                        const destination = index + offset;
+                        if (index < 0 || destination < 0 || destination >= configs.length) return;
+                        [configs[index], configs[destination]] = [configs[destination], configs[index]];
+                        reordered = configs;
+                        settings.put({ key: 'apiConfigs', value: configs });
+                    };
+                });
+                return reordered;
             },
             async inspectApiConfigReferences(configId) {
                 const chats = await dbUtils.getAllChats();

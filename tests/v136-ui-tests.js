@@ -196,10 +196,16 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         }finally{st.db.transaction=transaction;}
         event('sd-api-url','http://127.0.0.1:7860');await wait(()=> $('sd-api-url').getAttribute('aria-invalid')!=='true');
     });
-    await test('API save closes the dialog without a success alert',async()=>{
-        const collect=app.collectApiConfigFormValues, alert=ui.showCustomAlert;let alerts=0;ui.showCustomAlert=async()=>{alerts++};
-        app.collectApiConfigFormValues=()=>({...st.apiConfigs.find(c=>c.id==='gem'),name:'Gemini test'});
-        await app.saveApiConfigFromDialog();eq(alerts,0);ui.showCustomAlert=alert;app.collectApiConfigFormValues=collect;
+    await test('API autosave keeps the editor open and reports success inline',async()=>{
+        const alert=ui.showCustomAlert;let alerts=0;ui.showCustomAlert=async()=>{alerts++};
+        try {
+            app.openApiConfigDialog('gem');
+            $('api-config-name').value='Gemini test';
+            assert(await app.saveApiConfigFromDialog());
+            assert($('api-config-dialog').open);
+            eq($('api-config-save-status').textContent,'保存済み');
+            eq(alerts,0);
+        } finally { ui.showCustomAlert=alert; await app.closeApiConfigDialog(); }
     });
     await test('SD connection tests report success and failure in their section',async()=>{
         const fetchOriginal=window.fetch;window.fetch=async()=>({ok:true});$('sd-test-connection-btn').click();await wait(()=>!$('sd-test-connection-btn').disabled);assert($('sd-connection-status').textContent.includes('接続できました'));
