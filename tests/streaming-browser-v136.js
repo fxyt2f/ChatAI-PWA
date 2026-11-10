@@ -354,6 +354,8 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             assert((await app.loadChat(toolId)).ok);
             eq(st.currentMessages.at(-1).thoughtSummary, streamed.thoughtSummary);
             await settings({enableStreamingOutput: true});
+            window.functionCallingTools = originalTools;
+            window.functionDeclarations = originalDeclarations;
         });
 
         await test('OpenRouter merges reasoning without duplication, preserves opaque details and maintains routing', async () => {
@@ -534,7 +536,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             assert(el.messageContainer.querySelector('.message.error').textContent.includes(failedMessage.content));
         });
 
-        await test('switch, regenerate and delete isolate stale streams; title generation continues separately', async () => {
+        await test('stream survives navigation and restores its partial; regeneration, deletion and title requests remain independent', async () => {
             await settings({enableChatTitleGeneration: true, chatTitleModelRef: gemini});
             await start();
             const main = sse();
@@ -552,15 +554,22 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             main.frame(geminiResult([{text: '切替前の部分'}]));
             await waitFor(() => body()?.textContent === '切替前の部分', 'source partial');
             assert((await app.loadChat(toolId)).ok);
+            assert(!main.canceled && !titleSignal.aborted && st.currentChatId === toolId);
+            assert(!el.messageContainer.textContent.includes('切替前の部分'));
+            main.frame(geminiResult([{text: ' + 非表示中の部分'}]));
+            assert((await app.loadChat(sourceId)).ok);
+            await waitFor(() => body()?.textContent === '切替前の部分 + 非表示中の部分', 'restored stream');
+            assert(st.isSending && el.sendButton.title === '停止');
+            await app.loadChat(toolId);
+            main.frame(geminiResult([{text: ' + 最終出力'}], 'STOP'));
+            main.close();
             await sending;
-            main.frame(geminiResult([{text: '遅い出力'}], 'STOP'));
-            assert(main.canceled && !titleSignal.aborted && st.currentChatId === toolId);
-            assert(!el.messageContainer.textContent.includes('遅い出力'));
+            assert(!el.messageContainer.textContent.includes('最終出力'));
             titleReply(json(geminiResult([{text: '別通信で生成した題名'}], 'STOP')));
             await waitFor(async () => (await db.getChat(sourceId)).title === '別通信で生成した題名', 'independent title');
             const source = await db.getChat(sourceId);
             eq(source.messages.map(message => message.role), ['user', 'model']);
-            assert(source.messages.at(-1).incomplete && source.messages.at(-1).content === '切替前の部分');
+            assert(!source.messages.at(-1).incomplete && source.messages.at(-1).content === '切替前の部分 + 非表示中の部分 + 最終出力');
             assertQuietStop();
             await settings({enableChatTitleGeneration: false});
             await app.setCurrentChatModelRef(gemini);
@@ -582,6 +591,10 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             await waitFor(body, 'regeneration placeholder');
             regen.frame(geminiResult([{text: '再生成の部分'}]));
             await waitFor(() => body()?.textContent === '再生成の部分', 'regeneration partial');
+            await app.loadChat(sourceId);
+            assert(!regen.canceled && !st.isSending);
+            await app.loadChat(toolId);
+            eq(body()?.textContent, '再生成の部分');
             app.abortRequest();
             await rerun;
             const messages = (await chat()).messages;
@@ -615,6 +628,173 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             assert((await window.chatHistoryActions.delete(id)).ok);
             await pending;
             assert(remove.canceled && !(await db.getChat(id)));
+        });
+
+        await test('two providers can send independently while the first draft is still waiting for its ID', async () => {
+            await start(gemini, {enableStreamingOutput: true});
+            const main = sse(), other = sse();
+            const save = db.saveChat;
+            let release, releaseStop, stopping = false;
+            const hold = new Promise(resolve => { release = resolve; });
+            const holdStop = new Promise(resolve => { releaseStop = resolve; });
+            let draft;
+            // Capture the initial write even when title generation is disabled.
+            db.saveChat = async function (...args) {
+                if (Object.hasOwn(args[2] || {}, 'titleGeneration') && !draft) {
+                    draft = args[2].sendSession;
+                    await hold;
+                }
+                if (args[2]?.sendSession?.controller.signal.aborted && args[2].sendSession !== draft) {
+                    stopping = true;
+                    await holdStop;
+                }
+                return save.apply(this, args);
+            };
+            reply = call => call.url.startsWith(routerBase) ? other.response : main.response;
+            const first = send('A draft prompt');
+            let second;
+            try {
+                await waitFor(() => draft, 'first draft waiting for IndexedDB');
+                eq(draft.chatId, null);
+                const sourceProfile = draft.profileId;
+                assert(await app.confirmStartNewChat());
+                await st.executionSettingsReady;
+                assert(!st.isSending && !el.userInput.disabled && el.sendButton.title === '送信');
+                await app.setCurrentChatModelRef(router);
+                const profile = (await db.getAllProfiles()).find(candidate => candidate.id !== sourceProfile);
+                if (profile) assert(await app.switchProfile(profile.id));
+                st.settings.enableStreamingOutput = true;
+                second = send('B draft prompt');
+                await waitFor(() => other.body.locked, 'second provider streaming');
+                const targetId = st.currentChatId;
+                const targetMessages = st.currentMessages;
+                release();
+                await waitFor(() => main.body.locked, 'first provider streaming after second draft commits');
+                const sourceId = draft.chatId;
+                assert(sourceId !== targetId && st.currentChatId === targetId && st.currentMessages === targetMessages);
+                main.frame(geminiResult([{text: 'A partial'}]));
+                other.frame(routerResult({content: 'B partial'}));
+                await waitFor(() => body()?.textContent === 'B partial', 'only second stream rendered');
+                assert(st.sendJobsV136.size === 2 && !draft.controller.signal.aborted);
+                const copied = await app.duplicateChat(sourceId);
+                assert(copied.ok && !other.canceled && !main.canceled);
+                eq((await db.getChat(copied.chatId)).messages.map(message => message.content), ['A draft prompt']);
+                await app.loadChat(sourceId);
+                await waitFor(() => body()?.textContent === 'A partial', 'first stream restored');
+                await app.loadChat(targetId);
+                await waitFor(() => body()?.textContent === 'B partial', 'second stream restored');
+                await send('duplicate B');
+                el.sendButton.click();
+                await waitFor(() => stopping, 'second job saving its stopped partial');
+                assert(other.canceled && !main.canceled && !draft.controller.signal.aborted);
+                main.frame(geminiResult([{text: ' A final'}], 'STOP'));
+                main.close();
+                await first;
+                eq(st.currentChatId, targetId);
+                releaseStop();
+                await second;
+                const a = await db.getChat(sourceId), b = await db.getChat(targetId);
+                eq(a.messages.map(message => message.content), ['A draft prompt', 'A partial A final']);
+                eq(b.messages.map(message => message.content), ['B draft prompt', 'B partial']);
+                assert(!a.messages.at(-1).incomplete && b.messages.at(-1).incomplete);
+                eq(a.messages.at(-1).usageMetadata.tmExecution.profileId, sourceProfile);
+                eq(a.executionSettings.modelRef, gemini);
+                eq(b.executionSettings.modelRef, router);
+                assertQuietStop();
+            } finally {
+                release();
+                releaseStop();
+                db.saveChat = save;
+                main.close();
+                other.close();
+                await Promise.allSettled([first, second]);
+                if (draft && draft.profileId !== st.activeProfileId) await app.switchProfile(draft.profileId);
+            }
+        });
+
+        await test('background retry and tool continuation retain the source system, memory and model after racing loads', async () => {
+            await settings({memoryModelRef: router});
+            await start(gemini, {enableStreamingOutput: false, enableAutoRetry: true, maxRetries: 1,
+                useFixedRetryDelay: true, fixedRetryDelaySeconds: 0, geminiEnableFunctionCalling: true,
+                enableMemory: true, memoryAutoSaveInterval: 1});
+            const sourceProfile = st.activeProfileId;
+            const originalMemory = await db.getMemory(sourceProfile);
+            await db.saveMemory(sourceProfile, {items: ['profile A memory']});
+            st.currentSystemPrompt = 'system A';
+            st.currentPersistentMemory = {inventories: {a: ['source-only']}};
+            st.currentSummarizedContext = {summaryText: 'summary A', summaryRange: {start: 0, end: 0}};
+            const original = await db.getChat(toolId);
+            const get = db.getChat;
+            let releaseRead, readEntered, replyFailure;
+            const holdRead = new Promise(resolve => { releaseRead = resolve; });
+            const attempts = [];
+            const toolSource = await (await rawFetch('../function-calling.js')).text();
+            Function(toolSource)();
+            const sourceResponse = new Promise(resolve => { replyFailure = resolve; });
+            reply = call => {
+                attempts.push(call);
+                if (attempts.length === 1) return sourceResponse;
+                if (attempts.length === 2) return json(geminiResult([{functionCall: {
+                    name:'manage_persistent_memory', args:{action:'add', key:'source-key', value:'source-value'}
+                }}], 'STOP'));
+                if (attempts.length === 3) return json(geminiResult([{text:'A tool answer'}], 'STOP'));
+                return json({choices: [{message: {content: '- extracted source item'}}]});
+            };
+            const sending = send('tool and retry from A');
+            try {
+                await waitFor(() => attempts.length === 1, 'first source request');
+                const sourceId = st.currentChatId;
+                db.getChat = async function (...args) {
+                    const result = await get.apply(this, args);
+                    if (args[0] === sourceId && !readEntered) {
+                        readEntered = true;
+                        await holdRead;
+                    }
+                    return result;
+                };
+                const stale = app.loadChat(sourceId);
+                await waitFor(() => readEntered, 'source read held while navigating');
+                assert((await app.loadChat(toolId)).ok);
+                await ui.showScreen('history', true);
+                Object.assign(st.settings, {enableAutoRetry:false, geminiEnableFunctionCalling:false});
+                st.currentSystemPrompt = 'system B';
+                replyFailure(new Response('temporary service error', {status: 503}));
+                await sending;
+                releaseRead();
+                assert(!(await stale).ok);
+                eq(st.currentChatId, toolId);
+                eq(st.currentSystemPrompt, 'system B');
+                eq((await get.call(db, toolId)).messages, original.messages);
+                eq((await get.call(db, toolId)).persistentMemory, original.persistentMemory);
+                await waitFor(async () => (await db.getMemory(sourceProfile)).items.includes('extracted source item'), 'source memory extraction');
+                eq(attempts.length, 4);
+                for (const attempt of attempts.slice(0, 3)) {
+                    assert(attempt.url.includes(gemini.modelName));
+                    assert(attempt.body.systemInstruction.parts[0].text.includes('system A'));
+                    assert(attempt.body.systemInstruction.parts[0].text.includes('profile A memory'));
+                    assert(JSON.stringify(attempt.body.contents).includes('summary A'));
+                    assert(!JSON.stringify(attempt.body).includes('system B'));
+                }
+                const result = attempts[2].body.contents.at(-1).parts[0].functionResponse;
+                assert(result.response.success, JSON.stringify(result));
+                eq(attempts[3].body.model, router.modelName);
+                assert(JSON.stringify(attempts[3].body).includes('A tool answer'));
+                assert(!JSON.stringify(attempts[3].body).includes('system B'));
+                const source = await get.call(db, sourceId);
+                eq(source.persistentMemory['source-key'], 'source-value');
+                eq(source.messages.at(-1).content, 'A tool answer');
+                eq(source.messages.at(-1).executedFunctions, ['manage_persistent_memory']);
+                assert((await app.loadChat(sourceId)).ok);
+                assertQuietStop();
+            } finally {
+                releaseRead();
+                replyFailure(new Response('controlled cleanup', {status: 400}));
+                db.getChat = get;
+                await Promise.allSettled([sending]);
+                await db.saveMemory(sourceProfile, originalMemory || {items: []});
+                await settings({memoryModelRef: globalBefore.memoryModelRef ?? null});
+                await ui.showScreen('chat', true);
+            }
         });
 
         await test('thought label is identical on all saved response routes and hidden when disabled', async () => {

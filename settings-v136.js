@@ -1403,13 +1403,12 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 uiUtils.updateUserModelOptions();
                 root.settingsUiV136?.refresh();
             },
-            async waitForGenerationCompletionV136() {
-                const session = state.sendExecutionV136;
+            async waitForGenerationCompletionV136(session = state.sendExecutionV136) {
                 if (session?.finished) {
                     let timer;
                     try {
                         await Promise.race([session.finished, new Promise(resolve => { timer = setTimeout(resolve, 10000); })]);
-                        return !state.isSending;
+                        return !state.sendJobsV136.has(session.messages);
                     } finally { clearTimeout(timer); }
                 }
                 const deadline = Date.now() + 10000;
@@ -1474,13 +1473,12 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.currentExecutionApiConfig = Object.freeze(config);
                 return config;
             },
-            applyExecutionThinking(body, provider) {
-                const config = this.getExecutionApiConfig();
+            applyExecutionThinking(body, provider, config = this.getExecutionApiConfig()) {
                 const c = config?.thinkingCapability || capability(provider, config?.modelName || state.settings.modelName);
                 return applyThinking(body, provider, c, config?.thinkingEffort);
             },
-            completeExecutionMetadata(snapshot, message) {
-                if (state.abortController?.signal.aborted) throw new DOMException('キャンセルされました。', 'AbortError');
+            completeExecutionMetadata(snapshot, message, { signal = state.abortController?.signal } = {}) {
+                signal?.throwIfAborted();
                 const actual = message?.usageMetadata?.tmActualExecution;
                 const result = { ...snapshot, completedAt: Date.now() };
                 if (actual?.modelName) result.modelName = actual.modelName;
@@ -1674,7 +1672,12 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 if (global?.appearance?.backgroundAssetId) ids.add(global.appearance.backgroundAssetId);
                 const assets = await dbUtils.getAllAssets();
                 assets.forEach(a => { if (a.assetId) ids.add(a.assetId); });
-                for (const chat of (await dbUtils.getAllChats()).filter(c => String(c.id) !== String(excludeChatId))) for (const m of chat.messages || []) {
+                const chats = await dbUtils.getAllChats();
+                for (const job of state.sendJobsV136.values()) {
+                    chats.push({ id: job.chatId, messages: job.messages });
+                    if (job.chatId !== excludeChatId) job.imageIds.forEach(id => ids.add(id));
+                }
+                for (const chat of chats) if (String(chat.id) !== String(excludeChatId)) for (const m of chat.messages || []) {
                     (m.imageIds || []).forEach(id => ids.add(id));
                     (m.attachments || []).forEach(a => { if (a.assetId) ids.add(a.assetId); });
                 }

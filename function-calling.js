@@ -371,7 +371,7 @@ async function rollDice({ expression }) {
  * @param {number} [args.duration_minutes] - タイマーの期間（分単位）。startアクションで必須
  * @returns {Promise<object>} 操作結果を含むオブジェクトを返すPromise
  */
-async function manage_timer({ action, timer_name, duration_minutes }) {
+async function manage_timer({ action, timer_name, duration_minutes }, chat) {
     console.log(`[Function Calling] manage_timerが呼び出されました。`, { action, timer_name, duration_minutes });
 
     if (!timer_name) {
@@ -383,13 +383,13 @@ async function manage_timer({ action, timer_name, duration_minutes }) {
             if (typeof duration_minutes !== 'number' || duration_minutes <= 0) {
                 return { error: "タイマーを開始するには、0より大きい分数(duration_minutes)が必要です。" };
             }
-            return appLogic.timerManager.start(timer_name, duration_minutes);
+            return appLogic.timerManager.start(timer_name, duration_minutes, chat?.session);
 
         case "check":
-            return appLogic.timerManager.check(timer_name);
+            return appLogic.timerManager.check(timer_name, chat?.session);
 
         case "stop":
-            return appLogic.timerManager.stop(timer_name);
+            return appLogic.timerManager.stop(timer_name, chat?.session);
 
         default:
             return { error: `無効なアクションです: ${action}` };
@@ -788,8 +788,7 @@ async function generate_random_string({ length, count = 1, use_uppercase = true,
 async function search_web({ query }, chat) {
     console.log(`[Function Calling] search_webが呼び出されました。`, { query });
   
-    const apiKey = state.settings.googleSearchApiKey;
-    const engineId = state.settings.googleSearchEngineId;
+    const { googleSearchApiKey: apiKey, googleSearchEngineId: engineId } = chat?.settings ?? state.settings;
   
     if (!apiKey || !engineId) {
         return { error: "Web検索機能を利用するには、設定画面でGoogle Search APIキーと検索エンジンIDの両方を設定する必要があります。" };
@@ -904,7 +903,8 @@ async function manage_style_profile({ action, character_name, profile_name, over
 async function set_ui_opacity({ overlay, message_bubble }, chat) {
     console.log(`[Function Calling] set_ui_opacityが呼び出されました。`, { overlay, message_bubble });
 
-    if (window.state && window.state.settings.allowPromptUiChanges === false) {
+    if (chat?.canUpdateView?.() === false) return { error: "別の画面を表示しているため、UIは変更されませんでした。" };
+    if ((chat?.settings ?? window.state?.settings)?.allowPromptUiChanges === false || window.state?.settings.allowPromptUiChanges === false) {
         return { error: "ユーザー設定により、プロンプトによるUIの変更は許可されていません。" };
     }
 
@@ -924,7 +924,7 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
     }
 
     if (window.appLogic && typeof window.appLogic.updateOpacitySettings === 'function') {
-        const success = await window.appLogic.updateOpacitySettings(newOpacities, chat?.signal);
+        const success = await window.appLogic.updateOpacitySettings(newOpacities, chat?.signal, chat);
         if (success) {
             const message = `${changedItems.join('、')}変更しました。`;
             return { success: true, message: message };
@@ -945,7 +945,8 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
  async function set_background_image({ image_url, asset_name }, chat) {
     console.log(`[Function Calling] set_background_imageが呼び出されました。`, { image_url, asset_name });
 
-    if (window.state && window.state.settings.allowPromptUiChanges === false) {
+    if (chat?.canUpdateView?.() === false) return { error: "別の画面を表示しているため、UIは変更されませんでした。" };
+    if ((chat?.settings ?? window.state?.settings)?.allowPromptUiChanges === false || window.state?.settings.allowPromptUiChanges === false) {
         return { error: "ユーザー設定により、プロンプトによるUIの変更は許可されていません。" };
     }
 
@@ -966,6 +967,10 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
             return { error: "引数 'image_url' または 'asset_name' のどちらか一方は必須です。" };
         }
 
+        if (chat?.canUpdateView?.() === false) {
+            if (asset_name && final_image_url) URL.revokeObjectURL(final_image_url);
+            return { error: "別の画面を表示しているため、背景は変更されませんでした。" };
+        }
         if (window.appLogic && typeof window.appLogic.applyBackgroundImageFromUrl === 'function') {
             const result = await window.appLogic.applyBackgroundImageFromUrl(final_image_url);
             // URLの解放処理は呼び出し先のapp.jsに一任するため、ここでは何もしない
@@ -1002,13 +1007,14 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
       prompt, negative_prompt, aspect_ratio, source_image_message_index, hasInline: !!source_inline_image, model
     });
   
-    const apiKey = window.state?.settings?.apiKey;
+    const apiKey = (chat?.settings ?? window.state?.settings)?.apiKey;
     if (!apiKey) return { success: false, error: { message: "APIキーが設定されていません。" } };
     if (typeof window.GoogleGenAI === 'undefined') return { success: false, error: { message: "Google Gen AI SDK (@google/genai) が読み込まれていません。" } };
     if (!prompt || !String(prompt).trim()) return { success: false, error: { message: "prompt が空です。" } };
   
     // ローディングUI
-    if (window.uiUtils) {
+    if (chat?.setProgress) chat.setProgress('動画生成中...');
+    else if (window.uiUtils) {
       window.uiUtils.setLoadingIndicatorText('動画生成中...');
       window.elements.loadingIndicator.classList.remove('hidden');
     }
@@ -1194,7 +1200,7 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
           } 
       };
     } finally {
-      if (!chat?.signal?.aborted && window.uiUtils) window.elements?.loadingIndicator?.classList.add('hidden');
+      if (!chat?.setProgress && !chat?.signal?.aborted && window.uiUtils) window.elements?.loadingIndicator?.classList.add('hidden');
     }
 }
 
@@ -1220,9 +1226,9 @@ async function set_ui_opacity({ overlay, message_bubble }, chat) {
  * @returns {Promise<object>} 処理結果
  */
 async function generate_image(args = {}, chat) {
-    const ai = (window.ai instanceof GoogleGenAI)
+    const ai = !chat?.settings && window.ai instanceof GoogleGenAI
       ? window.ai
-      : new GoogleGenAI({ apiKey: (window.state?.settings?.apiKey || window.GEMINI_API_KEY) });
+      : new GoogleGenAI({ apiKey: chat?.settings ? chat.settings.apiKey : window.state?.settings?.apiKey || window.GEMINI_API_KEY });
   
     const {
       prompt,
@@ -1353,7 +1359,7 @@ async function generate_image(args = {}, chat) {
 
     console.log(`[Function Calling] edit_imageが呼び出されました。`, { prompt, source_images, model });
 
-    const apiKey = window.state?.settings?.apiKey;
+    const apiKey = (chat?.settings ?? window.state?.settings)?.apiKey;
     if (!apiKey) return { error: "APIキーが設定されていません。" };
     if (typeof window.GoogleGenAI === 'undefined') return { error: "Google Gen AI SDK (@google/genai) が読み込まれていません。" };
     if (!prompt || typeof prompt !== 'string') return { error: "引数 'prompt' は必須です。" };
@@ -1367,7 +1373,7 @@ async function generate_image(args = {}, chat) {
     // --- [DEBUG] ログ追加 END ---
 
     try {
-        const ai = (window.ai instanceof GoogleGenAI)
+        const ai = (!chat?.settings && window.ai instanceof GoogleGenAI)
             ? window.ai
             : new GoogleGenAI({ apiKey });
         
@@ -1690,7 +1696,7 @@ window.functionCallingTools = {
         console.log(`[Function Calling] generate_image_stable_diffusionが呼び出されました。`, args);
         if (window.appLogic && typeof window.appLogic.handleStableDiffusionGeneration === 'function') {
             const responseText = args._responseTextForQc || '';
-            return await window.appLogic.handleStableDiffusionGeneration(args, responseText, chatContext?.signal);
+            return await window.appLogic.handleStableDiffusionGeneration(args, responseText, chatContext?.signal, chatContext?.session);
         } else {
             return { error: "Stable Diffusion連携機能が初期化されていません。" };
         }

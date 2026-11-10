@@ -49,6 +49,57 @@ window.addEventListener('load', async () => {
         app.clearInputDraftAfterSend=()=>{};
         app.scrollToBottom=()=>{};
         window.testDebug.init=()=>{};
+        for (const version of [13, 14]) await test(`existing IndexedDB v${version} opens and preserves local data`, async () => {
+            const name = 'v1366-compat-' + crypto.randomUUID();
+            const legacyStore = 'background_jobs';
+            const open = indexedDB.open;
+            const originalMessages = st.currentMessages, originalChatId = st.currentChatId;
+            try {
+                const seeded = await new Promise((resolve, reject) => {
+                    const request = open.call(indexedDB, name, version);
+                    request.onerror = () => reject(request.error);
+                    request.onupgradeneeded = () => {
+                        const fixture = request.result;
+                        fixture.createObjectStore('chats', { keyPath: 'id' }).put({
+                            id: 1, title: 'compatibility chat', ...SettingsV136.nextChatContentVersion(),
+                            messages: [{ role: 'user', content: 'existing turn' }]
+                        });
+                        fixture.createObjectStore('settings', { keyPath: 'key' }).put({ key: 'compat', value: 'existing setting' });
+                        fixture.createObjectStore('memory_store', { keyPath: 'profileId' }).put({ profileId: 1, items: ['existing memory'] });
+                        if (version === 14) {
+                            const retired = fixture.createObjectStore(legacyStore, { keyPath: 'id' });
+                            retired.createIndex('chatId', 'chatId', { unique: true });
+                            retired.put({ id: 'retired-receipt', chatId: 1 });
+                        }
+                    };
+                    request.onsuccess = () => resolve(request.result);
+                });
+                seeded.close();
+                indexedDB.open = (_, requestedVersion) => open.call(indexedDB, name, requestedVersion);
+                const connection = await db.openDB();
+                eq(connection.version, 14);
+                eq(connection.objectStoreNames.contains(legacyStore), version === 14);
+                const original = await db.getChat(1);
+                eq(original.messages.map(message => message.content), ['existing turn']);
+                st.currentChatId = original.id;
+                st.currentMessages = original.messages;
+                db.bindChatSaveOwnerV136(st.currentMessages, original);
+                st.currentMessages.push({ role: 'model', content: 'local reply' });
+                await db.saveChat(null, null, { skipPush: true });
+                const saved = await db.getChat(1);
+                eq(saved.messages.map(message => message.content), ['existing turn', 'local reply']);
+                eq(saved.recordGenerationId, original.recordGenerationId);
+                eq((await db.getMemory(1)).items, ['existing memory']);
+                eq((await db.getSetting('compat')).value, 'existing setting');
+            } finally {
+                indexedDB.open = open;
+                st.db?.close();
+                st.db = null;
+                st.currentMessages = originalMessages;
+                st.currentChatId = originalChatId;
+                indexedDB.deleteDatabase(name);
+            }
+        });
         status('opening database'); await db.openDB();
         const configs=[{id:'gem',name:'Gem',provider:'gemini',enabled:true,apiKey:'mock',modelCandidates:['gemini-3-pro-preview','gemini-3-flash-preview','gemini-3.8-flash','gemini-2.5-pro'],defaultModel:'gemini-3-pro-preview'},
             {id:'or',name:'OR',provider:'openrouter',enabled:true,apiKey:'mock',modelCandidates:['test/reasoner'],defaultModel:'test/reasoner'},
@@ -291,36 +342,34 @@ window.addEventListener('load', async () => {
             eq(app.getCurrentChatThinkingEffort(),null);eq((await db.getChat(999)).messages[0].usageMetadata.tmExecution,oldMetadata);
             eq((await db.getChat(999)).messages[0].thinkingBudget,4096);
         });
-        await test('switching chats waits for the cancelled generation to finish saving',async()=>{
+        await test('non-streaming generation finishes on its source chat after switching to another chat and screen',async()=>{
             app.startNewChat();await st.executionSettingsReady;await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-pro-preview'});
-            st.settings.enableAutoRetry=false;
-            let requestReady;
+            Object.assign(st.settings,{enableAutoRetry:false,enableStreamingOutput:false,enableMemory:false,enableProofreading:false});
+            let requestReady, reply;
             const requestStarted=new Promise(resolve=>requestReady=resolve);
-            window.fetch=async(url,opts)=>new Promise((resolve,reject)=>{
-                const abort=()=>reject(new DOMException('cancelled','AbortError'));
-                if(opts.signal.aborted)abort();
-                else opts.signal.addEventListener('abort',abort,{once:true});
-                requestReady();
-            });
-            let sendFailure=null,sendFinished=false;
-            el.userInput.value='switch during request';const sending=app.handleSend().catch(error=>{sendFailure=error}).finally(()=>{sendFinished=true});
-            const sendDeadline=Date.now()+3000;
-            while(!st.isSending){
-                if(sendFailure)throw sendFailure;
-                if(sendFinished||Date.now()>sendDeadline)throw new Error('Send did not enter sending state: '+JSON.stringify({sendFinished,isEditingSystemPrompt:st.isEditingSystemPrompt,openDialogs:[...document.querySelectorAll('dialog[open]')].map(d=>d.id),input:el.userInput.value}));
-                await new Promise(r=>setTimeout(r,1));
+            window.fetch=async(url,opts)=>new Promise(resolve=>{reply=resolve;requestReady(opts.signal);});
+            el.userInput.value='switch during request';
+            const sending=app.handleSend();
+            const signal=await requestStarted, sourceId=st.currentChatId;
+            const targetBefore=await db.getChat(100);
+            try {
+                assert((await app.loadChat(100)).ok);
+                await ui.showScreen('settings',true);
+                assert(!signal.aborted && !st.isSending && !el.userInput.disabled);
+                reply(Response.json({candidates:[{content:{parts:[{text:'saved only in the source'}]},finishReason:'STOP'}]}));
+                await sending;
+                eq(st.currentChatId,100);
+                eq((await db.getChat(100)).messages,targetBefore.messages);
+                eq((await db.getChat(sourceId)).messages.map(m=>m.content),['switch during request','saved only in the source']);
+                assert((await app.loadChat(sourceId)).ok);
+                eq(st.currentMessages.at(-1).content,'saved only in the source');
+                assert(!st.isSending && !st.sendJobsV136.size);
+            } finally {
+                reply(Response.json({candidates:[]}));
+                await sending;
+                await ui.showScreen('chat',true);
+                window.fetch=rawFetch;
             }
-            // isSending precedes the initial DB save and AbortController setup.
-            // This case exercises cancellation of an actual in-flight request.
-            await Promise.race([requestStarted,new Promise((_,reject)=>setTimeout(()=>reject(new Error('Request never started')),3000))]);
-            const switched=await app.loadChat(100);
-            if (!switched?.ok) {
-                app.abortRequest(); await sending;
-                throw new Error('Chat switch did not complete: '+JSON.stringify(switched));
-            }
-            await sending;eq(st.currentChatId,100);eq(st.currentMessages[0].content,'old response');
-            if(sendFailure)throw sendFailure;
-            eq((await db.getChat(100)).messages[0].usageMetadata.tmExecution,oldMetadata);window.fetch=rawFetch;
         });
         if(new URLSearchParams(location.search).has('review')) {
             output.push(...await window.runReviewRegressionsV136({app,db,st,ui,el,assert,eq}));

@@ -9,7 +9,8 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-const DB_VERSION = 13; 
+// Keep v14 so databases already opened at that version remain readable.
+const DB_VERSION = 14;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -196,8 +197,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.5";
-const APP_CACHE_VERSION = "v1.36.5";
+const APP_VERSION = "1.36.6";
+const APP_CACHE_VERSION = "v1.36.6";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -1192,7 +1193,9 @@ Reason: [NGの場合の理由]`,
     syncMessageCounter: 0,
     backgroundImageUrl: null,
     isSending: false,
-    sendExecutionV136: null,
+    sendJobsV136: new Map(),
+    chatDataChangesV136: new Set(),
+    sendExecutionV136: null, // Projection of the job in the current chat.
     abortController: null,
     editingMessageIndex: null,
     isEditingSystemPrompt: false,
@@ -1390,8 +1393,8 @@ function scopedRequestSignalV136(parent, timeoutMs) {
     };
 }
 
-function configuredApiTimeoutV136() {
-    return state.settings.enableApiTimeout ? (state.settings.apiTimeoutSeconds || 90) * 1000 : null;
+function configuredApiTimeoutV136(settings = state.settings) {
+    return settings.enableApiTimeout ? (settings.apiTimeoutSeconds || 90) * 1000 : null;
 }
 
 // A client SDK can ignore abort while awaiting an external operation. The tool
@@ -1429,7 +1432,7 @@ function createServiceWorkerUpdateCoordinator() {
     const safe = () => {
         const imageOverlay = document.getElementById('image-modal-overlay');
         return Boolean(state.db && state.activeProfile && appLogic._setupEventListenersCallCount) &&
-            !state.executionInitializingV136 && !state.isSending && !state.sendPreparationV136 &&
+            !state.executionInitializingV136 && !state.isSending && !state.sendPreparationV136 && !state.sendJobsV136.size &&
             !appLogic.isGenerationBlockingActive?.() && state.editingMessageIndex === null &&
             !state.isEditingSystemPrompt && !appLogic.hasUnsavedSystemPrompt?.() &&
             !appLogic.attachmentPickerMessages && !appLogic.attachmentOperation && !state.pendingAttachments?.length &&
@@ -1894,8 +1897,9 @@ const dbUtils = {
         appLogic.ensureHistoryWorkerV136();
         // Capture the owner and contents before the first async boundary. A prompt
         // save may still be finishing when navigation changes the active chat.
-        const contextMessages = state.currentMessages;
-        let contextChatId = state.currentChatId;
+        const session = options.sendSession;
+        const contextMessages = session?.messages ?? state.currentMessages;
+        let contextChatId = session ? session.chatId : state.currentChatId;
         let targetChatId = chatObjectToSave ? chatObjectToSave.id : contextChatId, savedChatId = null;
         let committedVersion, conflict = false;
         let savedUiState = null;
@@ -1907,6 +1911,9 @@ const dbUtils = {
         let chatDataToSave;
 
         const promptSave = options.systemPromptSave;
+        if (!session && !chatObjectToSave && !promptSave && state.sendJobsV136.has(contextMessages)) {
+            throw new DOMException('応答生成中は会話データを更新できません。', 'ChatContentConflict');
+        }
         if (promptSave && (promptSave.messages !== contextMessages ||
             (promptSave.chatId != null && promptSave.chatId !== contextChatId))) {
             throw new DOMException('System prompt save owner changed', 'AbortError');
@@ -1914,14 +1921,11 @@ const dbUtils = {
 
         if (!chatObjectToSave) {
             const knownOwner = this.chatSaveOwners?.get(contextMessages);
-            if (!promptSave && !contextChatId && !knownOwner?.id && !knownOwner?.pending &&
-                (!state.currentMessages || state.currentMessages.length === 0) && !state.currentSystemPrompt) {
-                if(state.currentChatId) console.log(`saveChat: 既存チャット ${state.currentChatId} にメッセージもシステムプロンプトもないため保存せず`);
-                else console.log("saveChat: 新規チャットに保存するメッセージもシステムプロンプトもなし");
-                return state.currentChatId;
-            }
+            const systemPrompt = session ? session.systemPrompt : state.currentSystemPrompt;
+            if (!promptSave && !contextChatId && !knownOwner?.id && !knownOwner?.pending
+                && !contextMessages?.length && !systemPrompt) return contextChatId;
 
-            const placeholder = options.sendSession?.placeholder;
+            const placeholder = session?.placeholder;
             const snapshot = placeholder ? contextMessages.filter(message => message !== placeholder) : contextMessages;
             const messagesToSave = snapshot.map(msg => ({
                 ...SettingsV136.pick(msg, ['geminiFunctionCallId', 'name', 'response', '_toolCallId', 'tool_call_id',
@@ -1966,16 +1970,18 @@ const dbUtils = {
 
             chatDataToSave = {
                 messages: messagesToSave,
-                executionSettings: structuredClone(state.currentExecutionSettings),
-                systemPrompt: promptSave ? promptSave.value : state.currentSystemPrompt,
-                generationParameters: promptSave?.parameters || appLogic.getChatGenerationParameters(),
-                parameterRevision: state.currentChatParameterRevision,
-                persistentMemory: state.currentPersistentMemory || {},
-                summarizedContext: state.currentSummarizedContext || null,
-                isMemoryEnabledForChat: state.isMemoryEnabledForChat,
-                isPinned: state.currentChatIsPinned === true,
-                pinnedAt: state.currentChatIsPinned === true ? state.currentChatPinnedAt : null,
-                pinStateUpdatedAt: state.currentChatPinStateUpdatedAt,
+                executionSettings: structuredClone(session?.execution ?? state.currentExecutionSettings),
+                systemPrompt: promptSave ? promptSave.value : systemPrompt,
+                generationParameters: promptSave?.parameters || session?.generationParameters || appLogic.getChatGenerationParameters(),
+                parameterRevision: session?.parameterRevision ?? state.currentChatParameterRevision,
+                persistentMemory: session ? session.persistentMemory : state.currentPersistentMemory || {},
+                summarizedContext: session ? session.summarizedContext : state.currentSummarizedContext || null,
+                isMemoryEnabledForChat: session?.memoryEnabled ?? state.isMemoryEnabledForChat,
+                ...(session ? session.pinState : {
+                    isPinned: state.currentChatIsPinned === true,
+                    pinnedAt: state.currentChatPinnedAt,
+                    pinStateUpdatedAt: state.currentChatPinStateUpdatedAt
+                }),
             };
         } else {
             messagesForStats = chatObjectToSave.messages || [];
@@ -1994,6 +2000,7 @@ const dbUtils = {
         }
         const expectedVersion = chatObjectToSave ? SettingsV136.chatContentVersion(chatDataToSave) : owner;
         const commit = async () => {
+            if (session && !appLogic.ownsSendExecutionV136(session)) return null;
             if (!chatObjectToSave && !targetChatId && owner.id) {
                 targetChatId = contextChatId = owner.id;
             }
@@ -2090,11 +2097,12 @@ const dbUtils = {
 
                         const putRequest = store.put(finalChatData);
                         if (options.successfulExecution && !SettingsV136.matchesRemovedModel(options.successfulExecution.modelRef, removedRefs)) {
-                            savedSuccessfulExecution = options.successfulExecution;
                             const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
                             successRequest.onsuccess = () => {
-                                if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt)
-                                    settingsStore.put({ key: SettingsV136.SUCCESS_KEY, value: options.successfulExecution });
+                                if ((successRequest.result?.value?.completedAt || 0) <= options.successfulExecution.completedAt) {
+                                    savedSuccessfulExecution = options.successfulExecution;
+                                    settingsStore.put({ key: SettingsV136.SUCCESS_KEY, value: savedSuccessfulExecution });
+                                }
                             };
                         }
                         putRequest.onsuccess = (event) => {
@@ -2129,8 +2137,8 @@ const dbUtils = {
 
                     transaction.oncomplete = () => {
                         if (conflict) {
-                            if (options.sendSession) {
-                                options.sendSession.discarded = true;
+                            if (session) {
+                                session.discarded = true;
                                 resolve(null);
                             } else {
                                 reject(new DOMException('別の操作で会話が更新されました。履歴を開き直してください。', 'ChatContentConflict'));
@@ -2138,6 +2146,7 @@ const dbUtils = {
                             return;
                         }
                         if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, createdAt: savedUiState?.createdAt });
+                        if (session) session.chatId = savedChatId;
                         try {
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) state.currentChatId = contextChatId = savedChatId;
@@ -2421,9 +2430,26 @@ const dbUtils = {
         });
     },
 
+    async withChatDataChangeV136(chatId, operation) {
+        const changes = state.chatDataChangesV136;
+        if (changes.has(chatId) || changes.has(undefined) || (chatId === undefined && changes.size)) {
+            throw new Error('会話データを更新中です。');
+        }
+        changes.add(chatId);
+        try {
+            await appLogic.stopSendBeforeDataChangeV136(chatId);
+            return await operation();
+        } finally {
+            changes.delete(chatId);
+        }
+    },
+
     // 指定IDのチャットを削除
-    async deleteChat(id, { markDirty = true } = {}) {
-        await appLogic.stopSendBeforeDataChangeV136(id);
+    async deleteChat(id, options) {
+        return this.withChatDataChangeV136(id, () => this._deleteChat(id, options));
+    },
+
+    async _deleteChat(id, { markDirty = true } = {}) {
         await this.openDB();
         
         // Step 1: 削除対象のチャットから画像IDを収集
@@ -2484,7 +2510,10 @@ const dbUtils = {
 
     // 全データ (設定とチャット) をクリア
     async clearAllData() {
-        await appLogic.stopSendBeforeDataChangeV136();
+        return this.withChatDataChangeV136(undefined, () => this._clearAllData());
+    },
+
+    async _clearAllData() {
         await this.openDB();
         return new Promise((resolve, reject) => {
             // DBに存在するすべてのストア名をトランザクションの対象にする
@@ -2701,16 +2730,21 @@ const dbUtils = {
             request.onerror = (event) => reject(`メモリ(ID: ${profileId})保存エラー: ${event.target.error}`);
         });
     },
-    async appendExtractedMemory(profileId, items) {
+    async appendExtractedMemory(profileId, items, source = null) {
         await this.openDB();
         return new Promise((resolve, reject) => {
-            const tx = state.db.transaction([PROFILES_STORE, 'memory_store'], 'readwrite');
+            const stores = [PROFILES_STORE, 'memory_store'];
+            if (source) stores.push(CHATS_STORE);
+            const tx = state.db.transaction(stores, 'readwrite');
             let added = 0;
             tx.oncomplete = () => resolve(added);
             tx.onabort = () => reject(tx.error || new Error('記憶を保存できませんでした。'));
             const profile = tx.objectStore(PROFILES_STORE).getKey(profileId);
-            profile.onsuccess = () => {
-                if (profile.result === undefined) return;
+            const chat = source && tx.objectStore(CHATS_STORE).get(source.chatId);
+            let readsRemaining = chat ? 2 : 1;
+            const append = () => {
+                if (--readsRemaining || profile.result === undefined) return;
+                if (chat && (!chat.result || chat.result.recordGenerationId !== source.recordGenerationId)) return;
                 const store = tx.objectStore('memory_store');
                 const request = store.get(profileId);
                 request.onsuccess = () => {
@@ -2722,6 +2756,8 @@ const dbUtils = {
                     store.put({ ...current, profileId, items: [...current.items, ...additions] });
                 };
             };
+            profile.onsuccess = append;
+            if (chat) chat.onsuccess = append;
         });
     },
     async getAllMemories() {
@@ -2737,8 +2773,13 @@ const dbUtils = {
     /**
      * [V2] メタデータを受け取り、アセットをDLしてからDBをクリア＆インポートする
      */
-     async clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds) {
-        await appLogic.stopSendBeforeDataChangeV136();
+     async clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, { automatic = false } = {}) {
+        if (automatic && state.sendJobsV136.size) return null;
+        return this.withChatDataChangeV136(undefined,
+            () => this._clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds));
+    },
+
+    async _clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds) {
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
         uiUtils.showProgressDialog('データベースを準備中...');
 
@@ -3040,6 +3081,7 @@ const uiUtils = {
     },
 
     isGenerationPlaceholderMessage(message, index) {
+        if (state.sendExecutionV136) return state.sendExecutionV136.placeholder === message;
         if (!this.isResponseGenerationActive()) return false;
         if (!message || message.role !== 'model' || message.incomplete) return false;
         if (String(message.content || '').trim() !== '') return false;
@@ -4488,6 +4530,7 @@ renderChatMessages(options = {}) {
     }
 
     container.appendChild(fragment);
+    if (state.sendExecutionV136) appLogic.renderSendStreamV136(state.sendExecutionV136);
     if (state.chatSearch.messageTarget && !this.resolveChatSearchMessageContent()) {
         this.closeChatSearch({ restoreFocus: false });
     }
@@ -5684,11 +5727,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`
     )) {
         if (!openButton) return;
-        const generating = state.chatTitleGenerations.has(String(chatId));
+        const generatingTitle = state.chatTitleGenerations.has(String(chatId));
+        const generatingAnswer = Boolean(appLogic.getSendJobV136(chatId));
         const dot = openButton.querySelector('.chat-sidebar-title-dot');
         const title = openButton.querySelector('.chat-sidebar-item-title').title;
-        dot.hidden = !generating;
-        openButton.setAttribute('aria-label', `「${title}」を開く${generating ? '（タイトル生成中）' : ''}`);
+        dot.hidden = !(generatingTitle || generatingAnswer);
+        dot.title = generatingAnswer ? '応答生成中' : 'タイトル生成中';
+        openButton.setAttribute('aria-label', `「${title}」を開く${dot.hidden ? '' : `（${dot.title}）`}`);
     },
 
     createChatSidebarItem(model, { isSearch = false } = {}) {
@@ -8972,19 +9017,20 @@ const apiUtils = {
     },
 
     // Gemini APIを呼び出す
-    async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
+    async callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null, session = null) {
         appLogic.ensureHistoryWorkerV136();
-        const executionConfig = appLogic.getExecutionApiConfig();
+        const settings = session?.settings ?? state.settings;
+        const executionConfig = session?.apiConfig ?? appLogic.getExecutionApiConfig();
         console.log(`[Debug] callGeminiApi: 現在の設定値を確認します。`, {
-            forceFunctionCalling: state.settings.forceFunctionCalling,
-            geminiEnableFunctionCalling: state.settings.geminiEnableFunctionCalling,
+            forceFunctionCalling: settings.forceFunctionCalling,
+            geminiEnableFunctionCalling: settings.geminiEnableFunctionCalling,
             isForcedNow: forceCalling,
             apiConfigId: executionConfig?.id || ''
         });
 
-        const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || '') : state.settings.apiKey;
+        const apiKey = executionConfig?.provider === 'gemini' ? (executionConfig.apiKey || '') : settings.apiKey;
         if (!apiKey) {
-            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'gemini', modelName: state.settings.modelName }, 'gemini'));
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'gemini', modelName: settings.modelName }, 'gemini'));
         }
         
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -8993,11 +9039,11 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = executionConfig?.provider === 'gemini' ? executionConfig.modelName : state.settings.modelName;
+        const model = executionConfig?.provider === 'gemini' ? executionConfig.modelName : settings.modelName;
         if (!model) throw new Error('基本モデルが選択されていません。');
 
         if (model === 'gemini-2.5-pro') {
-            await appLogic._updateApiUsageCount(state.activeProfileId); 
+            await appLogic._updateApiUsageCount(session ? session.profileId : state.activeProfileId);
         }
 
         const isImageGenModel = model === 'gemini-2.5-flash-image-preview';
@@ -9010,7 +9056,7 @@ const apiUtils = {
             : GEMINI_API_BASE_URL;
         const endpoint = `${geminiBaseUrl}${model}:${endpointMethod}key=${apiKey}`;
         
-        const finalGenerationConfig = appLogic.applyExecutionThinking({ ...generationConfig }, 'gemini');
+        const finalGenerationConfig = appLogic.applyExecutionThinking({ ...generationConfig }, 'gemini', executionConfig);
         
         if (isImageGenModel) {
             finalGenerationConfig.responseModalities = ['IMAGE', 'TEXT'];
@@ -9047,11 +9093,11 @@ const apiUtils = {
             }
 
             let finalTools = [];
-            if (state.settings.geminiEnableFunctionCalling) {
+            if (settings.geminiEnableFunctionCalling) {
                 finalTools = window.functionDeclarations || [];
                 console.log("Function Calling を有効にしてAPIを呼び出します。");
             } 
-            else if (state.settings.geminiEnableGrounding) {
+            else if (settings.geminiEnableGrounding) {
                 finalTools.push({ "google_search": {} });
                 console.log("グラウンディング (Google Search) を有効にしてAPIを呼び出します。");
             }
@@ -9060,7 +9106,7 @@ const apiUtils = {
                 requestBody.tools = finalTools;
             }
 
-            if (forceCalling && state.settings.geminiEnableFunctionCalling) {
+            if (forceCalling && settings.geminiEnableFunctionCalling) {
                 requestBody.toolConfig = {
                     functionCallingConfig: {
                         mode: 'ANY'
@@ -9134,7 +9180,7 @@ const apiUtils = {
         });
     },
 
-    async translateText(textToTranslate, translationConfig, signal = state.abortController?.signal) {
+    async translateText(textToTranslate, translationConfig, signal = state.abortController?.signal, session = null) {
         signal?.throwIfAborted();
         if (!textToTranslate?.trim()) return { text: textToTranslate, complete: true };
 
@@ -9165,14 +9211,14 @@ const apiUtils = {
         const config = translationConfig || appLogic.resolveThoughtTranslationApiConfig();
         if (!config.modelName) return { text: textToTranslate, complete: false };
         const provider = appLogic.normalizeApiProvider(config.provider);
-        const timeout = Math.min(15000, configuredApiTimeoutV136() ?? Infinity);
+        const timeout = Math.min(15000, configuredApiTimeoutV136(session?.settings) ?? Infinity);
         const started = performance.now();
         const request = (entries, timeoutMs, retryTransport) => {
             const payload = JSON.stringify(Object.fromEntries(entries.map(unit => [unit.id, unit.source])));
-            if (provider === 'openrouter') return this.translateTextWithOpenRouter(payload, config, signal, timeoutMs);
-            if (provider === 'zai') return this.translateTextWithOpenAICompatible(payload, config, 'Z.ai', signal, timeoutMs);
-            if (provider === 'bedrock') return this.translateTextWithBedrock(payload, config, signal, timeoutMs);
-            return this.translateTextWithGemini(payload, config, signal, timeoutMs, retryTransport);
+            if (provider === 'openrouter') return this.translateTextWithOpenRouter(payload, config, signal, timeoutMs, session);
+            if (provider === 'zai') return this.translateTextWithOpenAICompatible(payload, config, 'Z.ai', signal, timeoutMs, session);
+            if (provider === 'bedrock') return this.translateTextWithBedrock(payload, config, signal, timeoutMs, session);
+            return this.translateTextWithGemini(payload, config, signal, timeoutMs, retryTransport, session);
         };
         let translatedCount = 0;
         const apply = (result, entries) => {
@@ -9218,7 +9264,7 @@ const apiUtils = {
         return typeof text === 'string' && text.trim() ? { text } : null;
     },
 
-    async translateTextWithGemini(textToTranslate, translationConfig, signal, timeout, retryTransport) {
+    async translateTextWithGemini(textToTranslate, translationConfig, signal, timeout, retryTransport, session) {
 
         console.log("--- 思考プロセスの翻訳処理開始 ---");
         
@@ -9252,16 +9298,17 @@ const apiUtils = {
             ]
         };
 
-        if (state.settings.applyDummyToTranslate && state.settings.dummyUser) {
+        const settings = session?.settings ?? state.settings;
+        if (settings.applyDummyToTranslate && settings.dummyUser) {
             requestBody.contents.push({
                 role: 'user',
-                parts: [{ text: state.settings.dummyUser }]
+                parts: [{ text: settings.dummyUser }]
             });
             console.log("翻訳リクエストにダミーUserプロンプトを適用しました。");
         }
 
         let lastError = null;
-        const maxTranslationRetries = retryTransport && state.settings.enableAutoRetry ? state.settings.maxRetries : 0;
+        const maxTranslationRetries = retryTransport && settings.enableAutoRetry ? settings.maxRetries : 0;
 
         for (let attempt = 0; attempt <= maxTranslationRetries; attempt++) {
             let request;
@@ -9270,22 +9317,22 @@ const apiUtils = {
 
                 if (attempt > 0) {
                     let delay;
-                    if (state.settings.useFixedRetryDelay) {
-                        delay = state.settings.fixedRetryDelaySeconds * 1000;
+                    if (settings.useFixedRetryDelay) {
+                        delay = settings.fixedRetryDelaySeconds * 1000;
                     } else {
                         const exponentialDelay = INITIAL_RETRY_DELAY * Math.pow(2, attempt - 1);
-                        const maxDelay = state.settings.maxBackoffDelaySeconds * 1000;
+                        const maxDelay = settings.maxBackoffDelaySeconds * 1000;
                         delay = Math.min(exponentialDelay, maxDelay);
                     }
-                    uiUtils.setLoadingIndicatorText(`翻訳エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
+                    appLogic.setSendProgressV136(session, `翻訳エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`翻訳APIリトライ ${attempt}: ${delay}ms待機...`);
                     await interruptibleSleep(delay, signal);
                 }
 
                 if (attempt > 0) {
-                    uiUtils.setLoadingIndicatorText('思考プロセスの翻訳を再試行中...');
+                    appLogic.setSendProgressV136(session, '思考プロセスの翻訳を再試行中...');
                 } else {
-                    uiUtils.setLoadingIndicatorText('思考プロセスを翻訳中...');
+                    appLogic.setSendProgressV136(session, '思考プロセスを翻訳中...');
                 }
 
                 request = scopedRequestSignalV136(signal, timeout);
@@ -9351,7 +9398,7 @@ const apiUtils = {
         return `${config.baseUrl.replace(/\/$/, '')}/chat/completions`.replace(/\/chat\/completions\/chat\/completions$/, '/chat/completions');
     },
 
-    async translateTextWithOpenRouter(textToTranslate, translationConfig, signal, timeout) {
+    async translateTextWithOpenRouter(textToTranslate, translationConfig, signal, timeout, session) {
         console.log("--- OpenRouter 思考プロセス翻訳処理開始 ---");
 
         const apiKey = translationConfig.apiKey || '';
@@ -9372,7 +9419,7 @@ const apiUtils = {
         try {
             request.signal.throwIfAborted();
 
-            uiUtils.setLoadingIndicatorText('思考プロセスをOpenRouterで翻訳中...');
+            appLogic.setSendProgressV136(session, '思考プロセスをOpenRouterで翻訳中...');
 
             const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, OPENROUTER_API_BASE_URL), {
                 method: 'POST',
@@ -9414,7 +9461,7 @@ const apiUtils = {
         return this.thoughtTranslationResponse(text, choice?.finish_reason, ['stop'], choice?.native_finish_reason);
     },
 
-    async translateTextWithOpenAICompatible(textToTranslate, translationConfig, providerLabel, signal, timeout) {
+    async translateTextWithOpenAICompatible(textToTranslate, translationConfig, providerLabel, signal, timeout, session) {
         console.log(`--- ${providerLabel} 思考プロセス翻訳処理開始 ---`);
 
         const apiKey = translationConfig.apiKey || '';
@@ -9433,7 +9480,7 @@ const apiUtils = {
         try {
             request.signal.throwIfAborted();
 
-            uiUtils.setLoadingIndicatorText(`思考プロセスを${providerLabel}で翻訳中...`);
+            appLogic.setSendProgressV136(session, `思考プロセスを${providerLabel}で翻訳中...`);
 
             const response = await fetch(this.getOpenAICompatibleEndpoint(translationConfig, ZAI_API_BASE_URL), {
                 method: 'POST',
@@ -9464,12 +9511,12 @@ const apiUtils = {
         }
     },
 
-    async translateTextWithBedrock(textToTranslate, translationConfig, signal, timeout) {
+    async translateTextWithBedrock(textToTranslate, translationConfig, signal, timeout, session) {
         console.log("--- Amazon Bedrock 思考プロセス翻訳処理開始 ---");
 
         const accessKey = translationConfig.bedrockAccessKey || translationConfig.apiKey || '';
         const secretKey = translationConfig.bedrockSecretKey || '';
-        const region = translationConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+        const region = translationConfig.bedrockRegion || (session?.settings ?? state.settings).bedrockRegion || DEFAULT_BEDROCK_REGION;
         if (!accessKey || !secretKey) {
             console.warn("Bedrock翻訳スキップ: Bedrock認証情報が設定されていません。");
             return null;
@@ -9483,7 +9530,7 @@ const apiUtils = {
         try {
             request.signal.throwIfAborted();
 
-            uiUtils.setLoadingIndicatorText('思考プロセスをAmazon Bedrockで翻訳中...');
+            appLogic.setSendProgressV136(session, '思考プロセスをAmazon Bedrockで翻訳中...');
             const client = new window.BedrockRuntimeClient({
                 region,
                 ...(translationConfig.baseUrl && { endpoint: translationConfig.baseUrl }),
@@ -9519,14 +9566,15 @@ const apiUtils = {
     },
 
     // Z.ai APIを呼び出す
-    async callZaiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+    async callZaiApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, session = null) {
         appLogic.ensureHistoryWorkerV136();
-        const executionConfig = appLogic.getExecutionApiConfig();
+        const settings = session?.settings ?? state.settings;
+        const executionConfig = session?.apiConfig ?? appLogic.getExecutionApiConfig();
         console.log(`[Debug] callZaiApi: Z.ai APIを呼び出します。`);
 
-        const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || '') : (state.settings.zaiApiKey || state.settings.apiKey);
+        const apiKey = executionConfig?.provider === 'zai' ? (executionConfig.apiKey || '') : (settings.zaiApiKey || settings.apiKey);
         if (!apiKey) {
-            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'zai', modelName: state.settings.modelName }, 'zai'));
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'zai', modelName: settings.modelName }, 'zai'));
         }
 
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -9535,11 +9583,11 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = executionConfig?.provider === 'zai' ? executionConfig.modelName : state.settings.modelName;
+        const model = executionConfig?.provider === 'zai' ? executionConfig.modelName : settings.modelName;
         if (!model) throw new Error('基本モデルが選択されていません。');
 
         // Gemini形式のメッセージをOpenAI形式に変換
-        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || state.settings.apiProvider,messages:messagesForApi,model});
+        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || settings.apiProvider,messages:messagesForApi,model});
 
         // システムプロンプトの処理
         if (systemInstruction && systemInstruction.parts && systemInstruction.parts.length > 0) {
@@ -9574,7 +9622,7 @@ const apiUtils = {
         }
 
         // Function Callingの処理
-        if (state.settings.geminiEnableFunctionCalling && window.functionDeclarations) {
+        if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
             const openAITools = [];
             
@@ -9608,7 +9656,7 @@ const apiUtils = {
             }
         }
 
-        appLogic.applyExecutionThinking(requestBody, 'zai');
+        appLogic.applyExecutionThinking(requestBody, 'zai', executionConfig);
         console.log("Z.aiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         
         // メッセージ構造の詳細をログ出力（デバッグ用）
@@ -9724,14 +9772,15 @@ const apiUtils = {
     },
 
     // OpenRouter APIを呼び出す
-    async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
+    async callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null, session = null) {
         appLogic.ensureHistoryWorkerV136();
-        const executionConfig = appLogic.getExecutionApiConfig();
+        const settings = session?.settings ?? state.settings;
+        const executionConfig = session?.apiConfig ?? appLogic.getExecutionApiConfig();
         console.log(`[Debug] callOpenRouterApi: OpenRouter APIを呼び出します。`);
 
-        const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || '') : state.settings.openrouterApiKey;
+        const apiKey = executionConfig?.provider === 'openrouter' ? (executionConfig.apiKey || '') : settings.openrouterApiKey;
         if (!apiKey) {
-            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'openrouter', modelName: state.settings.modelName }, 'openrouter'));
+            throw new Error(appLogic.getApiKeyMissingMessage(executionConfig || { provider: 'openrouter', modelName: settings.modelName }, 'openrouter'));
         }
 
         // signalが渡されていない場合のみstate.abortControllerを作成
@@ -9740,12 +9789,12 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = executionConfig?.provider === 'openrouter' ? executionConfig.modelName : state.settings.modelName;
+        const model = executionConfig?.provider === 'openrouter' ? executionConfig.modelName : settings.modelName;
         if (!model) throw new Error('基本モデルが選択されていません。');
         const stream = onStream && StreamingV136.canStream('openrouter', model, generationConfig);
 
         // Gemini形式のメッセージをOpenAI形式に変換
-        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || state.settings.apiProvider,messages:messagesForApi,model});
+        const openAIMessages = await SettingsV136.historyTaskV136('convert',{provider:executionConfig?.provider || settings.apiProvider,messages:messagesForApi,model});
 
         // システムプロンプトの処理
         if (systemInstruction && systemInstruction.parts && systemInstruction.parts.length > 0) {
@@ -9766,7 +9815,7 @@ const apiUtils = {
             ...(stream && { stream: true })
         };
 
-        appLogic.applyExecutionThinking(requestBody, 'openrouter');
+        appLogic.applyExecutionThinking(requestBody, 'openrouter', executionConfig);
 
         // 生成パラメータの変換
         if (generationConfig) {
@@ -9782,7 +9831,7 @@ const apiUtils = {
         }
 
         // Function Callingの処理
-        if (state.settings.geminiEnableFunctionCalling && window.functionDeclarations) {
+        if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
             const openAITools = [];
             
@@ -9953,18 +10002,19 @@ const apiUtils = {
     },
 
     // Amazon Bedrock APIを呼び出す
-    async callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null) {
+    async callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, session = null) {
         appLogic.ensureHistoryWorkerV136();
-        const executionConfig = appLogic.getExecutionApiConfig();
+        const settings = session?.settings ?? state.settings;
+        const executionConfig = session?.apiConfig ?? appLogic.getExecutionApiConfig();
         console.log(`[Debug] callBedrockApi: Amazon Bedrock APIを呼び出します。`);
         
-        const accessKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockAccessKey || executionConfig.apiKey || '') : state.settings.bedrockAccessKey;
-        const secretKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockSecretKey || '') : state.settings.bedrockSecretKey;
-        const region = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION) : (state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION);
+        const accessKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockAccessKey || executionConfig.apiKey || '') : settings.bedrockAccessKey;
+        const secretKey = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockSecretKey || '') : settings.bedrockSecretKey;
+        const region = executionConfig?.provider === 'bedrock' ? (executionConfig.bedrockRegion || settings.bedrockRegion || DEFAULT_BEDROCK_REGION) : (settings.bedrockRegion || DEFAULT_BEDROCK_REGION);
         
         // デバッグ情報を出力
         console.log(`[Bedrock Debug] Access Key存在: ${!!accessKey}, Secret Key存在: ${!!secretKey}, Region: ${region}`);
-        console.log(`[Bedrock Debug] state.settings:`, {
+        console.log(`[Bedrock Debug] settings:`, {
             bedrockAccessKey: accessKey ? '設定済み' : 'なし',
             bedrockSecretKey: secretKey ? '設定済み' : 'なし',
             bedrockRegion: region
@@ -9989,7 +10039,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const modelId = executionConfig?.provider === 'bedrock' ? executionConfig.modelName : state.settings.modelName;
+        const modelId = executionConfig?.provider === 'bedrock' ? executionConfig.modelName : settings.modelName;
         if (!modelId) throw new Error('基本モデルが選択されていません。');
 
         try {
@@ -10055,7 +10105,7 @@ const apiUtils = {
             }
 
             // Function Callingの処理
-            if (state.settings.geminiEnableFunctionCalling && window.functionDeclarations) {
+            if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
                 const bedrockTools = this.convertGeminiToolsToBedrock(window.functionDeclarations);
                 if (bedrockTools.length > 0) {
                     requestBody.toolConfig = {
@@ -10072,7 +10122,7 @@ const apiUtils = {
                 }
             }
 
-            appLogic.applyExecutionThinking(requestBody, 'bedrock');
+            appLogic.applyExecutionThinking(requestBody, 'bedrock', executionConfig);
             console.log("Amazon Bedrockへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), (key, value) => {
                 if (key === 'bytes' && value instanceof Uint8Array) {
                     return `[Uint8Array: ${value.length} bytes]`;
@@ -10103,17 +10153,17 @@ const apiUtils = {
     },
 
     // プロバイダーに応じて適切なAPIを呼び出すラッパー関数
-    async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null) {
-        const provider = appLogic.getExecutionProvider();
+    async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null, session = null) {
+        const provider = session?.apiConfig.provider ?? appLogic.getExecutionProvider();
         
         if (provider === 'zai') {
-            return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
+            return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'openrouter') {
-            return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream);
+            return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
         } else if (provider === 'bedrock') {
-            return await this.callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal);
+            return await this.callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'gemini') {
-            return await this.callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream);
+            return await this.callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
         }
         throw new Error('基本モデルが選択されていません。');
     }
@@ -11312,11 +11362,13 @@ const appLogic = {
     },
 
     timerManager: {
-        timers: {}, // { timer_name: { timerId: 123, endTime: 167... } }
+        timers: Object.create(null), // { timer_name: { timerId: 123, endTime: 167... } }
         
-        start(name, minutes) {
-            if (this.timers[name]) {
-                clearTimeout(this.timers[name].timerId);
+        start(name, minutes, session) {
+            const key = JSON.stringify([session?.chatId, name]);
+            const chatId = session?.chatId, profileId = session?.profileId;
+            if (this.timers[key]) {
+                clearTimeout(this.timers[key].timerId);
                 console.log(`タイマー「${name}」は上書きされました。`);
             }
             
@@ -11326,23 +11378,25 @@ const appLogic = {
             const timerId = setTimeout(() => {
                 console.log(`タイマー「${name}」が時間切れになりました。自動応答をトリガーします。`);
                 // 実行中のタイマーリストから削除
-                delete this.timers[name];
+                delete this.timers[key];
                 // 自動応答をトリガー
-                appLogic.triggerTimerExpiredResponse(name);
+                if (chatId == null || (state.currentChatId === chatId && state.activeProfileId === profileId))
+                    appLogic.triggerTimerExpiredResponse(name);
             }, durationMs);
 
-            this.timers[name] = { timerId, endTime };
+            this.timers[key] = { timerId, endTime };
             
             const message = `タイマー「${name}」を${minutes}分で開始しました。`;
             console.log(`[Timer] ${message}`);
             return { success: true, message: message };
         },
 
-        check(name) {
-            if (!this.timers[name]) {
+        check(name, session) {
+            const key = JSON.stringify([session?.chatId, name]);
+            if (!this.timers[key]) {
                 return { success: false, message: `タイマー「${name}」はセットされていません。` };
             }
-            const remainingMs = this.timers[name].endTime - Date.now();
+            const remainingMs = this.timers[key].endTime - Date.now();
             if (remainingMs <= 0) {
                 return { success: true, status: "expired", message: `タイマー「${name}」は既に時間切れです。` };
             }
@@ -11353,12 +11407,13 @@ const appLogic = {
             return { success: true, status: "running", remaining_time: message };
         },
 
-        stop(name) {
-            if (!this.timers[name]) {
+        stop(name, session) {
+            const key = JSON.stringify([session?.chatId, name]);
+            if (!this.timers[key]) {
                 return { success: false, message: `タイマー「${name}」はセットされていません。` };
             }
-            clearTimeout(this.timers[name].timerId);
-            delete this.timers[name];
+            clearTimeout(this.timers[key].timerId);
+            delete this.timers[key];
             const message = `タイマー「${name}」を停止しました。`;
             console.log(`[Timer] ${message}`);
             return { success: true, message: message };
@@ -13713,17 +13768,21 @@ const appLogic = {
     ensureHistoryWorkerV136() {
         SettingsV136.configureHistoryWorkerV136(SettingsV136.wireConvertersV136);
     },
-    async _prepareApiHistory(baseMessages, systemInstruction = undefined) {
+    async _prepareApiHistory(baseMessages, systemInstruction = undefined, session = null) {
         this.ensureHistoryWorkerV136();
-        const owner = { messages:state.currentMessages, chatId:state.currentChatId, profileId:state.activeProfileId,
+        const settings = session?.settings ?? state.settings;
+        const summarizedContext = session ? session.summarizedContext : state.currentSummarizedContext;
+        const owner = session || { messages:state.currentMessages, chatId:state.currentChatId, profileId:state.activeProfileId,
             system:state.currentSystemPrompt, execution:JSON.stringify(state.currentExecutionSettings), signal:state.abortController?.signal };
         const initiallyAborted = owner.signal?.aborted;
         const assertOwner = () => {
+            if (session) return this.assertSendExecutionV136(session);
             if (owner.messages !== state.currentMessages || owner.chatId !== state.currentChatId || owner.profileId !== state.activeProfileId
                 || owner.system !== state.currentSystemPrompt || owner.execution !== JSON.stringify(state.currentExecutionSettings)
                 || (!initiallyAborted && owner.signal?.aborted)) throw new DOMException('履歴準備が中断されました。','AbortError');
         };
-        if (systemInstruction === undefined) systemInstruction = state.currentSystemPrompt?.trim() ? {role:'system',parts:[{text:state.currentSystemPrompt.trim()}]} : null;
+        const systemPrompt = session ? session.systemPrompt : owner.system;
+        if (systemInstruction === undefined) systemInstruction = systemPrompt?.trim() ? {role:'system',parts:[{text:systemPrompt.trim()}]} : null;
         console.log("[API Prep] 履歴をAPIフォーマットに変換します。");
 
         // ディープコピーで元のメッセージ配列を保護する
@@ -13732,9 +13791,9 @@ const appLogic = {
         let historyToProcess;
 
         // 要約コンテキストが存在する場合、API送信用の履歴を動的に構築する
-        if (state.currentSummarizedContext && state.currentSummarizedContext.summaryText) {
+        if (summarizedContext?.summaryText) {
             console.log("[API Prep] 要約コンテキストを検出。API履歴を圧縮します。");
-            const { summaryText } = state.currentSummarizedContext;
+            const { summaryText } = summarizedContext;
             const headCount = 5;
             const tailCount = 15;
 
@@ -13758,35 +13817,36 @@ const appLogic = {
         }
 
         // ダミープロンプトの追加処理は共通
-        if (state.settings.reverseDummyOrder) {
+        if (settings.reverseDummyOrder) {
             // 順序を入れ替える場合: ダミーModel → ダミーUser
-            if (state.settings.dummyModel) {
-                historyToProcess.push({ role: 'model', content: state.settings.dummyModel, attachments: [] });
+            if (settings.dummyModel) {
+                historyToProcess.push({ role: 'model', content: settings.dummyModel, attachments: [] });
             }
-            if (state.settings.dummyUser) {
-                historyToProcess.push({ role: 'user', content: state.settings.dummyUser, attachments: [] });
+            if (settings.dummyUser) {
+                historyToProcess.push({ role: 'user', content: settings.dummyUser, attachments: [] });
             }
         } else {
             // 通常の順序: ダミーUser → ダミーModel
-            if (state.settings.dummyUser) {
-                historyToProcess.push({ role: 'user', content: state.settings.dummyUser, attachments: [] });
+            if (settings.dummyUser) {
+                historyToProcess.push({ role: 'user', content: settings.dummyUser, attachments: [] });
             }
-            if (state.settings.dummyModel) {
-                historyToProcess.push({ role: 'model', content: state.settings.dummyModel, attachments: [] });
+            if (settings.dummyModel) {
+                historyToProcess.push({ role: 'model', content: settings.dummyModel, attachments: [] });
             }
         }
         
         // Converse signatures bind the preceding conversation. Google signatures
         // are validated within a tool turn; do not impose Bedrock's prefix policy
         // on every provider. OpenRouter opaque Anthropic blocks need that policy.
-        const provider = this.getExecutionProvider();
+        const provider = session?.apiConfig.provider ?? this.getExecutionProvider();
+        const model = session?.apiConfig.modelName ?? this.getExecutionModelName();
         let prefixChanged = false, turnChanged = false;
         const hasLegacyHashes = historyToProcess.some(m => m.continuation && !m.continuation.historyWireV136 && (m.continuation.historyPrefixV136 !== undefined || m.continuation.historyTurnV136 !== undefined));
-        const legacyPrefixes = hasLegacyHashes ? await SettingsV136.historyTaskV136('prefixes',{messages:historyToProcess,system:owner.system}) : [];
+        const legacyPrefixes = hasLegacyHashes ? await SettingsV136.historyTaskV136('prefixes',{messages:historyToProcess,system:systemPrompt}) : [];
         assertOwner();
         let oldChanges = [];
-        if (state.currentChatId) {
-            const raw = localStorage.getItem(makeChangeHistoryStorageKey(state.currentChatId));
+        if (owner.chatId) {
+            const raw = localStorage.getItem(makeChangeHistoryStorageKey(owner.chatId));
             if (raw) {
                 try { oldChanges = JSON.parse(raw).slice().sort((a,b) => a.timestamp - b.timestamp).flatMap(e => e.changes || []); }
                 catch { if (provider === 'bedrock') throw new Error('変更履歴を確認できないため署名付き履歴を送信できません。チャットを再読込してください。'); }
@@ -13811,7 +13871,7 @@ const appLogic = {
             let dependentPrefixChanged = continuation?.historyPrefixInvalidV136 || (continuation?.historyPrefixV136 === undefined ? prefixChanged : prefixMismatch);
             let dependentTurnChanged = continuation?.historyTurnInvalidV136 || (continuation?.historyTurnV136 === undefined ? turnChanged : turnMismatch);
             if (continuation?.historyWireV136) {
-                const current = await SettingsV136.historyTaskV136('wire',{provider,messages:prepared,model:this.getExecutionModelName(),system:systemInstruction});
+                const current = await SettingsV136.historyTaskV136('wire',{provider,messages:prepared,model,system:systemInstruction});
                 assertOwner();
                 dependentPrefixChanged = continuation.historyPrefixInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.prefix !== current.prefix;
                 dependentTurnChanged = continuation.historyTurnInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.turn !== current.turn;
@@ -13851,9 +13911,9 @@ const appLogic = {
                     });
                 }
             }
-            const config = this.getExecutionApiConfig();
+            const config = session?.apiConfig ?? this.getExecutionApiConfig();
             const same = !invalidContinuation && continuation && continuation.provider === provider
-                && continuation.apiConfigId === config?.id && continuation.modelName === this.getExecutionModelName();
+                && continuation.apiConfigId === config?.id && continuation.modelName === model;
             if (same && continuation.turns?.length) prepared.push(...structuredClone(continuation.turns));
             else if (parts.length || (same && continuation.parts?.length)) prepared.push({ role:msg.role === 'tool' ? 'tool' : msg.role === 'model' ? 'model' : 'user',
                 parts:same && continuation.parts?.length ? structuredClone(continuation.parts) : parts,
@@ -13892,6 +13952,9 @@ const appLogic = {
                         }
                         
                         const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                        for (const job of state.sendJobsV136.values()) {
+                            if (job.controller.signal === signal) job.imageIds.add(imageId);
+                        }
                         const imageData = {
                             id: imageId,
                             blob: webpBlob,
@@ -14192,8 +14255,7 @@ const appLogic = {
      * @private 現在の永続メモリから状況サマリーを生成するヘルパー関数
      * @returns {string} AI向けのマークダウン形式のサマリー文字列
      */
-    _buildSummaryForPrompt() {
-        const memory = state.currentPersistentMemory || {};
+    _buildSummaryForPrompt(memory = state.currentPersistentMemory || {}) {
         if (Object.keys(memory).length === 0) {
             return '';
         }
@@ -14704,7 +14766,7 @@ const appLogic = {
      * ローカルデータに変更があったことを記録し、設定に応じてPush処理をスケジュールする
      * @param {boolean} [forcePush=false] - trueの場合、同期頻度の設定を無視して即時Pushを実行する
      */
-    markAsDirtyAndSchedulePush(type = 'message') {
+    markAsDirtyAndSchedulePush(type = 'message', { completedSend = false } = {}) {
         const timestamp = new Date().toLocaleTimeString();
         const normalizedType = type === true ? 'structural' : type;
 
@@ -14729,7 +14791,7 @@ const appLogic = {
             return;
         }
 
-        if (normalizedType === 'message' && state.isSending) {
+        if (normalizedType === 'message' && state.isSending && !completedSend) {
             console.log(`[SYNC_DEBUG ${timestamp}] -> SKIPPED: AI is responding (isSending=true).`);
             return;
         }
@@ -15147,7 +15209,11 @@ const appLogic = {
                     if (isManual) uiUtils.showProgressDialog('同期を再開しています...');
                 }
 
-                const importResult = await this.importDataFromString(cloudMetadataString);
+                const importResult = await this.importDataFromString(cloudMetadataString, { automatic: !isManual });
+                if (!importResult) {
+                    this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
+                    return;
+                }
                 const removedAssetInfo = importResult.removedAssetInfo;
 
                 if (importResult.localPinStateWon) {
@@ -16851,6 +16917,7 @@ const appLogic = {
     // 新規チャット開始の確認と実行
     async confirmStartNewChat() {
         if (this.chatParameterOperation) return false;
+        const navigation = this.chatNavigationV136 = {};
         const confirmed = await uiUtils.showCustomConfirm(this.hasComposerAttachments()
             ? "添付ファイルを破棄し、現在のチャットを保存して新規チャットを開始しますか？"
             : "現在のチャットを保存して新規チャットを開始しますか？");
@@ -16859,11 +16926,7 @@ const appLogic = {
             return false;
         }
 
-        // 送信中なら中断
-        if (state.isSending) {
-            this.abortRequest();
-            if (!await this.waitForGenerationCompletionV136()) return false;
-        }
+        if (this.chatNavigationV136 !== navigation) return false;
         // 編集中なら破棄
         if (state.editingMessageIndex !== null) {
             const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
@@ -16875,7 +16938,7 @@ const appLogic = {
         }
         try {
             // 現在のチャットに保存すべき内容があれば保存する
-            if ((state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId) {
+            if (!state.sendJobsV136.has(state.currentMessages) && (state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId) {
                 await dbUtils.saveChat();
             }
         } catch (error) {
@@ -16884,6 +16947,7 @@ const appLogic = {
             await uiUtils.showCustomAlert("現在のチャットの保存に失敗しました。");
         }
 
+        if (this.chatNavigationV136 !== navigation) return false;
         const previousDraftContextKey = this.getInputDraftContextKey();
         if (state.currentChatId) {
             this.flushInputDraft();
@@ -16899,7 +16963,8 @@ const appLogic = {
 
     // 新規チャットを開始する (状態リセット)
     startNewChat(options = {}) {
-        if (state.isSending || this.chatParameterOperation) return;
+        if (this.chatParameterOperation) return;
+        this.chatNavigationV136 = {};
         this.invalidateSystemPromptOpen();
         this.clearComposerAttachments();
         this.cancelSendPreparationV136();
@@ -16913,6 +16978,7 @@ const appLogic = {
         state.currentChatPinnedAt = null;
         state.currentChatPinStateUpdatedAt = null;
         state.currentMessages = [];
+        this.projectSendJobV136();
         let draft = null;
         if (options.restoreDraft) {
             try { draft = JSON.parse(sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY)); } catch { /* use the profile defaults */ }
@@ -16950,14 +17016,22 @@ const appLogic = {
 
         this.resetSwipeState();
         this.invalidateSystemPromptOpen();
-        const shouldAbortSending = state.isSending;
+        const navigation = this.chatNavigationV136 = {};
+        const isCurrent = () => this.chatNavigationV136 === navigation
+            && !state.chatDataChangesV136.has(undefined) && !state.chatDataChangesV136.has(normalizedId);
+        const readChat = async () => {
+            let revision, chat;
+            // A read can capture the pre-completion record even when the job
+            // has already left the registry by the time the view is attached.
+            do {
+                revision = this.sendCompletionGenerationV136;
+                chat = await dbUtils.getChat(normalizedId);
+            } while (isCurrent() && revision !== this.sendCompletionGenerationV136 && !this.getSendJobV136(normalizedId));
+            return chat;
+        };
         const editingMessageIndex = state.editingMessageIndex;
         const shouldCloseSystemPrompt = state.isEditingSystemPrompt;
 
-        if (shouldAbortSending) {
-            const confirmed = await uiUtils.showCustomConfirm("送信中です。中断して別のチャットを読み込みますか？");
-            if (!confirmed) return { ok: false, cancelled: true, reason: 'sending' };
-        }
         if (editingMessageIndex !== null) {
             const confirmed = await uiUtils.showCustomConfirm("編集中です。変更を破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'message-edit' };
@@ -16973,8 +17047,11 @@ const appLogic = {
         }
 
         let chat;
+        const completionBeforeRead = this.sendCompletionGenerationV136;
         try {
-            chat = await dbUtils.getChat(normalizedId);
+            if (!isCurrent()) return { ok: false, cancelled: true };
+            chat = await readChat();
+            if (!isCurrent()) return { ok: false, cancelled: true };
         } catch (error) {
             console.error(`チャット ${normalizedId} の読み込みに失敗しました:`, error);
             await uiUtils.showCustomAlert(`チャットの読み込みエラー: ${error}`);
@@ -16989,11 +17066,6 @@ const appLogic = {
         // ここから先は対象チャットの読み込み成功後にだけ実行する。
         this.flushInputDraft();
         this.cancelSendPreparationV136();
-        const waitsForSend = state.isSending;
-        if (waitsForSend) {
-            this.abortRequest();
-            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
-        }
         if (editingMessageIndex !== null) {
             const messageElement = state.mobileMessageEditor.messageElement
                 || elements.messageContainer.querySelector(`.message[data-index="${editingMessageIndex}"]`);
@@ -17002,23 +17074,28 @@ const appLogic = {
         if (shouldCloseSystemPrompt) {
             if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        // A partial response or title may have been saved while waiting.
-        if ((waitsForSend && normalizedId === state.currentChatId)
-            || (chat.titleGenerationId && (waitsForSend || shouldCloseSystemPrompt))) {
-            const latest = await dbUtils.getChat(chat.id);
-            if (!latest) return { ok: false, notFound: true, reason: 'not-found' };
-            chat = latest;
-        }
-        if (!confirmedAttachmentDiscard && this.hasComposerAttachments()) {
+        const hasNewAttachments = !confirmedAttachmentDiscard && this.hasComposerAttachments();
+        if (hasNewAttachments) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
         }
-        const nextMessages = chat.messages?.map(msg => ({
+        if (!isCurrent()) return { ok: false, cancelled: true };
+        if (shouldCloseSystemPrompt || hasNewAttachments || completionBeforeRead !== this.sendCompletionGenerationV136) {
+            try { chat = await readChat(); }
+            catch (error) {
+                if (isCurrent()) await uiUtils.showCustomAlert(`チャットの読み込みエラー: ${error}`);
+                return { ok: false, error, reason: 'load-error' };
+            }
+        }
+        if (!isCurrent()) return { ok: false, cancelled: true };
+        if (!chat) return { ok: false, notFound: true, reason: 'not-found' };
+        const job = this.getSendJobV136(normalizedId);
+        const nextMessages = job?.messages ?? chat.messages?.map(msg => ({
             ...msg,
             attachments: msg.attachments || []
-        })) || [];
+        })) ?? [];
         let needsSave = !chat.executionSettings;
-        const groupIds = new Set(nextMessages.filter(m => m.siblingGroupId).map(m => m.siblingGroupId));
+        const groupIds = new Set((job ? [] : nextMessages).filter(m => m.siblingGroupId).map(m => m.siblingGroupId));
         groupIds.forEach(gid => {
             const siblings = nextMessages.filter(m => m.siblingGroupId === gid);
             const selected = siblings.filter(m => m.isSelected);
@@ -17036,7 +17113,9 @@ const appLogic = {
         state.syncMessageCounter = 0;
         this.clearComposerAttachments();
         state.currentChatId = chat.id;
-        state.currentExecutionSettings = this.getChatExecutionSettingsV136(chat);
+        state.currentMessages = nextMessages;
+        state.currentExecutionSettings = job?.execution ?? this.getChatExecutionSettingsV136(chat);
+        this.projectSendJobV136();
         state.executionInitializingV136 = false;
         sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
         sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
@@ -17047,10 +17126,9 @@ const appLogic = {
         state.currentChatIsPinned = loadedPinState.isPinned;
         state.currentChatPinnedAt = loadedPinState.isPinned ? loadedPinState.pinnedAt : null;
         state.currentChatPinStateUpdatedAt = loadedPinState.pinStateUpdatedAt;
-        state.currentMessages = nextMessages;
-        dbUtils.bindChatSaveOwnerV136(nextMessages, chat);
-        state.currentPersistentMemory = chat.persistentMemory || {};
-        state.currentSummarizedContext = chat.summarizedContext || null;
+        if (!job) dbUtils.bindChatSaveOwnerV136(nextMessages, chat);
+        state.currentPersistentMemory = job?.persistentMemory ?? chat.persistentMemory ?? {};
+        state.currentSummarizedContext = job ? job.summarizedContext : chat.summarizedContext || null;
         state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
         this.applyChatParameterSnapshot({ systemPrompt: typeof chat.systemPrompt === 'string' ? chat.systemPrompt : state.settings.systemPrompt || '',
             generationParameters: SettingsV136.normalizeChatNumbers(chat.generationParameters, state.settings) }, chat.parameterRevision || 0);
@@ -17061,13 +17139,13 @@ const appLogic = {
         uiUtils.renderChatMessages();
         elements.userInput.value = '';
         uiUtils.adjustTextareaHeight();
-        uiUtils.setSendingState(false);
+        this.restoreSendProgressV136(job);
         this.scheduleInputDraftRestore(0, true);
 
         if (options.scrollAfterLoad !== false) {
             this.scrollToBottom();
         }
-        if (needsSave) {
+        if (needsSave && !job) {
             console.log("読み込み時に isSelected を正規化しました。DBに保存します。");
             try {
                 await dbUtils.saveChat();
@@ -17082,15 +17160,15 @@ const appLogic = {
 
     // チャットを複製
     async duplicateChat(id) {
-        // 送信中・編集中・他チャット保存の確認 (loadChatと同様)
-        const session = state.sendExecutionV136;
-        if (state.isSending) {
+        const session = this.getSendJobV136(id);
+        if (session && this.showsSendExecutionV136(session)) {
             const confirmed = await uiUtils.showCustomConfirm("送信中です。中断してチャットを複製しますか？");
-            if (!confirmed) return { ok: false, cancelled: true };
-            if (state.isSending && state.sendExecutionV136 !== session) return { ok: false, cancelled: true };
-            this.abortRequest();
-            if (!await this.waitForGenerationCompletionV136()) return { ok: false, reason: 'generation-still-stopping' };
-            if (session?.saveFailed || session?.discarded) return { ok: false, reason: 'generation-save-failed' };
+            if (!confirmed || !this.showsSendExecutionV136(session)
+                || (state.sendExecutionV136 && state.sendExecutionV136 !== session)) return { ok: false, cancelled: true };
+            session.controller.abort();
+            if (!await this.waitForGenerationCompletionV136(session)) return { ok: false, reason: 'generation-still-stopping' };
+            if (session.saveFailed || session.discarded) return { ok: false, reason: 'generation-save-failed' };
+            if (!this.showsSendExecutionV136(session) || state.isSending) return { ok: false, cancelled: true };
         }
         if (state.editingMessageIndex !== null) { const conf = await uiUtils.showCustomConfirm("編集中です。変更を破棄してチャットを複製しますか？"); if (!conf) return { ok: false, cancelled: true }; const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`); this.cancelEditMessage(state.editingMessageIndex, msgEl); }
         if (state.isEditingSystemPrompt) {
@@ -17098,7 +17176,7 @@ const appLogic = {
             if (!saved) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
             if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        if ((state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId && state.currentChatId !== id) { try { await dbUtils.saveChat(); } catch (error) { console.error("複製前の現チャット保存失敗:", error); const conf = await uiUtils.showCustomConfirm("現在のチャット保存に失敗しました。複製を続行しますか？"); if (!conf) return; } }
+        if (!state.isSending && (state.currentMessages.length > 0 || state.currentSystemPrompt) && state.currentChatId && state.currentChatId !== id) { try { await dbUtils.saveChat(); } catch (error) { console.error("複製前の現チャット保存失敗:", error); const conf = await uiUtils.showCustomConfirm("現在のチャット保存に失敗しました。複製を続行しますか？"); if (!conf) return; } }
         // 保留中の添付ファイルがあれば破棄確認
         if (this.hasComposerAttachments()) {
             const confirmedAttach = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄してチャットを複製しますか？");
@@ -17399,13 +17477,14 @@ const appLogic = {
         const confirmed = await uiUtils.showCustomConfirm(`「${title || 'この履歴'}」を削除しますか？`);
         if (!confirmed) return { ok: false, cancelled: true };
 
+        const currentMessagesBeforeDelete = state.currentMessages;
         const isDeletingCurrent = state.currentChatId === id;
         try {
             // DB削除と画像参照確認、Dropbox dirty化は既存処理へ委譲する。
             await dbUtils.deleteChat(id);
             console.log("チャット削除:", id);
 
-            if (isDeletingCurrent) {
+            if (state.currentChatId === id && state.currentMessages === currentMessagesBeforeDelete) {
                 console.log("表示中のチャットが削除されたため、新規チャット画面へ移動します。");
                 this.startNewChat();
                 await uiUtils.showScreen('chat');
@@ -17445,10 +17524,11 @@ const appLogic = {
     },
 
     async callProofreadingModel(textToProofread, options = {}) {
+        const settings = options.settings ?? state.settings;
         const proofreadingConfig = options.apiConfig || this.resolveProofreadingApiConfig();
         const provider = this.normalizeApiProvider(proofreadingConfig.provider);
         const modelName = proofreadingConfig.modelName;
-        const systemPrompt = options.systemPrompt || state.settings.proofreadingSystemInstruction || '';
+        const systemPrompt = options.systemPrompt || settings.proofreadingSystemInstruction || '';
         const generationConfig = options.generationConfig || {};
         const signal = options.signal || state.abortController?.signal;
 
@@ -17466,8 +17546,8 @@ const appLogic = {
                 messages.push({ role: 'system', content: systemPrompt.trim() });
             }
             messages.push({ role: 'user', content: textToProofread });
-            if (state.settings.applyDummyToProofread && state.settings.dummyUser) {
-                messages.push({ role: 'user', content: state.settings.dummyUser });
+            if (settings.applyDummyToProofread && settings.dummyUser) {
+                messages.push({ role: 'user', content: settings.dummyUser });
             }
             const requestBody = {
                 model: modelName,
@@ -17523,7 +17603,7 @@ const appLogic = {
         if (provider === 'bedrock') {
             const accessKey = proofreadingConfig.bedrockAccessKey || proofreadingConfig.apiKey || '';
             const secretKey = proofreadingConfig.bedrockSecretKey || '';
-            const region = proofreadingConfig.bedrockRegion || state.settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+            const region = proofreadingConfig.bedrockRegion || settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
             if (!accessKey || !secretKey) {
                 throw new Error("Bedrock認証情報（Access KeyまたはSecret Key）が設定されていません。");
             }
@@ -17582,10 +17662,10 @@ const appLogic = {
             ]
         };
 
-        if (state.settings.applyDummyToProofread && state.settings.dummyUser) {
+        if (settings.applyDummyToProofread && settings.dummyUser) {
             requestBody.contents.push({
                 role: 'user',
-                parts: [{ text: state.settings.dummyUser }]
+                parts: [{ text: settings.dummyUser }]
             });
         }
 
@@ -17620,7 +17700,8 @@ const appLogic = {
         throw new Error("校正APIの応答に有効なコンテンツが含まれていません。");
     },
 
-    async proofreadTextWithInfo(textToProofread, signal = state.abortController?.signal) {
+    async proofreadTextWithInfo(textToProofread, signal = state.abortController?.signal, session = null) {
+        const settings = session?.settings ?? state.settings;
         console.log("--- 校正処理開始 ---");
         const {
             proofreadingSystemInstruction,
@@ -17630,8 +17711,8 @@ const appLogic = {
             topP,
             enableAutoRetry,
             maxRetries
-        } = state.settings;
-        const proofreadingConfig = this.resolveProofreadingApiConfig();
+        } = settings;
+        const proofreadingConfig = session ? this.getSendAuxiliaryConfigV136(session, 'proofreadingModelRef') : this.resolveProofreadingApiConfig();
         const generationConfig = {};
         if (temperature !== null) generationConfig.temperature = temperature;
         if (maxTokens !== null) generationConfig.maxOutputTokens = maxTokens;
@@ -17648,32 +17729,33 @@ const appLogic = {
 
                 if (attempt > 0) {
                     let delay;
-                    if (state.settings.useFixedRetryDelay) {
-                        delay = state.settings.fixedRetryDelaySeconds * 1000;
+                    if (settings.useFixedRetryDelay) {
+                        delay = settings.fixedRetryDelaySeconds * 1000;
                     } else {
                         const exponentialDelay = INITIAL_RETRY_DELAY * Math.pow(2, attempt - 1);
-                        const maxDelay = state.settings.maxBackoffDelaySeconds * 1000;
+                        const maxDelay = settings.maxBackoffDelaySeconds * 1000;
                         delay = Math.min(exponentialDelay, maxDelay);
                     }
                     
-                    uiUtils.setLoadingIndicatorText(`校正エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
+                    this.setSendProgressV136(session, `校正エラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`校正APIリトライ ${attempt}: ${delay}ms待機...`);
                     await interruptibleSleep(delay, signal);
                 }
 
                 if (attempt === 0) {
-                    uiUtils.setLoadingIndicatorText('校正中...');
+                    this.setSendProgressV136(session, '校正中...');
                 } else if (attempt === 1) {
-                    uiUtils.setLoadingIndicatorText('校正処理を再試行中...');
+                    this.setSendProgressV136(session, '校正処理を再試行中...');
                 } else {
-                    uiUtils.setLoadingIndicatorText(`校正処理${attempt}回目の再試行中...`);
+                    this.setSendProgressV136(session, `校正処理${attempt}回目の再試行中...`);
                 }
 
-                request = scopedRequestSignalV136(signal, configuredApiTimeoutV136());
+                request = scopedRequestSignalV136(signal, configuredApiTimeoutV136(settings));
                 const proofreadContent = await this.callProofreadingModel(textToProofread, {
                     apiConfig: proofreadingConfig,
                     systemPrompt: proofreadingSystemInstruction,
                     generationConfig,
+                    settings,
                     signal: request.signal
                 });
                 request.signal?.throwIfAborted();
@@ -17724,12 +17806,13 @@ const appLogic = {
     },
      async _internalHandleSend(messagesForApi, generationConfig, systemInstruction, session) {
         this.ensureHistoryWorkerV136();
-        const requestOwner = {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
+        const settings = session?.settings ?? state.settings;
+        const requestOwner = session || {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
         const wasAborted = requestOwner.signal?.aborted;
-        const requestContext = await SettingsV136.historyTaskV136('wire',{provider:this.getExecutionProvider(),messages:messagesForApi,model:this.getExecutionModelName(),system:systemInstruction});
+        const requestContext = await SettingsV136.historyTaskV136('wire',{provider:session?.apiConfig.provider ?? this.getExecutionProvider(),messages:messagesForApi,model:session?.apiConfig.modelName ?? this.getExecutionModelName(),system:systemInstruction});
 
         const assertOwner = () => {
-            this.assertSendExecutionV136(session);
+            if (session) return this.assertSendExecutionV136(session);
             if (requestOwner.messages !== state.currentMessages || requestOwner.chatId !== state.currentChatId || requestOwner.profileId !== state.activeProfileId
                 || (!wasAborted && requestOwner.signal?.aborted)) throw new DOMException('送信準備が中断されました。', 'AbortError');
         };
@@ -17748,7 +17831,7 @@ const appLogic = {
         let currentTurnHistory = [...messagesForApi];
         let aggregatedSearchResults = [];
 
-        uiUtils.setLoadingIndicatorText('応答生成中...');
+        this.setSendProgressV136(session, '応答生成中...');
 
         while (loopCount < MAX_LOOPS) {
             loopCount++;
@@ -17789,7 +17872,7 @@ const appLogic = {
             }
             this.validateToolCallIdsV136(result.toolCalls);
             
-            const historyForFunctions = state.currentMessages.slice(0, -1);
+            const historyForFunctions = requestOwner.messages.slice(0, -1);
             const responseTextForQc = result.content || '';
             
             const toolResults = [];
@@ -17802,11 +17885,11 @@ const appLogic = {
                 console.log(`[Function Calling] 実行: ${functionName}`, functionArgs);
                 
                 if (functionName === 'generate_image_stable_diffusion') {
-                    uiUtils.setLoadingIndicatorText('SDで画像生成中...');
+                    this.setSendProgressV136(session, 'SDで画像生成中...');
                 } else if (functionName === 'run_quality_checker') {
-                    uiUtils.setLoadingIndicatorText('品質チェック中...');
+                    this.setSendProgressV136(session, '品質チェック中...');
                 } else {
-                    uiUtils.setLoadingIndicatorText('関数実行中...');
+                    this.setSendProgressV136(session, '関数実行中...');
                 }
 
                 let toolResult;
@@ -17814,9 +17897,14 @@ const appLogic = {
                     const argsWithContext = { ...functionArgs, _responseTextForQc: responseTextForQc };
                     toolResult = await waitForToolV136(window.functionCallingTools[functionName](argsWithContext, {
                         messages: historyForFunctions.filter(m => m.role !== 'tool'),
-                        persistentMemory: state.currentPersistentMemory,
+                        persistentMemory: session ? session.persistentMemory : state.currentPersistentMemory,
+                        settings,
+                        session,
+                        canUpdateView: () => !session || (this.showsSendExecutionV136(session) && state.currentScreen === 'chat'
+                            && state.activeProfileId === session.profileId),
+                        setProgress: text => this.setSendProgressV136(session, text),
                         signal,
-                        requestTimeoutMs: configuredApiTimeoutV136(),
+                        requestTimeoutMs: configuredApiTimeoutV136(settings),
                         assertActive: assertOwner
                     }), signal);
                 } catch (toolError) {
@@ -17858,7 +17946,7 @@ const appLogic = {
                 console.log("終端アクションが検出されたため、Function Callingループを終了します。");
                 if (!result.content) {
                     console.log("[_internalHandleSend] テキスト応答がなかったため、ツール結果を基に最終応答を生成します。");
-                    uiUtils.setLoadingIndicatorText('最終応答を生成中...');
+                    this.setSendProgressV136(session, '最終応答を生成中...');
 
                     const partsForApi = result.continuation.parts;
                     const modelMessageForApi = { role: 'model', parts: partsForApi,
@@ -17872,11 +17960,11 @@ const appLogic = {
                     currentTurnHistory.push(modelMessageForApi, ...toolResultsForApi);
 
                     // Bedrock使用時はレート制限回避のため遅延を入れる
-                    if (state.settings.apiProvider === 'bedrock') {
+                    if (settings.apiProvider === 'bedrock') {
                         const delayMs = 6500; // 6.5秒の遅延（レート制限: 毎分10リクエスト = 6秒間隔 + 余裕0.5秒）
                         console.log(`[Bedrock] レート制限回避のため ${delayMs}ms 待機します...`);
-                        uiUtils.setLoadingIndicatorText(`レート制限回避のため ${delayMs/1000}秒待機中...`);
-                        await interruptibleSleep(delayMs, state.abortController.signal);
+                        this.setSendProgressV136(session, `レート制限回避のため ${delayMs/1000}秒待機中...`);
+                        await interruptibleSleep(delayMs, signal);
                         assertOwner();
                     }
 
@@ -17910,15 +17998,15 @@ const appLogic = {
                 currentTurnHistory.push(modelMessageForApi, ...toolResultsForApi);
             
             // Bedrock使用時はレート制限回避のため遅延を入れる
-            if (state.settings.apiProvider === 'bedrock') {
+            if (settings.apiProvider === 'bedrock') {
                 const delayMs = 6500; // 6.5秒の遅延（レート制限: 毎分10リクエスト = 6秒間隔 + 余裕0.5秒）
                 console.log(`[Bedrock] レート制限回避のため ${delayMs}ms 待機します...`);
-                uiUtils.setLoadingIndicatorText(`レート制限回避のため ${delayMs/1000}秒待機中...`);
-                await interruptibleSleep(delayMs, state.abortController.signal);
+                this.setSendProgressV136(session, `レート制限回避のため ${delayMs/1000}秒待機中...`);
+                await interruptibleSleep(delayMs, signal);
                 assertOwner();
             }
             
-            uiUtils.setLoadingIndicatorText('応答生成中...');
+            this.setSendProgressV136(session, '応答生成中...');
         }
 
         // 後処理（校正）
@@ -17929,12 +18017,12 @@ const appLogic = {
                 lastMessage.search_web_results = aggregatedSearchResults;
             }
 
-            if (state.settings.enableProofreading && this.getProofreadingModelRefForExecution()) {
+            if (settings.enableProofreading && (session ? session.auxiliary.proofreadingModelRef : this.getProofreadingModelRefForExecution())) {
                 const lastTextResponse = finalModelMessages.filter(m => m.content).pop();
                 if (lastTextResponse) {
                     try {
-                        uiUtils.setLoadingIndicatorText('校正中...');
-                        const proofreadingResult = await this.proofreadTextWithInfo(lastTextResponse.content, signal);
+                        this.setSendProgressV136(session, '校正中...');
+                        const proofreadingResult = await this.proofreadTextWithInfo(lastTextResponse.content, signal, session);
                         assertOwner();
                         lastTextResponse.content = proofreadingResult.content;
                         if (proofreadingResult.modelInfo) {
@@ -17945,7 +18033,7 @@ const appLogic = {
                     } catch (proofreadError) {
                         assertOwner();
                         console.error("校正処理中にエラーが発生しました。校正前のテキストを使用します。", proofreadError);
-                        await uiUtils.showCustomAlert(proofreadError?.message || '校正モデルの設定が無効です。設定画面で校正モデルを選び直してください。');
+                        if (!session || (this.showsSendExecutionV136(session) && state.currentScreen === 'chat')) await uiUtils.showCustomAlert(proofreadError?.message || '校正モデルの設定が無効です。設定画面で校正モデルを選び直してください。');
                         assertOwner();
                     }
                 }
@@ -18029,10 +18117,10 @@ const appLogic = {
 
     async translateThoughtSummary(message, session) {
         const original = message.thoughtSummary;
-        if (!original || !state.settings.enableThoughtTranslation || !this.getThoughtTranslationModelRefForExecution()) return;
+        if (!original || !session.settings.enableThoughtTranslation || !session.auxiliary.thoughtTranslationModelRef) return;
         try {
-            const config = this.resolveThoughtTranslationApiConfig();
-            const translated = await apiUtils.translateText(original, config, session.controller.signal);
+            const config = this.getSendAuxiliaryConfigV136(session, 'thoughtTranslationModelRef');
+            const translated = await apiUtils.translateText(original, config, session.controller.signal, session);
             this.assertSendExecutionV136(session);
             message.thoughtSummary = translated.text;
             if (translated.complete && translated.text !== original) {
@@ -18043,7 +18131,7 @@ const appLogic = {
         } catch (error) {
             this.assertSendExecutionV136(session);
             console.error('思考プロセスの翻訳中にエラーが発生しました。原文を使用します。', error);
-            await uiUtils.showCustomAlert(error?.message || '思考翻訳モデルの設定が無効です。設定画面で思考翻訳モデルを選び直してください。');
+            if (this.showsSendExecutionV136(session) && state.currentScreen === 'chat') await uiUtils.showCustomAlert(error?.message || '思考翻訳モデルの設定が無効です。設定画面で思考翻訳モデルを選び直してください。');
         }
     },
 
@@ -18053,7 +18141,9 @@ const appLogic = {
         state.sendPreparationV136 = null;
     },
     beginSendPreparationV136() {
-        if (state.isSending || state.sendPreparationV136 || this.chatParameterOperation || this.attachmentOperation) return null;
+        if (state.isSending || this.getSendJobV136(state.currentChatId) || state.sendPreparationV136
+            || this.chatParameterOperation || this.attachmentOperation
+            || state.chatDataChangesV136.has(undefined) || state.chatDataChangesV136.has(state.currentChatId)) return null;
         const preparation = {
             controller: new AbortController(),
             chatId: state.currentChatId, messages: state.currentMessages, profileId: state.activeProfileId,
@@ -18084,18 +18174,72 @@ const appLogic = {
         preparation.controller.signal.throwIfAborted();
     },
     startSendExecutionV136(session) {
+        session.id = crypto.getRandomValues(new Uint32Array(4)).join('-');
         session.originalMessages = session.messages.slice();
+        session.imageIds = new Set();
         session.finished = new Promise(resolve => { session.resolveFinished = resolve; });
-        session.streaming = state.settings.enableStreamingOutput === true
-            && StreamingV136.canStream(this.getExecutionProvider(), this.getExecutionModelName());
+        session.apiConfig = this.getExecutionApiConfig();
+        session.execution = structuredClone(state.currentExecutionSettings);
+        session.settings = structuredClone(state.settings);
+        session.parameterRevision = state.currentChatParameterRevision;
+        session.originalMemory = state.currentPersistentMemory;
+        session.persistentMemory = structuredClone(state.currentPersistentMemory || {});
+        session.summarizedContext = structuredClone(state.currentSummarizedContext || null);
+        session.memoryEnabled = state.isMemoryEnabledForChat;
+        session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
+            pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
+        session.streaming = session.settings.enableStreamingOutput === true
+            && StreamingV136.canStream(session.apiConfig.provider, session.apiConfig.modelName);
+        session.auxiliary = {};
+        for (const key of ['thoughtTranslationModelRef', 'proofreadingModelRef', 'memoryModelRef', 'sdQcModelRef', 'sdPromptImproveModelRef']) {
+            if (!this.getGlobalAuxiliaryModelRefV136(key)) continue;
+            try { session.auxiliary[key] = { config: structuredClone(this.resolveSelectedAuxiliaryApiConfigV136(key)) }; }
+            catch (error) { session.auxiliary[key] = { error }; }
+        }
+        session.memoryExtractionPrompt = this.getMemoryExtractionPromptV136();
+        state.currentPersistentMemory = session.persistentMemory;
         state.sendPreparationV136 = null;
-        state.sendExecutionV136 = session;
-        state.abortController = session.controller;
-        uiUtils.setSendingState(true);
+        state.sendJobsV136.set(session.messages, session);
+        this.projectSendJobV136();
+        this.restoreSendProgressV136(session);
+        if (session.chatId != null) uiUtils.syncChatSidebarTitleGeneration(session.chatId);
+    },
+    getSendJobV136(chatId) {
+        if (chatId == null) return null;
+        for (const job of state.sendJobsV136.values()) {
+            const targetId = job.chatId ?? dbUtils.chatSaveOwners?.get(job.messages)?.id;
+            if (!job.discarded && targetId === chatId) return job;
+        }
+        return null;
     },
     ownsSendExecutionV136(session) {
-        return !session.discarded && state.sendExecutionV136 === session && state.currentMessages === session.messages
-            && state.currentChatId === session.chatId && state.activeProfileId === session.profileId;
+        return !session.discarded && state.sendJobsV136.get(session.messages) === session;
+    },
+    showsSendExecutionV136(session) {
+        return state.currentMessages === session.messages;
+    },
+    projectSendJobV136() {
+        const job = state.sendJobsV136.get(state.currentMessages) || null;
+        state.sendExecutionV136 = job;
+        state.abortController = job?.controller ?? null;
+        state.currentExecutionApiConfig = job?.apiConfig ?? null;
+        state.isSending = Boolean(job);
+    },
+    restoreSendProgressV136(session) {
+        uiUtils.setSendingState(Boolean(session));
+        if (session) {
+            uiUtils.setLoadingIndicatorText(session.status || '応答生成中...');
+            this.renderSendStreamV136(session);
+        }
+    },
+    setSendProgressV136(session, text) {
+        if (session) session.status = text;
+        if (!session || this.showsSendExecutionV136(session)) uiUtils.setLoadingIndicatorText(text);
+    },
+    getSendAuxiliaryConfigV136(session, key) {
+        const result = session.auxiliary[key];
+        if (result?.error) throw result.error;
+        return result?.config;
     },
     assertSendExecutionV136(session) {
         if (!session) return;
@@ -18110,11 +18254,14 @@ const appLogic = {
         if (session.streamFrame) return;
         session.streamFrame = requestAnimationFrame(() => {
             session.streamFrame = 0;
-            if (!this.ownsSendExecutionV136(session) || session.controller.signal.aborted
-                || session.messages[session.modelIndex] !== session.placeholder) return;
-            uiUtils.updateStreamingMessage(session.modelIndex, {
-                content: session.streamContent, thoughtSummary: session.getStreamThought?.()
-            });
+            this.renderSendStreamV136(session);
+        });
+    },
+    renderSendStreamV136(session) {
+        if (!this.ownsSendExecutionV136(session) || !this.showsSendExecutionV136(session) || !session.placeholder
+            || session.messages[session.modelIndex] !== session.placeholder) return;
+        uiUtils.updateStreamingMessage(session.modelIndex, {
+            content: session.streamContent, thoughtSummary: session.getStreamThought?.()
         });
     },
     getIncompleteStreamMessageV136(session) {
@@ -18125,32 +18272,36 @@ const appLogic = {
     },
     finishSendExecutionV136(session) {
         cancelAnimationFrame(session.streamFrame);
-        if (state.sendExecutionV136 !== session) return;
-        state.sendExecutionV136 = null;
-        state.abortController = null;
-        state.currentExecutionApiConfig = null;
-        const showConflict = session.discarded && state.currentMessages === session.messages
-            && state.currentChatId === session.chatId && state.activeProfileId === session.profileId;
+        if (state.sendJobsV136.get(session.messages) !== session) return;
+        state.sendJobsV136.delete(session.messages);
+        this.sendCompletionGenerationV136 = (this.sendCompletionGenerationV136 || 0) + 1;
+        const visible = this.showsSendExecutionV136(session);
         try {
-            if (showConflict) {
-                session.messages.length = 0;
-                for (const message of session.originalMessages) session.messages.push(message);
-                uiUtils.renderChatMessages();
-            }
-        } finally {
-            try {
-                uiUtils.setSendingState(false);
+            if (visible) {
+                if (session.discarded) {
+                    session.messages.length = 0;
+                    for (const message of session.originalMessages) session.messages.push(message);
+                    state.currentPersistentMemory = session.originalMemory;
+                    uiUtils.renderChatMessages();
+                }
+                this.projectSendJobV136();
+                this.restoreSendProgressV136(null);
                 this.applyRemovedExecutionSelectionV136();
                 void this.syncRemovedExecutionSelectionV136().catch(() => {});
             }
-            finally { session.resolveFinished?.(); }
+            if (session.chatId != null) uiUtils.syncChatSidebarTitleGeneration(session.chatId);
+        } finally {
+            session.resolveFinished();
         }
-        if (showConflict) void uiUtils.showCustomAlert('別の操作で会話が更新されました。履歴を開き直してください。');
+        if (visible && state.currentScreen === 'chat' && session.discarded) void uiUtils.showCustomAlert('別の操作で会話が更新されました。履歴を開き直してください。');
     },
-    async stopSendBeforeDataChangeV136(chatId = state.currentChatId) {
-        if (state.currentChatId !== chatId || (!state.isSending && !state.sendPreparationV136)) return;
-        this.abortRequest();
-        if (!await this.waitForGenerationCompletionV136()) throw new Error('応答生成の停止を確認できませんでした。');
+    async stopSendBeforeDataChangeV136(chatId) {
+        const preparation = state.sendPreparationV136;
+        if (preparation && (chatId === undefined || preparation.chatId === chatId)) this.cancelSendPreparationV136();
+        const jobs = chatId === undefined ? [...state.sendJobsV136.values()] : [this.getSendJobV136(chatId)].filter(Boolean);
+        for (const job of jobs) job.controller.abort();
+        const finished = await Promise.all(jobs.map(job => this.waitForGenerationCompletionV136(job)));
+        if (finished.includes(false)) throw new Error('応答生成の停止を確認できませんでした。');
     },
     async handleSend() {
         const preparation = this.beginSendPreparationV136();
@@ -18196,19 +18347,18 @@ const appLogic = {
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
         this.startSendExecutionV136(preparation);
-        uiUtils.setLoadingIndicatorText('応答生成中...');
         const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
         const titleGeneration = this.createChatTitleGenerationV136(userMessage);
-        state.currentMessages.push(userMessage);
-        uiUtils.appendMessage(userMessage.role, userMessage.content, state.currentMessages.length - 1, false, null, userMessage.attachments);
+        preparation.messages.push(userMessage);
+        uiUtils.appendMessage(userMessage.role, userMessage.content, preparation.messages.length - 1, false, null, userMessage.attachments);
         
-        const baseHistory = state.currentMessages.filter(msg => !msg.isCascaded || msg.isSelected);
+        const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
         
         const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
-        state.currentMessages.push(modelMessage);
-        const modelMessageIndex = state.currentMessages.length - 1;
+        preparation.messages.push(modelMessage);
+        const modelMessageIndex = preparation.messages.length - 1;
         preparation.placeholder = modelMessage;
         preparation.modelIndex = modelMessageIndex;
         uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
@@ -18223,23 +18373,22 @@ const appLogic = {
         }
         
         try {
-            const savedId = await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
-            if (preparation.chatId == null && savedId != null) preparation.chatId = savedId;
-            if (this.ownsSendExecutionV136(preparation))
+            await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
+            if (this.showsSendExecutionV136(preparation) && this.ownsSendExecutionV136(preparation))
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
 
             const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
 
-            const summaryText = this._buildSummaryForPrompt();
+            const summaryText = this._buildSummaryForPrompt(preparation.persistentMemory);
             let finalSystemPrompt = preparation.systemPrompt?.trim() || '';
             if (summaryText) {
                 finalSystemPrompt += `\n\n${summaryText}`;
             }
 
-            if (state.settings.enableMemory && state.isMemoryEnabledForChat && state.activeProfileId) {
-                const memoryData = await dbUtils.getMemory(state.activeProfileId);
+            if (preparation.settings.enableMemory && preparation.memoryEnabled && preparation.profileId) {
+                const memoryData = await dbUtils.getMemory(preparation.profileId);
                 this.assertSendExecutionV136(preparation);
                 if (memoryData && memoryData.items && memoryData.items.length > 0) {
                     const memoryBlock = `[長期記憶]\n- ${memoryData.items.join('\n- ')}\n---\n\n`;
@@ -18250,7 +18399,7 @@ const appLogic = {
 
             const systemInstruction = finalSystemPrompt ? { role: "system", parts: [{ text: finalSystemPrompt }] } : null;
 
-            const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
+            const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction, preparation);
             this.assertSendExecutionV136(preparation);
             const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
             this.assertSendExecutionV136(preparation);
@@ -18258,26 +18407,29 @@ const appLogic = {
             const finalAggregatedMessage = this._aggregateMessages(newMessages);
             await this.translateThoughtSummary(finalAggregatedMessage, preparation);
             this.assertSendExecutionV136(preparation);
-            this.attachExecutionMetadataToModelMessage(finalAggregatedMessage, this.completeExecutionMetadata(executionMetadata, finalAggregatedMessage));
-            state.currentMessages[modelMessageIndex] = finalAggregatedMessage;
+            this.attachExecutionMetadataToModelMessage(finalAggregatedMessage,
+                this.completeExecutionMetadata(executionMetadata, finalAggregatedMessage, { signal: preparation.controller.signal }));
+            preparation.messages[modelMessageIndex] = finalAggregatedMessage;
 
-            if (preparation.streaming) uiUtils.renderStreamingResult();
-            else uiUtils.renderChatMessages();
+            if (this.showsSendExecutionV136(preparation)) {
+                if (preparation.streaming) uiUtils.renderStreamingResult();
+                else uiUtils.renderChatMessages();
+            }
 
             // Commit the response and success default atomically.
             await dbUtils.saveChat(null, null, { skipPush: true, sendSession: preparation,
                 successfulExecution: this.successfulExecutionRecord(finalAggregatedMessage) });
             if (!this.ownsSendExecutionV136(preparation)) return;
 
-            this.updateCharacterProfileButtonVisibility();
+            if (this.showsSendExecutionV136(preparation)) this.updateCharacterProfileButtonVisibility();
 
             // --- 自動学習トリガー ---
-            const interval = parseInt(state.settings.memoryAutoSaveInterval, 10);
+            const interval = parseInt(preparation.settings.memoryAutoSaveInterval, 10);
             // ユーザーの発言回数をカウント
-            const userMessageCount = state.currentMessages.filter(m => m.role === 'user').length;
-            if (state.settings.enableMemory && state.isMemoryEnabledForChat && interval > 0 && userMessageCount > 0 && userMessageCount % interval === 0) {
+            const userMessageCount = preparation.messages.filter(m => m.role === 'user').length;
+            if (preparation.settings.enableMemory && preparation.memoryEnabled && interval > 0 && userMessageCount > 0 && userMessageCount % interval === 0) {
                 console.log(`[Memory] ユーザーの発言数が ${userMessageCount} 回に達したため、自動学習を開始します。`);
-                this.triggerAutoMemorySave(); // awaitを付けずに実行 (Fire-and-forget)
+                this.triggerAutoMemorySave(preparation); // awaitを付けずに実行 (Fire-and-forget)
             }
             // -------------------------
 
@@ -18290,9 +18442,13 @@ const appLogic = {
                 replacement.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
                     timestamp: Date.now(), ...(partial && { incomplete: true }) });
             }
-            state.currentMessages.splice(modelMessageIndex, 1, ...replacement);
-            if (preparation.streaming) uiUtils.renderStreamingResult();
-            else uiUtils.renderChatMessages(() => uiUtils.scrollToBottom());
+            preparation.messages.splice(modelMessageIndex, 1, ...replacement);
+            if (this.showsSendExecutionV136(preparation)) {
+                if (preparation.streaming) uiUtils.renderStreamingResult();
+                else uiUtils.renderChatMessages(() => {
+                    if (this.showsSendExecutionV136(preparation)) uiUtils.scrollToBottom();
+                });
+            }
             
             // 中断・失敗時も、プレースホルダー除去と取得済み内容を保存する。
             try {
@@ -18305,8 +18461,10 @@ const appLogic = {
             const stillOwner = this.ownsSendExecutionV136(preparation);
             this.finishSendExecutionV136(preparation);
             if (stillOwner) {
-                this.markAsDirtyAndSchedulePush('message');
-                if (!preparation.streaming && state.settings.autoScroll) requestAnimationFrame(() => this.scrollToBottom());
+                this.markAsDirtyAndSchedulePush('message', { completedSend: true });
+                if (!preparation.streaming && preparation.settings.autoScroll) requestAnimationFrame(() => {
+                    if (this.showsSendExecutionV136(preparation)) this.scrollToBottom();
+                });
             }
         }
     },
@@ -18316,9 +18474,10 @@ const appLogic = {
     // APIリクエストを中断
     abortRequest() {
         this.cancelSendPreparationV136();
-        if (state.abortController) {
+        const controller = state.sendExecutionV136?.controller || state.abortController;
+        if (controller) {
             console.log("中断リクエスト送信");
-            state.abortController.abort(); // AbortControllerで中断
+            controller.abort();
         } else {
             console.log("中断するアクティブなリクエストがありません。");
         }
@@ -19917,28 +20076,31 @@ const appLogic = {
             try {
                 // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
                 this.ensureHistoryWorkerV136();
-                await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
+                await SettingsV136.rememberHistoryContextsAsyncV136(preparation.messages, preparation.systemPrompt);
                 this.assertSendExecutionV136(preparation);
-                state.currentMessages.splice(index + 1);
+                preparation.messages.splice(index + 1);
                 truncated = true;
-                if (preparation.streaming) uiUtils.renderStreamingResult();
-                else uiUtils.renderChatMessages();
+                if (this.showsSendExecutionV136(preparation)) {
+                    if (preparation.streaming) uiUtils.renderStreamingResult();
+                    else uiUtils.renderChatMessages();
+                }
 
                 const systemInstruction = preparation.systemPrompt?.trim() ? { role: "system", parts: [{ text: preparation.systemPrompt.trim() }] } : null;
-                const baseHistory = state.currentMessages.filter(msg => !msg.isCascaded || msg.isSelected);
-                const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction);
+                const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
+                const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction, preparation);
                 this.assertSendExecutionV136(preparation);
     
-                const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
                 const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
-                state.currentMessages.push(modelMessage);
-                const modelMessageIndex = state.currentMessages.length - 1;
+                preparation.messages.push(modelMessage);
+                const modelMessageIndex = preparation.messages.length - 1;
                 preparation.placeholder = modelMessage;
                 preparation.modelIndex = modelMessageIndex;
-                uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
-                if (preparation.streaming) {
+                if (this.showsSendExecutionV136(preparation)) {
+                    const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
+                    uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
                     if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
-                } else this.scrollToBottom();
+                    else if (!preparation.streaming) this.scrollToBottom();
+                }
     
                 const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
@@ -19948,7 +20110,8 @@ const appLogic = {
                 const newAggregatedMessage = this._aggregateMessages(newMessages);
                 await this.translateThoughtSummary(newAggregatedMessage, preparation);
                 this.assertSendExecutionV136(preparation);
-                this.attachExecutionMetadataToModelMessage(newAggregatedMessage, this.completeExecutionMetadata(executionMetadata, newAggregatedMessage));
+                this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
+                    this.completeExecutionMetadata(executionMetadata, newAggregatedMessage, { signal: preparation.controller.signal }));
     
                 const finalOriginalResponses = originalResponses.map(message => ({ ...message }));
 
@@ -19986,11 +20149,13 @@ const appLogic = {
                 newAggregatedMessage.isSelected = true;
                 newAggregatedMessage.siblingGroupId = siblingGroupId;
 
-                state.currentMessages.splice(modelMessageIndex, 1, ...finalOriginalResponses, newAggregatedMessage);
-                if (preparation.streaming) uiUtils.renderStreamingResult();
-                else {
-                    uiUtils.renderChatMessages();
-                    this.scrollToBottom();
+                preparation.messages.splice(modelMessageIndex, 1, ...finalOriginalResponses, newAggregatedMessage);
+                if (this.showsSendExecutionV136(preparation)) {
+                    if (preparation.streaming) uiUtils.renderStreamingResult();
+                    else {
+                        uiUtils.renderChatMessages();
+                        this.scrollToBottom();
+                    }
                 }
                 await dbUtils.saveChat(null, null, { sendSession: preparation,
                     successfulExecution: this.successfulExecutionRecord(newAggregatedMessage) });
@@ -20002,10 +20167,10 @@ const appLogic = {
                 // Restore this operation's original history and keep any incomplete response in its turn.
                 if (truncated) {
                     const partial = this.getIncompleteStreamMessageV136(preparation);
-                    state.currentMessages.splice(index + 1);
-                    for (const message of originalTurn) state.currentMessages.push(message);
-                    if (partial) state.currentMessages.push(partial);
-                    if (nextTurn !== -1) for (const message of originalSuffix.slice(nextTurn)) state.currentMessages.push(message);
+                    preparation.messages.splice(index + 1);
+                    for (const message of originalTurn) preparation.messages.push(message);
+                    if (partial) preparation.messages.push(partial);
+                    if (nextTurn !== -1) for (const message of originalSuffix.slice(nextTurn)) preparation.messages.push(message);
                     try {
                         await dbUtils.saveChat(null, null, { sendSession: preparation });
                     } catch (saveError) {
@@ -20018,21 +20183,23 @@ const appLogic = {
                 // 実際のエラーだけを一時表示する。
                 if (!interrupted) {
                     console.error("再生成エラー:", error);
-                    state.currentMessages.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
+                    preparation.messages.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
                         timestamp: Date.now(), isNonPersistent: true });
                 }
     
-                if (preparation.streaming) uiUtils.renderStreamingResult();
-                else uiUtils.renderChatMessages();
-    
-                if (!interrupted) state.currentMessages.pop();
-                
-                if (!preparation.streaming) this.scrollToBottom();
+                if (this.showsSendExecutionV136(preparation)) {
+                    if (preparation.streaming) uiUtils.renderStreamingResult();
+                    else uiUtils.renderChatMessages();
+                    if (!preparation.streaming) this.scrollToBottom();
+                }
+                if (!interrupted) preparation.messages.pop();
     
             } finally {
                 const stillOwner = this.ownsSendExecutionV136(preparation);
                 this.finishSendExecutionV136(preparation);
-                if (stillOwner && !preparation.streaming && state.settings.autoScroll) requestAnimationFrame(() => this.scrollToBottom());
+                if (stillOwner && !preparation.streaming && preparation.settings.autoScroll) requestAnimationFrame(() => {
+                    if (this.showsSendExecutionV136(preparation)) this.scrollToBottom();
+                });
             }
         }
     },    
@@ -20282,12 +20449,16 @@ const appLogic = {
 
     async callApiWithRetry(apiParams) {
         const { messagesForApi, generationConfig, systemInstruction, tools, isFirstCall, session } = apiParams;
+        const settings = session?.settings ?? state.settings;
         let lastError = null;
-        const maxRetries = state.settings.enableAutoRetry ? state.settings.maxRetries : 0;
-        const forceCalling = state.settings.forceFunctionCalling && isFirstCall;
+        const maxRetries = settings.enableAutoRetry ? settings.maxRetries : 0;
+        const forceCalling = settings.forceFunctionCalling && isFirstCall;
+        const provider = session?.apiConfig.provider ?? this.getExecutionProvider();
+        const apiConfigId = (session?.apiConfig ?? this.getExecutionApiConfig())?.id;
+        const modelName = session?.apiConfig.modelName ?? this.getExecutionModelName();
         
         // state.abortControllerを確実に作成（ユーザーの手動キャンセル用）
-        if (!state.abortController) {
+        if (!session && !state.abortController) {
             state.abortController = new AbortController();
         }
         const userSignal = session?.controller.signal || state.abortController.signal;
@@ -20295,7 +20466,7 @@ const appLogic = {
         const previousContent = session?.streamContent;
         const previousThought = session?.getStreamThought?.();
         const joinTurns = (previous, current) => previous && current ? previous + '\n\n' + current : previous || current;
-        const onStream = (session?.streaming ?? state.settings.enableStreamingOutput === true) ? progress => {
+        const onStream = (session?.streaming ?? settings.enableStreamingOutput === true) ? progress => {
             receivedStreamData = true;
             if (session) this.updateSendStreamV136(session, {
                 content: joinTurns(previousContent, progress.content),
@@ -20304,8 +20475,8 @@ const appLogic = {
         } : null;
         
         // タイムアウト設定の取得
-        const timeoutEnabled = state.settings.enableApiTimeout || false;
-        const timeoutMs = timeoutEnabled ? (state.settings.apiTimeoutSeconds || 90) * 1000 : null;
+        const timeoutEnabled = settings.enableApiTimeout || false;
+        const timeoutMs = timeoutEnabled ? (settings.apiTimeoutSeconds || 90) * 1000 : null;
         
         if (timeoutEnabled) {
             console.log(`[Timeout] APIタイムアウト有効: ${timeoutMs}ms`);
@@ -20326,24 +20497,24 @@ const appLogic = {
 
                 if (attempt > 0) {
                     let delay;
-                    if (state.settings.useFixedRetryDelay) {
-                        delay = state.settings.fixedRetryDelaySeconds * 1000;
+                    if (settings.useFixedRetryDelay) {
+                        delay = settings.fixedRetryDelaySeconds * 1000;
                     } else {
                         const exponentialDelay = INITIAL_RETRY_DELAY * Math.pow(2, attempt - 1);
-                        const maxDelay = state.settings.maxBackoffDelaySeconds * 1000;
+                        const maxDelay = settings.maxBackoffDelaySeconds * 1000;
                         delay = Math.min(exponentialDelay, maxDelay);
                     }
 
-                    uiUtils.setLoadingIndicatorText(`APIエラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
+                    this.setSendProgressV136(session, `APIエラー 再試行(${attempt}回目)... ${Math.round(delay/1000)}秒待機`);
                     console.log(`API呼び出し失敗。${delay}ms後にリトライします... (試行 ${attempt + 1}/${maxRetries + 1})`);
                     await interruptibleSleep(delay, userSignal);
                     this.assertSendExecutionV136(session);
                 }
 
                 if (attempt === 1) {
-                    uiUtils.setLoadingIndicatorText('再試行中...');
+                    this.setSendProgressV136(session, '再試行中...');
                 } else if (attempt > 1) {
-                    uiUtils.setLoadingIndicatorText(`${attempt}回目の再試行中...`);
+                    this.setSendProgressV136(session, `${attempt}回目の再試行中...`);
                 }
 
                 // タイムアウトタイマーの設定
@@ -20357,7 +20528,7 @@ const appLogic = {
                 }
 
                 const response = await apiUtils.callApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling,
-                    attemptController.signal, onStream);
+                    attemptController.signal, onStream, session);
                 this.assertSendExecutionV136(session);
 
                 const getFinishReasonError = (candidate) => {
@@ -20473,16 +20644,16 @@ const appLogic = {
                 return {
                     content: finalContent,
                     thoughtSummary: finalThoughtSummary.trim() || null,
-                    continuation: { provider: this.getExecutionProvider(), apiConfigId: this.getExecutionApiConfig()?.id,
-                        modelName: this.getExecutionModelName(), displayContent: finalContent, parts: structuredClone(parts),
+                    continuation: { provider, apiConfigId,
+                        modelName, displayContent: finalContent, parts: structuredClone(parts),
                         openai: candidate.tmContinuation || null, bedrock: candidate.tmBedrockContinuation || null },
                     toolCalls: finalToolCalls.length > 0 ? finalToolCalls : null,
                     thoughtParts: finalThoughtParts.length > 0 ? finalThoughtParts : null, // 追加
                     finishReason: candidate.finishReason,
                     safetyRatings: candidate.safetyRatings,
                     usageMetadata: { ...responseData.usageMetadata, tmActualExecution: {
-                        provider: this.getExecutionProvider(), apiConfigId: this.getExecutionApiConfig()?.id,
-                        modelName: responseData.tmActualModel || responseData.modelVersion || this.getExecutionModelName() } },
+                        provider, apiConfigId,
+                        modelName: responseData.tmActualModel || responseData.modelVersion || modelName } },
                     retryCount: attempt
                 };
 
@@ -20561,27 +20732,29 @@ const appLogic = {
     },
 
     // --- Function Calling用ヘルパー ---
-    async updateOpacitySettings(opacitySettings, signal) {
+    async updateOpacitySettings(opacitySettings, signal, chat) {
         signal?.throwIfAborted();
+        const canUpdateView = () => chat?.canUpdateView?.() !== false;
+        const target = { ...this.captureAppearanceTargetV136('appearance'), signal };
         let settingsChanged = false;
         const changedItems = [];
 
-        if (typeof opacitySettings.overlay === 'number' && opacitySettings.overlay >= 0 && opacitySettings.overlay <= 1) {
-            await this.saveAppearanceValues('appearance', { overlayOpacity: opacitySettings.overlay }, { signal });
+        if (canUpdateView() && typeof opacitySettings.overlay === 'number' && opacitySettings.overlay >= 0 && opacitySettings.overlay <= 1) {
+            await this.saveAppearanceValues('appearance', { overlayOpacity: opacitySettings.overlay }, target);
             signal?.throwIfAborted();
-            document.documentElement.style.setProperty('--overlay-opacity-value', state.settings.overlayOpacity);
+            if (canUpdateView()) document.documentElement.style.setProperty('--overlay-opacity-value', state.settings.overlayOpacity);
             changedItems.push(`オーバーレイの濃さを${Math.round(opacitySettings.overlay * 100)}%に`);
             settingsChanged = true;
         }
-        if (typeof opacitySettings.message_bubble === 'number' && opacitySettings.message_bubble >= 0.1 && opacitySettings.message_bubble <= 1) {
-            await this.saveAppearanceValues('appearance', { messageOpacity: opacitySettings.message_bubble }, { signal });
+        if (canUpdateView() && typeof opacitySettings.message_bubble === 'number' && opacitySettings.message_bubble >= 0.1 && opacitySettings.message_bubble <= 1) {
+            await this.saveAppearanceValues('appearance', { messageOpacity: opacitySettings.message_bubble }, target);
             signal?.throwIfAborted();
             changedItems.push(`メッセージバブルの濃さを${Math.round(opacitySettings.message_bubble * 100)}%に`);
             settingsChanged = true;
         }
 
         if (settingsChanged) {
-            uiUtils.applySettingsToUI();
+            if (canUpdateView()) uiUtils.applySettingsToUI();
             const message = `${changedItems.join('、')}変更しました。`;
             return { success: true, message: message };
         } else {
@@ -21342,7 +21515,8 @@ const appLogic = {
                         const getAllKeysReq = store.getAllKeys();
                         getAllKeysReq.onsuccess = () => {
                             const keys = getAllKeysReq.result || [];
-                            const orphanIds = keys.filter(id => !String(id).startsWith('background_') && !activeImageIds.has(id));
+                            const inFlightImages = new Set([...state.sendJobsV136.values()].flatMap(job => [...job.imageIds]));
+                            const orphanIds = keys.filter(id => !String(id).startsWith('background_') && !activeImageIds.has(id) && !inFlightImages.has(id));
                             orphanIds.forEach(id => store.delete(id));
                             tx.oncomplete = resolve;
                             tx.onerror = () => reject(tx.error);
@@ -21396,6 +21570,7 @@ const appLogic = {
     },
 
     async toggleChatMemory() {
+        if (await this.guardGenerationMutableAction()) return;
         state.isMemoryEnabledForChat = !state.isMemoryEnabledForChat;
         this.toggleMemoryIconVisibility();
         // 現在のチャットの状態として保存
@@ -21672,18 +21847,22 @@ const appLogic = {
         return config.provider === 'gemini' ? (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('')
             : (data.choices?.[0]?.message?.content || '');
     },
-    async triggerAutoMemorySave() {
-        const profileId = state.activeProfileId;
-        const interval = parseInt(state.settings.memoryAutoSaveInterval, 10);
-        if (!profileId || !state.settings.enableMemory || !state.isMemoryEnabledForChat || !(interval > 0)) return;
+    async triggerAutoMemorySave(session = null) {
+        const settings = session?.settings ?? state.settings;
+        const messages = session?.messages ?? state.currentMessages;
+        const profileId = session ? session.profileId : state.activeProfileId;
+        const source = session ? { chatId: session.chatId,
+            recordGenerationId: dbUtils.chatSaveOwners?.get(session.messages)?.recordGenerationId } : null;
+        const interval = parseInt(settings.memoryAutoSaveInterval, 10);
+        if (!profileId || !settings.enableMemory || !(session?.memoryEnabled ?? state.isMemoryEnabledForChat) || !(interval > 0)) return;
 
         try {
-            const userMessagesInInterval = state.currentMessages.filter(m => m.role === 'user').slice(-interval);
+            const userMessagesInInterval = messages.filter(m => m.role === 'user').slice(-interval);
             if (userMessagesInInterval.length === 0) {
                 return;
             }
-            const firstUserMessageIndex = state.currentMessages.indexOf(userMessagesInInterval[0]);
-            const historyToSummarize = state.currentMessages.slice(firstUserMessageIndex).filter(message => !message.incomplete);
+            const firstUserMessageIndex = messages.indexOf(userMessagesInInterval[0]);
+            const historyToSummarize = messages.slice(firstUserMessageIndex).filter(message => !message.incomplete);
 
             const conversationText = historyToSummarize.map(msg => {
                 return `${msg.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${msg.content}`;
@@ -21694,7 +21873,7 @@ const appLogic = {
                 ? `- ${memoryData.items.join('\n- ')}`
                 : "（まだ何も記憶していません）";
 
-            const summarizationPrompt = `${this.getMemoryExtractionPromptV136()}
+            const summarizationPrompt = `${session?.memoryExtractionPrompt ?? this.getMemoryExtractionPromptV136()}
 
 ---
 【既存の記憶】
@@ -21708,7 +21887,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 [抽出結果]`;
 
-            const memoryConfig = await this.resolveAuxiliaryApiConfigV136('memoryModelRef');
+            const memoryConfig = session ? this.getSendAuxiliaryConfigV136(session, 'memoryModelRef') : await this.resolveAuxiliaryApiConfigV136('memoryModelRef');
             if (!memoryConfig) return;
             const requestBody = {
                 contents: [{
@@ -21743,7 +21922,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 const existingItems = new Set(memoryData.items);
                 const uniqueNewItems = newItems.filter(item => !existingItems.has(item));
                 if (!uniqueNewItems.length) return;
-                const added = await dbUtils.appendExtractedMemory(profileId, uniqueNewItems);
+                const added = await dbUtils.appendExtractedMemory(profileId, uniqueNewItems, source);
                 if (added) console.log(`[Memory] 自動学習により、${added}件の新しい記憶を追加しました。`);
             }
         } catch (error) {
@@ -22946,6 +23125,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 
     async confirmSummary() {
+        if (await this.guardGenerationMutableAction()) return;
         const summaryText = elements.summaryEditor.value.trim();
         if (!summaryText) {
             uiUtils.showCustomAlert("要約内容が空です。");
@@ -23299,7 +23479,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 
 
-    async importDataFromString(jsonString) {
+    async importDataFromString(jsonString, options = {}) {
         console.log("[Data Import V2] 文字列からのデータインポートを開始します。");
         uiUtils.showProgressDialog('インポートデータを準備中...');
     
@@ -23381,7 +23561,9 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             }
 
             // clearAndImportDataからの戻り値を受け取る
-            const { removedAssetInfo } = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds);
+            const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options);
+            if (!result) return null;
+            const { removedAssetInfo } = result;
             await this.loadGlobalSettings();
             await this.loadProfiles();
     
@@ -23542,40 +23724,41 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
     },
 
     // --- Stable Diffusion連携機能の本体ロジック ---
-    handleStableDiffusionGeneration: async function(args, responseText = '', signal) {
-        if (!state.settings.sdApiUrl) {
+    handleStableDiffusionGeneration: async function(args, responseText = '', signal, session = null) {
+        const settings = session?.settings ?? state.settings;
+        if (!settings.sdApiUrl) {
             return { error: "Stable Diffusion WebUIのURLが設定されていません。" };
         }
 
         let currentPrompt = args.prompt;
         let generatedImageBlob = null;
         let qualityCheckResult = null;
-        const isQcEnabled = state.settings.sdEnableQualityChecker && this.getGlobalAuxiliaryModelRefV136('sdQcModelRef');
-        const canImprovePrompt = isQcEnabled && this.getGlobalAuxiliaryModelRefV136('sdPromptImproveModelRef');
-        const maxRetries = canImprovePrompt ? (state.settings.sdQcRetries || 0) : 0;
+        const isQcEnabled = state.settings.sdEnableQualityChecker && (session ? session.auxiliary.sdQcModelRef : this.getGlobalAuxiliaryModelRefV136('sdQcModelRef'));
+        const canImprovePrompt = isQcEnabled && (session ? session.auxiliary.sdPromptImproveModelRef : this.getGlobalAuxiliaryModelRefV136('sdPromptImproveModelRef'));
+        const maxRetries = canImprovePrompt ? (settings.sdQcRetries || 0) : 0;
 
         try {
             for (let i = 0; i <= maxRetries; i++) {
                 if (i > 0) {
-                    uiUtils.setLoadingIndicatorText(`プロンプト改善中... (${i}/${maxRetries})`);
-                    currentPrompt = await runToolRequestV136(signal, configuredApiTimeoutV136(),
-                        requestSignal => this._improveSdPrompt(args.prompt, currentPrompt, qualityCheckResult.reason, requestSignal));
+                    this.setSendProgressV136(session, `プロンプト改善中... (${i}/${maxRetries})`);
+                    currentPrompt = await runToolRequestV136(signal, configuredApiTimeoutV136(settings),
+                        requestSignal => this._improveSdPrompt(args.prompt, currentPrompt, qualityCheckResult.reason, requestSignal, session));
                 }
                 
                 signal?.throwIfAborted();
-                uiUtils.setLoadingIndicatorText('SDで画像生成中...');
+                this.setSendProgressV136(session, 'SDで画像生成中...');
                 const payload = { ...args, prompt: currentPrompt };
-                generatedImageBlob = await runToolRequestV136(signal, configuredApiTimeoutV136(),
-                    requestSignal => this.callStableDiffusionApi(payload, requestSignal));
+                generatedImageBlob = await runToolRequestV136(signal, configuredApiTimeoutV136(settings),
+                    requestSignal => this.callStableDiffusionApi(payload, requestSignal, settings));
                 signal?.throwIfAborted();
 
                 if (!isQcEnabled) {
                     break;
                 }
 
-                uiUtils.setLoadingIndicatorText('品質チェック中...');
-                qualityCheckResult = await runToolRequestV136(signal, configuredApiTimeoutV136(),
-                    requestSignal => this.runQualityChecker(generatedImageBlob, currentPrompt, responseText, requestSignal));
+                this.setSendProgressV136(session, '品質チェック中...');
+                qualityCheckResult = await runToolRequestV136(signal, configuredApiTimeoutV136(settings),
+                    requestSignal => this.runQualityChecker(generatedImageBlob, currentPrompt, responseText, requestSignal, session));
                 signal?.throwIfAborted();
 
                 // runQualityCheckerの実行直後に、その結果をログに出力する
@@ -23707,9 +23890,10 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             }
         },
 
-    async _improveSdPrompt(originalPrompt, failedPrompt, ngReason, signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef');
-        const systemPrompt = state.settings.sdPromptImproveSystemPrompt;
+    async _improveSdPrompt(originalPrompt, failedPrompt, ngReason, signal, session = null) {
+        const config = session ? this.getSendAuxiliaryConfigV136(session, 'sdPromptImproveModelRef')
+            : await this.resolveAuxiliaryApiConfigV136('sdPromptImproveModelRef');
+        const systemPrompt = (session?.settings ?? state.settings).sdPromptImproveSystemPrompt;
 
         const userPrompt = `元のプロンプト: ${originalPrompt}\n失敗したプロンプト: ${failedPrompt}\n失敗理由: ${ngReason}`;
 
@@ -23727,9 +23911,10 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         return improvedPrompt;
     },
 
-    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
-        const qcSystemPrompt = state.settings.sdQcPrompt
+    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal, session = null) {
+        const config = session ? this.getSendAuxiliaryConfigV136(session, 'sdQcModelRef')
+            : await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
+        const qcSystemPrompt = (session?.settings ?? state.settings).sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');
         
@@ -23760,8 +23945,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         }
     },
 
-    callStableDiffusionApi: async function(args, signal) {
-        const apiUrl = state.settings.sdApiUrl.trim().replace(/\/$/, '');
+    callStableDiffusionApi: async function(args, signal, settings = state.settings) {
+        const apiUrl = settings.sdApiUrl.trim().replace(/\/$/, '');
         const endpoint = `${apiUrl}/sdapi/v1/txt2img`;
 
         // advanced_params を分離し、残りを mainArgs として受け取る
@@ -23804,8 +23989,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         }
 
         const headers = { 'Content-Type': 'application/json' };
-        if (state.settings.sdApiUser && state.settings.sdApiPassword) {
-            headers['Authorization'] = 'Basic ' + btoa(`${state.settings.sdApiUser}:${state.settings.sdApiPassword}`);
+        if (settings.sdApiUser && settings.sdApiPassword) {
+            headers['Authorization'] = 'Basic ' + btoa(`${settings.sdApiUser}:${settings.sdApiPassword}`);
         }
 
         console.log("[Stable Diffusion] APIリクエスト送信:", endpoint, payload);
@@ -23836,9 +24021,10 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 
 
-    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal) {
-        const config = await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
-        const qcSystemPrompt = state.settings.sdQcPrompt
+    runQualityChecker: async function(imageBlob, prompt, responseText = '', signal, session = null) {
+        const config = session ? this.getSendAuxiliaryConfigV136(session, 'sdQcModelRef')
+            : await this.resolveAuxiliaryApiConfigV136('sdQcModelRef');
+        const qcSystemPrompt = (session?.settings ?? state.settings).sdQcPrompt
             .replace('{prompt}', prompt || '(プロンプトなし)')
             .replace('{response_text}', responseText || '(応答文なし)');
         
