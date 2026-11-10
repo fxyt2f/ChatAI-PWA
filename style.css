@@ -1810,10 +1810,8 @@ body.dark-mode #settings-screen::after {
 }
 .message:first-child { margin-top: 0; }
 .message.user {
-    background-color: color-mix(in srgb, var(--user-message-bg, var(--bg-user-message)) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
     color: var(--user-message-fg, var(--text-primary));
     align-self: flex-end;
-    border-bottom-right-radius: var(--border-radius-sm);
 }
 .message.model {
     background-color: color-mix(in srgb, var(--bg-model-message) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
@@ -4011,9 +4009,13 @@ body.header-auto-hide.header-force-show .floating-action-panel {
     justify-content: center;
     align-items: center;
     cursor: pointer;
-    pointer-events: auto;
     transition: all var(--transition-duration) var(--transition-timing);
     padding: 0;
+}
+
+html:not(.text-formatting-enabled) #text-formatting-btn,
+html:not(.text-formatting-enabled) #chat-screen .tm-format-message-btn {
+    display: none;
 }
 
 .floating-action-panel .floating-action-button .material-symbols-outlined {
@@ -5533,7 +5535,7 @@ body.dark-mode #sd-test-connection-btn {
     width: 100%;
     max-width: none;
     min-width: 0;
-    margin: 22px 0 78px;
+    margin: 22px 0 6px;
     padding: 0;
     background: transparent;
     border: none;
@@ -5541,21 +5543,39 @@ body.dark-mode #sd-test-connection-btn {
     box-shadow: none;
 }
 
-#chat-screen .message.model:not(:has(.message-actions .message-action-meta)) {
-    margin-bottom: 44px;
+#chat-screen .message.model:not(:where(:has(.message-action-meta))) {
+    margin-bottom: 8px;
 }
 
 #chat-screen .message.user {
-    align-self: flex-end;
-    width: fit-content;
-    max-width: min(var(--message-max-width, 85%), 100%);
+    /* The bubble uses the right track; actions can use both tracks. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) fit-content(min(var(--message-max-width, 85%), 100%));
+    align-self: stretch;
+    max-width: none;
     min-width: 0;
-    margin-bottom: 44px;
+    margin-bottom: 8px;
+    padding: 0;
+    box-shadow: none;
 }
 
-#chat-screen .message.user .message-content {
-    max-width: 100%;
+#chat-screen .message.user > :is(.message-content, .message-edit-area),
+#chat-screen .message.user::before {
+    grid-area: 1 / 2;
+}
+
+#chat-screen .message.user::before {
+    content: "";
+    pointer-events: none;
+    background-color: color-mix(in srgb, var(--user-message-bg, var(--bg-user-message)) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
+    border-radius: var(--border-radius-lg);
+    border-bottom-right-radius: var(--border-radius-sm);
+    box-shadow: var(--shadow-1);
+}
+
+#chat-screen .message.user > .message-content {
     min-width: 0;
+    margin: var(--spacing-unit) calc(var(--spacing-unit) * 1.5);
     box-sizing: border-box;
 }
 
@@ -5622,6 +5642,15 @@ body.dark-mode #sd-test-connection-btn {
     width: 100%;
     max-width: none;
     min-width: 0;
+}
+
+#chat-screen .message.user.editing {
+    grid-template-columns: 0 minmax(0, 1fr);
+}
+
+#chat-screen .message.user.editing > .message-edit-area {
+    width: auto;
+    margin: calc(var(--spacing-unit) + 5px) calc(var(--spacing-unit) * 1.5) var(--spacing-unit);
 }
 
 #chat-screen .message-edit-area {
@@ -5853,18 +5882,16 @@ body.mobile-message-editor-open {
 }
 
 #chat-screen .message-actions {
-    position: absolute;
-    bottom: -36px;
+    position: relative;
+    inset: auto;
     display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    width: max-content;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
     max-width: 100%;
-    min-height: 32px;
-    margin: 0;
+    margin: 4px 0 0;
     padding: 0;
-    row-gap: 3px;
-    column-gap: 2px;
+    gap: 3px;
     opacity: 1;
     visibility: visible;
     transform: none;
@@ -5882,44 +5909,14 @@ body.mobile-message-editor-open {
 }
 
 #chat-screen .message.user .message-actions {
-    right: 0;
-    left: auto;
-    justify-content: flex-end;
+    grid-column: 1 / -1;
+    justify-self: end;
     width: max-content;
-    max-width: min(var(--content-max-width, 760px), calc(100vw - 32px));
-    overflow: visible;
 }
 
-#chat-screen .message.model .message-actions {
-    bottom: -72px;
-    left: 0;
-    right: auto;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: flex-start;
-    width: min(100%, var(--content-max-width, 760px));
-    max-width: 100%;
+#chat-screen .message.model .message-actions:has(.message-action-meta) {
+    margin-top: 6px;
     min-height: 66px;
-    row-gap: 3px;
-    column-gap: 0;
-    overflow: visible;
-}
-
-#chat-screen .message.model .message-actions::before {
-    display: none;
-}
-
-#chat-screen .message.model .message-actions:not(:has(.message-action-meta)) {
-    bottom: -36px;
-    display: flex;
-    flex-direction: row;
-    flex-wrap: nowrap;
-    min-height: 32px;
-}
-
-#chat-screen .message.model .message-actions:not(:has(.message-action-meta))::before {
-    display: none;
 }
 
 #chat-screen .message-actions button,
@@ -6007,30 +6004,14 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
 }
 
 #chat-screen .message-action-buttons {
-    width: max-content;
-    max-width: 100%;
+    width: 100%;
     min-height: 32px;
     gap: 2px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-}
-
-#chat-screen .message-action-buttons::-webkit-scrollbar {
-    display: none;
+    flex-wrap: wrap;
 }
 
 #chat-screen .message.user .message-action-buttons {
-    width: max-content;
-    max-width: min(var(--content-max-width, 760px), calc(100vw - 32px));
-    justify-content: flex-start;
-}
-
-#chat-screen .message.model .message-action-buttons {
-    width: 100%;
-    justify-content: flex-start;
+    justify-content: flex-end;
 }
 
 #chat-screen .message-actions .token-count-display {
@@ -6199,46 +6180,34 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
     pointer-events: none;
 }
 
+#chat-screen .message.model:is([id^="streaming-message-"], :has([id^="streaming-content-"])) {
+    margin-bottom: 44px;
+}
+
 @media screen and (max-width: 600px) {
     #chat-screen .message-container {
         max-width: 100%;
     }
 
     #chat-screen .message.model {
-        margin-bottom: 82px;
+        margin-bottom: 10px;
     }
 
-    #chat-screen .message.model:not(:has(.message-actions .message-action-meta)) {
-        margin-bottom: 42px;
-    }
-
-    #chat-screen .message.model .message-actions {
-        bottom: -72px;
-        width: 100%;
-        max-width: 100%;
-        min-height: 66px;
-        overflow: visible;
-    }
-
-    #chat-screen .message.model .message-actions::before {
-        display: none;
-    }
-
-    #chat-screen .message.model .message-actions:not(:has(.message-action-meta)) {
-        bottom: -36px;
-        min-height: 32px;
-    }
-
+    #chat-screen .message.model:not(:where(:has(.message-action-meta))),
     #chat-screen .message.user {
-        width: fit-content;
-        max-width: min(92%, 100%);
-        min-width: 0;
+        margin-bottom: 6px;
+    }
+
+    #chat-screen .message.model:is([id^="streaming-message-"], :has([id^="streaming-content-"])) {
         margin-bottom: 42px;
+    }
+
+    #chat-screen .message.user:not(.editing) {
+        grid-template-columns: minmax(0, 1fr) fit-content(92%);
     }
 
     #chat-screen .message.model.editing,
     #chat-screen .message.user.editing {
-        max-width: 100%;
         margin-bottom: 24px;
     }
 
@@ -6252,63 +6221,8 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
         flex-wrap: wrap;
     }
 
-    #chat-screen .message-actions {
-        max-width: calc(100vw - 32px);
-        flex-wrap: nowrap;
-        align-items: center;
-        align-content: center;
-        row-gap: 0;
-        column-gap: 1px;
-        min-height: 32px;
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-width: none;
-        -webkit-overflow-scrolling: touch;
-    }
-
     #chat-screen .message-action-buttons {
-        max-width: 100%;
         column-gap: 1px;
-    }
-
-    #chat-screen .message.model .message-actions {
-        bottom: -72px;
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        row-gap: 3px;
-        column-gap: 0;
-        min-height: 66px;
-        overflow: visible;
-    }
-
-    #chat-screen .message.model .message-action-buttons {
-        width: 100%;
-    }
-
-    #chat-screen .message.model .message-actions:not(:has(.message-action-meta)) {
-        bottom: -36px;
-        display: flex;
-        flex-direction: row;
-        min-height: 32px;
-    }
-
-    #chat-screen .message.user .message-actions {
-        bottom: -36px;
-        width: max-content;
-        max-width: calc(100vw - 32px);
-        justify-content: flex-end;
-        overflow: visible;
-    }
-
-    #chat-screen .message.user .message-action-buttons {
-        width: max-content;
-        max-width: calc(100vw - 32px);
-        justify-content: flex-start;
-    }
-
-    #chat-screen .message-actions::-webkit-scrollbar {
-        display: none;
     }
 
     #chat-screen .message.model .message-actions .token-count-display {
