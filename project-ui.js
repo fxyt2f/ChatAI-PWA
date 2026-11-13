@@ -101,7 +101,9 @@ window.ProjectUI = (() => {
             }, 'chat-sidebar-item-open project-folder-toggle');
             toggle.dataset.projectFocus = 'expand';
             const titleLine = node('span', '', 'chat-sidebar-title-line');
-            titleLine.append(icon(isExpanded ? 'folder_open' : 'folder'), node('span', project.name, 'chat-sidebar-item-title'));
+            const folderIcon = icon(isExpanded ? 'folder_open' : 'folder');
+            folderIcon.classList.add('project-folder-icon');
+            titleLine.append(folderIcon, node('span', project.name, 'chat-sidebar-item-title'));
             toggle.append(titleLine);
             toggle.title = project.name;
             toggle.setAttribute('aria-expanded', String(isExpanded));
@@ -160,8 +162,13 @@ window.ProjectUI = (() => {
         anchor.setAttribute('aria-expanded', 'true');
         anchor.closest('.chat-sidebar-item')?.classList.add('menu-active');
         element.hidden = false;
-        ui().positionRowMenu(element, anchor);
+        if (anchor.closest('#project-sidebar')) positionSidebarMenu();
+        else ui().positionRowMenu(element, anchor);
         element.querySelector(':scope > :not([hidden])')?.focus({ preventScroll: true });
+    }
+
+    function positionSidebarMenu() {
+        if (menu?.anchor.closest('#project-sidebar') && !ui().positionSidebarRowMenu(byId('menu'), menu.anchor)) closeMenu();
     }
 
     function moveChatControls(toProject) {
@@ -773,7 +780,9 @@ window.ProjectUI = (() => {
                 items[next].focus({ preventScroll: true });
             }
         });
-        window.addEventListener('resize', () => closeMenu());
+        window.addEventListener('resize', () => {
+            if (menu && !menu.anchor.closest('#project-sidebar')) closeMenu();
+        });
         const viewport = window.visualViewport;
         const updateViewport = () => {
             const workspace = byId('workspace');
@@ -782,7 +791,7 @@ window.ProjectUI = (() => {
         };
         viewport?.addEventListener('resize', updateViewport, { passive: true });
         document.addEventListener('scroll', event => {
-            if (menu && (event.target === byId('content') || event.target.id === 'chat-sidebar-scroll')) closeMenu();
+            if (menu && event.target === byId('content') && !menu.anchor.closest('#project-sidebar')) closeMenu();
         }, true);
         byId('dialog-cancel').addEventListener('click', () => byId('dialog').close());
         byId('dialog').addEventListener('close', () => { if (!byId('dialog').open && dialog) finishDialog(dialog); });
@@ -828,7 +837,7 @@ window.ProjectUI = (() => {
         input.click();
     }
 
-    return { install, open, close, closeMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged,
+    return { install, open, close, closeMenu, positionSidebarMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged,
         prepareForUpdate, saveProfileDraft, restoreProfileDraft, beginSend, openChat, isReady: () => view?.ready === true,
         isSavingFirstMessage: () => Boolean(handoff) };
 })();

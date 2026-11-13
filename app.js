@@ -3264,7 +3264,8 @@ const historyUiState = {
     menuPointerActive: false
 };
 
-// 一覧データは一度の全件走査を共有し、常設開閉だけはlocalUiSettingsへ保存する。
+// 一覧データは一度の全件走査を共有する。
+const collapsedSidebarGroupsKey = 'chatai-collapsed-sidebar-groups';
 const chatSidebarUiState = {
     mode: 'disabled',
     isOpen: false,
@@ -3277,6 +3278,7 @@ const chatSidebarUiState = {
     searchTimer: null,
     refreshTimer: null,
     hasLoadedAll: false,
+    collapsedGroups: null,
     unsubscribe: null
 };
 
@@ -5774,6 +5776,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             chatSidebarUiState.isOpen = false;
         }
         this.applyChatSidebarState();
+        window.ProjectUI?.positionSidebarMenu();
         if (chatSidebarUiState.isOpen && !chatSidebarUiState.hasLoadedAll) {
             void this.renderChatSidebar({ refreshRecent: true });
         } else if (chatSidebarUiState.isOpen) {
@@ -6020,15 +6023,38 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const pinned = document.getElementById('chat-sidebar-pinned');
         pinned.hidden = !showProjects || !pinnedModels.length;
         document.getElementById('chat-sidebar-pinned-list').replaceChildren(...(showProjects ? pinnedModels.map(createItem) : []));
+        const recent = document.getElementById('chat-sidebar-recent');
+        recent.firstElementChild.hidden = !showProjects;
+        const listLabel = showProjects ? 'chat-sidebar-recent-title' : 'chat-sidebar-history-title';
+        recent.setAttribute('aria-labelledby', listLabel);
+        elements.chatSidebarList.setAttribute('aria-labelledby', listLabel);
+        this.syncChatSidebarGroups(!showProjects);
         const models = showProjects ? unpinnedModels : [...pinnedModels, ...unpinnedModels];
         const fragment = document.createDocumentFragment();
         for (const model of models) fragment.append(createItem(model));
         elements.chatSidebarList.replaceChildren(fragment);
-        elements.chatSidebarStatus.textContent = !allModels.length
-            ? query ? '一致するチャットはありません' : 'チャットはありません' : '';
+        elements.chatSidebarStatus.textContent = models.length ? ''
+            : query ? '一致するチャットはありません' : '未所属のチャットはありません';
         elements.chatSidebarLive.textContent = query
             ? `検索結果 ${models.length}件`
             : `ピン留め ${pinnedModels.length}件、チャット ${unpinnedModels.length}件`;
+    },
+
+    syncChatSidebarGroups(searching = Boolean(this.normalizeHistoryText(chatSidebarUiState.query))) {
+        if (!chatSidebarUiState.collapsedGroups) {
+            try {
+                const stored = JSON.parse(localStorage.getItem(collapsedSidebarGroupsKey) || '[]');
+                chatSidebarUiState.collapsedGroups = new Set(Array.isArray(stored) ? stored : []);
+            } catch {
+                chatSidebarUiState.collapsedGroups = new Set();
+            }
+        }
+        for (const button of elements.chatSidebarScroll.querySelectorAll('.chat-sidebar-group-title')) {
+            const id = button.getAttribute('aria-controls');
+            const expanded = searching || !chatSidebarUiState.collapsedGroups.has(id);
+            button.setAttribute('aria-expanded', String(expanded));
+            document.getElementById(id).hidden = !expanded;
+        }
     },
 
     async renderChatSidebar({ refreshRecent = false, invalidateSearch = false } = {}) {
@@ -6083,12 +6109,30 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     positionHistoryItemMenu() {
         const menu = elements.historyItemMenu;
-        const anchor = historyUiState.menuContext?.triggerElement;
-        if (!menu || !anchor?.isConnected || menu.classList.contains('hidden')) return;
-        this.positionRowMenu(menu, anchor);
+        const context = historyUiState.menuContext;
+        const anchor = context?.triggerElement;
+        if (!menu || !context || menu.classList.contains('hidden')) return;
+        if (context.source === 'sidebar') {
+            if (!this.positionSidebarRowMenu(menu, anchor)) this.closeHistoryItemMenu();
+        } else if (anchor.isConnected) {
+            this.positionRowMenu(menu, anchor);
+        }
     },
 
-    positionRowMenu(menu, anchor, container = null) {
+    positionSidebarRowMenu(menu, anchor) {
+        if (!anchor.isConnected || elements.chatHistorySidebar.inert || !anchor.getClientRects().length) return false;
+        const scroller = anchor.closest('.chat-sidebar-scroll');
+        if (scroller) {
+            const row = anchor.getBoundingClientRect();
+            const bounds = scroller.getBoundingClientRect();
+            if (row.bottom <= bounds.top || row.top >= bounds.bottom) return false;
+        }
+        const sidebarRight = elements.chatHistorySidebar.getBoundingClientRect().right;
+        this.positionRowMenu(menu, anchor, null, { rightOf: sidebarRight });
+        return true;
+    },
+
+    positionRowMenu(menu, anchor, container = null, { rightOf = null } = {}) {
         const viewportMargin = 8;
         const gap = 4;
         const anchorRect = anchor.getBoundingClientRect();
@@ -6103,15 +6147,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.setProperty('--row-menu-width', `${Math.max(0, rightEdge - leftEdge)}px`);
         menu.style.setProperty('--row-menu-height', `${Math.max(0, bottomEdge - topEdge)}px`);
         const menuRect = menu.getBoundingClientRect();
-        const left = Math.min(
-            Math.max(leftEdge, anchorRect.right - menuRect.width),
-            Math.max(leftEdge, rightEdge - menuRect.width)
-        );
+        const besideLeft = Math.max(anchorRect.right, rightOf ?? 0) + gap;
+        const beside = rightOf !== null && besideLeft + menuRect.width <= rightEdge;
+        const left = beside ? besideLeft : Math.min(
+            Math.max(leftEdge, anchorRect.right - menuRect.width), Math.max(leftEdge, rightEdge - menuRect.width));
         const belowTop = anchorRect.bottom + gap;
         const aboveTop = anchorRect.top - menuRect.height - gap;
-        const top = belowTop + menuRect.height <= bottomEdge
-            ? belowTop
-            : Math.max(topEdge, aboveTop);
+        const top = beside ? Math.max(topEdge, Math.min(anchorRect.top, bottomEdge - menuRect.height))
+            : belowTop + menuRect.height <= bottomEdge ? belowTop : Math.max(topEdge, aboveTop);
         menu.style.left = `${Math.round(left - (bounds?.left ?? 0))}px`;
         menu.style.top = `${Math.round(top - (bounds?.top ?? 0))}px`;
     },
@@ -15323,11 +15366,22 @@ const appLogic = {
                 event.preventDefault();
                 uiUtils.closeHistoryItemMenu({ restoreFocus: true });
             });
-            window.addEventListener('resize', () => uiUtils.closeHistoryItemMenu(), { passive: true });
+            const repositionSidebarMenus = () => {
+                if (historyUiState.menuContext?.source === 'sidebar') uiUtils.positionHistoryItemMenu();
+                window.ProjectUI?.positionSidebarMenu();
+            };
+            window.addEventListener('resize', () => {
+                if (historyUiState.menuContext?.source !== 'sidebar') uiUtils.closeHistoryItemMenu();
+                repositionSidebarMenus();
+            }, { passive: true });
+            window.visualViewport?.addEventListener('resize', repositionSidebarMenus, { passive: true });
+            window.visualViewport?.addEventListener('scroll', repositionSidebarMenus, { passive: true });
+            elements.chatSidebarScroll.addEventListener('scroll', repositionSidebarMenus, { passive: true });
             this._historyActionMenuEventsBound = true;
         }
 
         if (!this._chatSidebarEventsBound) {
+            uiUtils.syncChatSidebarGroups();
             const clearSidebarTouchInput = () => elements.chatScreen.classList.remove('sidebar-touch-input');
             document.addEventListener('pointerdown', event => {
                 elements.chatScreen.classList.toggle('sidebar-touch-input', event.pointerType === 'touch');
@@ -15390,6 +15444,17 @@ const appLogic = {
                 elements.chatSidebarSearchInput.focus();
             });
             elements.chatSidebarScroll.addEventListener('click', async event => {
+                const toggle = event.target.closest('.chat-sidebar-group-title');
+                if (toggle) {
+                    const id = toggle.getAttribute('aria-controls');
+                    const collapsed = chatSidebarUiState.collapsedGroups;
+                    if (collapsed.has(id)) collapsed.delete(id);
+                    else collapsed.add(id);
+                    uiUtils.syncChatSidebarGroups();
+                    try { localStorage.setItem(collapsedSidebarGroupsKey, JSON.stringify([...collapsed])); }
+                    catch { /* keep the current tab's state */ }
+                    return;
+                }
                 const actionElement = event.target.closest('[data-sidebar-action]');
                 if (!actionElement || !elements.chatSidebarScroll.contains(actionElement)) return;
                 const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId);
@@ -15411,13 +15476,10 @@ const appLogic = {
                     }
                 }
             });
-            elements.chatSidebarScroll.addEventListener('scroll', () => {
-                if (historyUiState.menuContext?.source === 'sidebar') uiUtils.closeHistoryItemMenu();
-            }, { passive: true });
             document.addEventListener('keydown', event => {
                 if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen ||
                     document.querySelector('dialog[open]')) return;
-                if (!elements.historyItemMenu.classList.contains('hidden')) return;
+                if (!elements.historyItemMenu.classList.contains('hidden') || !document.getElementById('project-menu').hidden) return;
                 event.preventDefault();
                 uiUtils.closeChatSidebar({ restoreFocus: true });
             });

@@ -59,9 +59,9 @@ def run(client, url, screenshots=None):
             field.dispatchEvent(new Event({json.dumps(event)}, {{bubbles:true}}));
         }})()""")
 
-    def viewport(width, mobile):
+    def viewport(width, mobile, height=800):
         client.call('Emulation.setDeviceMetricsOverride', {
-            'width': width, 'height': 800, 'deviceScaleFactor': 1, 'mobile': mobile,
+            'width': width, 'height': height, 'deviceScaleFactor': 1, 'mobile': mobile,
         })
         client.call('Emulation.setTouchEmulationEnabled', {'enabled': mobile})
 
@@ -74,12 +74,44 @@ def run(client, url, screenshots=None):
         }})()""")
         client.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', **point})
 
+    def mouse_click(selector):
+        hover(selector)
+        point = ev(f"""(() => {{
+            const node = document.querySelector({json.dumps(selector)});
+            const r = node.getBoundingClientRect(), x = r.left+r.width/2, y = r.top+r.height/2;
+            return {{x,y,hit:node.contains(document.elementFromPoint(x,y))}};
+        }})()""")
+        assert point.pop('hit'), (selector, point)
+        for kind in ['mousePressed', 'mouseReleased']:
+            client.call('Input.dispatchMouseEvent', {'type': kind, 'button': 'left', 'clickCount': 1, **point})
+
+    def key(name):
+        for kind in ['keyDown', 'keyUp']:
+            client.call('Input.dispatchKeyEvent', {'type': kind, 'key': name, 'code': name,
+                        'windowsVirtualKeyCode': {'Tab': 9, 'Escape': 27}[name]})
+
+    def menu_in_bounds(selector, beside=False):
+        return ev(f"""(() => {{
+            const menu=document.querySelector({json.dumps(selector)});
+            const rect=menu.getBoundingClientRect();
+            return !menu.closest('#chat-history-sidebar') && rect.width>0 && rect.left>=0 && rect.top>=0 &&
+                rect.right<=innerWidth && rect.bottom<=innerHeight &&
+                ({str(not beside).lower()} || rect.left>=elements.chatHistorySidebar.getBoundingClientRect().right-4) &&
+                [...menu.querySelectorAll('[hidden]')].every(button=>!button.getClientRects().length) &&
+                [...menu.querySelectorAll('[role=menuitem]:not([hidden])')].every(button=>{{
+                    const r=button.getBoundingClientRect();
+                    return !button.disabled && button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+                }});
+        }})()""")
+
     def capture(name):
         if screenshots:
             screenshots.mkdir(parents=True, exist_ok=True)
             ev("""(async()=>{
                 await document.fonts.ready;
-                await Promise.all(document.getAnimations().filter(animation=>animation.effect?.target?.closest('#project-workspace'))
+                await Promise.all(document.getAnimations().filter(animation=>
+                    animation.effect?.getTiming().iterations!==Infinity &&
+                    animation.effect?.target?.closest('#project-workspace, #chat-history-sidebar'))
                     .map(animation=>animation.finished.catch(()=>{})));
             })()""")
             shot = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
@@ -185,7 +217,7 @@ def run(client, url, screenshots=None):
     assert ev(f"""(() => {{
         const ids=[...document.querySelector('#chat-sidebar-scroll').children].map(node=>node.id);
         return ids.indexOf('chat-sidebar-pinned')<ids.indexOf('project-sidebar') &&
-            ids.indexOf('project-sidebar')<ids.indexOf('chat-sidebar-list') &&
+            ids.indexOf('project-sidebar')<ids.indexOf('chat-sidebar-recent') &&
             !document.querySelector('#project-all-history, #chat-sidebar-list .chat-sidebar-group-title') &&
             Boolean(document.querySelector('#chat-sidebar-list [data-chat-id="{old}"]'));
     }})()""")
@@ -203,10 +235,97 @@ def run(client, url, screenshots=None):
             getComputedStyle(row).backgroundColor==='rgba(0, 0, 0, 0)' && elements.projectWorkspace.hidden;
     }})()""")
     capture('pc-expanded')
+    capture('sidebar-pc-expanded')
+    viewport(1200, True)
+    wait("innerWidth===1200 && chatSidebarUiState.mode==='permanent'", 'tablet wide sidebar')
+    capture('sidebar-tablet-wide')
+    viewport(1280, False)
+    wait("innerWidth===1280", 'desktop sidebar restored')
+    groups = {
+        'pinned': '#chat-sidebar-pinned-title button',
+        'projects': '#project-sidebar-title button',
+        'recent': '#chat-sidebar-recent-title button',
+    }
+    for name, toggle in groups.items():
+        mouse_click(toggle)
+        wait(f"""[...document.querySelectorAll('.chat-sidebar-group-title')].every(button=>{{
+            const content=document.getElementById(button.getAttribute('aria-controls'));
+            const collapsed=button.matches({json.dumps(toggle)});
+            if (collapsed) content.querySelector('button')?.focus();
+            return button.getAttribute('aria-expanded')===String(!collapsed) && content.hidden===collapsed &&
+                (getComputedStyle(button.lastElementChild).transform==='none')===collapsed &&
+                (!collapsed || !content.getClientRects().length && !content.contains(document.activeElement));
+        }})""", name + ' section toggles independently')
+        capture('sidebar-pc-' + name + '-collapsed')
+        if name == 'projects':
+            mouse_click('#project-create')
+            wait("document.querySelector('#project-dialog').open", 'add button opens dialog even while section is collapsed')
+            click('#project-dialog-cancel')
+            assert ev(f"document.querySelector({json.dumps(toggle)}).getAttribute('aria-expanded')==='false'")
+        mouse_click(toggle)
+        assert ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).getAttribute('aria-expanded')==='true'")
+    hover('.chat-sidebar-brand')
+    ev('document.activeElement.blur()')
+    wait("getComputedStyle(document.querySelector('#project-create')).opacity==='0'", 'project add is hidden at rest')
+    assert ev(f"""[...document.querySelector({json.dumps(folder(alpha, 'expand'))}).parentElement.querySelectorAll('.chat-sidebar-item-menu')]
+        .every(button=>getComputedStyle(button).pointerEvents==='none')""")
+    hover('#project-sidebar-title button')
+    wait("getComputedStyle(document.querySelector('#project-create')).opacity==='1'", 'section hover shows add')
+    capture('sidebar-pc-heading-hover')
+    hover('.chat-sidebar-brand')
+    ev("document.querySelector('#project-sidebar-title button').focus()")
+    key('Tab')
+    wait("document.activeElement.id==='project-create' && getComputedStyle(document.activeElement).opacity==='1'",
+         'Tab reaches and reveals add')
+    ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).focus()")
+    for action in ['open', 'menu']:
+        key('Tab')
+        wait(f"""document.activeElement.matches({json.dumps(folder(alpha, action))}) &&
+            getComputedStyle(document.activeElement).opacity==='1'""", 'Tab reaches project ' + action)
+    ev('document.activeElement.blur()')
+    assert ev(f"""(() => {{
+        const folder = document.querySelector({json.dumps(folder(alpha, 'expand'))});
+        const pinned = document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-sidebar-item-open');
+        const measure = button => {{
+            const [icon, title] = button.querySelector('.chat-sidebar-title-line').children;
+            const i = icon.getBoundingClientRect(), t = title.getBoundingClientRect();
+            return [i.left, t.left - i.right, getComputedStyle(title).fontSize, i.y + i.height / 2 - t.y - t.height / 2];
+        }};
+        const a = measure(folder), b = measure(pinned);
+        return a.slice(0, 3).every((value,index)=>value===b[index]) && Math.abs(a[3])<1 && Math.abs(b[3])<1 &&
+            new Set([...document.querySelectorAll('.chat-sidebar-group-title')].map(button=>{{
+                const style=getComputedStyle(button);
+                return [style.fontSize,style.fontWeight,style.color,style.padding,style.minHeight].join();
+            }})).size===1 &&
+            parseFloat(getComputedStyle(document.querySelector('#project-create span')).fontSize) <
+            parseFloat(getComputedStyle(document.querySelector('#chat-sidebar-history-menu-btn span')).fontSize) &&
+            parseFloat(getComputedStyle(folder.parentElement.querySelector('.project-folder-compose span')).fontSize) <
+            parseFloat(getComputedStyle(folder.parentElement.querySelector('.project-folder-options span')).fontSize);
+    }})()""")
+    mouse_click(groups['recent'])
+    click('#chat-sidebar-search-toggle')
+    change('#chat-sidebar-search-input', 'AB12')
+    wait(f"""document.querySelector('#chat-sidebar-list [data-chat-id="{old}"]').getClientRects().length""",
+         'search overrides a collapsed recent section')
+    assert ev("""(() => {
+        const title=document.querySelector('#chat-sidebar-list .chat-sidebar-item-title');
+        return title.scrollWidth>title.clientWidth && getComputedStyle(title).textOverflow==='ellipsis';
+    })()""")
+    click('#chat-sidebar-search-toggle')
+    wait("document.querySelector('#chat-sidebar-recent-content').hidden", 'clearing search restores collapsed section')
+    first_load = ev('performance.timeOrigin')
+    client.call('Page.reload')
+    wait(f"""performance.timeOrigin>{first_load} && {ready} && chatSidebarUiState.hasLoadedAll &&
+        document.querySelector('#chat-sidebar-recent-content').hidden &&
+        document.querySelector({json.dumps(folder(alpha, 'expand'))})?.getAttribute('aria-expanded')==='true'""",
+        'reload preserves section and folder states')
+    mouse_click(groups['recent'])
+    checks.append('independent sections, keyboard and hover controls, icon alignment, collapsed search and reload')
     hover(folder(alpha, 'expand'))
     wait(f"""[...document.querySelector({json.dumps(folder(alpha, 'expand'))}).parentElement.querySelectorAll('.chat-sidebar-item-menu')]
          .every(button=>Number(getComputedStyle(button).opacity)>.99)""", 'mouse hover reveals compose and management')
     capture('pc-folder-hover')
+    capture('sidebar-pc-folder-hover')
     click(folder(alpha, 'expand'))
     assert ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).getAttribute('aria-expanded')==='false'")
     wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-sidebar-item-snippet')?.textContent==='第一・編集済み'""",
@@ -219,6 +338,89 @@ def run(client, url, screenshots=None):
     click('#chat-sidebar-search-toggle')
     wait(f"""!document.querySelector('#chat-sidebar-list [data-chat-id="{member}"]') && !document.querySelector('#project-sidebar').hidden""",
          'clear search returns to recent')
+    short_viewport = ev("""document.querySelector('#chat-sidebar-recent').getBoundingClientRect().bottom - 12""")
+    short_height = round(short_viewport)
+    viewport(1280, False, short_height)
+    wait(f"innerHeight==={short_height} && elements.chatSidebarScroll.scrollHeight>elements.chatSidebarScroll.clientHeight",
+         'sidebar can scroll while a menu is open')
+    for anchor, menu in [
+        (f'#chat-sidebar-pinned-list [data-chat-id="{member}"] [data-sidebar-action="menu"]', '#history-item-menu'),
+        (f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="menu"]', '#history-item-menu'),
+        (folder(alpha, 'menu'), '#project-menu'),
+    ]:
+        mouse_click(anchor)
+        wait(f"document.querySelector({json.dumps(menu)}).getClientRects().length", 'sidebar menu opens')
+        assert menu_in_bounds(menu, beside=True), ev(f"""(() => {{
+            const menu=document.querySelector({json.dumps(menu)});
+            return {{viewport:[innerWidth,innerHeight], sidebar:elements.chatHistorySidebar.getBoundingClientRect().toJSON(),
+                anchor:document.querySelector({json.dumps(anchor)}).getBoundingClientRect().toJSON(),
+                menu:menu.getBoundingClientRect().toJSON(),
+                items:[...menu.querySelectorAll('[role=menuitem]:not([hidden])')].map(button=>{{
+                    const r=button.getBoundingClientRect();
+                    return [button.textContent,r.y,r.height,document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.outerHTML.slice(0,120)];
+                }})}};
+        }})()""")
+        hover(f'{menu} [role="menuitem"]:not([hidden])')
+        assert menu_in_bounds(menu, beside=True), 'pointer crossing the sidebar edge keeps the menu open'
+        assert ev("""(() => {
+            const scroller=elements.chatSidebarScroll, before=scroller.scrollTop;
+            scroller.scrollTop += before>8 ? -8 : 8;
+            return scroller.scrollTop!==before;
+        })()""")
+        wait(f"""(() => {{
+            const popup=document.querySelector({json.dumps(menu)}).getBoundingClientRect();
+            const button=document.querySelector({json.dumps(anchor)}).getBoundingClientRect();
+            return Math.abs(popup.top-Math.max(8,Math.min(button.top,innerHeight-8-popup.height)))<1;
+        }})()""", 'menu follows sidebar scroll within viewport bounds')
+        assert menu_in_bounds(menu, beside=True)
+        viewport(1220, False, short_height + 16)
+        wait(f"innerWidth===1220 && innerHeight==={short_height + 16}", 'desktop resized while menu remains open')
+        assert menu_in_bounds(menu, beside=True)
+        if menu == '#project-menu':
+            capture('sidebar-pc-menu')
+            mouse_click('#project-menu [data-project-action="edit"]')
+            wait("document.querySelector('#project-dialog').open", 'menu action outside sidebar opens editor')
+            click('#project-dialog-cancel')
+            assert ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).getAttribute('aria-expanded')==='false'")
+        else:
+            if 'pinned' in anchor:
+                capture('sidebar-pc-chat-menu')
+            key('Escape')
+            wait("elements.historyItemMenu.classList.contains('hidden')", 'Escape hides history menu')
+        assert ev(f"!document.querySelector({json.dumps(menu)}).getClientRects().length")
+        viewport(1280, False, short_height)
+    viewport(390, True)
+    wait("chatSidebarUiState.mode==='overlay' && !chatSidebarUiState.isOpen", 'phone sidebar ready')
+    open_sidebar(True)
+    click(folder(alpha, 'expand'), True)
+    capture('sidebar-mobile')
+    click(folder(alpha, 'menu'), True)
+    wait("!document.querySelector('#project-menu').hidden", 'phone project menu opens')
+    assert menu_in_bounds('#project-menu')
+    capture('sidebar-mobile-menu')
+    key('Escape')
+    assert ev("chatSidebarUiState.isOpen && document.querySelector('#project-menu').hidden")
+    click(folder(alpha, 'expand'), True)
+    viewport(1280, False)
+    open_sidebar()
+    ev('elements.chatSidebarScroll.scrollTop=0')
+    mouse_click(f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="open"]')
+    wait(f'state.currentChatId==={loose}', 'normal chat selected')
+    for scope, pinned in [('#chat-sidebar-list', 'true'), ('#chat-sidebar-pinned-list', 'false')]:
+        mouse_click(f'{scope} [data-chat-id="{loose}"] [data-sidebar-action="menu"]')
+        wait("!elements.historyItemMenu.classList.contains('hidden')", 'pin action menu opens')
+        mouse_click('#history-item-menu [data-history-menu-action="pin"]')
+        wait(f"dbUtils.getChat({loose}).then(chat=>chat.isPinned==={pinned})", 'pin action via menu outside sidebar')
+        wait(f"""document.querySelector('#chat-sidebar-{"pinned-list" if pinned == "true" else "list"} [data-chat-id="{loose}"]')""",
+             'pin and unpin rerender the expected section')
+    delete_chat = ev("dbUtils.saveChat(null,{title:'メニューから削除するチャット',messages:[]},{skipPush:true})")
+    wait(f"""document.querySelector('#chat-sidebar-list [data-chat-id="{delete_chat}"]')""", 'delete fixture rendered')
+    mouse_click(f'#chat-sidebar-list [data-chat-id="{delete_chat}"] [data-sidebar-action="menu"]')
+    wait("!elements.historyItemMenu.classList.contains('hidden')", 'delete action menu opens')
+    mouse_click('#history-item-menu [data-history-menu-action="delete"]')
+    accept()
+    wait(f'dbUtils.getChat({delete_chat}).then(chat=>!chat)', 'chat deleted through existing menu')
+    checks.append('sidebar menus escape clipping, follow scroll and resize, and preserve chat actions')
     click(folder(alpha, 'expand'))
     click(f'#project-sidebar-list [data-chat-id="{member}"] [data-sidebar-action="open"]')
     wait(f"""state.currentChatId==={member} && document.querySelector('#project-sidebar-list .chat-sidebar-item[aria-current="page"]')""",
@@ -545,7 +747,20 @@ def run(client, url, screenshots=None):
     open_sidebar(True)
     capture('mobile-sidebar')
     mobile_id = ev("document.querySelector('.project-folder').dataset.projectId")
+    click('#project-create', True)
+    wait("document.querySelector('#project-dialog').open", 'touch reveals and opens add')
+    click('#project-dialog-cancel', True)
     click(folder(mobile_id, 'expand'), True)
+    assert ev(f"document.querySelector({json.dumps(folder(mobile_id, 'expand'))}).getAttribute('aria-expanded')==='true'")
+    click(folder(mobile_id, 'menu'), True)
+    wait("!document.querySelector('#project-menu').hidden", 'touch opens project menu')
+    assert menu_in_bounds('#project-menu')
+    key('Escape')
+    assert ev("chatSidebarUiState.isOpen && document.querySelector('#project-menu').hidden")
+    click(folder(mobile_id, 'menu'), True)
+    click('#project-menu [data-project-action="edit"]', True)
+    wait("document.querySelector('#project-dialog').open", 'touch activates a menu item')
+    click('#project-dialog-cancel', True)
     assert ev(f"document.querySelector({json.dumps(folder(mobile_id, 'expand'))}).getAttribute('aria-expanded')==='true'")
     click(folder(mobile_id), True)
     wait('!elements.projectWorkspace.hidden && !chatSidebarUiState.isOpen', 'touch opens workspace and closes overlay')

@@ -74,19 +74,28 @@
                     <p id="chat-sidebar-live" class="visually-hidden" aria-live="polite"></p>
                 </div>
                 <div id="chat-sidebar-scroll" class="chat-sidebar-scroll">
-                    <section id="chat-sidebar-pinned" class="chat-sidebar-group" aria-label="ピン留め" hidden>
-                        <h2 class="chat-sidebar-group-title">ピン留め</h2>
+                    <section id="chat-sidebar-pinned" class="chat-sidebar-group" aria-labelledby="chat-sidebar-pinned-title" hidden>
+                        <div class="chat-sidebar-group-heading">
+                            <h3 id="chat-sidebar-pinned-title"><button class="chat-sidebar-group-title" type="button" aria-expanded="true" aria-controls="chat-sidebar-pinned-list">ピン留め<span class="material-symbols-outlined" aria-hidden="true">chevron_right</span></button></h3>
+                        </div>
                         <div id="chat-sidebar-pinned-list" role="list"></div>
                     </section>
-                    <section id="project-sidebar" aria-labelledby="project-sidebar-title" hidden>
-                        <div class="chat-sidebar-history-header">
-                            <h2 id="project-sidebar-title">プロジェクト</h2>
-                            <button id="project-create" class="chat-sidebar-icon-button" type="button" aria-label="プロジェクトを作成" title="プロジェクトを作成"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
+                    <section id="project-sidebar" class="chat-sidebar-group" aria-labelledby="project-sidebar-title" hidden>
+                        <div class="chat-sidebar-group-heading">
+                            <h3 id="project-sidebar-title"><button class="chat-sidebar-group-title" type="button" aria-expanded="true" aria-controls="project-sidebar-list">プロジェクト<span class="material-symbols-outlined" aria-hidden="true">chevron_right</span></button></h3>
+                            <button id="project-create" class="chat-sidebar-item-menu" type="button" aria-label="プロジェクトを作成" title="プロジェクトを作成"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
                         </div>
                         <div id="project-sidebar-list"></div>
                     </section>
-                    <p id="chat-sidebar-status" class="chat-sidebar-status" role="status"></p>
-                    <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-labelledby="chat-sidebar-history-title"></div>
+                    <section id="chat-sidebar-recent" class="chat-sidebar-group" aria-labelledby="chat-sidebar-recent-title">
+                        <div class="chat-sidebar-group-heading">
+                            <h3 id="chat-sidebar-recent-title"><button class="chat-sidebar-group-title" type="button" aria-expanded="true" aria-controls="chat-sidebar-recent-content">最近のチャット<span class="material-symbols-outlined" aria-hidden="true">chevron_right</span></button></h3>
+                        </div>
+                        <div id="chat-sidebar-recent-content">
+                            <p id="chat-sidebar-status" class="chat-sidebar-status" role="status"></p>
+                            <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-labelledby="chat-sidebar-recent-title"></div>
+                        </div>
+                    </section>
                 </div>
             </aside>
             <div id="chat-sidebar-backdrop" class="chat-sidebar-backdrop" hidden aria-hidden="true"></div>
