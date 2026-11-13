@@ -12818,7 +12818,10 @@ const appLogic = {
         if (chatId !== null && chatId !== undefined) {
             return `chat:${String(chatId)}`;
         }
-        const projectId = dbUtils.projectDrafts?.get(state.currentMessages);
+        return this.getNewInputDraftContextKey(dbUtils.projectDrafts?.get(state.currentMessages), profileId);
+    },
+
+    getNewInputDraftContextKey(projectId, profileId = state.activeProfileId) {
         const profile = String(profileId || state.activeProfile?.id || 'default');
         return projectId ? `new:project:${projectId}:${profile}` : `new:${profile}`;
     },
@@ -12988,6 +12991,7 @@ const appLogic = {
 
     prepareForServiceWorkerUpdate() {
         this.flushInputDraft();
+        if (window.ProjectUI?.prepareForUpdate() === false) return false;
         const text = elements.userInput?.value || '';
         // Quota/storage failures and over-limit drafts must also defer reload.
         return !text || this.loadInputDraftLocal(this.getInputDraftContextKey())?.text === text;
@@ -15088,7 +15092,7 @@ const appLogic = {
                         "クラウド上に、このデバイスとは異なるデータが見つかりました。\n\n" +
                         "同期を実行すると、このデバイスのチャット、画像、設定などがDropboxのデータで置き換わります。\n" +
                         (libraryConflict ? "未同期のファイル・原本の版・チャットとの紐づけもDropboxのデータで置き換わります。\n" : "") +
-                        (projectConflict ? "未同期のプロジェクト・チャットの所属・共有資料の関連付けもDropboxのデータで置き換わります。\n" : "") +
+                        (projectConflict ? "未同期のプロジェクト・チャットの所属・共有ファイルの関連付けもDropboxのデータで置き換わります。\n" : "") +
                         "現在のデータを残すには、キャンセルして設定画面から全データのバックアップを作成してください。\n\n" +
                         "クラウドのデータで同期を開始してもよろしいですか？"
                     );
@@ -16025,7 +16029,7 @@ const appLogic = {
         chatScreen.addEventListener('dragover', event => {
             if (!event.dataTransfer?.types.includes('Files')) return;
             event.preventDefault();
-            const canAttach = state.currentScreen === 'chat' && !state.isSending;
+            const canAttach = state.currentScreen === 'chat' && !state.isSending && elements.projectWorkspace.hidden;
             event.dataTransfer.dropEffect = canAttach ? 'copy' : 'none';
             chatScreen.classList.toggle('drag-over', canAttach);
         });
@@ -16038,7 +16042,7 @@ const appLogic = {
             const transfer = event.dataTransfer;
             if (!transfer?.files.length && !transfer?.types.includes('Files')) return;
             event.preventDefault();
-            if (state.currentScreen === 'chat') void this.handleFileSelection(transfer.files);
+            if (state.currentScreen === 'chat' && elements.projectWorkspace.hidden) void this.handleFileSelection(transfer.files);
         });
         window.addEventListener('drop', clearAttachmentDropHighlight, true);
         window.addEventListener('dragend', clearAttachmentDropHighlight, true);
@@ -16771,7 +16775,7 @@ const appLogic = {
 
 
     // 新規チャット開始の確認と実行
-    async confirmStartNewChat({ projectId, ownsProjectView = () => true } = {}) {
+    async confirmStartNewChat() {
         if (this.chatParameterOperation) return false;
         const navigation = this.chatNavigationV136 = {};
         const confirmed = await uiUtils.showCustomConfirm(this.hasComposerAttachments()
@@ -16782,7 +16786,7 @@ const appLogic = {
             return false;
         }
 
-        if (this.chatNavigationV136 !== navigation || !ownsProjectView()) return false;
+        if (this.chatNavigationV136 !== navigation) return false;
         // 編集中なら破棄
         if (state.editingMessageIndex !== null) {
             const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
@@ -16803,7 +16807,7 @@ const appLogic = {
             await uiUtils.showCustomAlert("現在のチャットの保存に失敗しました。");
         }
 
-        if (this.chatNavigationV136 !== navigation || !ownsProjectView()) return false;
+        if (this.chatNavigationV136 !== navigation) return false;
         const previousDraftContextKey = this.getInputDraftContextKey();
         if (state.currentChatId || dbUtils.projectDrafts?.has(state.currentMessages)) {
             this.flushInputDraft();
@@ -16812,7 +16816,7 @@ const appLogic = {
         }
 
         // 新規チャットを開始
-        this.startNewChat({ projectId });
+        this.startNewChat();
         await uiUtils.showScreen('chat');
         return true;
     },
@@ -16833,7 +16837,8 @@ const appLogic = {
 
     startNewChat(options = {}) {
         if (this.chatParameterOperation) return;
-        window.ProjectUI?.close();
+        const homeDraft = options.homeDraft;
+        if (!homeDraft) window.ProjectUI?.close();
         window.DocumentLibraryUI?.close();
         this.chatNavigationV136 = {};
         this.invalidateSystemPromptOpen();
@@ -16858,7 +16863,8 @@ const appLogic = {
         let draft = null;
         if (options.restoreDraft) {
             try { draft = JSON.parse(sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY)); } catch { /* use the profile defaults */ }
-        } else sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        } else if (!homeDraft) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        if (homeDraft) draft = homeDraft.parameters;
         this.applyChatParameterSnapshot({ systemPrompt: typeof draft?.systemPrompt === 'string' ? draft.systemPrompt : state.settings.systemPrompt || '',
             generationParameters: SettingsV136.normalizeChatNumbers(draft?.generationParameters, state.settings) });
         state.currentPersistentMemory = {};
@@ -16870,14 +16876,89 @@ const appLogic = {
         uiUtils.updateSystemPromptUI();
         uiUtils.renderChatMessages();
         uiUtils.updateChatTitle();
-        elements.userInput.value = '';
+        elements.userInput.value = homeDraft?.text ?? '';
+        if (homeDraft) this.restoreComposerAttachments(homeDraft.attachments);
         uiUtils.adjustTextareaHeight();
         uiUtils.setSendingState(false);
         uiUtils.syncChatSidebarCurrentSelection();
         this.updateCharacterProfileButtonVisibility();
         state.currentStyleProfiles = {};
-        state.executionSettingsReady = this.initializeNewChatExecution(options);
-        this.scheduleInputDraftRestore(0, true);
+        if (homeDraft) {
+            state.executionInitGeneration = (state.executionInitGeneration || 0) + 1;
+            state.executionInitializingV136 = false;
+            state.currentExecutionSettings = structuredClone(homeDraft.execution);
+            state.executionSettingsReady = Promise.resolve();
+            this.syncChatExecutionToLegacySettings();
+            uiUtils.applySettingsToUI();
+        } else {
+            state.executionSettingsReady = this.initializeNewChatExecution(options);
+            this.scheduleInputDraftRestore(0, true);
+        }
+    },
+
+    captureChatViewForProject() {
+        const keys = [
+            'currentChatId', 'currentMessages', 'currentExecutionSettings', 'executionInitializingV136',
+            'currentChatIsPinned', 'currentChatPinnedAt', 'currentChatPinStateUpdatedAt', 'currentSystemPrompt',
+            'currentChatGenerationParameters', 'currentChatParameterRevision', 'currentPersistentMemory',
+            'currentSummarizedContext', 'isMemoryEnabledForChat', 'currentScene', 'currentStyleProfiles', 'syncMessageCounter'
+        ];
+        return {
+            // Preserve the message-array identity used by in-flight sends and queued saves.
+            values: Object.fromEntries(keys.map(key => [key, state[key]])), text: elements.userInput.value,
+            recordGenerationId: dbUtils.chatSaveOwners?.get(state.currentMessages)?.recordGenerationId,
+            attachments: [...state.pendingAttachments], title: elements.chatTitle.title,
+            scrollTop: elements.chatWorkspace.querySelector('.main-content').scrollTop,
+            draftSettings: state.currentChatId == null ? [SettingsV136.DRAFT_KEY, SettingsV136.CHAT_PARAMETER_DRAFT_KEY]
+                .map(key => [key, sessionStorage.getItem(key)]) : []
+        };
+    },
+
+    restoreChatViewForProject(snapshot) {
+        this.cancelSendPreparationV136();
+        this.chatNavigationV136 = {};
+        this.invalidateSystemPromptOpen();
+        this.clearComposerAttachments();
+        state.executionInitGeneration = (state.executionInitGeneration || 0) + 1;
+        const previous = snapshot.values;
+        const saved = dbUtils.chatSaveOwners?.get(previous.currentMessages);
+        const job = state.sendJobsV136.get(previous.currentMessages);
+        Object.assign(state, previous);
+        state.currentChatId ??= job?.chatId ?? saved?.id ?? null;
+        if (job) {
+            state.currentExecutionSettings = job.execution;
+            state.currentPersistentMemory = job.persistentMemory;
+            state.currentSummarizedContext = job.summarizedContext;
+        }
+        state.executionSettingsReady = Promise.resolve();
+        this.projectSendJobV136();
+        this.applyChatParameterSnapshot({
+            systemPrompt: state.currentSystemPrompt, generationParameters: state.currentChatGenerationParameters
+        }, state.currentChatParameterRevision);
+        for (const [key, value] of state.currentChatId == null ? snapshot.draftSettings : []) {
+            if (value === null) sessionStorage.removeItem(key);
+            else sessionStorage.setItem(key, value);
+        }
+        this.syncChatExecutionToLegacySettings();
+        uiUtils.applySettingsToUI();
+        elements.userInput.value = snapshot.text;
+        this.restoreComposerAttachments(snapshot.attachments);
+        uiUtils.updateChatTitle(previous.currentChatId === state.currentChatId ? snapshot.title : null);
+        uiUtils.renderChatMessages();
+        this.restoreSendProgressV136(state.sendExecutionV136);
+        this.toggleMemoryIconVisibility();
+        this.updateCharacterProfileButtonVisibility();
+        uiUtils.adjustTextareaHeight();
+        elements.chatWorkspace.querySelector('.main-content').scrollTop = snapshot.scrollTop;
+        window.ProjectUI?.syncDraftLabel();
+        uiUtils.syncChatSidebarCurrentSelection();
+    },
+
+    restoreComposerAttachments(attachments) {
+        state.pendingAttachments = [...attachments];
+        elements.composerAttachmentList.replaceChildren();
+        attachments.forEach(attachment => uiUtils.appendComposerAttachment(attachment));
+        uiUtils.updateComposerAttachmentControls();
     },
 
 
@@ -16916,7 +16997,7 @@ const appLogic = {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
             if (!saved) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        const confirmedAttachmentDiscard = this.hasComposerAttachments();
+        const confirmedAttachmentDiscard = !options.keepProjectHistory && this.hasComposerAttachments();
         if (confirmedAttachmentDiscard) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
@@ -16950,7 +17031,7 @@ const appLogic = {
         if (shouldCloseSystemPrompt) {
             if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        const hasNewAttachments = !confirmedAttachmentDiscard && this.hasComposerAttachments();
+        const hasNewAttachments = !options.keepProjectHistory && !confirmedAttachmentDiscard && this.hasComposerAttachments();
         if (hasNewAttachments) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
@@ -16984,7 +17065,7 @@ const appLogic = {
             }
         });
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
-        window.ProjectUI?.close();
+        window.ProjectUI?.close({ fromHistory: options.keepProjectHistory });
         window.DocumentLibraryUI?.close();
         uiUtils.closeChatSearch({ restoreFocus: false });
 
@@ -18206,10 +18287,10 @@ const appLogic = {
         const finished = await Promise.all(jobs.map(job => this.waitForGenerationCompletionV136(job)));
         if (finished.includes(false)) throw new Error('応答生成の停止を確認できませんでした。');
     },
-    async handleSend() {
+    async handleSend(options) {
         const preparation = this.beginSendPreparationV136();
         if (!preparation) return;
-        try { await this._handleSendPreparedV136(preparation); }
+        try { await this._handleSendPreparedV136(preparation, options); }
         catch (error) { if (error.name !== 'AbortError') throw error; }
         finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
     },
@@ -18249,7 +18330,7 @@ const appLogic = {
             return { historyForApi, systemInstruction: base };
         }
     },
-    async _handleSendPreparedV136(preparation) {
+    async _handleSendPreparedV136(preparation, { onInitialSave, onInitialError } = {}) {
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
         if (state.isEditingSystemPrompt) {
@@ -18280,7 +18361,9 @@ const appLogic = {
             this.freezeExecutionSettings();
         } catch (error) {
             if (error.name === 'AbortError') return;
-            await uiUtils.showCustomAlert(error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。');
+            const message = error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。';
+            if (onInitialError) onInitialError(message);
+            else await uiUtils.showCustomAlert(message);
             return;
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
@@ -18318,6 +18401,7 @@ const appLogic = {
             if (this.showsSendExecutionV136(preparation) && this.ownsSendExecutionV136(preparation))
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
+            onInitialSave?.(preparation);
 
             const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
@@ -18368,15 +18452,16 @@ const appLogic = {
                 if (this.showsSendExecutionV136(preparation)) {
                     elements.userInput.value = preparation.input;
                     state.currentPersistentMemory = preparation.originalMemory;
-                    state.pendingAttachments = preparation.attachments;
-                    preparation.attachments.forEach(attachment => uiUtils.appendComposerAttachment(attachment));
-                    uiUtils.updateComposerAttachmentControls();
+                    this.restoreComposerAttachments(preparation.attachments);
                     uiUtils.adjustTextareaHeight();
                     uiUtils.renderChatMessages();
                     this.flushInputDraft();
                 }
-                if (!preparation.controller.signal.aborted)
-                    await uiUtils.showCustomAlert(`チャットと所属を保存できませんでした。\n${error.message || error}`);
+                if (!preparation.controller.signal.aborted) {
+                    const message = `チャットと所属を保存できませんでした。\n${error.message || error}`;
+                    if (onInitialError) onInitialError(message);
+                    else await uiUtils.showCustomAlert(message);
+                }
                 return;
             }
             const partial = this.getIncompleteStreamMessageV136(preparation);
@@ -20322,54 +20407,60 @@ const appLogic = {
     async prepareComposerAttachments(operation) {
         const current = () => this.attachmentOperation === operation && state.currentMessages === operation.messages &&
             (operation.chatId == null || state.currentChatId === operation.chatId);
+        try {
+            const status = await this.addComposerFiles(operation.files, state.pendingAttachments, {
+                current,
+                onAdd: attachment => {
+                    uiUtils.appendComposerAttachment(attachment);
+                    uiUtils.updateComposerAttachmentControls();
+                }
+            });
+            if (this.attachmentOperation === operation) this.cancelAttachmentOperation(status);
+        } finally {
+            if (this.attachmentOperation === operation) this.cancelAttachmentOperation();
+        }
+    },
+
+    async addComposerFiles(files, attachments, { current, onAdd }) {
         const skipped = new Map();
         const skip = reason => skipped.set(reason, (skipped.get(reason) || 0) + 1);
-        try {
-            // The iterator also reads files queued while a conversion is in flight.
-            for (const file of operation.files) {
-                if (!current()) return;
-                if (file.size > MAX_FILE_SIZE) {
-                    skip('10MiB超過');
-                    continue;
-                }
-                if (state.pendingAttachments.some(item => item.name === file.name && item.file?.size === file.size)) {
-                    skip('重複');
-                    continue;
-                }
-                const total = state.pendingAttachments.reduce((sum, item) => sum + (item.file?.size || 0), 0);
-                if (total + file.size > MAX_TOTAL_ATTACHMENT_SIZE) {
-                    skip('合計50MiB超過');
-                    continue;
-                }
-                let attachment;
-                try {
-                    const base64Data = await this.fileToBase64(file);
-                    if (!current()) return;
-                    const blob = await this.base64ToBlob(base64Data, file.type);
-                    const dot = file.name.lastIndexOf('.');
-                    const extension = dot > 0 ? file.name.slice(dot + 1).toLowerCase() : '';
-                    const mimeType = (Object.hasOwn(extensionToMimeTypeMap, extension) && extensionToMimeTypeMap[extension]) ||
-                        file.type || 'application/octet-stream';
-                    attachment = { file: blob, name: file.name, mimeType, base64Data };
-                } catch (error) {
-                    if (!current()) return;
-                    console.error(`添付ファイル "${file.name}" の変換に失敗しました:`, error);
-                    skip('変換失敗');
-                    continue;
-                }
-                if (!current()) return;
-                state.pendingAttachments.push(attachment);
-                uiUtils.appendComposerAttachment(attachment);
-                uiUtils.updateComposerAttachmentControls();
+        // The iterator also reads files queued while a conversion is in flight.
+        for (const file of files) {
+            if (!current()) return;
+            if (file.size > MAX_FILE_SIZE) {
+                skip('10MiB超過');
+                continue;
             }
-        } finally {
-            if (this.attachmentOperation === operation) {
-                const status = current() && skipped.size
-                    ? `追加できなかったファイル: ${Array.from(skipped, ([reason, count]) => `${reason} ${count}件`).join('・')}`
-                    : '';
-                this.cancelAttachmentOperation(status);
+            if (attachments.some(item => item.name === file.name && item.file?.size === file.size)) {
+                skip('重複');
+                continue;
             }
+            const total = attachments.reduce((sum, item) => sum + (item.file?.size || 0), 0);
+            if (total + file.size > MAX_TOTAL_ATTACHMENT_SIZE) {
+                skip('合計50MiB超過');
+                continue;
+            }
+            let attachment;
+            try {
+                const base64Data = await this.fileToBase64(file);
+                if (!current()) return;
+                const blob = await this.base64ToBlob(base64Data, file.type);
+                const dot = file.name.lastIndexOf('.');
+                const extension = dot > 0 ? file.name.slice(dot + 1).toLowerCase() : '';
+                const mimeType = (Object.hasOwn(extensionToMimeTypeMap, extension) && extensionToMimeTypeMap[extension]) ||
+                    file.type || 'application/octet-stream';
+                attachment = { file: blob, name: file.name, mimeType, base64Data };
+            } catch (error) {
+                if (!current()) return;
+                console.error(`添付ファイル "${file.name}" の変換に失敗しました:`, error);
+                skip('変換失敗');
+                continue;
+            }
+            if (!current()) return;
+            attachments.push(attachment);
+            onAdd(attachment);
         }
+        return skipped.size ? `追加できなかったファイル: ${Array.from(skipped, ([reason, count]) => `${reason} ${count}件`).join('・')}` : '';
     },
 
     hasComposerAttachments() {
@@ -23156,7 +23247,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
     scrollToBottom(force = false) {
         const mainContent = elements.chatScreen.querySelector('.main-content');
-        if (!mainContent || !elements.documentLibraryWorkspace.hidden) return;
+        if (!mainContent || !elements.documentLibraryWorkspace.hidden || !elements.projectWorkspace.hidden) return;
 
         if (state.suppressAutoScrollForCollapse && !force) {
             return;
@@ -23171,7 +23262,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         let startTime = null;
 
         const step = (currentTime) => {
-            if (!elements.documentLibraryWorkspace.hidden) return;
+            if (!elements.documentLibraryWorkspace.hidden || !elements.projectWorkspace.hidden) return;
             if (startTime === null) startTime = currentTime;
             const elapsed = currentTime - startTime;
             
@@ -23514,8 +23605,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。';
             const legacy = !Object.hasOwn(envelope.data, 'projectData');
             const projectWarning = legacy
-                ? 'このバックアップにはプロジェクト情報がありません。復元すると現在のプロジェクト、チャットの所属、共有資料の関連付けが失われます。'
-                : 'プロジェクト、チャットの所属、共有資料の関連付けもバックアップの内容で置き換えます。';
+                ? 'このバックアップにはプロジェクト情報がありません。復元すると現在のプロジェクト、チャットの所属、共有ファイルの関連付けが失われます。'
+                : 'プロジェクト、チャットの所属、共有ファイルの関連付けもバックアップの内容で置き換えます。';
             if (!await uiUtils.showCustomConfirm(`${message}\n\n${projectWarning}\n\n必要なデータは先にバックアップしてください。復元しますか？`)) return;
             await this.importDataFromString(json, { source: 'file', libraryBefore, projectsBefore, allowLegacyProjectClear: legacy });
             uiUtils.hideProgressDialog();
@@ -24156,7 +24247,7 @@ const chatHistoryActions = {
             return { ok: false, notFound: true, reason: 'invalid-chat-id' };
         }
 
-        const result = await appLogic.loadChat(normalizedId, { scrollAfterLoad: false });
+        const result = await appLogic.loadChat(normalizedId, { scrollAfterLoad: false, keepProjectHistory: options.keepProjectHistory });
         if (!result.ok) return result;
 
         if (options.transition !== false) {

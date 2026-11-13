@@ -1464,6 +1464,14 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 // sessionStorage is isolated per browsing context, including independent duplicated tabs.
                 sessionStorage.setItem(DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
             },
+            newChatExecutionDefaults() {
+                const success = state.lastSuccessfulExecution;
+                const fallback = [success?.modelRef, state.legacyInitialModelRefV136]
+                    .find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
+                return executionSettings(fallback && success?.modelRef?.apiConfigId === fallback.apiConfigId &&
+                    success.modelRef.modelName === fallback.modelName ? success : null,
+                    fallback, ref => this.getModelThinkingCapability(ref));
+            },
             async initializeNewChatExecution({ restoreDraft = false } = {}) {
                 const generation = (state.executionInitGeneration || 0) + 1;
                 state.executionInitGeneration = generation;
@@ -1478,11 +1486,11 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.legacyInitialModelRefV136 = legacy || null;
                 if (configs) state.apiConfigs = state.settings.apiConfigs = this.normalizeApiConfigs(configs.value);
                 state.removedApiModelRefsV136 = removed?.value || [];
-                const candidates = [success?.modelRef, legacy];
-                const fallback = candidates.find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
+                const defaults = this.newChatExecutionDefaults();
                 const draft = restoreDraft ? this.clearUnavailableExecutionSelectionV136(this.readExecutionDraft()) : null;
-                const source = draft || (success && modelRef(success.modelRef) && JSON.stringify(success.modelRef) === JSON.stringify(modelRef(fallback)) ? success : null);
-                state.currentExecutionSettings = executionSettings(source, fallback, ref => this.getModelThinkingCapability(ref));
+                state.currentExecutionSettings = draft
+                    ? executionSettings(draft, defaults.modelRef, ref => this.getModelThinkingCapability(ref))
+                    : defaults;
                 state.executionInitializingV136 = false;
                 this.syncChatExecutionToLegacySettings(); this.persistExecutionDraft();
                 uiUtils.applySettingsToUI(); notify('chat');
@@ -1582,21 +1590,10 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 };
                 assertContext();
                 if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
-                const current = state.currentExecutionSettings || {};
-                const ref = modelRef(updates.modelRef || current.modelRef);
-                this.assertModelRefForExecution(ref);
-                const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
-                if (capabilityRequest) await capabilityRequest;
-                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
-                const capability = this.getModelThinkingCapability(ref);
-                const changingModel = ref.apiConfigId !== current.modelRef?.apiConfigId || ref.modelName !== current.modelRef?.modelName;
-                const gemini = this.getApiConfigById(ref.apiConfigId)?.provider === 'gemini';
-                if (gemini && validateThinkingEffort && !canSelectEffort(updates.thinkingEffort, capability))
-                    throw new Error('このモデルでは利用できないThinkingレベルです。');
-                const useDefault = gemini && changingModel && (capability.modelDefault || capability.preserveEffort || capability.mode === 'unknown');
-                const desired = useDefault ? { ...current, thinkingEffort: null } : current;
-                const next = executionSettings({ ...desired, ...updates, updatedAt: Date.now() }, ref, () => capability);
+                const next = await this.prepareChatExecutionSelection(state.currentExecutionSettings, updates, validateThinkingEffort);
+                const ref = next.modelRef;
                 assertContext();
+                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
                 if (state.currentChatId) {
                     const id = state.currentChatId;
                     await transaction(['chats', 'settings'], tx => {
@@ -1618,6 +1615,21 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.currentExecutionSettings = next; this.syncChatExecutionToLegacySettings();
                 this.markAsDirtyAndSchedulePush('structural'); notify('chat');
                 uiUtils.applySettingsToUI(); return structuredClone(next);
+            },
+            async prepareChatExecutionSelection(current, updates, validateThinkingEffort = false) {
+                current ||= {};
+                const ref = modelRef(updates.modelRef || current.modelRef);
+                this.assertModelRefForExecution(ref);
+                const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
+                if (capabilityRequest) await capabilityRequest;
+                const capability = this.getModelThinkingCapability(ref);
+                const changingModel = ref.apiConfigId !== current.modelRef?.apiConfigId || ref.modelName !== current.modelRef?.modelName;
+                const gemini = this.getApiConfigById(ref.apiConfigId)?.provider === 'gemini';
+                if (gemini && validateThinkingEffort && !canSelectEffort(updates.thinkingEffort, capability))
+                    throw new Error('このモデルでは利用できないThinkingレベルです。');
+                const useDefault = gemini && changingModel && (capability.modelDefault || capability.preserveEffort || capability.mode === 'unknown');
+                const desired = useDefault ? { ...current, thinkingEffort: null } : current;
+                return executionSettings({ ...desired, ...updates, updatedAt: Date.now() }, ref, () => capability);
             },
             setCurrentChatModelRef(ref) { return this.setCurrentChatExecution({ modelRef: ref }); },
             setCurrentChatThinkingEffort(value) {

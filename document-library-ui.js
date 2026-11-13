@@ -181,12 +181,12 @@ window.DocumentLibraryUI = (() => {
 
     function renderPicker(view) {
         const selecting = view.selecting;
-        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : view.project ? 'チャット固有資料' : 'このチャットのファイル';
+        controls.pickerHeading.textContent = selecting ? 'ファイルライブラリから追加' : view.project ? 'チャット固有ファイル' : 'このチャットのファイル';
         controls.pickerProject.hidden = selecting || !view.project;
         controls.pickerProjectOpen.textContent = view.project ? `「${view.project.name}」で管理` : 'プロジェクトで管理';
         controls.pickerProjectList.replaceChildren(...(view.shared ?? []).map(entry =>
             node('li', `${entry.fileName} · 版 ${entry.version}`)));
-        if (view.project && !view.shared.length) controls.pickerProjectList.append(node('li', '共有資料はありません。'));
+        if (view.project && !view.shared.length) controls.pickerProjectList.append(node('li', '共有ファイルはありません。'));
         controls.pickerCount.hidden = selecting;
         controls.pickerCount.textContent = view.linked.length + '件';
         controls.pickerBack.hidden = !selecting;
@@ -1057,6 +1057,6 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName,
+    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName, fileSize,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

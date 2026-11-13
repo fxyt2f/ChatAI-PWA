@@ -1,9 +1,10 @@
 """Project workflows through the real app, Chrome and IndexedDB."""
+import base64
 import json
 import time
 
 
-def run(client, url):
+def run(client, url, screenshots=None):
     checks = []
 
     def ev(expression):
@@ -62,6 +63,17 @@ def run(client, url):
         })
         client.call('Emulation.setTouchEmulationEnabled', {'enabled': mobile})
 
+    def capture(name):
+        if screenshots:
+            screenshots.mkdir(parents=True, exist_ok=True)
+            ev("""(async()=>{
+                await document.fonts.ready;
+                await Promise.all(document.getAnimations().filter(animation=>animation.effect?.target?.closest('#project-workspace'))
+                    .map(animation=>animation.finished.catch(()=>{})));
+            })()""")
+            shot = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
+            (screenshots / f'{name}.png').write_bytes(base64.b64decode(shot['data']))
+
     def folder(project, action='open'):
         return f'#project-sidebar-list [data-project-id="{project}"] [data-project-focus="{action}"]'
 
@@ -118,8 +130,9 @@ def run(client, url):
     click('#project-dialog-cancel')
     alpha = create('第一プロジェクト', '最初の説明')
     assert ev("document.querySelector('#project-chats').textContent.includes('チャットはありません') && "
-              "document.querySelector('#project-documents').textContent.includes('共有資料はありません')")
+              "document.querySelector('#project-documents').textContent.includes('共有ファイルはありません')")
     assert ev("document.querySelector('#project-description').textContent==='最初の説明'")
+    capture('pc-empty')
     click('#project-options')
     click('#project-menu [data-project-action="edit"]')
     wait("document.querySelector('#project-dialog').open", 'project edit')
@@ -196,12 +209,16 @@ def run(client, url):
 
     doc = ev("""dbUtils.addLibraryDocument(new File(['共有ファイル本文'], '共有資料.md')).then(entry=>entry.id)""")
     ev(f'dbUtils.setChatDocuments({member},[{json.dumps(doc)}])')
+    click('#project-file-add')
     click('#project-add-document')
     wait("document.querySelector('#project-dialog-fields input[type=checkbox]')", 'library chooser loaded')
     click('#project-dialog-fields input[type=checkbox]')
     click('#project-dialog-submit')
     wait("document.querySelector('#project-documents').textContent.includes('共有資料.md')", 'existing original shared')
-    click('#project-documents .chat-sidebar-item-open')
+    ev('window.projectFixtureDark=state.settings.darkMode; state.settings.darkMode=true; uiUtilsV136.applyDarkMode()')
+    capture('pc-chats-and-files')
+    ev('state.settings.darkMode=window.projectFixtureDark; uiUtilsV136.applyDarkMode()')
+    click('#project-documents .project-file-open')
     wait("document.querySelector('#document-library-extracts').textContent.includes('共有ファイル本文')", 'shared document previews')
     ev('history.back()')
     wait("!elements.projectWorkspace.hidden && elements.documentLibraryWorkspace.hidden && "
@@ -215,16 +232,18 @@ def run(client, url):
     click('#document-library-picker-open')
     wait("!document.querySelector('#document-library-picker-project').hidden && "
          "document.querySelector('#document-library-picker-list').textContent.includes('共有資料.md')", 'shared and chat files are both shown')
-    assert ev("document.querySelector('#document-library-picker-heading').textContent==='チャット固有資料' && "
+    assert ev("document.querySelector('#document-library-picker-heading').textContent==='チャット固有ファイル' && "
               "document.querySelector('#document-library-picker-project-list').textContent.includes('共有資料.md')")
     click('#document-library-picker-project-open')
     wait("document.querySelector('#project-documents .project-document-row')", 'manage shared documents')
     click('#project-documents .project-document-row button:last-child')
-    wait("document.querySelector('#project-documents').textContent.includes('共有資料はありません')", 'share removed')
+    click('#project-menu [data-project-action=unlink-file]')
+    wait("document.querySelector('#project-documents').textContent.includes('共有ファイルはありません')", 'share removed')
     assert ev(f"dbUtils.getChatDocuments({member}).then(items=>items[0].id==={json.dumps(doc)})")
     ev("""(() => {
         const input = document.querySelector('#project-files');
         input.click=()=>{};
+        document.querySelector('#project-file-add').click();
         document.querySelector('#project-upload-document').click();
         const files = new DataTransfer();
         files.items.add(new File(['upload text'],'新規アップロード.txt'));
@@ -236,6 +255,7 @@ def run(client, url):
         const add = dbUtils.addProjectDocument;
         dbUtils.addProjectDocument = async () => { dbUtils.addProjectDocument = add; throw new Error('関連付け失敗'); };
         const input = document.querySelector('#project-files');
+        document.querySelector('#project-file-add').click();
         document.querySelector('#project-upload-document').click();
         const files = new DataTransfer();
         files.items.add(new File(['original survives'],'登録済み.txt'));
@@ -261,47 +281,49 @@ def run(client, url):
 
     open_project(alpha, '第一・編集済み')
     count = ev('dbUtils.getAllChats().then(chats=>chats.length)')
-    click('#project-new-chat')
-    accept()
-    wait("elements.projectWorkspace.hidden && state.currentChatId===null && "
-         "document.querySelector('#project-draft-label').textContent.includes('第一・編集済み')", 'project draft started')
     assert ev(f'dbUtils.getAllChats().then(chats=>chats.length==={count})')
-    change('#user-input', '第一の未送信下書き')
+    change('#project-input', '第一の未送信下書き')
     open_project(beta, '第二プロジェクト')
-    assert ev("document.querySelector('#user-input').value==='第一の未送信下書き'")
-    click('#project-new-chat')
-    accept()
-    wait("document.querySelector('#project-draft-label').textContent.includes('第二プロジェクト')", 'different project draft')
-    assert ev("!document.querySelector('#user-input').value")
+    assert ev("!document.querySelector('#project-input').value")
+    change('#project-input', '第二の下書き')
     open_project(alpha, '第一・編集済み')
-    click('#project-new-chat')
-    accept()
-    wait("document.querySelector('#user-input').value==='第一の未送信下書き'", 'original draft restored by project')
-    click('#new-chat-btn')
-    accept()
-    wait("document.querySelector('#project-draft-label').hidden && state.currentChatId===null", 'normal draft has no project')
-    assert ev("!document.querySelector('#user-input').value")
-    plain = ev("""(async()=>{
-        state.currentMessages.push({role:'user',content:'通常チャット'});
-        return dbUtils.saveChat();
-    })()""")
-    assert ev(f'dbUtils.getChatProject({plain}).then(project=>!project)')
-    open_project(alpha, '第一・編集済み')
-    click('#project-new-chat')
-    accept()
-    wait("document.querySelector('#user-input').value==='第一の未送信下書き'", 'project draft still present')
+    wait("document.querySelector('#project-input').value==='第一の未送信下書き'", 'project drafts are isolated')
+    click('#project-back')
+    wait('elements.projectWorkspace.hidden', 'back to original conversation')
+    change('#user-input', '会話の入力を保持')
+    original_id = ev('state.currentChatId')
     ev("""(async()=>{
         await dbUtils.saveSetting('apiConfigs',[{id:'project-ui-gem',provider:'gemini',apiKey:'mock',enabled:true,
-            modelCandidates:['gemini-3-flash-preview'],defaultModel:'gemini-3-flash-preview'}]);
+            modelCandidates:['gemini-3-flash-preview','gemini-2.5-flash'],defaultModel:'gemini-3-flash-preview'}]);
         await appLogic.loadGlobalSettings();
-        await appLogic.setCurrentChatModelRef({apiConfigId:'project-ui-gem',modelName:'gemini-3-flash-preview'});
+        await appLogic.setCurrentChatModelRef({apiConfigId:'project-ui-gem',modelName:'gemini-2.5-flash'});
         await appLogic.saveGlobalSettingsV136({enableChatTitleGeneration:false,enableStreamingOutput:false});
         Object.assign(state.settings,{enableMemory:false,enableAutoRetry:false,enableApiTimeout:false,
             enableProofreading:false,enableThoughtTranslation:false,geminiEnableFunctionCalling:false});
+        await appLogic.handleFileSelection([new File(['keep'], 'keep.txt', {type:'text/plain'})]);
+    })()""")
+    open_project(alpha, '第一・編集済み')
+    click('#project-model')
+    wait("document.querySelector('#execution-popover .model-picker-choice')", 'reuse model picker')
+    ev("[...document.querySelectorAll('.model-picker-choice')].find(button=>button.textContent==='gemini-3-flash-preview').click()")
+    wait("document.querySelector('#project-model').textContent==='gemini-3-flash-preview'", 'project model selected')
+    assert ev("state.currentExecutionSettings.modelRef.modelName==='gemini-2.5-flash'")
+    ev("""(() => {
+        const input=document.querySelector('#project-attachment-input');
+        input.click=()=>{};
+        document.querySelector('#project-attach').click();
+        const data=new DataTransfer();
+        data.items.add(new File([new Uint8Array([37,80,68,70])],'送信ファイル.pdf',{type:'application/pdf'}));
+        input.files=data.files;
+        input.dispatchEvent(new Event('change'));
+    })()""")
+    wait("document.querySelector('#project-attachments').textContent.includes('送信ファイル.pdf')", 'project attachment added')
+    ev("""(() => {
         const original = window.fetch;
         window.fetch = (url, options) => {
             if (!String(url).includes('generativelanguage.googleapis.com') || !options?.body) return original(url, options);
             window.firstWireMembership=dbUtils.getChatProject(state.currentChatId);
+            window.projectRequest={url:String(url),body:JSON.parse(options.body)};
             return new Promise(resolve=>window.finishProjectSend=()=>resolve(Response.json({
                 candidates:[{content:{role:'model',parts:[{text:'検証用回答'}]},finishReason:'STOP'}]
             })));
@@ -314,22 +336,89 @@ def run(client, url):
             }
             return add.apply(this,args);
         };
-        window.projectSend = appLogic.handleSend();
     })()""")
-    wait("document.querySelector('#alertDialog').open", 'initial save failure shown')
-    assert ev(f"""(async()=>state.currentChatId===null && !window.firstWireMembership &&
-        (await dbUtils.getAllChats()).length==={count+1} && document.querySelector('#user-input').value==='第一の未送信下書き')()""")
-    click('#alertDialog .dialog-ok-btn')
-    ev('window.projectSend')
-    ev('window.projectSend=appLogic.handleSend(); void 0')
-    wait('window.finishProjectSend && state.isSending', 'first network request begins')
+    click('#project-send')
+    wait("document.querySelector('#project-composer-status').textContent.includes('所属保存のテスト失敗') && "
+         "!document.querySelector('#project-send').disabled", 'initial save failure shown')
+    assert ev(f"""(async()=>state.currentChatId==={original_id} && !window.firstWireMembership &&
+        (await dbUtils.getAllChats()).length==={count} && document.querySelector('#project-input').value==='第一の未送信下書き' &&
+        state.pendingAttachments[0].name==='keep.txt' && document.querySelector('#project-attachments').textContent.includes('送信ファイル.pdf'))()""")
+    ev("""document.querySelector('#project-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}))""")
+    wait('window.finishProjectSend && state.isSending && elements.projectWorkspace.hidden', 'first network request begins from chat')
     project_chat = ev('state.currentChatId')
     assert ev(f'window.firstWireMembership.then(project=>project.id==={json.dumps(alpha)})')
-    open_project(beta, '第二プロジェクト')
-    ev('window.finishProjectSend(); window.projectSend')
-    wait('!state.isSending', 'send completes under management workspace')
+    assert ev("projectRequest.url.includes('gemini-3-flash-preview:generateContent') && "
+              "JSON.stringify(projectRequest.body).includes('application/pdf')")
+    ev('history.back()')
+    wait(f"!elements.projectWorkspace.hidden && state.currentChatId==={original_id}", 'back restores origin during generation')
+    assert ev("document.querySelector('#user-input').value==='会話の入力を保持' && "
+              "state.pendingAttachments[0].name==='keep.txt' && state.currentExecutionSettings.modelRef.modelName==='gemini-2.5-flash'")
+    assert ev(f"Boolean(appLogic.getSendJobV136({project_chat}))")
+    ev('window.finishProjectSend()')
+    wait(f"!appLogic.getSendJobV136({project_chat})", 'send completes under project home')
     assert ev(f"dbUtils.getChat({project_chat}).then(chat=>chat.messages.at(-1).content==='検証用回答')")
+    ev("appLogic.clearComposerAttachments()")
+    ev('history.forward()')
+    wait(f"elements.projectWorkspace.hidden && state.currentChatId==={project_chat}", 'forward restores generated chat')
+    open_project(beta, '第二プロジェクト')
+    assert ev("document.querySelector('#project-input').value==='第二の下書き'")
     checks.append('project and ordinary drafts, atomic initial send and failure, generation during navigation')
+
+    if screenshots:
+        ev(f"""(async()=>{{
+            const id={json.dumps(beta)};
+            for(let i=0;i<14;i++){{
+                const chat=await dbUtils.saveChat(null,{{title:(i+1)+' · 章の構成と登場人物の会話について確認する長いチャットの題名',messages:[]}},{{skipPush:true}});
+                await dbUtils.setChatProject(chat,id);
+                const file=await dbUtils.addLibraryDocument(new File(['world '+i],(i+1)+' · 長いタイトルの世界観設定と登場人物のメモ.md'));
+                await dbUtils.addProjectDocument(id,file.id);
+            }}
+        }})()""")
+        wait("document.querySelectorAll('#project-documents .project-document-row').length>=14 && "
+             "document.querySelectorAll('#project-chats [data-chat-id]').length>=14", 'many chats and files')
+    viewport(1600, False)
+    wait("innerWidth===1600 && getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'wide PC columns')
+    assert ev("""(() => {
+        const composer=document.querySelector('#project-composer').getBoundingClientRect();
+        const files=document.querySelector('#project-file-panel').getBoundingClientRect();
+        const list=document.querySelector('#project-documents');
+        return composer.width>files.width && files.width>=245 && composer.right<files.left &&
+            list.scrollWidth<=list.clientWidth+1;
+    })()""")
+    capture('pc-many-chats-and-files')
+    viewport(1200, True)
+    wait("innerWidth===1200 && chatSidebarUiState.mode==='permanent' && "
+         "getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'tablet wide uses available width')
+    capture('tablet-wide')
+    ev("appLogic.updateLocalUiSetting('enableWideMode',false)")
+    viewport(1024, True)
+    wait("chatSidebarUiState.mode==='overlay' && "
+         "getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'tablet regular uses two columns')
+    ev("appLogic.updateLocalUiSetting('enableWideMode',true)")
+    viewport(390, True)
+    wait("innerWidth===390 && getComputedStyle(document.querySelector('#project-tabs')).display==='flex'", 'phone uses tabs')
+    click('#project-tab-chats', True)
+    assert ev("getComputedStyle(document.querySelector('#project-file-panel')).display==='none'")
+    capture('mobile-chats')
+    click('#project-tab-files', True)
+    assert ev("""(() => {
+        const content=document.querySelector('#project-content');
+        return content.scrollWidth<=content.clientWidth+1 &&
+            document.querySelector('#project-input').value==='第二の下書き' &&
+            getComputedStyle(document.querySelector('#project-chat-panel')).display==='none';
+    })()""")
+    click('#project-file-add', True)
+    wait("!document.querySelector('#project-menu').hidden", 'file menu opened')
+    assert ev("""(() => {
+        const menu=document.querySelector('#project-menu').getBoundingClientRect();
+        return menu.width>0 && menu.left>=0 && menu.right<=innerWidth && menu.bottom<=innerHeight;
+    })()""")
+    click('#project-file-add', True)
+    wait("document.querySelector('#project-menu').hidden", 'file menu closed before capture')
+    capture('mobile-files')
+    viewport(1280, False)
+    wait("innerWidth===1280 && chatSidebarUiState.mode==='permanent'", 'PC restored for remaining actions')
+    checks.append('responsive columns, phone tabs, file menu bounds and draft preservation')
 
     click('#project-options')
     click('#project-menu [data-project-action="delete"]')

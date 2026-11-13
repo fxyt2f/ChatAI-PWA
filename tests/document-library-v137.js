@@ -440,7 +440,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
             ui.showCustomAlert = async message => { alerts.push(message); throw new Error('stop test reload'); };
             ui.showCustomConfirm = async message => { warning = message; return false; };
             await app.handleFullBackupImport(file(json, 'v1.37.0.json'));
-            assert(warning.includes('プロジェクト、チャットの所属、共有資料の関連付けが失われます'));
+            assert(warning.includes('プロジェクト、チャットの所属、共有ファイルの関連付けが失われます'));
             eq(await db.getChatProject(chatId), project);
             const revision = await db.getProjectSyncContext();
             ui.showCustomConfirm = async () => {

@@ -57,7 +57,7 @@
                 <div class="chat-sidebar-controls">
                     <nav class="chat-sidebar-navigation" aria-label="ワークスペース">
                         <button id="new-chat-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">edit_square</span>新規チャット</button>
-                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ライブラリ</button>
+                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ファイルライブラリ</button>
                     </nav>
                     <div class="chat-sidebar-history-header">
                         <h2>履歴</h2>
@@ -277,38 +277,55 @@
 
             </div>
             <section id="project-workspace" class="chat-workspace" aria-labelledby="project-title" hidden>
-                <header class="app-header project-header">
-                    <button id="project-back" class="header-button" type="button" aria-label="チャットへ戻る" title="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back_ios</span></button>
-                    <span data-document-icon="folder" aria-hidden="true"></span>
-                    <h1 id="project-title" tabindex="-1">プロジェクト</h1>
-                    <button id="project-options" class="header-button" type="button" aria-label="プロジェクトの操作" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">more_vert</span></button>
-                </header>
                 <div id="project-content">
-                    <p id="project-description" hidden></p>
-                    <p id="project-notice" class="document-library-notice" role="status"></p>
-                    <section aria-labelledby="project-chats-title">
-                        <h2 id="project-chats-title">チャット</h2>
-                        <div class="document-library-toolbar">
-                            <button id="project-new-chat" class="document-library-action" type="button">新規チャット</button>
-                            <button id="project-add-chat" class="document-library-action" type="button">既存チャットを追加</button>
+                    <div class="project-home">
+                        <header class="project-header">
+                            <button id="project-back" class="chat-sidebar-icon-button" type="button" aria-label="前の画面へ戻る" title="前の画面へ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back</span></button>
+                            <span data-document-icon="folder" aria-hidden="true"></span>
+                            <h1 id="project-title" tabindex="-1">プロジェクト</h1>
+                            <button id="project-options" class="chat-sidebar-icon-button" type="button" aria-label="プロジェクトの操作" title="プロジェクトの操作" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">more_horiz</span></button>
+                        </header>
+                        <p id="project-description" hidden></p>
+                        <p id="project-notice" class="document-library-notice" role="status"></p>
+                        <div class="project-home-grid" data-tab="chats">
+                            <form id="project-composer" class="project-composer">
+                                <textarea id="project-input" placeholder="このプロジェクトでメッセージを送信…" rows="2" aria-label="プロジェクトへのメッセージ"></textarea>
+                                <ul id="project-attachments" class="project-attachments" aria-label="送信待ちの添付ファイル" hidden></ul>
+                                <div class="project-composer-controls">
+                                    <button id="project-attach" class="chat-sidebar-icon-button" type="button" aria-label="ファイルを添付" title="ファイルを添付"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
+                                    <input id="project-attachment-input" type="file" multiple hidden>
+                                    <button id="project-model" class="project-model-button" type="button" aria-haspopup="dialog" aria-expanded="false">モデルを選択</button>
+                                    <button id="project-send" type="submit" title="送信" aria-label="送信" disabled><span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span></button>
+                                </div>
+                                <p id="project-composer-status" role="status" hidden></p>
+                            </form>
+                            <div id="project-tabs" class="project-tabs" role="tablist" aria-label="プロジェクトの内容">
+                                <button type="button" id="project-tab-chats" role="tab" aria-controls="project-chat-panel" aria-selected="true">チャット</button>
+                                <button type="button" id="project-tab-files" role="tab" aria-controls="project-file-panel" aria-selected="false" tabindex="-1">ファイル</button>
+                            </div>
+                            <section id="project-chat-panel" class="project-chat-panel" aria-labelledby="project-chats-title">
+                                <div class="project-section-header">
+                                    <h2 id="project-chats-title">チャット</h2>
+                                    <button id="project-add-chat" class="project-text-action" type="button">既存チャットを追加</button>
+                                </div>
+                                <div id="project-chats" role="list" aria-labelledby="project-chats-title"></div>
+                            </section>
+                            <section id="project-file-panel" class="project-file-panel" aria-labelledby="project-documents-title">
+                                <div class="project-section-header">
+                                    <h2 id="project-documents-title">共有ファイル</h2>
+                                    <button id="project-file-add" class="chat-sidebar-icon-button" type="button" title="共有ファイルを追加" aria-label="共有ファイルを追加" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
+                                    <input id="project-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
+                                </div>
+                                <ul id="project-documents" aria-labelledby="project-documents-title"></ul>
+                            </section>
                         </div>
-                        <div id="project-chats" role="list" aria-labelledby="project-chats-title"></div>
-                    </section>
-                    <section aria-labelledby="project-documents-title">
-                        <h2 id="project-documents-title">共有資料</h2>
-                        <div class="document-library-toolbar">
-                            <button id="project-add-document" class="document-library-action" type="button">ライブラリから追加</button>
-                            <button id="project-upload-document" class="document-library-action" type="button">ファイルをアップロード</button>
-                            <input id="project-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
-                        </div>
-                        <ul id="project-documents" aria-labelledby="project-documents-title"></ul>
-                    </section>
+                    </div>
                 </div>
             </section>
             <section id="document-library-workspace" class="chat-workspace" aria-labelledby="document-library-title" hidden>
                 <header class="app-header">
                     <button id="document-library-back" class="header-button" type="button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back_ios</span></button>
-                    <h1 id="document-library-title" tabindex="-1"><span class="document-library-heading">ライブラリ</span><span id="document-library-mobile-title"></span></h1>
+                    <h1 id="document-library-title" tabindex="-1"><span class="document-library-heading">ファイルライブラリ</span><span id="document-library-mobile-title"></span></h1>
                     <button id="document-library-add" type="button"><span data-document-icon="add" aria-hidden="true"></span>ファイルを追加</button>
                     <button id="document-library-mobile-search" class="header-button" type="button" title="ファイル内を検索" aria-label="ファイル内を検索" aria-expanded="false" aria-controls="document-library-detail-search"><span data-document-icon="search" aria-hidden="true"></span></button>
                     <input id="document-library-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
@@ -1411,7 +1428,7 @@
             </header>
             <p id="document-library-picker-notice" class="document-library-notice" role="status"></p>
             <section id="document-library-picker-project" aria-labelledby="document-library-picker-project-title" hidden>
-                <h3 id="document-library-picker-project-title">プロジェクト共有資料</h3>
+                <h3 id="document-library-picker-project-title">プロジェクト共有ファイル</h3>
                 <ul id="document-library-picker-project-list"></ul>
                 <button id="document-library-picker-project-open" type="button" class="document-library-action">プロジェクトで管理</button>
             </section>
@@ -1424,7 +1441,7 @@
                 <ul id="document-library-picker-list" class="document-library-list"></ul>
             </div>
             <div id="document-library-picker-actions" class="document-library-toolbar document-library-picker-actions">
-                <button id="document-library-picker-select" class="document-library-action" type="button"><span data-document-icon="folder" aria-hidden="true"></span><span>ライブラリから<wbr>追加</span></button>
+                <button id="document-library-picker-select" class="document-library-action" type="button"><span data-document-icon="folder" aria-hidden="true"></span><span>ファイル<wbr>ライブラリから<wbr>追加</span></button>
                 <button id="document-library-picker-upload" class="document-library-action" type="button"><span data-document-icon="add" aria-hidden="true"></span><span>ファイルを<wbr>アップロード</span></button>
             </div>
             <div id="document-library-picker-menu" class="history-item-menu document-library-menu" role="menu" hidden></div>
@@ -1512,6 +1529,9 @@
     <div id="project-menu" class="history-item-menu" role="menu" aria-label="プロジェクトの操作" hidden>
         <button type="button" role="menuitem" data-project-action="edit"><span class="material-symbols-outlined" aria-hidden="true">edit</span>名前・説明を編集</button>
         <button type="button" role="menuitem" class="history-item-menu-delete" data-project-action="delete"><span class="material-symbols-outlined" aria-hidden="true">delete</span>プロジェクトを削除</button>
+        <button type="button" role="menuitem" id="project-add-document" data-project-action="add-file" hidden><span class="material-symbols-outlined" aria-hidden="true">folder_open</span>ファイルライブラリから追加</button>
+        <button type="button" role="menuitem" id="project-upload-document" data-project-action="upload" hidden><span class="material-symbols-outlined" aria-hidden="true">upload</span>新しいファイルをアップロード</button>
+        <button type="button" role="menuitem" data-project-action="unlink-file" hidden><span class="material-symbols-outlined" aria-hidden="true">link_off</span>共有を解除</button>
     </div>
     <div id="history-item-menu" class="history-item-menu hidden" role="menu" aria-label="チャット操作">
         <button id="import-history-btn" type="button" role="menuitem" data-history-menu-action="import" class="hidden" hidden><span class="material-symbols-outlined" aria-hidden="true">download</span>チャットをインポート</button>

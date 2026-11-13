@@ -10,7 +10,11 @@ window.ProjectUI = (() => {
         span.textContent = name;
         return span;
     };
-    let installed = false, view, dialog, menu, sidebar, expanded, currentChat;
+    let installed = false, view, dialog, menu, sidebar, expanded, currentChat, handoff;
+    const drafts = new Map();
+    const returns = new Map();
+    const chatEntries = new Map();
+    const tabs = new Map();
     let dataGeneration = 0, draftLabelGeneration = 0;
     const expansionKey = 'chatai-expanded-projects';
 
@@ -143,17 +147,19 @@ window.ProjectUI = (() => {
         if (restoreFocus && anchor.isConnected) anchor.focus({ preventScroll: true });
     }
 
-    function openMenu(anchor, id) {
+    function openMenu(anchor, id, actions = ['edit', 'delete'], documentId) {
         if (menu?.anchor === anchor) return closeMenu(true);
         closeMenu();
         ui().closeHistoryItemMenu();
         const element = byId('menu');
-        menu = { anchor, id };
+        menu = { anchor, id, documentId };
+        for (const item of element.children) item.hidden = !actions.includes(item.dataset.projectAction);
+        element.setAttribute('aria-label', actions.includes('edit') ? 'プロジェクトの操作' : '共有ファイルの操作');
         anchor.setAttribute('aria-expanded', 'true');
         anchor.closest('.chat-sidebar-item')?.classList.add('menu-active');
         element.hidden = false;
         ui().positionRowMenu(element, anchor);
-        element.firstElementChild.focus({ preventScroll: true });
+        element.querySelector(':scope > :not([hidden])')?.focus({ preventScroll: true });
     }
 
     function markOpenFolder() {
@@ -172,6 +178,9 @@ window.ProjectUI = (() => {
         }
         const previous = view;
         const returnState = history.state;
+        if (!previous && !fromHistory && returnState?.projectChatToken && returnState.projectChatId === window.state.currentChatId) {
+            chatEntries.set(returnState.projectChatToken, app().captureChatViewForProject());
+        }
         const chat = document.getElementById('chat-workspace');
         const scroller = chat.querySelector('.main-content');
         const fromOverlay = !document.getElementById('chat-sidebar-backdrop').hidden;
@@ -191,6 +200,8 @@ window.ProjectUI = (() => {
         }
         byId('workspace').hidden = false;
         byId('content').scrollTop = 0;
+        activateTab(tabs.get(id) || 'chats');
+        attachDraft(view);
         byId('title').textContent = 'プロジェクト';
         byId('description').hidden = true;
         byId('notice').textContent = '読み込み中…';
@@ -226,22 +237,284 @@ window.ProjectUI = (() => {
         }
     }
 
-    function handleHistory(entry) {
+    async function handleHistory(entry) {
+        if (entry?.projectReturn && !handoff) {
+            const origin = returns.get(entry.projectReturn);
+            if (origin && window.state.currentMessages !== origin.values.currentMessages) {
+                const chatId = window.state.currentChatId;
+                if (origin.chatIdAfterOpen === chatId && origin.chatTokenAfterOpen) {
+                    chatEntries.set(origin.chatTokenAfterOpen, app().captureChatViewForProject());
+                }
+                await restoreChatSnapshot(origin);
+                if (history.state?.projectReturn !== entry.projectReturn) return;
+            }
+        }
         if (entry?.projectId && !entry.documentLibrary) {
             if (dialog) byId('dialog').close();
             open(entry.projectId, { fromHistory: true });
+        } else {
+            close({ fromHistory: true, restoreFocus: !entry?.documentLibrary && !entry?.projectChatId });
+            if (entry?.projectChatId && !entry.documentLibrary && window.state.currentChatId !== entry.projectChatId) {
+                const snapshot = chatEntries.get(entry.projectChatToken);
+                if (snapshot && await restoreChatSnapshot(snapshot)) return;
+                if (history.state?.projectChatToken !== entry.projectChatToken) return;
+                await window.chatHistoryActions.open(entry.projectChatId, { keepProjectHistory: true });
+            }
         }
-        else close({ fromHistory: true, restoreFocus: !entry?.documentLibrary });
+    }
+
+    async function restoreChatSnapshot(snapshot) {
+        const entry = history.state;
+        const navigation = app().chatNavigationV136;
+        const generation = dataGeneration;
+        const id = snapshot.values.currentChatId;
+        if (id != null) {
+            const current = await db().getChat(id);
+            const owner = db().chatSaveOwners?.get(snapshot.values.currentMessages);
+            if (!current || (current.recordGenerationId ?? null) !== (owner?.recordGenerationId ?? snapshot.recordGenerationId ?? null)) return false;
+        }
+        const current = history.state;
+        if (generation !== dataGeneration || navigation !== app().chatNavigationV136 ||
+            current?.projectReturn !== entry?.projectReturn || current?.projectChatToken !== entry?.projectChatToken ||
+            current?.screen !== entry?.screen) return false;
+        app().restoreChatViewForProject(snapshot);
+        return true;
     }
 
     function setViewReady(ready) {
-        for (const id of ['options', 'new-chat', 'add-chat', 'add-document', 'upload-document']) byId(id).disabled = !ready;
+        for (const id of ['options', 'add-chat', 'file-add']) byId(id).disabled = !ready;
+        if (view) view.ready = ready;
+        renderComposer();
     }
 
     function setNotice(owner, message) {
         if (view !== owner) return;
         owner.notice = message;
         byId('notice').textContent = message;
+    }
+
+    function activateTab(tab) {
+        if (!view) return;
+        tabs.set(view.id, tab);
+        byId('tabs').parentElement.dataset.tab = tab;
+        for (const name of ['chats', 'files']) {
+            const selected = tab === name;
+            byId('tab-' + name).setAttribute('aria-selected', String(selected));
+            byId('tab-' + name).tabIndex = selected ? 0 : -1;
+        }
+    }
+
+    function attachDraft(owner) {
+        const key = app().getNewInputDraftContextKey(owner.id);
+        let draft = drafts.get(key);
+        if (!draft) {
+            const local = app().loadInputDraftLocal(key);
+            draft = { key, text: local?.text ?? '', attachments: [], changed: false, execution: null };
+            drafts.set(key, draft);
+            void app().loadInputDraftDropbox(key).then(remote => {
+                if (drafts.get(key) !== draft || draft.changed || draft.busy) return;
+                const latest = app().chooseLatestInputDraftRecord(local, remote);
+                draft.text = latest?.deleted ? '' : latest?.text ?? '';
+                if (view?.draft === draft) {
+                    byId('input').value = draft.text;
+                    renderComposer();
+                }
+            });
+        }
+        owner.draft = draft;
+        byId('input').value = draft.text;
+        renderComposer();
+    }
+
+    function renderComposer() {
+        if (!view?.draft) return;
+        const draft = view.draft;
+        const input = byId('input');
+        input.disabled = !view.ready || !!draft.busy;
+        const model = byId('model');
+        model.disabled = !view.ready || !!draft.busy || !!draft.selectingModel;
+        const execution = draftExecution(draft);
+        const ref = execution.modelRef;
+        model.textContent = ref?.modelName ?? 'モデルを選択';
+        model.title = model.textContent;
+        model.setAttribute('aria-label', `モデルを選択（${model.textContent}）`);
+        byId('send').disabled = !view.ready || !!draft.busy || !!draft.processing || !!draft.selectingModel ||
+            !(draft.text.trim() || draft.attachments.length);
+        byId('attach').disabled = !view.ready || !!draft.busy || !!draft.processing;
+        const list = byId('attachments');
+        list.hidden = !draft.attachments.length;
+        list.replaceChildren(...draft.attachments.map(attachment => {
+            const label = node('span', attachment.name);
+            label.title = attachment.name;
+            const remove = button('×', () => {
+                draft.attachments = draft.attachments.filter(item => item !== attachment);
+                renderComposer();
+                byId('attach').focus({ preventScroll: true });
+            }, 'chat-sidebar-icon-button');
+            remove.disabled = !!draft.busy || !!draft.processing;
+            remove.setAttribute('aria-label', `${attachment.name} を削除`);
+            const item = node('li');
+            item.append(icon('attach_file'), label, remove);
+            return item;
+        }));
+        const status = byId('composer-status');
+        status.textContent = draft.busy ? 'チャットを保存中…' : draft.processing ? '添付ファイルを準備中…' : draft.notice || '';
+        status.hidden = !status.textContent;
+        status.dataset.error = String(Boolean(draft.notice && !draft.busy && !draft.processing));
+    }
+
+    function draftExecution(draft) {
+        if (draft.execution) return draft.execution;
+        return app().getCurrentChatModelRef() ? window.state.currentExecutionSettings : app().newChatExecutionDefaults();
+    }
+
+    function persistDraft(draft) {
+        if (!draft.changed) return;
+        app().persistInputDraft(draft.key, draft.text);
+        void app().flushInputDraftDropboxSave();
+    }
+
+    function prepareForUpdate() {
+        for (const draft of drafts.values()) {
+            if (draft.busy || draft.processing || draft.attachments.length) return false;
+            if (draft.changed && draft.text && app().loadInputDraftLocal(draft.key)?.text !== draft.text) return false;
+        }
+        return true;
+    }
+
+    async function addDraftAttachments(draft, files) {
+        if (!files.length || draft.processing || draft.busy) return;
+        draft.processing = true;
+        draft.notice = '';
+        if (view?.draft === draft) renderComposer();
+        try {
+            draft.notice = await app().addComposerFiles(files, draft.attachments, {
+                current: () => drafts.get(draft.key) === draft,
+                onAdd: () => { if (view?.draft === draft) renderComposer(); }
+            });
+        } finally {
+            draft.processing = false;
+            if (view?.draft === draft) renderComposer();
+        }
+    }
+
+    function chooseDraftModel(owner) {
+        const draft = owner.draft;
+        window.settingsUiV136?.openModels(byId('model'), '', {
+            getRef: () => draftExecution(draft).modelRef,
+            select: async ref => {
+                draft.selectingModel = true;
+                draft.notice = '';
+                renderComposer();
+                try {
+                    const execution = await app().prepareChatExecutionSelection(draftExecution(draft), { modelRef: ref });
+                    if (view === owner && owner.draft === draft) draft.execution = execution;
+                } catch (error) {
+                    draft.notice = error.message || String(error);
+                    throw error;
+                } finally {
+                    draft.selectingModel = false;
+                    if (view?.draft === draft) renderComposer();
+                }
+            }
+        });
+    }
+
+    function rememberOrigin(owner, snapshot) {
+        const entry = history.state;
+        if (entry?.projectId !== owner.id) return null;
+        const token = entry.projectReturn ?? crypto.randomUUID();
+        returns.set(token, snapshot);
+        history.replaceState({ ...entry, projectReturn: token }, '', '#chat');
+        return token;
+    }
+
+    function pushChatEntry(chatId, returnToken) {
+        const token = crypto.randomUUID();
+        history.pushState({ screen: 'chat', projectChatId: chatId, projectChatToken: token }, '', '#chat');
+        const origin = returns.get(returnToken);
+        if (origin) {
+            origin.chatIdAfterOpen = chatId;
+            origin.chatTokenAfterOpen = token;
+        }
+    }
+
+    async function openChat(owner, chatId) {
+        if (handoff || view !== owner) return;
+        if (app().attachmentOperation?.finished) await app().attachmentOperation.finished;
+        if (view !== owner || handoff) return;
+        const snapshot = app().captureChatViewForProject();
+        const token = rememberOrigin(owner, snapshot);
+        const result = await window.chatHistoryActions.open(chatId, { keepProjectHistory: true });
+        if (result?.ok && token && history.state?.projectReturn === token) {
+            pushChatEntry(result.chatId, token);
+        }
+    }
+
+    async function sendDraft() {
+        const owner = view;
+        if (!owner || handoff || byId('send').disabled) return;
+        const { draft } = owner;
+        draft.busy = true;
+        draft.notice = '';
+        renderComposer();
+        const attempt = handoff = { owner };
+        let snapshot;
+        try {
+            const messages = window.state.currentMessages;
+            await window.state.executionSettingsReady;
+            if (app().attachmentOperation?.finished) await app().attachmentOperation.finished;
+            if (view !== owner || owner.draft !== draft || messages !== window.state.currentMessages) return;
+            if (app().chatParameterOperation || window.state.isEditingSystemPrompt || window.state.isEditingChatTitle ||
+                window.state.editingMessageIndex !== null || window.state.chatDataChangesV136.has(undefined)) {
+                draft.notice = '現在の会話の編集またはデータ更新が終わってから送信してください。';
+                return;
+            }
+            const execution = draftExecution(draft);
+            if (!execution.modelRef) {
+                draft.notice = '送信するモデルを選択してください。';
+                return;
+            }
+            snapshot = app().captureChatViewForProject();
+            const token = rememberOrigin(owner, snapshot);
+            app().startNewChat({ projectId: owner.id, homeDraft: {
+                text: draft.text, attachments: draft.attachments, execution,
+                parameters: app().profileChatParameters(window.state.settings)
+            } });
+            attempt.messages = window.state.currentMessages;
+            await app().handleSend({
+                onInitialError: message => { draft.notice = message; },
+                onInitialSave: session => {
+                    if (handoff !== attempt) return;
+                    attempt.committed = true;
+                    draft.text = '';
+                    draft.changed = false;
+                    draft.attachments = [];
+                    draft.execution = null;
+                    draft.busy = false;
+                    handoff = null;
+                    if (view === owner && window.state.currentMessages === session.messages) {
+                        close({ fromHistory: true });
+                        if (token && history.state?.projectReturn === token)
+                            pushChatEntry(session.chatId, token);
+                    } else if (window.state.currentMessages === session.messages) {
+                        app().restoreChatViewForProject(snapshot);
+                        return;
+                    }
+                    app().scrollToBottom();
+                }
+            });
+        } catch (error) {
+            if (attempt.committed) await ui().showCustomAlert(error.message || String(error));
+            else draft.notice = error.message || String(error);
+        } finally {
+            if (handoff === attempt) {
+                handoff = null;
+                if (snapshot && attempt.messages === window.state.currentMessages) app().restoreChatViewForProject(snapshot);
+                draft.busy = false;
+                if (view?.draft === draft) renderComposer();
+            }
+        }
     }
 
     async function refresh(owner) {
@@ -270,14 +543,23 @@ window.ProjectUI = (() => {
     function drawChats(owner, records) {
         const list = byId('chats');
         const models = chatModels(records);
-        const signature = JSON.stringify(models.map(({ id, title, isPinned, updatedAt }) => [id, title, isPinned, updatedAt]));
+        const byChat = new Map(records.map(record => [record.id, record]));
+        const signature = JSON.stringify(models.map(({ id, title, isPinned, updatedAt }) => [id, title, isPinned, updatedAt, byChat.get(id)?.recordGenerationId]));
         if (owner.chatSignature === signature) return;
         owner.chatSignature = signature;
         if (!models.length) return emptyList(list, 'チャットはありません。');
-        const byChat = new Map(records.map(record => [record.id, record]));
         list.replaceChildren(...models.map(model => {
             const item = ui().createChatSidebarItem(model);
-            item.querySelector('[data-sidebar-action="open"]').addEventListener('click', () => window.chatHistoryActions.open(model.id));
+            const openButton = item.querySelector('[data-sidebar-action="open"]');
+            openButton.addEventListener('click', () => openChat(owner, model.id));
+            if (!model.isPinned) openButton.querySelector('.chat-sidebar-title-line').prepend(icon('chat_bubble_outline'));
+            const stamp = model.updatedAt && new Date(model.updatedAt);
+            if (stamp && Number.isFinite(stamp.getTime())) {
+                const time = node('time', new Intl.DateTimeFormat('ja', { year: 'numeric', month: 'short', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit' }).format(stamp), 'project-chat-date');
+                time.dateTime = stamp.toISOString();
+                openButton.append(time);
+            }
             const options = item.querySelector('[data-sidebar-action="menu"]');
             options.addEventListener('click', () => {
                 ui().closeHistoryItemMenu();
@@ -293,24 +575,23 @@ window.ProjectUI = (() => {
         const signature = JSON.stringify(entries.map(({ id, fileName, versionId }) => [id, fileName, versionId]));
         if (owner.documentSignature === signature) return;
         owner.documentSignature = signature;
-        if (!entries.length) return emptyList(list, '共有資料はありません。');
+        if (!entries.length) return emptyList(list, '共有ファイルはありません。');
         list.replaceChildren(...entries.map(entry => {
             const item = node('li', '', 'project-document-row');
-            const preview = button('', () => window.DocumentLibraryUI.openProjectPreview(entry, owner.id), 'chat-sidebar-item-open');
-            preview.append(node('span', entry.fileName, 'chat-sidebar-item-title'),
-                node('span', `版 ${entry.version}`, 'chat-sidebar-item-snippet'));
-            const remove = button('共有を解除', async () => {
-                remove.disabled = true;
-                try {
-                    await db().removeProjectDocument(owner.id, entry.id);
-                    setNotice(owner, '');
-                    await refresh(owner);
-                } catch (error) {
-                    setNotice(owner, `共有を解除できませんでした。 ${error.message || error}`);
-                } finally { remove.disabled = false; }
-            });
-            remove.setAttribute('aria-label', `「${entry.fileName}」の共有を解除`);
-            item.append(preview, remove);
+            const preview = button('', () => window.DocumentLibraryUI.openProjectPreview(entry, owner.id), 'project-file-open');
+            const name = node('span', entry.fileName, 'project-file-name');
+            name.title = entry.fileName;
+            const details = node('span', '', 'project-file-details');
+            details.append(name, node('span', `${entry.format.toUpperCase()} · ${window.DocumentLibraryUI.fileSize(entry.size)} · 版 ${entry.version}`,
+                'chat-sidebar-item-snippet'));
+            preview.append(icon(entry.format === 'pdf' ? 'picture_as_pdf' : 'description'), details);
+            const options = button('', () => openMenu(options, owner.id, ['unlink-file'], entry.id), 'chat-sidebar-icon-button');
+            options.append(icon('more_horiz'));
+            options.setAttribute('aria-label', `「${entry.fileName}」の操作`);
+            options.setAttribute('aria-haspopup', 'menu');
+            options.setAttribute('aria-expanded', 'false');
+            options.setAttribute('aria-controls', 'project-menu');
+            item.append(preview, options);
             return item;
         }));
     }
@@ -374,7 +655,7 @@ window.ProjectUI = (() => {
         const generation = dataGeneration;
         const owner = view;
         const confirmed = await ui().showCustomConfirm(
-            `「${project.name}」のプロジェクト本体を削除しますか？\n\n所属チャットは削除されず、未所属に戻ります。共有資料との関連付けは解除され、ライブラリの原本と旧版は残ります。`,
+            `「${project.name}」のプロジェクト本体を削除しますか？\n\n所属チャットは削除されず、未所属に戻ります。共有ファイルとの関連付けは解除され、ライブラリの原本と旧版は残ります。`,
             { confirmLabel: 'プロジェクトを削除' });
         if (!confirmed || generation !== dataGeneration) return;
         try {
@@ -424,7 +705,7 @@ window.ProjectUI = (() => {
 
     function chooseExisting(owner, kind) {
         const choosingChats = kind === 'chat';
-        return showDialog(choosingChats ? '既存チャットを追加' : 'ライブラリから追加', '追加', (context, fields) => {
+        return showDialog(choosingChats ? '既存チャットを追加' : 'ファイルライブラリから追加', '追加', (context, fields) => {
             const search = field(fields, choosingChats ? 'チャット名で絞り込み' : 'ファイル名で絞り込み', node('input'));
             search.type = 'search';
             const list = node('div', '読み込み中…', 'project-picker-list');
@@ -507,6 +788,8 @@ window.ProjectUI = (() => {
     function dataChanged(detail) {
         if (detail.type === 'restore' || detail.replaced) {
             dataGeneration++;
+            returns.clear();
+            chatEntries.clear();
             if (dialog) byId('dialog').close();
             closeMenu();
         }
@@ -537,18 +820,31 @@ window.ProjectUI = (() => {
         catch { expanded = new Set(); }
         byId('create').addEventListener('click', () => editProject());
         byId('back').addEventListener('click', () => {
+            if (handoff) return;
             if (history.state?.projectId === view?.id) history.back();
             else close({ restoreFocus: true });
         });
         byId('options').addEventListener('click', () => { if (view) openMenu(byId('options'), view.id); });
+        byId('file-add').addEventListener('click', () => { if (view) openMenu(byId('file-add'), view.id, ['add-file', 'upload']); });
         byId('menu').addEventListener('click', async event => {
             const action = event.target.closest('[data-project-action]')?.dataset.projectAction;
             if (!action || !menu) return;
-            const { id } = menu;
+            const { id, documentId } = menu;
             const owner = view;
             const generation = dataGeneration;
             closeMenu(true);
             try {
+                if (action === 'add-file') { if (owner?.id === id) await chooseExisting(owner, 'document'); return; }
+                if (action === 'upload') { if (owner?.id === id) chooseUpload(owner); return; }
+                if (action === 'unlink-file') {
+                    if (owner?.id === id) {
+                        try {
+                            await db().removeProjectDocument(id, documentId);
+                            setNotice(owner, '');
+                        } catch (error) { setNotice(owner, `共有を解除できませんでした。 ${error.message || error}`); }
+                    }
+                    return;
+                }
                 const project = await db().getProject(id);
                 if (generation !== dataGeneration || view !== owner) return;
                 if (!project) throw new Error('プロジェクトが見つかりません。');
@@ -569,7 +865,7 @@ window.ProjectUI = (() => {
                 closeMenu(true);
             } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
                 event.preventDefault();
-                const items = [...byId('menu').children];
+                const items = [...byId('menu').querySelectorAll(':scope > :not([hidden])')];
                 const current = items.indexOf(document.activeElement);
                 const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
                     (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
@@ -577,6 +873,13 @@ window.ProjectUI = (() => {
             }
         });
         window.addEventListener('resize', () => closeMenu());
+        const viewport = window.visualViewport;
+        const updateViewport = () => {
+            const workspace = byId('workspace');
+            if (viewport.scale > 1.01 || viewport.height >= window.innerHeight) workspace.style.removeProperty('--project-viewport-height');
+            else workspace.style.setProperty('--project-viewport-height', `${viewport.height}px`);
+        };
+        viewport?.addEventListener('resize', updateViewport, { passive: true });
         document.addEventListener('scroll', event => {
             if (menu && (event.target === byId('content') || event.target.id === 'chat-sidebar-scroll')) closeMenu();
         }, true);
@@ -601,24 +904,78 @@ window.ProjectUI = (() => {
                 if (ownsDialog(context)) submit.disabled = false;
             }
         });
-        byId('new-chat').addEventListener('click', async () => {
-            const owner = view;
-            if (owner) await app().confirmStartNewChat({ projectId: owner.id, ownsProjectView: () => view === owner });
-        });
         byId('add-chat').addEventListener('click', () => { if (view) void chooseExisting(view, 'chat'); });
-        byId('add-document').addEventListener('click', () => { if (view) void chooseExisting(view, 'document'); });
-        byId('upload-document').addEventListener('click', () => {
-            if (!view) return;
-            const input = byId('files');
-            const owner = view;
+        for (const name of ['chats', 'files']) byId('tab-' + name).addEventListener('click', () => activateTab(name));
+        byId('tabs').addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const name = event.key === 'Home' ? 'chats' : event.key === 'End' ? 'files' :
+                event.target.id === 'project-tab-chats' ? 'files' : 'chats';
+            activateTab(name);
+            byId('tab-' + name).focus();
+        });
+        byId('model').addEventListener('click', () => { if (view) chooseDraftModel(view); });
+        byId('input').addEventListener('input', event => {
+            if (!view?.draft) return;
+            const { draft } = view;
+            draft.text = event.target.value;
+            draft.changed = true;
+            draft.notice = '';
+            app().persistInputDraft(draft.key, draft.text);
+            renderComposer();
+        });
+        byId('input').addEventListener('focusout', () => { if (view?.draft) persistDraft(view.draft); });
+        byId('input').addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+            if (!event.ctrlKey && (!window.state.settings.enterToSend || event.shiftKey || event.altKey || event.metaKey)) return;
+            event.preventDefault();
+            if (!byId('send').disabled) byId('composer').requestSubmit();
+        });
+        byId('attach').addEventListener('click', () => {
+            const draft = view?.draft;
+            if (!draft) return;
+            const input = byId('attachment-input');
+            input.value = '';
             input.onchange = () => {
                 const files = [...input.files];
                 input.value = '';
-                if (view === owner && files.length) void upload(owner, files);
+                void addDraftAttachments(draft, files);
             };
             input.click();
         });
+        byId('composer').addEventListener('dragover', event => {
+            if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+        });
+        byId('composer').addEventListener('drop', event => {
+            if (!view?.draft || !event.dataTransfer?.files.length) return;
+            event.preventDefault();
+            event.stopPropagation();
+            void addDraftAttachments(view.draft, [...event.dataTransfer.files]);
+        });
+        byId('composer').addEventListener('submit', event => {
+            event.preventDefault();
+            void sendDraft();
+        });
+        window.addEventListener('execution-settings-changed', () => {
+            if (!view) return;
+            if (view.draft?.key !== app().getNewInputDraftContextKey(view.id)) attachDraft(view);
+            else renderComposer();
+        });
+        window.addEventListener('pagehide', () => {
+            if (view?.draft) persistDraft(view.draft);
+        });
     }
 
-    return { install, open, close, closeMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged, syncDraftLabel };
+    function chooseUpload(owner) {
+        const input = byId('files');
+        input.onchange = () => {
+            const files = [...input.files];
+            input.value = '';
+            if (view === owner && files.length) void upload(owner, files);
+        };
+        input.click();
+    }
+
+    return { install, open, close, closeMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged, syncDraftLabel,
+        prepareForUpdate };
 })();
