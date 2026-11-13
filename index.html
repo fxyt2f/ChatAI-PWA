@@ -14,12 +14,16 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.36.7">
+    <link rel="stylesheet" href="./style.css?v=1.37.0">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.36.7" defer></script>
-    <script src="./dropbox.js?v=1.36.7" defer></script>
+    <script src="./function-calling.js?v=1.37.0" defer></script>
+    <script src="./document-library.js?v=1.37.0" defer></script>
+    <script src="./document-search.js?v=1.37.0" defer></script>
+    <script src="./document-rag.js?v=1.37.0" defer></script>
+    <script src="./document-library-ui.js?v=1.37.0" defer></script>
+    <script src="./dropbox.js?v=1.37.0" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -33,31 +37,33 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.36.7" defer></script>
-    <script src="./streaming-v136.js?v=1.36.7" defer></script>
-    <script src="./app.js?v=1.36.7" defer></script>
-    <script src="./settings-ui-v136.js?v=1.36.7" defer></script>
+    <script src="./settings-v136.js?v=1.37.0" defer></script>
+    <script src="./streaming-v136.js?v=1.37.0" defer></script>
+    <script src="./app.js?v=1.37.0" defer></script>
+    <script src="./settings-ui-v136.js?v=1.37.0" defer></script>
 </head>
 <body>
     <div class="app-container">
 
         <!-- チャット画面 -->
         <div id="chat-screen" class="screen active">
+            <div id="chat-overlay" class="chat-workspace-overlay"></div>
             <aside id="chat-history-sidebar" class="chat-history-sidebar" aria-label="チャット履歴サイドバー" aria-hidden="true">
                 <div class="chat-sidebar-header">
-                    <button id="chat-sidebar-close-btn" type="button" class="chat-sidebar-icon-button" aria-label="サイドバーを閉じる" title="サイドバーを閉じる" aria-controls="chat-history-sidebar" aria-expanded="true">
-                        <span class="material-symbols-outlined" aria-hidden="true">menu</span>
-                    </button>
                     <span class="chat-sidebar-brand">ChatAI PWA</span>
                 </div>
                 <div class="chat-sidebar-controls">
-                    <button id="chat-sidebar-all-history-btn" type="button" class="chat-sidebar-all-history-button">
-                        <span class="material-symbols-outlined" aria-hidden="true">history</span>
-                        全ての履歴
-                    </button>
-                    <label class="visually-hidden" for="chat-sidebar-search-input">チャットを検索</label>
-                    <div class="chat-sidebar-search-field">
-                        <span class="material-symbols-outlined" aria-hidden="true">search</span>
+                    <nav class="chat-sidebar-navigation" aria-label="ワークスペース">
+                        <button id="new-chat-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">edit_square</span>新規チャット</button>
+                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ライブラリ</button>
+                    </nav>
+                    <div class="chat-sidebar-history-header">
+                        <h2 id="chat-sidebar-history-title">履歴</h2>
+                        <button id="chat-sidebar-search-toggle" class="chat-sidebar-icon-button" type="button" aria-label="履歴を検索" aria-expanded="false" aria-controls="chat-sidebar-search-field"><span class="material-symbols-outlined" aria-hidden="true">search</span></button>
+                        <button id="chat-sidebar-history-menu-btn" class="chat-sidebar-item-menu" type="button" aria-label="履歴の操作" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu"><span class="material-symbols-outlined" aria-hidden="true">more_vert</span></button>
+                        <input type="file" id="import-history-input" accept=".txt,text/plain" hidden>
+                    </div>
+                    <div id="chat-sidebar-search-field" class="chat-sidebar-search-field hidden">
                         <input id="chat-sidebar-search-input" type="search" maxlength="200" placeholder="チャットを検索" autocomplete="off" aria-label="チャットを検索">
                         <button id="chat-sidebar-search-clear-btn" type="button" class="chat-sidebar-search-clear hidden" aria-label="検索文字列を消去" title="検索文字列を消去">
                             <span class="material-symbols-outlined" aria-hidden="true">close</span>
@@ -67,18 +73,16 @@
                 </div>
                 <div id="chat-sidebar-scroll" class="chat-sidebar-scroll">
                     <p id="chat-sidebar-status" class="chat-sidebar-status" role="status"></p>
-                    <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-label="最近のチャット"></div>
+                    <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-labelledby="chat-sidebar-history-title"></div>
                 </div>
             </aside>
-            <div id="chat-sidebar-backdrop" class="chat-sidebar-backdrop" hidden></div>
+            <div id="chat-sidebar-backdrop" class="chat-sidebar-backdrop" hidden aria-hidden="true"></div>
             <div id="chat-workspace" class="chat-workspace">
-            <div id="chat-overlay"></div>
             <div id="header-trigger-area"></div>
             <header class="app-header">
-                <button id="goto-history-btn" class="header-button" title="履歴一覧へ" aria-label="履歴一覧へ"><span class="material-symbols-outlined">menu</span></button>
+                <button id="goto-history-btn" class="header-button" title="サイドバーを開く" aria-label="サイドバーを開く" aria-controls="chat-history-sidebar" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">menu</span></button>
                 <span id="sync-status-header-icon" class="material-symbols-outlined sync-status-header-icon" title="同期ステータス"></span>
                 <h1 id="chat-title" role="button" tabindex="0" aria-label="チャットタイトル。タップして編集" title="新規チャット">新規チャット</h1>
-                <button id="new-chat-btn" class="new-chat-button" title="新規チャットを開始"><span class="material-symbols-outlined">add</span></button>
                 <button id="goto-settings-btn" class="header-button" title="設定へ"><span class="material-symbols-outlined">settings</span></button>
             </header>
 
@@ -109,6 +113,9 @@
                 </button>
                 <button id="chat-search-open-btn" class="floating-action-button" title="チャット内を検索" aria-label="チャット内を検索">
                     <span class="material-symbols-outlined">search</span>
+                </button>
+                <button id="document-library-picker-open" class="floating-action-button" type="button" title="このチャットのファイル" aria-label="このチャットのファイル" aria-haspopup="dialog" aria-controls="document-library-picker">
+                    <span data-document-icon="text" aria-hidden="true"></span>
                 </button>
                 <button id="text-formatting-btn" class="floating-action-button" title="文章整形" aria-label="文章整形">
                     <span class="material-symbols-outlined">format_align_left</span>
@@ -191,10 +198,10 @@
             <dialog id="system-prompt-dialog" class="custom-dialog system-prompt-dialog" aria-labelledby="system-prompt-dialog-title">
                 <div class="system-prompt-dialog-header">
                     <h3 id="system-prompt-dialog-title" class="dialog-title system-prompt-dialog-title">パラメータ設定</h3>
-                    <button id="chat-parameter-menu-btn" class="system-prompt-close-btn" type="button" aria-label="パラメータ設定の操作" aria-haspopup="menu" aria-expanded="false" aria-controls="chat-parameter-menu">
+                    <button id="chat-parameter-menu-btn" class="chat-dialog-icon-button" type="button" aria-label="パラメータ設定の操作" aria-haspopup="menu" aria-expanded="false" aria-controls="chat-parameter-menu">
                         <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
                     </button>
-                    <button id="system-prompt-close-btn" class="system-prompt-close-btn" type="button" title="閉じる" aria-label="閉じる">
+                    <button id="system-prompt-close-btn" class="chat-dialog-icon-button" type="button" title="閉じる" aria-label="閉じる">
                         <span class="material-symbols-outlined">close</span>
                     </button>
                 </div>
@@ -257,139 +264,91 @@
             </footer>
 
             </div>
-
-        </div>
-
-        <!-- 履歴画面 -->
-        <div id="history-screen" class="screen">
-            <header class="app-header">
-                <button id="back-to-chat-from-history" class="header-button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
-                <h1 id="history-title">履歴</h1>
-            </header>
-            <main class="main-content history-main-content">
-                <div class="history-workspace">
-                    <section class="history-list-pane" aria-labelledby="history-title">
-                        <div class="history-toolbar">
-                            <div class="history-toolbar-primary history-toolbar-standard">
-                                <div class="history-search-field">
-                                    <span class="material-symbols-outlined" aria-hidden="true">search</span>
-                                    <label class="visually-hidden" for="history-search-input">チャットを検索</label>
-                                    <input id="history-search-input" type="search" maxlength="200" placeholder="チャットを検索" autocomplete="off" aria-label="チャットを検索">
-                                    <button id="history-search-clear-btn" type="button" class="history-search-clear hidden" aria-label="検索文字列を消去" title="検索文字列を消去"><span class="material-symbols-outlined" aria-hidden="true">close</span></button>
-                                </div>
-                                <div id="history-pin-filter" class="history-pin-filter" role="group" aria-label="履歴の表示対象">
-                                    <button type="button" data-history-pin-filter="all" aria-pressed="true">すべて</button>
-                                    <button type="button" data-history-pin-filter="pinned" aria-pressed="false"><span class="material-symbols-outlined" aria-hidden="true">push_pin</span>ピン留め</button>
-                                </div>
-                                <label class="history-sort-field" for="history-sort-order-toolbar">
-                                    <span class="visually-hidden">履歴の並び替え</span>
-                                    <select id="history-sort-order-toolbar" aria-label="履歴の並び替え">
-                                        <option value="updatedAt">更新日時の新しい順</option>
-                                        <option value="createdAt">作成日時の新しい順</option>
-                                        <option value="title">タイトル順</option>
-                                    </select>
-                                </label>
-                            </div>
-                            <div class="history-toolbar-secondary history-toolbar-standard">
-                                <button id="import-history-btn" type="button" class="history-secondary-action"><span class="material-symbols-outlined" aria-hidden="true">download</span>インポート</button>
-                                <button id="history-delete-mode-btn" type="button" class="history-secondary-action history-danger-action"><span class="material-symbols-outlined" aria-hidden="true">delete</span>履歴を削除</button>
-                                <input type="file" id="import-history-input" accept=".txt,text/plain" class="hidden">
-                            </div>
-                            <div id="history-delete-toolbar" class="history-delete-toolbar hidden">
-                                <div class="history-toolbar-primary">
-                                    <label class="history-delete-select-all">
-                                        <input id="history-delete-select-all" type="checkbox">
-                                        <span id="history-delete-select-all-label">全選択</span>
-                                    </label>
-                                    <span id="history-delete-count" class="history-delete-count" role="status" aria-live="polite">選択中 0件</span>
-                                </div>
-                                <div class="history-toolbar-secondary">
-                                    <button id="history-delete-cancel-btn" type="button" class="history-secondary-action">キャンセル</button>
-                                    <button id="history-delete-confirm-btn" type="button" class="history-secondary-action history-danger-action" disabled><span class="material-symbols-outlined" aria-hidden="true">delete</span>選択した履歴を削除</button>
-                                </div>
-                            </div>
-                            <p id="history-delete-live" class="visually-hidden" aria-live="polite"></p>
+            <section id="document-library-workspace" class="chat-workspace" aria-labelledby="document-library-title" hidden>
+                <header class="app-header">
+                    <button id="document-library-back" class="header-button" type="button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back_ios</span></button>
+                    <h1 id="document-library-title" tabindex="-1"><span class="document-library-heading">ライブラリ</span><span id="document-library-mobile-title"></span></h1>
+                    <button id="document-library-add" type="button"><span data-document-icon="add" aria-hidden="true"></span>ファイルを追加</button>
+                    <button id="document-library-mobile-search" class="header-button" type="button" title="ファイル内を検索" aria-label="ファイル内を検索" aria-expanded="false" aria-controls="document-library-detail-search"><span data-document-icon="search" aria-hidden="true"></span></button>
+                    <input id="document-library-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
+                    <input id="document-library-replacement" type="file" accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
+                </header>
+                <p id="document-library-notice" class="document-library-notice" role="status"></p>
+                <div class="document-library-layout">
+                    <section id="document-library-collection" class="document-library-collection" aria-label="登録済みのファイル">
+                        <div class="document-library-filter-tools">
+                            <form id="document-library-search" class="document-library-search" role="search">
+                                <span data-document-icon="search" aria-hidden="true"></span>
+                                <input id="document-library-query" type="search" placeholder="ファイルを検索" aria-label="ファイルを検索" maxlength="512" autocomplete="off">
+                                <select id="document-library-search-mode" class="document-library-select" aria-label="検索対象">
+                                    <option value="name">ファイル名</option>
+                                    <option value="body">本文</option>
+                                    <option value="all">すべて</option>
+                                </select>
+                            </form>
+                            <select id="document-library-sort" class="document-library-select" aria-label="並び替え" title="並び替え">
+                                <option value="name">名前順</option>
+                                <option value="updated">更新順</option>
+                            </select>
                         </div>
-                        <p id="history-status" class="history-status" role="status" aria-live="polite"></p>
-                        <section id="history-state-panel" class="history-state-panel hidden" aria-live="polite">
-                            <span class="material-symbols-outlined history-state-icon" aria-hidden="true">forum</span>
-                            <h2 id="no-history-message"></h2>
-                            <p id="history-state-description"></p>
-                            <button id="history-state-action" type="button" class="history-primary-action hidden"></button>
-                        </section>
-                        <ul id="history-list" class="history-list" aria-label="チャット履歴"></ul>
-                        <template id="history-item-template" class="js-history-item-template">
-                            <li class="history-item">
-                                <span class="history-delete-checkbox-control hidden">
-                                    <input type="checkbox" class="history-delete-checkbox">
-                                </span>
-                                <button type="button" class="history-item-open" data-history-action="open">
-                                    <span class="history-item-title"></span>
-                                    <span class="history-item-dates">
-                                        <span class="updated-date"></span>
-                                        <span class="history-date-separator" aria-hidden="true">・</span>
-                                        <span class="created-date"></span>
-                                    </span>
-                                </button>
-                                <button type="button" class="history-item-menu-button" data-history-action="menu" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu">
-                                    <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
-                                </button>
-                            </li>
-                        </template>
+                        <p id="document-library-search-status" class="document-library-muted" role="status"></p>
+                        <div id="document-library-collection-scroll" class="document-library-scroll">
+                            <p id="document-library-empty" class="document-library-muted" role="status" hidden></p>
+                            <ul id="document-library-list" class="document-library-list"></ul>
+                        </div>
                     </section>
-                    <aside id="history-detail-pane" class="history-detail-pane" aria-labelledby="history-detail-heading">
-                        <h2 id="history-detail-heading" class="visually-hidden">チャット詳細</h2>
-                        <div id="history-detail-empty" class="history-detail-empty">
-                            <span class="material-symbols-outlined" aria-hidden="true">info</span>
-                            <h3>チャットを選択してください</h3>
-                            <p>一覧からチャットを選ぶと、詳細を確認できます</p>
+                    <section id="document-library-preview" class="document-library-detail" aria-labelledby="document-library-preview-title" hidden>
+                        <div class="document-library-preview-header">
+                            <h2 id="document-library-preview-title" tabindex="-1"></h2>
+                            <button id="document-library-desktop-search" class="chat-dialog-icon-button" type="button" title="ファイル内を検索" aria-label="ファイル内を検索" aria-expanded="false" aria-controls="document-library-detail-search"><span data-document-icon="search" aria-hidden="true"></span></button>
+                            <button id="document-library-detail-close" class="chat-dialog-icon-button" type="button" title="プレビューを閉じる" aria-label="プレビューを閉じる"><span data-document-icon="close" aria-hidden="true"></span></button>
                         </div>
-                        <div id="history-detail-content" class="history-detail-content hidden">
-                            <header class="history-detail-header">
-                                <p class="history-detail-eyebrow">選択したチャット</p>
-                                <h2 id="history-detail-title"></h2>
-                                <p id="history-detail-pin-status" class="history-detail-pin-status hidden"><span class="material-symbols-outlined" aria-hidden="true">push_pin</span>ピン留め中</p>
-                            </header>
-                            <dl class="history-detail-meta">
-                                <div><dt>最終更新</dt><dd id="history-detail-updated"></dd></div>
-                                <div><dt>作成日時</dt><dd id="history-detail-created"></dd></div>
-                                <div><dt>表示メッセージ</dt><dd id="history-detail-message-count"></dd></div>
-                                <div><dt>システムプロンプト</dt><dd id="history-detail-system-prompt"></dd></div>
-                                <div><dt>添付ファイル</dt><dd id="history-detail-attachments"></dd></div>
-                            </dl>
-                            <section class="history-detail-section" aria-labelledby="history-detail-stats-heading">
-                                <h3 id="history-detail-stats-heading">統計</h3>
-                                <div class="history-detail-stats">
-                                    <span><span class="material-symbols-outlined" aria-hidden="true">token</span><span id="history-detail-tokens"></span></span>
-                                    <span><span class="material-symbols-outlined" aria-hidden="true">perm_media</span><span id="history-detail-assets"></span></span>
-                                    <span><span class="material-symbols-outlined" aria-hidden="true">database</span><span id="history-detail-size"></span></span>
-                                </div>
-                            </section>
-                            <section class="history-detail-section" aria-labelledby="history-detail-first-heading">
-                                <h3 id="history-detail-first-heading">最初のユーザーメッセージ</h3>
-                                <p id="history-detail-first-message" class="history-detail-excerpt"></p>
-                            </section>
-                            <section class="history-detail-section" aria-labelledby="history-detail-latest-heading">
-                                <h3 id="history-detail-latest-heading">最新メッセージ</h3>
-                                <p id="history-detail-latest-role" class="history-detail-role"></p>
-                                <p id="history-detail-latest-message" class="history-detail-excerpt"></p>
-                            </section>
-                            <div class="history-detail-actions">
-                                <button type="button" class="history-primary-action" data-history-detail-action="open"><span class="material-symbols-outlined" aria-hidden="true">open_in_new</span>チャットを開く</button>
-                                <button type="button" class="history-secondary-action" data-history-detail-action="export"><span class="material-symbols-outlined" aria-hidden="true">upload</span>チャットを出力</button>
-                                <button type="button" class="history-secondary-action history-detail-menu-button" data-history-detail-action="menu" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu"><span class="material-symbols-outlined" aria-hidden="true">more_vert</span>その他</button>
+                        <div class="document-library-modes" role="group" aria-label="表示内容">
+                            <button id="document-library-show-original" class="document-library-action" type="button" aria-pressed="false">原本</button>
+                            <button id="document-library-show-extracts" class="document-library-action" type="button" aria-pressed="true">抽出テキスト</button>
+                        </div>
+                        <div id="document-library-detail-find" hidden>
+                            <form id="document-library-detail-search" class="document-library-search" role="search">
+                                <span data-document-icon="search" aria-hidden="true"></span>
+                                <input id="document-library-detail-query" type="search" placeholder="ファイル内を検索" aria-label="ファイル内を検索" maxlength="512" autocomplete="off">
+                            </form>
+                            <p id="document-library-detail-search-status" class="document-library-muted" role="status"></p>
+                            <ul id="document-library-detail-results" class="document-library-results" hidden></ul>
+                        </div>
+                        <div id="document-library-original" hidden>
+                            <p id="document-library-original-status" class="document-library-muted" role="status"></p>
+                            <div id="document-library-pdf-tools" class="document-library-toolbar" hidden>
+                                <button id="document-library-pdf-previous" class="document-library-action" type="button">前へ</button>
+                                <span id="document-library-pdf-number" class="document-library-muted" aria-live="polite"></span>
+                                <button id="document-library-pdf-next" class="document-library-action" type="button">次へ</button>
+                                <button id="document-library-pdf-zoom-out" class="document-library-action" type="button" aria-label="縮小">−</button>
+                                <button id="document-library-pdf-zoom-in" class="document-library-action" type="button" aria-label="拡大">＋</button>
                             </div>
+                            <div id="document-library-pdf-viewport"></div>
                         </div>
-                        <p id="history-detail-live" class="visually-hidden" aria-live="polite"></p>
-                    </aside>
+                        <div id="document-library-extracted">
+                            <p id="document-library-preview-status" class="document-library-muted" role="status"></p>
+                            <div class="document-library-toolbar">
+                                <button id="document-library-retry" class="document-library-action" type="button" hidden>解析を再試行</button>
+                                <button id="document-library-cancel" class="document-library-action" type="button" hidden>解析を中止</button>
+                            </div>
+                            <div id="document-library-pages" class="document-library-toolbar" hidden>
+                                <button id="document-library-previous" class="document-library-action" type="button">前へ</button>
+                                <span id="document-library-page-number" class="document-library-muted" aria-live="polite"></span>
+                                <button id="document-library-next" class="document-library-action" type="button">次へ</button>
+                            </div>
+                            <div id="document-library-extracts"></div>
+                        </div>
+                    </section>
                 </div>
-            </main>
+                <div id="document-library-menu" class="history-item-menu document-library-menu" role="menu" hidden></div>
+            </section>
+
         </div>
 
-        <!-- 設定画面 -->
         <div id="settings-screen" class="screen">
             <header class="app-header">
-                 <button id="back-to-chat-from-settings" class="header-button" title="チャットへ戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
+                 <button id="back-to-chat-from-settings" class="header-button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
                  <h1 id="settings-title">設定</h1>
 
             </header>
@@ -625,13 +584,6 @@
                                    </select>
                                    <input type="color" id="header-text-color-input" aria-label="ヘッダー文字色の手動指定">
                                    <button id="reset-header-text-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
-                               </div>
-                           </div>
-                           <div class="color-setting-row">
-                               <label class="color-setting-label" for="new-chat-button-color-input">新規チャットボタン</label>
-                               <div class="color-setting-controls">
-                                   <input type="color" id="new-chat-button-color-input">
-                                   <button id="reset-new-chat-button-color-btn" class="settings-reset-button color-reset-button" type="button">リセット</button>
                                </div>
                            </div>
                            <div class="color-setting-row">
@@ -1091,6 +1043,7 @@
                        <option value="createdAt">作成日時 (新しい順)</option>
                        <option value="title">タイトル順</option>
                    </select>
+    <button id="history-delete-mode-btn" type="button">履歴を一括削除</button>
 </section>
 <div class="settings-group">
                     <h3>保存済み画像アセット</h3>
@@ -1107,7 +1060,16 @@
                          取込（インポート）は、既存のアセットにファイルを追加します。<br>
                          同名のアセットが見つかった場合は、上書きするか確認します。
                     </p>
-                </div><section class="settings-group" id="developer-settings"><h2>開発者向け</h2>
+                </div>
+<section class="settings-group" id="full-backup-settings">
+    <h2>全データのバックアップ</h2>
+    <div class="asset-actions">
+        <button type="button" id="full-backup-export">バックアップを保存</button>
+        <button type="button" id="full-backup-import">ファイルから復元</button>
+        <input type="file" id="full-backup-input" accept=".json,application/json" class="hidden">
+    </div>
+</section>
+<section class="settings-group" id="developer-settings"><h2>開発者向け</h2>
 <label class="checkbox-label" style="margin-top: 15px;">
                     <input type="checkbox" id="debug-mode-toggle">
                     デバッグモードを有効にする
@@ -1400,6 +1362,29 @@
             </div>
         </dialog>
 
+        <dialog id="document-library-picker" class="custom-dialog" aria-labelledby="document-library-picker-title">
+            <header class="system-prompt-dialog-header">
+                <button id="document-library-picker-back" class="chat-dialog-icon-button" type="button" aria-label="紐づけ一覧へ戻る" hidden><span data-document-icon="back" aria-hidden="true"></span></button>
+                <h2 id="document-library-picker-title" class="dialog-title system-prompt-dialog-title" tabindex="-1"><span id="document-library-picker-heading">このチャットのファイル</span> <span id="document-library-picker-count" aria-live="polite">0件</span></h2>
+                <button id="document-library-picker-close" class="chat-dialog-icon-button" type="button" aria-label="閉じる" autofocus><span data-document-icon="close" aria-hidden="true"></span></button>
+            </header>
+            <p id="document-library-picker-notice" class="document-library-notice" role="status"></p>
+            <div id="document-library-picker-search" class="document-library-search" role="search" hidden>
+                <span data-document-icon="search" aria-hidden="true"></span>
+                <input id="document-library-picker-query" type="search" placeholder="ファイルを検索" aria-label="ファイルを検索" maxlength="512" autocomplete="off">
+            </div>
+            <div class="document-library-picker-scroll">
+                <p id="document-library-picker-empty" class="document-library-muted" role="status" hidden></p>
+                <ul id="document-library-picker-list" class="document-library-list"></ul>
+            </div>
+            <div id="document-library-picker-actions" class="document-library-toolbar document-library-picker-actions">
+                <button id="document-library-picker-select" class="document-library-action" type="button"><span data-document-icon="folder" aria-hidden="true"></span><span>ライブラリから<wbr>追加</span></button>
+                <button id="document-library-picker-upload" class="document-library-action" type="button"><span data-document-icon="add" aria-hidden="true"></span><span>ファイルを<wbr>アップロード</span></button>
+            </div>
+            <div id="document-library-picker-menu" class="history-item-menu document-library-menu" role="menu" hidden></div>
+        </dialog>
+        <input id="document-library-picker-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
+
         <!-- Asset Management Dialog -->
         <dialog id="assetManagementDialog" class="custom-dialog">
             <h3 class="dialog-title">アセットの管理</h3>
@@ -1454,7 +1439,21 @@
             </div>
         </dialog>
 
+    <dialog id="history-delete-dialog" class="custom-dialog" aria-labelledby="history-delete-title">
+        <h2 id="history-delete-title">履歴を一括削除</h2>
+        <div class="history-delete-toolbar">
+            <label><input id="history-delete-select-all" type="checkbox"> 全選択</label>
+            <span id="history-delete-count" role="status"></span>
+        </div>
+        <p id="history-delete-status" role="status"></p>
+        <ul id="history-delete-list" aria-label="削除するチャット"></ul>
+        <div class="dialog-actions">
+            <button id="history-delete-cancel-btn" type="button">閉じる</button>
+            <button id="history-delete-confirm-btn" type="button" disabled>選択した履歴を削除</button>
+        </div>
+    </dialog>
     <div id="history-item-menu" class="history-item-menu hidden" role="menu" aria-label="チャット操作">
+        <button id="import-history-btn" type="button" role="menuitem" data-history-menu-action="import" class="hidden" hidden><span class="material-symbols-outlined" aria-hidden="true">download</span>チャットをインポート</button>
         <button type="button" role="menuitem" data-history-menu-action="pin"><span class="material-symbols-outlined" aria-hidden="true">push_pin</span><span data-history-pin-label>ピン留め</span></button>
         <button type="button" role="menuitem" data-history-menu-action="rename"><span class="material-symbols-outlined" aria-hidden="true">edit</span>タイトルを変更</button>
         <button type="button" role="menuitem" data-history-menu-action="export"><span class="material-symbols-outlined" aria-hidden="true">upload</span>チャットを出力</button>

@@ -7,7 +7,7 @@ window.runThemeColorV1361 = async () => {
     const check = (ok, message) => { assertions++; if (!ok) throw new Error(message); };
     const hex = rgb => ui.colorToHex(rgb).toUpperCase();
     const palette = () => Object.fromEntries(['--app-header-bg', '--app-header-fg', '--app-header-hover-bg',
-        '--app-header-hover-fg', '--new-chat-button-bg', '--send-button-bg', '--bg-button', '--bg-user-message',
+        '--app-header-hover-fg', '--send-button-bg', '--bg-button', '--bg-user-message',
         '--user-message-bg', '--user-message-fg']
         .map(name => [name, getComputedStyle(document.body).getPropertyValue(name).trim()]));
     const verify = (expected, label) => {
@@ -23,6 +23,13 @@ window.runThemeColorV1361 = async () => {
     check(manifest.theme_color === '#1e1e1e', 'diagnostic manifest theme_color stays fixed dark');
 
     await app.setProfileOverride('theme', false);
+    const stored = (await window.dbUtils.getSetting(SettingsV136.GLOBAL_KEY)).value;
+    await window.dbUtils.saveSetting(SettingsV136.GLOBAL_KEY,
+        { ...stored, theme: { ...stored.theme, newChatButtonColor: '#3344aa' } });
+    await app.loadSettingsV136(); app.applyActiveProfile();
+    check(!Object.hasOwn(st.settings, 'newChatButtonColor'), 'loading legacy data ignores the retired theme setting');
+    check(!document.querySelector('#new-chat-button-color-input, #reset-new-chat-button-color-btn') &&
+        !getComputedStyle(document.body).getPropertyValue('--new-chat-button-bg'), 'retired theme control and variable are absent');
     for (const darkMode of [false, true, false]) {
         const expected = darkMode ? '#1E1E1E' : '#F5F5F5';
         await app.saveAppearanceValues('theme', { darkMode }, { global: true });
@@ -33,12 +40,11 @@ window.runThemeColorV1361 = async () => {
 
         for (const themeColorMode of ['accent', 'individual']) {
             await app.saveAppearanceValues('theme', { themeColorMode, accentColor: '#aa3388', headerColor: '#228844',
-                newChatButtonColor: '#3344aa', sendButtonColor: '#bb7722', otherButtonColor: '#556677', userMessageColor: '#663399' }, { global: true });
+                sendButtonColor: '#bb7722', otherButtonColor: '#556677', userMessageColor: '#663399' }, { global: true });
             const configured = palette();
             ui.applyHeaderColor(); ui.applyThemeColorSettings();
             verify(expected, `${darkMode ? 'dark' : 'light'} ${themeColorMode} header/accent change`);
             check(configured['--app-header-bg'] === ui.getEffectiveHeaderColor(), 'header still follows its own settings');
-            check(configured['--new-chat-button-bg'] === ui.getEffectiveNewChatButtonColor(), 'new-chat button still follows its settings');
             check(configured['--send-button-bg'] === ui.getEffectiveSendButtonColor(), 'send button still follows its settings');
             check(configured['--bg-button'] === ui.getEffectiveOtherButtonColor(), 'other buttons still follow their settings');
             check(configured['--user-message-bg'] === ui.getEffectiveUserMessageColor(), 'messages still follow their settings');

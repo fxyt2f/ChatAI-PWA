@@ -14,10 +14,18 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
     }));
     const routerBase = 'https://stream-router.invalid/v1';
     const geminiImage = {...gemini, modelName: 'gemini-2.5-flash-image-preview'};
+    const geminiBase = 'https://gemini-thinking.invalid/v1beta/models';
+    const hydrogen = {apiConfigId: 'thinking-gemini', modelName: 'gemini-4-hydrogen'};
+    const future = {...hydrogen, modelName: 'gemini-12.1-nova-preview'};
+    const noThinking = {...hydrogen, modelName: 'gemini-13-embedder'};
+    const geminiConfig = {id: hydrogen.apiConfigId, name: 'Gemini Thinking fixture', provider: 'gemini',
+        apiKey: 'mock-key-1', baseUrl: geminiBase + '/', defaultModel: hydrogen.modelName,
+        modelCandidates: [hydrogen.modelName, future.modelName, noThinking.modelName]};
     const encoder = new TextEncoder();
     const calls = [];
+    const modelCalls = [];
     const events = [];
-    let reply;
+    let reply, modelReply;
     const geminiResult = (parts, finishReason) => ({
         candidates: [{index: 0, content: {role: 'model', parts}, ...(finishReason && {finishReason})}]
     });
@@ -100,11 +108,17 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             ...originalConfigs.map(config => config.id === gemini.apiConfigId
                 ? {...config, modelCandidates: [...config.modelCandidates, geminiImage.modelName]} : config),
             {id: router.apiConfigId, name: 'Streaming fixture', provider: 'openrouter', apiKey: 'mock',
-                baseUrl: routerBase, modelCandidates: [router.modelName, deepseek.modelName], defaultModel: router.modelName}
+                baseUrl: routerBase, modelCandidates: [router.modelName, deepseek.modelName], defaultModel: router.modelName},
+            geminiConfig
         ]);
         st.modelMetadataV136[router.apiConfigId] = Object.fromEntries(routerMetadata.map(meta => [meta.id, meta]));
         window.fetch = async (url, options) => {
             if (!options?.body && String(url).startsWith(routerBase)) return json({data: routerMetadata});
+            if (!options?.body && String(url).startsWith('https://gemini-thinking.invalid/')) {
+                const call = {url: String(url), key: options.headers['x-goog-api-key'], redirect: options.redirect, cache: options.cache};
+                modelCalls.push(call);
+                return modelReply(call);
+            }
             if (!options?.body) return rawFetch(url, options);
             const call = {url: String(url), body: JSON.parse(options.body), signal: options.signal};
             calls.push(call);
@@ -755,7 +769,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                 const stale = app.loadChat(sourceId);
                 await waitFor(() => readEntered, 'source read held while navigating');
                 assert((await app.loadChat(toolId)).ok);
-                await ui.showScreen('history', true);
+                await ui.showScreen('settings', true);
                 Object.assign(st.settings, {enableAutoRetry:false, geminiEnableFunctionCalling:false});
                 st.currentSystemPrompt = 'system B';
                 replyFailure(new Response('temporary service error', {status: 503}));
@@ -811,6 +825,163 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                 await settings({showThoughtProcess: false});
                 assert(!ui.createMessageElement('model', 'gemini', 0).querySelector('.thought-summary-details'));
             } finally { st.currentMessages = original; }
+        });
+
+        await test('Hydrogen displays its documented default, preserves choices and observes both GenerateContent transports', async () => {
+            await settings({enableStreamingOutput:false, showThoughtProcess:true});
+            modelReply = () => json({name:'models/' + hydrogen.modelName, thinking:true, supportedGenerationMethods:['generateContent']});
+            await start(hydrogen);
+            await app.ensureGeminiThinkingCapabilities(hydrogen);
+            await app.ensureGeminiThinkingCapabilities(hydrogen);
+            eq(modelCalls, [{url:geminiBase + '/' + hydrogen.modelName,key:'mock-key-1',redirect:'error',cache:'no-store'}]);
+            const capability = () => app.getModelThinkingCapability(hydrogen);
+            eq(capability().levels, ['low','medium','high','xhigh']);
+            assert(capability().thinkingConfirmed && !capability().acceptedLevels.length);
+            eq(app.getCurrentChatThinkingEffort(), null);
+            const select = document.getElementById('settings-thinking-button');
+            const trigger = document.getElementById('chat-model-button');
+            eq([...select.options].map(option=>option.textContent), ['モデル既定','Low','Medium','High','Extra High']);
+            eq(select.value, 'high');
+            eq(document.getElementById('chat-thinking-label').textContent, 'High');
+            reply = () => json(geminiResult([{text:'default answer'}],'STOP'));
+            await send('Hydrogen before selecting a Thinking level');
+            eq(calls.at(-1).body.generationConfig.thinkingConfig,{includeThoughts:true});
+            eq(capability().acceptedLevels, []);
+            const storedChat = st.currentChatId;
+            eq((await chat()).executionSettings.thinkingEffort, null);
+            await app.loadChat(storedChat,{scrollAfterLoad:false});
+            eq(app.getCurrentChatThinkingEffort(), null);
+            eq(select.value, 'high');
+            trigger.click();
+            const popover = document.querySelector('.thinking-popover');
+            eq(popover.querySelector('.thinking-level-name').textContent, 'High');
+            eq(popover.querySelector('[data-level="high"]').getAttribute('aria-checked'), 'true');
+            eq([...popover.querySelectorAll('[role=radio]')].map(dot=>dot.dataset.level), ['low','medium','high','xhigh']);
+            eq([...popover.querySelectorAll('[role=radio]')].map(dot=>dot.getAttribute('aria-label')), ['Low','Medium','High','Extra High']);
+            popover.querySelector('[data-level="xhigh"]').click();
+            await waitFor(()=>app.getCurrentChatThinkingEffort()==='xhigh', 'Hydrogen choice in popover');
+            eq(popover.querySelector('.thinking-level-name').textContent, 'Extra High');
+            let before = calls.length;
+            reply = () => json(geminiResult([{text:'thought',thought:true},{text:'answer'}],'STOP'));
+            await send('Hydrogen non-stream');
+            eq(calls.length-before,1);
+            assert(calls.at(-1).url.includes(':generateContent?'));
+            eq(calls.at(-1).body.generationConfig.thinkingConfig,{thinkingLevel:'XHIGH',includeThoughts:true});
+            eq(capability().acceptedLevels,['xhigh']);
+            eq((await chat()).executionSettings.thinkingEffort,'xhigh');
+            await app.loadChat(storedChat,{scrollAfterLoad:false});
+            eq(app.getCurrentChatThinkingEffort(),'xhigh');
+            eq(select.options[4].textContent,'Extra High');
+            await app.setCurrentChatThinkingEffort('low');
+            await settings({enableStreamingOutput:true});
+            reply = () => {
+                const event = sse();
+                event.frame(geminiResult([{text:'stream answer'}],'STOP'));
+                event.done(); event.close();
+                return event.response;
+            };
+            before = calls.length;
+            await send('Hydrogen stream');
+            eq(calls.length-before,1);
+            assert(calls.at(-1).url.includes(':streamGenerateContent?'));
+            eq(calls.at(-1).body.generationConfig.thinkingConfig.thinkingLevel,'LOW');
+            eq(capability().acceptedLevels,['xhigh','low']);
+            await app.setCurrentChatThinkingEffort(SettingsV136.MODEL_DEFAULT_EFFORT);
+            await settings({enableStreamingOutput:false});
+            reply = () => json(geminiResult([{text:'default answer'}],'STOP'));
+            await send('Hydrogen model default');
+            eq(calls.at(-1).body.generationConfig.thinkingConfig,{includeThoughts:true});
+            eq((await chat()).executionSettings.thinkingEffort,'model-default');
+        });
+
+        await test('future Gemini preserves choices on error, isolates cached metadata and never probes generation', async () => {
+            await settings({enableStreamingOutput:false});
+            modelReply = () => { throw new TypeError('fixture offline'); };
+            await start(future, {enableAutoRetry:true,maxRetries:2});
+            eq(app.getModelThinkingCapability().levels,['low','medium','high','xhigh']);
+            eq(document.getElementById('settings-thinking-button').value, SettingsV136.MODEL_DEFAULT_EFFORT);
+            eq(document.getElementById('chat-thinking-label').textContent, 'モデル既定');
+            let before = calls.length;
+            reply = () => json(geminiResult([{text:'works offline from Models API'}],'STOP'));
+            await send('Default while metadata is unavailable');
+            eq(calls.length-before,1);
+            assert(!calls.at(-1).body.generationConfig.thinkingConfig);
+            await app.setCurrentChatThinkingEffort('xhigh');
+            const errorResponse = message => new Response(JSON.stringify({error:{code:400,status:'INVALID_ARGUMENT',message}}),
+                {status:400,headers:{'Content-Type':'application/json'}});
+            reply = () => errorResponse('Invalid maxOutputTokens.');
+            before = calls.length;
+            await send('Unrelated invalid argument');
+            eq(calls.length-before,1);
+            eq(app.getModelThinkingCapability().rejectedLevels,[]);
+            eq(app.getCurrentChatThinkingEffort(),'xhigh');
+            reply = () => errorResponse('Thinking level XHIGH is not supported for this model.');
+            before = calls.length;
+            await send('Rejected thinking level');
+            eq(calls.length-before,1);
+            eq(app.getModelThinkingCapability().rejectedLevels,['xhigh']);
+            eq(app.getCurrentChatThinkingEffort(),'xhigh');
+            const rejected = document.querySelector('#settings-thinking-button option[value="xhigh"]');
+            assert(rejected.disabled);
+            eq(rejected.textContent,'Extra High');
+            assert(st.currentMessages.some(message=>message.content.includes('Thinking レベル「XHIGH」を拒否')));
+            let blocked = false;
+            try { app.freezeExecutionSettings(); } catch (error) { blocked = error.message.includes('拒否'); }
+            assert(blocked && calls.length===before+1);
+
+            await app.setCurrentChatThinkingEffort('medium');
+            await settings({enableStreamingOutput:true});
+            reply = () => {
+                const event = sse();
+                event.frame({error:{code:400,message:'Thinking level MEDIUM is not supported for this model.'}});
+                event.close();
+                return event.response;
+            };
+            before = calls.length;
+            await send('Stream rejected thinking level');
+            eq(calls.length-before,1);
+            eq(app.getModelThinkingCapability().rejectedLevels,['xhigh','medium']);
+            eq(app.getCurrentChatThinkingEffort(),'medium');
+            await settings({enableStreamingOutput:false});
+
+            let releaseOld, releaseOther;
+            modelReply = ({key,url}) => key==='mock-key-2' && url===geminiBase+'/'+future.modelName
+                ? new Promise(resolve=>{releaseOld=resolve;})
+                : url.endsWith(noThinking.modelName)
+                    ? new Promise(resolve=>{releaseOther=resolve;})
+                    : json({name:'models/'+future.modelName,thinking:true});
+            const changeConnection = async (apiKey, baseUrl) => {
+                const configs = (await db.getSetting('apiConfigs')).value;
+                await db.saveSetting('apiConfigs',configs.map(config=>config.id===future.apiConfigId ? {...config,apiKey,baseUrl} : config));
+                await app.refreshExecutionApiConfigsV136();
+            };
+            await changeConnection('mock-key-2',geminiBase);
+            const pending = app.ensureGeminiThinkingCapabilities(future);
+            assert(pending && pending===app.ensureGeminiThinkingCapabilities(future));
+            await waitFor(()=>releaseOld,'pending metadata for old credential');
+            eq(app.getModelThinkingCapability(future).rejectedLevels,[]);
+            await changeConnection('mock-key-2','https://gemini-thinking.invalid/v1/models/');
+            await app.ensureGeminiThinkingCapabilities(future);
+            releaseOld(json({name:'models/'+future.modelName,thinking:false}));
+            await pending;
+            assert(app.getModelThinkingCapability(future).thinkingConfirmed);
+            await app.setCurrentChatModelRef(noThinking);
+            const other = app.ensureGeminiThinkingCapabilities(noThinking);
+            await waitFor(()=>releaseOther,'pending metadata for another model');
+            await app.setCurrentChatModelRef(future);
+            releaseOther(json({name:'models/'+noThinking.modelName,thinking:false}));
+            await other;
+            eq(app.getModelThinkingCapability().levels,['low','medium','high','xhigh']);
+            eq(app.getModelThinkingCapability(noThinking).mode,'none');
+            await app.setCurrentChatModelRef(noThinking);
+            assert(document.getElementById('settings-thinking-button').hidden);
+            before = calls.length;
+            reply = () => json(geminiResult([{text:'response without thinking'}],'STOP'));
+            await send('Metadata says unsupported');
+            eq(calls.length-before,1);
+            assert(!calls.at(-1).body.generationConfig.thinkingConfig);
+            assert(modelCalls.some(call=>call.url==='https://gemini-thinking.invalid/v1/models/'+future.modelName &&
+                call.key==='mock-key-2' && !call.url.includes('?')));
         });
     } finally {
         for (const event of events) event.close();

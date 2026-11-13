@@ -9,8 +9,7 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-// Keep v14 so databases already opened at that version remain readable.
-const DB_VERSION = 14;
+const DB_VERSION = 16;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -174,7 +173,6 @@ const DEFAULT_ACCENT_COLOR = '#1976d2';
 const DEFAULT_THEME_COLOR_MODE = 'accent';
 const DEFAULT_HEADER_TEXT_COLOR_MODE = 'auto';
 const DEFAULT_HEADER_TEXT_COLOR = '#ffffff';
-const DEFAULT_NEW_CHAT_BUTTON_COLOR = '#1976d2';
 const DEFAULT_SEND_BUTTON_COLOR = '#1976d2';
 const DEFAULT_OTHER_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
@@ -190,14 +188,13 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     headerColor: '',
     headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
     headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
-    newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
     sendButtonColor: DEFAULT_SEND_BUTTON_COLOR,
     otherButtonColor: DEFAULT_OTHER_BUTTON_COLOR,
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.36.7";
-const APP_CACHE_VERSION = "v1.36.7";
+const APP_VERSION = "1.37.0";
+const APP_CACHE_VERSION = "v1.37.0";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -486,6 +483,12 @@ const VERSION_HISTORY = {
     ]
 };
 const SWIPE_THRESHOLD = 50; // スワイプ判定の閾値 (px)
+const SIDEBAR_PERMANENT_SWIPE_EDGE = 32;
+const SIDEBAR_LIBRARY_DRAG_EDGE = 64;
+const SIDEBAR_DRAG_COMMIT_FRACTION = 1 / 3;
+const SIDEBAR_FLING_MIN_DISTANCE = 28;
+const SIDEBAR_FLING_MIN_SPEED = 0.65; // CSS px/ms
+const SIDEBAR_FLING_WINDOW = 100;
 const SWIPE_TAP_TARGETS = 'input, button, label, a[href], summary, [role="button"], [role="link"], [role="switch"]';
 const SWIPE_CHAT_ACTION_TARGETS = `
     .message-action-buttons > button, #floating-action-panel > button, #scroll-to-bottom-btn,
@@ -665,17 +668,19 @@ try {
         appHeader: document.querySelector('.app-header'),
         chatScreen: document.getElementById('chat-screen'),
         chatWorkspace: document.getElementById('chat-workspace'),
+        documentLibraryWorkspace: document.getElementById('document-library-workspace'),
+        documentLibraryOpen: document.getElementById('document-library-open'),
         chatHistorySidebar: document.getElementById('chat-history-sidebar'),
         chatSidebarBackdrop: document.getElementById('chat-sidebar-backdrop'),
-        chatSidebarCloseBtn: document.getElementById('chat-sidebar-close-btn'),
         chatSidebarSearchInput: document.getElementById('chat-sidebar-search-input'),
         chatSidebarSearchClearBtn: document.getElementById('chat-sidebar-search-clear-btn'),
         chatSidebarScroll: document.getElementById('chat-sidebar-scroll'),
         chatSidebarStatus: document.getElementById('chat-sidebar-status'),
         chatSidebarList: document.getElementById('chat-sidebar-list'),
         chatSidebarLive: document.getElementById('chat-sidebar-live'),
-        chatSidebarAllHistoryBtn: document.getElementById('chat-sidebar-all-history-btn'),
-        historyScreen: document.getElementById('history-screen'),
+        chatSidebarSearchToggle: document.getElementById('chat-sidebar-search-toggle'),
+        chatSidebarSearchField: document.getElementById('chat-sidebar-search-field'),
+        chatSidebarHistoryMenuBtn: document.getElementById('chat-sidebar-history-menu-btn'),
         settingsScreen: document.getElementById('settings-screen'),
         chatTitle: document.getElementById('chat-title'),
         messageContainer: document.getElementById('message-container'),
@@ -683,48 +688,15 @@ try {
         sendButton: document.getElementById('send-button'),
         loadingIndicator: document.getElementById('loading-indicator'),
         generationStatusIndicator: document.getElementById('generation-status-indicator'),
-        historyList: document.getElementById('history-list'),
-        historyTitle: document.getElementById('history-title'),
-        noHistoryMessage: document.getElementById('no-history-message'),
-        historyItemTemplate: document.getElementById('history-item-template'),
         historyItemMenu: document.getElementById('history-item-menu'),
-        historyDetailPane: document.getElementById('history-detail-pane'),
-        historyDetailEmpty: document.getElementById('history-detail-empty'),
-        historyDetailContent: document.getElementById('history-detail-content'),
-        historyDetailTitle: document.getElementById('history-detail-title'),
-        historyDetailPinStatus: document.getElementById('history-detail-pin-status'),
-        historyDetailUpdated: document.getElementById('history-detail-updated'),
-        historyDetailCreated: document.getElementById('history-detail-created'),
-        historyDetailMessageCount: document.getElementById('history-detail-message-count'),
-        historyDetailSystemPrompt: document.getElementById('history-detail-system-prompt'),
-        historyDetailAttachments: document.getElementById('history-detail-attachments'),
-        historyDetailTokens: document.getElementById('history-detail-tokens'),
-        historyDetailAssets: document.getElementById('history-detail-assets'),
-        historyDetailSize: document.getElementById('history-detail-size'),
-        historyDetailFirstMessage: document.getElementById('history-detail-first-message'),
-        historyDetailLatestRole: document.getElementById('history-detail-latest-role'),
-        historyDetailLatestMessage: document.getElementById('history-detail-latest-message'),
-        historyDetailLive: document.getElementById('history-detail-live'),
-        historyMainContent: document.querySelector('#history-screen .history-main-content'),
-        historyStatus: document.getElementById('history-status'),
-        historyStatePanel: document.getElementById('history-state-panel'),
-        historyStateDescription: document.getElementById('history-state-description'),
-        historyStateAction: document.getElementById('history-state-action'),
-        historySearchInput: document.getElementById('history-search-input'),
-        historySearchClearBtn: document.getElementById('history-search-clear-btn'),
-        historyPinFilter: document.getElementById('history-pin-filter'),
-        historyPinFilterButtons: [...document.querySelectorAll('[data-history-pin-filter]')],
-        historySortOrderToolbar: document.getElementById('history-sort-order-toolbar'),
-        historyWorkspace: document.querySelector('#history-screen .history-workspace'),
-        historyToolbarStandard: [...document.querySelectorAll('#history-screen .history-toolbar-standard')],
         historyDeleteModeBtn: document.getElementById('history-delete-mode-btn'),
-        historyDeleteToolbar: document.getElementById('history-delete-toolbar'),
+        historyDeleteDialog: document.getElementById('history-delete-dialog'),
+        historyDeleteList: document.getElementById('history-delete-list'),
         historyDeleteSelectAll: document.getElementById('history-delete-select-all'),
-        historyDeleteSelectAllLabel: document.getElementById('history-delete-select-all-label'),
         historyDeleteCount: document.getElementById('history-delete-count'),
         historyDeleteCancelBtn: document.getElementById('history-delete-cancel-btn'),
         historyDeleteConfirmBtn: document.getElementById('history-delete-confirm-btn'),
-        historyDeleteLive: document.getElementById('history-delete-live'),
+        historyDeleteStatus: document.getElementById('history-delete-status'),
         themeColorMeta: document.getElementById('theme-color-meta'),
         systemPromptOpenBtn: document.getElementById('system-prompt-open-btn'),
         systemPromptDialog: document.getElementById('system-prompt-dialog'),
@@ -802,7 +774,6 @@ try {
         deleteBackgroundBtn: document.getElementById('delete-background-btn'),
         gotoHistoryBtn: document.getElementById('goto-history-btn'),
         gotoSettingsBtn: document.getElementById('goto-settings-btn'),
-        backToChatFromHistoryBtn: document.getElementById('back-to-chat-from-history'),
         backToChatFromSettingsBtn: document.getElementById('back-to-chat-from-settings'),
         newChatBtn: document.getElementById('new-chat-btn'),
         updateAppBtn: document.getElementById('update-app-btn'),
@@ -860,13 +831,11 @@ try {
         headerColorInput: document.getElementById('header-color-input'),
         headerTextColorModeSelect: document.getElementById('header-text-color-mode-select'),
         headerTextColorInput: document.getElementById('header-text-color-input'),
-        newChatButtonColorInput: document.getElementById('new-chat-button-color-input'),
         sendButtonColorInput: document.getElementById('send-button-color-input'),
         otherButtonColorInput: document.getElementById('other-button-color-input'),
         userMessageColorInput: document.getElementById('user-message-color-input'),
         resetHeaderColorBtn: document.getElementById('reset-header-color-btn'),
         resetHeaderTextColorBtn: document.getElementById('reset-header-text-color-btn'),
-        resetNewChatButtonColorBtn: document.getElementById('reset-new-chat-button-color-btn'),
         resetSendButtonColorBtn: document.getElementById('reset-send-button-color-btn'),
         resetOtherButtonColorBtn: document.getElementById('reset-other-button-color-btn'),
         resetUserMessageColorBtn: document.getElementById('reset-user-message-color-btn'),
@@ -1131,7 +1100,6 @@ const state = {
         headerColor: '',
         headerTextColorMode: DEFAULT_HEADER_TEXT_COLOR_MODE,
         headerTextColor: DEFAULT_HEADER_TEXT_COLOR,
-        newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR,
         sendButtonColor: DEFAULT_SEND_BUTTON_COLOR,
         otherButtonColor: DEFAULT_OTHER_BUTTON_COLOR,
         userMessageColor: DEFAULT_USER_MESSAGE_COLOR,
@@ -1796,6 +1764,8 @@ const dbUtils = {
                         }
                     });
                 }
+                if (event.oldVersion < 15) DocumentLibrary.upgrade(db);
+                if (event.oldVersion < 16) db.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
                 if (event.oldVersion === 0) {
                     transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
                 }
@@ -1913,6 +1883,7 @@ const dbUtils = {
         let chatDataToSave;
 
         const promptSave = options.systemPromptSave;
+        const documentIds = options.documentIds;
         if (!session && !chatObjectToSave && !promptSave && state.sendJobsV136.has(contextMessages)) {
             throw new DOMException('応答生成中は会話データを更新できません。', 'ChatContentConflict');
         }
@@ -1925,7 +1896,7 @@ const dbUtils = {
             const knownOwner = this.chatSaveOwners?.get(contextMessages);
             const systemPrompt = session ? session.systemPrompt : state.currentSystemPrompt;
             if (!promptSave && !contextChatId && !knownOwner?.id && !knownOwner?.pending
-                && !contextMessages?.length && !systemPrompt) return contextChatId;
+                && !contextMessages?.length && !systemPrompt && !documentIds?.length) return contextChatId;
 
             const placeholder = session?.placeholder;
             const snapshot = placeholder ? contextMessages.filter(message => message !== placeholder) : contextMessages;
@@ -1940,6 +1911,7 @@ const dbUtils = {
                 ...(msg.incomplete === true && { incomplete: true }),
                 continuation: msg.continuation || null,
                 thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
+                ...(msg.role === 'model' && window.DocumentRag?.normalize(msg.rag) && { rag: window.DocumentRag.normalize(msg.rag) }),
                 proofreadingModelInfo: msg.proofreadingModelInfo || null,
                 tool_calls: msg.tool_calls || null,
                 imageIds: msg.imageIds,
@@ -2006,7 +1978,8 @@ const dbUtils = {
             if (!chatObjectToSave && !targetChatId && owner.id) {
                 targetChatId = contextChatId = owner.id;
             }
-            if (!promptSave && !chatObjectToSave && !targetChatId && !chatDataToSave.messages.length && !chatDataToSave.systemPrompt) return null;
+            if (!promptSave && !chatObjectToSave && !targetChatId && !chatDataToSave.messages.length
+                && !chatDataToSave.systemPrompt && !documentIds?.length) return null;
             await SettingsV136.rememberHistoryContextsAsyncV136(chatDataToSave.messages, chatDataToSave.systemPrompt);
             await this.openDB();
             if (promptSave && (targetChatId || promptSave.profileSwitch || (!chatDataToSave.messages.length && !chatDataToSave.systemPrompt))) {
@@ -2023,11 +1996,14 @@ const dbUtils = {
 
             return new Promise((resolve, reject) => {
                 try {
-                    const transaction = state.db.transaction([CHATS_STORE, SETTINGS_STORE], 'readwrite');
+                    const scopes = [CHATS_STORE, SETTINGS_STORE];
+                    if (documentIds) scopes.push(DocumentLibrary.documents, DocumentLibrary.links);
+                    const transaction = state.db.transaction(scopes, 'readwrite');
                     const store = transaction.objectStore(CHATS_STORE);
                     const settingsStore = transaction.objectStore(SETTINGS_STORE);
                     const removed = settingsStore.get(SettingsV136.REMOVED_MODELS_KEY);
                     let savedSuccessfulExecution = null;
+                    let linkError;
                     const now = Date.now();
 
                     const processSave = (existingChatData = null) => {
@@ -2111,6 +2087,13 @@ const dbUtils = {
                             const savedId = event.target.result;
                             savedChatId = savedId;
                             savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt };
+                            if (documentIds) {
+                                DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode)
+                                    .catch(error => {
+                                        linkError = error;
+                                        try { transaction.abort(); } catch { /* already aborted */ }
+                                    });
+                            }
                         };
                         putRequest.onerror = (event) => {
                             console.error("チャット保存(put)エラー:", event.target.error);
@@ -2151,13 +2134,16 @@ const dbUtils = {
                         if (session) session.chatId = savedChatId;
                         try {
                             if (savedUiState && ownsContext()) {
-                                if (!contextChatId && savedChatId) state.currentChatId = contextChatId = savedChatId;
+                                if (!contextChatId && savedChatId) {
+                                    state.currentChatId = contextChatId = savedChatId;
+                                    if (documentIds) appLogic.flushInputDraft();
+                                }
                                 state.currentChatIsPinned = savedUiState.pinState.isPinned;
                                 state.currentChatPinnedAt = savedUiState.pinState.isPinned ? savedUiState.pinState.pinnedAt : null;
                                 state.currentChatPinStateUpdatedAt = savedUiState.pinState.pinStateUpdatedAt;
                                 uiUtils.updateChatTitle(savedUiState.title);
                             }
-                            if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush();
+                            if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush(documentIds ? true : 'message');
                             if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
                             if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
                             if (savedSuccessfulExecution) state.lastSuccessfulExecution = savedSuccessfulExecution;
@@ -2174,7 +2160,7 @@ const dbUtils = {
                         console.error("チャット保存トランザクション失敗:", event.target.error);
                         reject(new Error(`チャット保存トランザクション失敗: ${event.target.error.message}`));
                     };
-                    transaction.onabort = () => reject(transaction.error || new Error('チャット保存が中断されました。'));
+                    transaction.onabort = () => reject(linkError || transaction.error || new Error('チャット保存が中断されました。'));
 
                 } catch (error) {
                     console.error("チャット保存処理の開始に失敗:", error);
@@ -2191,6 +2177,79 @@ const dbUtils = {
             this.pendingChatSaves--;
             if (!chatObjectToSave) owner.pending--;
         }
+    },
+
+    async addLibraryDocument(file, options) {
+        const db = await this.openDB();
+        const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, null, file, options);
+        appLogic.markAsDirtyAndSchedulePush(true);
+        return entry;
+    },
+
+    async replaceLibraryDocument(id, file, options) {
+        if (id == null) throw new TypeError('ファイルIDを指定してください。');
+        const db = await this.openDB();
+        const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, id, file, options);
+        appLogic.markAsDirtyAndSchedulePush(true);
+        return entry;
+    },
+
+    async deleteLibraryDocument(id, options = {}) {
+        const db = await this.openDB();
+        const deleted = await DocumentLibrary.deleteDocument(db, SETTINGS_STORE, id, options);
+        if (deleted) appLogic.markAsDirtyAndSchedulePush(true);
+        return deleted;
+    },
+
+    async listLibraryDocuments() {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(DocumentLibrary.documents).getAll());
+    },
+
+    async getLibraryDocument(id) {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(DocumentLibrary.documents).get(id));
+    },
+
+    async getLibraryOriginal(id, version, expectedVersionId) {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [DocumentLibrary.documents, DocumentLibrary.originals], 'readonly', async tx => {
+            const selectedVersion = version ?? (await DocumentLibrary.request(tx.objectStore(DocumentLibrary.documents).get(id)))?.version;
+            if (selectedVersion == null) return undefined;
+            const original = await DocumentLibrary.request(tx.objectStore(DocumentLibrary.originals).get([id, selectedVersion]));
+            if (expectedVersionId == null || original?.versionId === expectedVersionId) return original;
+        });
+    },
+
+    getChatDocuments(chatId, expectedChat) {
+        const owner = expectedChat ? { store: CHATS_STORE, recordGenerationId: expectedChat.recordGenerationId } : null;
+        const read = db => DocumentLibrary.getChatDocuments(db, chatId, owner);
+        return state.db ? read(state.db) : this.openDB().then(read);
+    },
+
+    async setChatDocuments(chatId, documentIds, expectedChat, mode) {
+        const ids = DocumentLibrary.normalizeIds(documentIds);
+        if (state.chatDataChangesV136.has(undefined)) throw new Error('会話データを更新中です。');
+        const db = await this.openDB();
+        const names = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links];
+        const changed = await DocumentLibrary.transaction(db, names, 'readwrite', async tx => {
+            const chat = await DocumentLibrary.request(tx.objectStore(CHATS_STORE).get(chatId));
+            if (!chat || (expectedChat && SettingsV136.chatContentVersion(chat).recordGenerationId !== expectedChat.recordGenerationId)) {
+                throw new Error('チャットが変更または削除されました。');
+            }
+            return DocumentLibrary.replaceLinks(tx, SETTINGS_STORE, chatId, ids, mode);
+        });
+        if (changed) appLogic.markAsDirtyAndSchedulePush(true);
+        return chatId;
+    },
+
+    async getDocumentLibrarySyncState() {
+        return DocumentLibrary.syncState(await this.getSetting(DocumentLibrary.syncKey));
+    },
+
+    async hasChatDocumentLinks() {
+        await this.openDB();
+        return (await DocumentLibrary.request(this._getStore(DocumentLibrary.links).count())) > 0;
     },
 
     async _calculateChatStats(messages) {
@@ -2451,7 +2510,7 @@ const dbUtils = {
         return this.withChatDataChangeV136(id, () => this._deleteChat(id, options));
     },
 
-    async _deleteChat(id, { markDirty = true } = {}) {
+    async _deleteChat(id, { markDirty = true, expectedRecord = null } = {}) {
         await this.openDB();
         
         // Step 1: 削除対象のチャットから画像IDを収集
@@ -2475,14 +2534,13 @@ const dbUtils = {
         const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !String(id).startsWith('background_') && !activeImageIdsInOtherChats.has(id));
 
         // Step 3: トランザクション内でチャットと画像の削除を実行
-        return new Promise((resolve, reject) => {
-            const storeNames = [CHATS_STORE];
-            if (finalImageIdsToDelete.length > 0) {
-                storeNames.push(IMAGE_STORE);
-            }
-            
-            const transaction = state.db.transaction(storeNames, 'readwrite');
+        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links];
+        if (finalImageIdsToDelete.length > 0) storeNames.push(IMAGE_STORE);
+        const linksChanged = await DocumentLibrary.transaction(state.db, storeNames, 'readwrite', async transaction => {
             const chatStore = transaction.objectStore(CHATS_STORE);
+            if (expectedRecord && !this.matchesHistoryDeleteRecord(await DocumentLibrary.request(chatStore.get(id)), expectedRecord)) {
+                throw new Error('チャットが変更または削除されました。');
+            }
 
             // チャットを削除
             chatStore.delete(id);
@@ -2494,19 +2552,16 @@ const dbUtils = {
                 finalImageIdsToDelete.forEach(imgId => imageStore.delete(imgId));
             }
 
-            transaction.oncomplete = async () => {
-                console.log(`チャット削除完了 (ID: ${id})`);
-                state.chatTitleGenerations.get(String(id))?.abort();
-                if (markDirty) appLogic.markAsDirtyAndSchedulePush(true);
-                try { await appLogic.cleanupBackgroundAssetsV136(); }
-                catch (error) { console.warn('背景整理を次回へ延期しました:', error); }
-                resolve();
-            };
-            transaction.onerror = (event) => {
-                console.error(`チャット(ID:${id})の削除トランザクション中にエラー:`, event.target.error);
-                reject(`チャット ${id} 削除エラー: ${event.target.error}`);
-            };
+            return DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, id, []);
         });
+        state.chatTitleGenerations.get(String(id))?.abort();
+        if (markDirty || linksChanged) appLogic.markAsDirtyAndSchedulePush(true);
+        try { await appLogic.cleanupBackgroundAssetsV136(); }
+        catch (error) { console.warn('背景整理を次回へ延期しました:', error); }
+    },
+
+    matchesHistoryDeleteRecord(record, expected) {
+        return record && record.recordGenerationId === expected.recordGenerationId && record.createdAt === expected.createdAt;
     },
 
 
@@ -2540,6 +2595,7 @@ const dbUtils = {
             transaction.onerror = (event) => {
                 reject(`データクリアトランザクション失敗: ${event.target.error}`);
             };
+            transaction.onabort = () => reject(transaction.error || new Error('データ削除が中断されました。'));
 
             // 各ストアに対してクリア処理を実行
             storeNames.forEach(storeName => {
@@ -2775,21 +2831,28 @@ const dbUtils = {
     /**
      * [V2] メタデータを受け取り、アセットをDLしてからDBをクリア＆インポートする
      */
-     async clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, { automatic = false } = {}) {
+     async clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options = {}) {
+        const { automatic = false } = options;
         if (automatic && state.sendJobsV136.size) return null;
         return this.withChatDataChangeV136(undefined,
-            () => this._clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds));
+            () => this._clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options));
     },
 
-    async _clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds) {
+    async _clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options) {
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
         uiUtils.showProgressDialog('データベースを準備中...');
 
-        const { profiles, chats, memories, assets, settings } = data;
+        const { profiles, chats, memories, assets, settings, documentLibrary } = data;
+        if (documentLibrary && !options.originals) throw new Error('ファイル原本の検証が必要です。');
+        const linkedChatIds = new Set(documentLibrary?.links.map(link => link.chatId));
         const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => {
             const restored = applyNormalizedChatPinState(chat);
             delete restored.titleGenerationId;
             delete restored.titleGenerationEligible;
+            if (linkedChatIds.has(chat.id) && restored.titleSource === 'fallback' &&
+                !restored.messages?.some(message => message.role === 'user' && !message.isHidden)) {
+                restored.titleGenerationEligible = true;
+            }
             Object.assign(restored, SettingsV136.nextChatContentVersion());
             return restored;
         });
@@ -2852,119 +2915,93 @@ const dbUtils = {
             }
         });
         
-        const tempStoreNames = [
-            `${PROFILES_STORE}_temp`, `${CHATS_STORE}_temp`, `${SETTINGS_STORE}_temp`,
-            `${IMAGE_STORE}_temp`, 'image_assets_temp', 'memory_store_temp'
-        ];
-        const mainStoreNames = [
-            PROFILES_STORE, CHATS_STORE, SETTINGS_STORE,
-            IMAGE_STORE, 'image_assets', 'memory_store'
-        ];
-
-        const currentTokens = await dbUtils.getSetting('dropboxTokens');
-        const currentLocalUiSettings = await dbUtils.getSetting('localUiSettings');
-        const migrationBackup = await dbUtils.getSetting(SettingsV136.BACKUP_KEY);
-        const localUiSettingKeysForImport = new Set(['localUiSettings', SettingsV136.BACKUP_KEY, ...LOCAL_UI_SETTING_KEYS]);
-        const settingsForImport = (settings || []).filter(setting => !localUiSettingKeysForImport.has(setting.key));
-
-        try {
-            uiUtils.updateProgressMessage('データを一時領域にインポート中...');
-            const tempTx = state.db.transaction(tempStoreNames, 'readwrite');
-            const tempStores = {
-                'profiles_temp': profilesWithBlobs,
-                'chats_temp': normalizedChats,
-                'memory_store_temp': memories || [],
-                'image_assets_temp': assetsWithBlobs,
-                'image_store_temp': imagesWithBlobs,
-                'settings_temp': settingsForImport
-            };
-
-            const tempClearPromises = tempStoreNames.map(name => {
-                return new Promise((resolve, reject) => {
-                    const request = tempTx.objectStore(name).clear();
-                    request.onsuccess = resolve;
-                    request.onerror = () => reject(request.error);
-                });
-            });
-            await Promise.all(tempClearPromises);
-
-            for (const storeName in tempStores) {
-                const store = tempTx.objectStore(storeName);
-                (tempStores[storeName] || []).forEach(item => store.put(item));
-            }
-            
-            await new Promise((resolve, reject) => {
-                tempTx.oncomplete = resolve;
-                tempTx.onerror = () => reject(tempTx.error);
-            });
-            console.log("[DB Import V2] 一時ストアへのデータ書き込みが完了しました。");
-
-            uiUtils.updateProgressMessage('データベースを更新中...');
-            const mainTx = state.db.transaction([...mainStoreNames, ...tempStoreNames], 'readwrite');
-            
-            const mainClearPromises = mainStoreNames.map(name => {
-                return new Promise((resolve, reject) => {
-                    const request = mainTx.objectStore(name).clear();
-                    request.onsuccess = resolve;
-                    request.onerror = () => reject(request.error);
-                });
-            });
-            await Promise.all(mainClearPromises);
-
-            for (let i = 0; i < mainStoreNames.length; i++) {
-                const mainStore = mainTx.objectStore(mainStoreNames[i]);
-                const tempStore = mainTx.objectStore(tempStoreNames[i]);
-                const allTempItemsReq = tempStore.getAll();
-                allTempItemsReq.onsuccess = () => {
-                    allTempItemsReq.result.forEach(item => mainStore.put(item));
-                };
-            }
-            
-            const tempClearPromises2 = tempStoreNames.map(name => {
-                return new Promise((resolve, reject) => {
-                    const request = mainTx.objectStore(name).clear();
-                    request.onsuccess = resolve;
-                    request.onerror = () => reject(request.error);
-                });
-            });
-            await Promise.all(tempClearPromises2);
-
-            if (migrationBackup) mainTx.objectStore(SETTINGS_STORE).put(migrationBackup);
-            if (currentTokens) {
-                mainTx.objectStore(SETTINGS_STORE).put(currentTokens);
-            }
-            if (currentLocalUiSettings) {
-                mainTx.objectStore(SETTINGS_STORE).put(currentLocalUiSettings);
-            }
-
-            await new Promise((resolve, reject) => {
-                mainTx.oncomplete = resolve;
-                mainTx.onerror = () => reject(mainTx.error);
-            });
-            console.log("[DB Import V2] メインデータベースの更新が正常に完了しました。");
-            for (const controller of state.chatTitleGenerations.values()) controller.abort();
-            void chatListChangeController.notify({ type: 'restore' });
-
-            // 処理結果を返す
-            return { removedAssetInfo: missingAssetInfo };
-
-        } catch (error) {
-            console.error("[DB Import V2] 安全なインポート処理中にエラーが発生しました:", error);
-            try {
-                const cleanupTx = state.db.transaction(tempStoreNames, 'readwrite');
-                const cleanupPromises = tempStoreNames.map(name => {
-                    return new Promise((resolve, reject) => {
-                        const request = cleanupTx.objectStore(name).clear();
-                        request.onsuccess = resolve;
-                        request.onerror = () => reject(request.error);
-                    });
-                });
-                await Promise.all(cleanupPromises);
-            } catch (cleanupError) {
-                console.error("[DB Import V2] エラー後のクリーンアップに失敗:", cleanupError);
-            }
-            throw error;
+        const records = new Map([
+            [PROFILES_STORE, profilesWithBlobs],
+            [CHATS_STORE, normalizedChats],
+            ['memory_store', memories || []],
+            ['image_assets', assetsWithBlobs],
+            [IMAGE_STORE, imagesWithBlobs],
+            [SETTINGS_STORE, settings || []]
+        ]);
+        const localKeys = new Set(['dropboxTokens', 'localUiSettings', SettingsV136.BACKUP_KEY,
+            DocumentLibrary.syncKey, 'lastSyncId', 'lastSyncTimestamp', 'syncIsDirty', 'syncLastError']);
+        const excludedKeys = new Set([...localKeys, ...LOCAL_UI_SETTING_KEYS]);
+        records.set(SETTINGS_STORE, records.get(SETTINGS_STORE).filter(setting => !excludedKeys.has(setting.key)));
+        if (documentLibrary) {
+            records.set(DocumentLibrary.documents, documentLibrary.documents);
+            records.set(DocumentLibrary.originals, options.originals);
+            records.set(DocumentLibrary.links, documentLibrary.links);
         }
+
+        const names = new Set([...records.keys(), ...DocumentLibrary.stores]);
+        const db = await this.openDB();
+        const libraryPending = await DocumentLibrary.transaction(db,
+            [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore], 'readwrite', async tx => {
+                const read = DocumentLibrary.request;
+                const localSettings = tx.objectStore(SETTINGS_STORE);
+                const [preserved, linkCount] = await Promise.all([
+                    Promise.all([...localKeys].map(key => read(localSettings.get(key)))),
+                    read(tx.objectStore(DocumentLibrary.links).count())
+                ]);
+                const current = DocumentLibrary.syncState(preserved.find(setting => setting?.key === DocumentLibrary.syncKey));
+                const expected = options.libraryBefore;
+                if (expected && (current.revision !== expected.revision || current.syncedRevision !== expected.syncedRevision)) {
+                    throw new Error('復元の準備中にファイルが変更されました。再度お試しください。');
+                }
+                if (!documentLibrary && linkCount && options.source !== 'file') {
+                    throw new Error('同期データにファイルの紐づけが含まれていないため、現在のチャットを保持しました。手動同期から、この端末のデータでDropboxを更新できます。');
+                }
+                if (options.source === 'dropbox' && !documentLibrary && current.syncedRevision) {
+                    throw new Error('以前同期したファイル情報がDropboxに見つかりません。クラウドとこの端末のデータを確認してください。');
+                }
+                if (options.source === 'dropbox' && documentLibrary && !options.allowLibraryReplace &&
+                    current.revision !== current.syncedRevision && current.revision !== documentLibrary.revision) {
+                    throw new Error('未同期のファイル変更があります。バックアップを作成してから手動で同期してください。');
+                }
+                if (documentLibrary) await DocumentLibrary.discardChangedIndexes(tx, documentLibrary.documents);
+
+                uiUtils.updateProgressMessage('データを一時領域にインポート中...');
+                // Stage and promote in the same transaction so another tab cannot replace the staged snapshot.
+                await Promise.all([...names].map(name => read(tx.objectStore(name + '_temp').clear())));
+                for (const [name, items] of records) {
+                    const store = tx.objectStore(name + '_temp');
+                    for (const item of items) store.add(item);
+                }
+                const staged = await Promise.all([...records.keys()].map(name => read(tx.objectStore(name + '_temp').getAll())));
+
+                uiUtils.updateProgressMessage('データベースを更新中...');
+                for (const [i, name] of [...records.keys()].entries()) {
+                    const store = tx.objectStore(name);
+                    store.clear();
+                    for (const item of staged[i]) store.put(item);
+                    tx.objectStore(name + '_temp').clear();
+                }
+                if (!documentLibrary && linkCount) tx.objectStore(DocumentLibrary.links).clear();
+                for (const setting of preserved) {
+                    if (setting) localSettings.put(setting);
+                }
+                const next = { ...current };
+                if (options.source === 'dropbox' && documentLibrary) {
+                    next.revision = next.syncedRevision = documentLibrary.revision;
+                } else if (documentLibrary || linkCount) {
+                    next.revision = DocumentLibrary.uniqueId();
+                }
+                if (next.revision) localSettings.put({ key: DocumentLibrary.syncKey, value: next });
+                const pending = next.revision !== next.syncedRevision;
+                if (options.source === 'dropbox') {
+                    localSettings.put({ key: 'lastSyncId', value: options.syncId });
+                    localSettings.put({ key: 'lastSyncTimestamp', value: options.syncTimestamp });
+                    localSettings.put({ key: 'syncLastError', value: null });
+                    localSettings.put({ key: 'syncIsDirty', value: pending || state.sync.pendingPush });
+                } else if (options.source === 'file' || pending) {
+                    localSettings.put({ key: 'syncIsDirty', value: true });
+                }
+                return pending;
+            });
+
+        for (const controller of state.chatTitleGenerations.values()) controller.abort();
+        void chatListChangeController.notify({ type: 'restore' });
+        return { removedAssetInfo: missingAssetInfo, libraryPending };
     },
 };
 
@@ -3004,30 +3041,10 @@ const chatListChangeController = {
     }
 };
 
-// 履歴画面を往復する間だけ保持する一時状態。検索語とスクロール位置は永続化しない。
 const historyUiState = {
-    query: '',
-    sortOrder: 'updatedAt',
-    pinFilter: 'all',
-    scrollTop: 0,
-    renderGeneration: 0,
-    dataRevision: 0,
-    loadedRevision: -1,
-    pendingLoad: null,
-    renderedView: null,
-    renderedChatId: null,
-    cachedChats: [],
-    searchTimer: null,
     menuContext: null,
     menuActionPending: false,
-    menuPointerActive: false,
-    selectedChatId: null,
-    displayedChatIds: [],
-    chatRecordsById: new Map(),
-    deleteFallbackChatId: null,
-    deleteMode: false,
-    deleteSelection: new Set(),
-    deleteTargetIds: []
+    menuPointerActive: false
 };
 
 // 一覧データは一度の全件走査を共有し、常設開閉だけはlocalUiSettingsへ保存する。
@@ -4982,6 +4999,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     }
 
     const editArea = document.createElement('div');
+    if (role === 'model' && !isStreamingPlaceholder) {
+        const references = window.DocumentRag?.render(messageData);
+        if (references) messageDiv.appendChild(references);
+    }
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
 
@@ -5354,45 +5375,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
-    getHistoryScrollContainer() {
-        return elements.historyMainContent || elements.historyScreen;
-    },
-
-    captureHistoryScrollPosition() {
-        const container = this.getHistoryScrollContainer();
-        historyUiState.scrollTop = Math.max(0, container?.scrollTop || 0);
-        return historyUiState.scrollTop;
-    },
-
-    setHistoryStatePanel(type, { preserveList = false } = {}) {
-        const states = {
-            loading: { icon: 'progress_activity', title: '履歴を読み込んでいます', description: '', action: '', role: 'status' },
-            empty: { icon: 'forum', title: 'まだチャット履歴がありません', description: 'チャットを開始すると、ここに表示されます', action: '', role: 'status' },
-            noResults: { icon: 'search_off', title: '一致するチャットがありません', description: '検索語を変更してください', action: '検索をクリア', actionName: 'clear-search', role: 'status' },
-            pinnedEmpty: { icon: 'push_pin', title: 'ピン留めした履歴はありません', description: '三点メニューから、よく使う履歴をピン留めできます', action: '', role: 'status' },
-            pinnedNoResults: { icon: 'search_off', title: '一致するピン留め履歴がありません', description: '検索語を変更してください', action: '検索をクリア', actionName: 'clear-search', role: 'status' },
-            error: { icon: 'error', title: '履歴を読み込めませんでした', description: '時間をおいて、もう一度お試しください', action: '再試行', actionName: 'retry', role: 'alert' }
-        };
-        const config = states[type];
-        if (!config) return;
-        elements.historyList.classList.toggle('hidden', !preserveList);
-        elements.historyStatePanel.classList.remove('hidden');
-        elements.historyStatePanel.setAttribute('role', config.role);
-        elements.historyStatePanel.dataset.state = type;
-        elements.historyStatePanel.querySelector('.history-state-icon').textContent = config.icon;
-        elements.noHistoryMessage.textContent = config.title;
-        elements.historyStateDescription.textContent = config.description;
-        elements.historyStateAction.textContent = config.action;
-        elements.historyStateAction.dataset.historyStateAction = config.actionName || '';
-        elements.historyStateAction.classList.toggle('hidden', !config.action);
-    },
-
-    clearHistoryStatePanel() {
-        elements.historyStatePanel.classList.add('hidden');
-        elements.historyStatePanel.removeAttribute('role');
-        elements.historyList.classList.remove('hidden');
-    },
-
     normalizeHistoryText(value) {
         if (typeof value !== 'string' && typeof value !== 'number') return '';
         return String(value)
@@ -5462,7 +5444,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
         const sortOrder = HISTORY_SORT_OPTIONS.includes(sortOrderOverride)
             ? sortOrderOverride
-            : HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
+            : state.settings.historySortOrder || 'updatedAt';
         const groupTimestamp = this.getHistoryDateValue(chat, sortOrder);
         const pinState = normalizeChatPinState(chat);
         return {
@@ -5514,28 +5496,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    isHistoryDetailViewport() {
-        return window.matchMedia('(min-width: 1000px)').matches;
-    },
-
-    isHistoryDetailVisible() {
-        return this.isHistoryDetailViewport();
-    },
-
-    rebuildHistoryRecordMap() {
-        historyUiState.chatRecordsById = new Map(
-            historyUiState.cachedChats.map(chat => [String(chat.id), chat])
-        );
-    },
-
-    getHistoryRecord(chatId) {
-        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
-        return normalizedId === null ? null : historyUiState.chatRecordsById.get(String(normalizedId)) || null;
-    },
-
     getChatSidebarMode() {
-        if (!state.settings.enableWideMode || window.innerWidth < 900) return 'disabled';
-        return window.innerWidth >= 1200 ? 'permanent' : 'overlay';
+        return state.settings.enableWideMode && window.innerWidth >= 1200 ? 'permanent' : 'overlay';
     },
 
     getChatSidebarRecord(chatId) {
@@ -5543,35 +5505,33 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return normalizedId === null ? null : chatSidebarUiState.recordsById.get(String(normalizedId)) || null;
     },
 
+    syncChatWorkspaceInteractivity() {
+        const overlay = chatSidebarUiState.mode === 'overlay' && chatSidebarUiState.isOpen;
+        const library = elements.documentLibraryWorkspace;
+        elements.chatWorkspace.inert = overlay || !library.hidden;
+        library.inert = overlay;
+    },
+
     applyChatSidebarState({ restoreFocus = false } = {}) {
         const mode = chatSidebarUiState.mode;
         const isOpen = mode !== 'disabled' && chatSidebarUiState.isOpen;
-        const isOverlayOpen = mode === 'overlay' && isOpen;
         elements.chatScreen.classList.toggle('chat-sidebar-mode-permanent', mode === 'permanent');
         elements.chatScreen.classList.toggle('chat-sidebar-mode-overlay', mode === 'overlay');
         elements.chatScreen.classList.toggle('chat-sidebar-open', isOpen);
         elements.chatHistorySidebar.setAttribute('aria-hidden', String(!isOpen));
-        elements.chatSidebarCloseBtn?.setAttribute('aria-expanded', String(isOpen));
-        elements.chatSidebarCloseBtn?.setAttribute('aria-controls', 'chat-history-sidebar');
-        elements.chatSidebarCloseBtn?.setAttribute('aria-label', 'サイドバーを閉じる');
-        elements.chatSidebarBackdrop.hidden = !isOverlayOpen;
-        elements.chatWorkspace.inert = isOverlayOpen;
+        elements.chatHistorySidebar.inert = !isOpen;
+        elements.chatSidebarBackdrop.hidden = mode !== 'overlay' || !isOpen;
+        this.syncChatWorkspaceInteractivity();
         this.updateChatWorkspaceLayout();
 
-        const headerOpensSidebar = mode !== 'disabled';
-        elements.gotoHistoryBtn.classList.toggle('hidden', mode === 'permanent' && isOpen);
-        elements.gotoHistoryBtn.setAttribute('aria-label', headerOpensSidebar ? 'サイドバーを開く' : '履歴一覧へ');
-        elements.gotoHistoryBtn.title = headerOpensSidebar ? 'サイドバーを開く' : '履歴一覧へ';
-        if (headerOpensSidebar) {
-            elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
-            elements.gotoHistoryBtn.setAttribute('aria-controls', 'chat-history-sidebar');
-        } else {
-            elements.gotoHistoryBtn.removeAttribute('aria-expanded');
-            elements.gotoHistoryBtn.removeAttribute('aria-controls');
-        }
-
-        if (restoreFocus && mode === 'overlay' && !isOpen && elements.gotoHistoryBtn.isConnected) {
-            elements.gotoHistoryBtn.focus();
+        const label = isOpen ? 'サイドバーを閉じる' : 'サイドバーを開く';
+        elements.gotoHistoryBtn.setAttribute('aria-label', label);
+        elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
+        elements.gotoHistoryBtn.title = label;
+        if (restoreFocus && !isOpen) {
+            const trigger = elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
+                document.getElementById('document-library-back');
+            trigger.focus({ preventScroll: true });
         }
     },
 
@@ -5584,6 +5544,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
 
         this.closeHistoryItemMenu();
+        if (appLogic.swipeGesture?.sidebarDirection) appLogic.resetSwipeState();
         chatSidebarUiState.mode = nextMode;
         if (nextMode === 'permanent') {
             chatSidebarUiState.isOpen = state.localUiSettings.isPersistentChatSidebarOpen !== false;
@@ -5610,7 +5571,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (chatSidebarUiState.hasLoadedAll) this.renderChatSidebarModels();
         else void this.renderChatSidebar({ refreshRecent: true });
         if (chatSidebarUiState.mode === 'overlay') {
-            requestAnimationFrame(() => elements.chatSidebarCloseBtn?.focus());
+            requestAnimationFrame(() => {
+                if (chatSidebarUiState.isOpen && state.currentScreen === 'chat' && !document.querySelector('dialog[open]')) {
+                    elements.newChatBtn.focus({ preventScroll: true });
+                }
+            });
         }
         return true;
     },
@@ -5697,23 +5662,26 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     closeChatSidebar({ restoreFocus = false } = {}) {
+        if (appLogic.swipeGesture?.sidebarDrag) appLogic.resetSwipeState();
         if (!chatSidebarUiState.isOpen) {
             this.applyChatSidebarState();
             return;
         }
         if (historyUiState.menuContext?.source === 'sidebar') this.closeHistoryItemMenu();
-        const wasOverlay = chatSidebarUiState.mode === 'overlay';
         chatSidebarUiState.isOpen = false;
         if (chatSidebarUiState.mode === 'permanent') {
             void appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', false)
                 .catch(error => console.error('[Chat Sidebar] 常設サイドバー状態の保存に失敗しました:', error));
         }
-        this.applyChatSidebarState({ restoreFocus: restoreFocus && wasOverlay });
+        this.applyChatSidebarState({ restoreFocus });
     },
 
     syncChatSidebarCurrentSelection() {
+        const libraryVisible = !elements.documentLibraryWorkspace.hidden;
+        if (libraryVisible) elements.documentLibraryOpen.setAttribute('aria-current', 'page');
+        else elements.documentLibraryOpen.removeAttribute('aria-current');
         elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item').forEach(item => {
-            const isCurrent = String(item.dataset.chatId) === String(state.currentChatId ?? '');
+            const isCurrent = !libraryVisible && String(item.dataset.chatId) === String(state.currentChatId ?? '');
             if (isCurrent) item.setAttribute('aria-current', 'page');
             else item.removeAttribute('aria-current');
         });
@@ -5743,7 +5711,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         item.className = 'chat-sidebar-item';
         item.dataset.chatId = model.id;
         item.setAttribute('role', 'listitem');
-        if (model.isCurrent) item.setAttribute('aria-current', 'page');
+        if (model.isCurrent && elements.documentLibraryWorkspace.hidden) item.setAttribute('aria-current', 'page');
 
         const openButton = document.createElement('button');
         openButton.type = 'button';
@@ -5797,28 +5765,22 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
+        const sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         const allModels = chatSidebarUiState.allChats
-            .map(chat => this.createHistoryDisplayModel(chat, query, 'updatedAt'))
+            .map(chat => this.createHistoryDisplayModel(chat, query, sortOrder))
             .filter(Boolean);
-        const compareIds = (left, right) => String(left.id ?? '').localeCompare(String(right.id ?? ''), 'ja', { numeric: true });
-        const pinnedModels = allModels.filter(model => model.isPinned).sort((left, right) =>
-            ((right.effectivePinnedAt || 0) - (left.effectivePinnedAt || 0))
-            || ((right.updatedAt || 0) - (left.updatedAt || 0))
-            || compareIds(left, right)
-        );
-        const unpinnedModels = allModels.filter(model => !model.isPinned).sort((left, right) =>
-            ((right.updatedAt || 0) - (left.updatedAt || 0)) || compareIds(left, right)
-        );
-        const models = query ? [...pinnedModels, ...unpinnedModels] : [...pinnedModels, ...unpinnedModels.slice(0, 30)];
+        const pinnedModels = this.sortPinnedHistoryDisplayModels(allModels.filter(model => model.isPinned), sortOrder);
+        const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model => !model.isPinned), sortOrder);
+        const models = [...pinnedModels, ...unpinnedModels];
         chatSidebarUiState.recordsById = new Map(chatSidebarUiState.allChats.map(chat => [String(chat.id), chat]));
         elements.chatSidebarList.replaceChildren();
         elements.chatSidebarStatus.textContent = '';
 
         if (models.length === 0) {
-            elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : '最近のチャットはありません';
-        } else if (query) {
+            elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : 'チャット履歴はありません';
+        } else if (query || sortOrder === 'title') {
             const fragment = document.createDocumentFragment();
-            models.forEach(model => fragment.appendChild(this.createChatSidebarItem(model, { isSearch: true })));
+            models.forEach(model => fragment.appendChild(this.createChatSidebarItem(model, { isSearch: Boolean(query) })));
             elements.chatSidebarList.appendChild(fragment);
         } else {
             const labels = {
@@ -5839,12 +5801,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             };
             appendGroup('ピン留め', pinnedModels);
             ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
-                appendGroup(labels[groupKey], unpinnedModels.slice(0, 30).filter(model => model.groupKey === groupKey));
+                appendGroup(labels[groupKey], unpinnedModels.filter(model => model.groupKey === groupKey));
             });
         }
         elements.chatSidebarLive.textContent = query
             ? `検索結果 ${models.length}件`
-            : `ピン留め ${pinnedModels.length}件、最近のチャット ${unpinnedModels.slice(0, 30).length}件`;
+            : `ピン留め ${pinnedModels.length}件、チャット ${unpinnedModels.length}件`;
     },
 
     async renderChatSidebar({ refreshRecent = false, invalidateSearch = false } = {}) {
@@ -5881,491 +5843,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }, delay);
     },
 
-    createHistoryDetailSnippet(text, maxLength = 280) {
-        const normalizedText = this.normalizeHistoryText(text);
-        if (!normalizedText) return '';
-        return normalizedText.length > maxLength ? `${normalizedText.slice(0, maxLength - 1)}…` : normalizedText;
-    },
-
-    createHistoryDetailModel(chat) {
-        if (!chat) return null;
-        const visibleMessages = this.getHistoryVisibleTextMessages(chat.messages);
-        const firstUserMessage = visibleMessages.find(message => message.role === 'user') || null;
-        const latestMessage = visibleMessages[visibleMessages.length - 1] || null;
-        const hasAttachments = Array.isArray(chat.messages)
-            ? chat.messages.some(message => Array.isArray(message?.attachments) && message.attachments.length > 0)
-            : null;
-        const stats = chat.stats && typeof chat.stats === 'object' ? chat.stats : null;
-        const pinState = normalizeChatPinState(chat);
-        return {
-            id: chat.id,
-            title: this.normalizeChatTitleText(chat.title, `履歴 ${chat.id ?? ''}`) || `履歴 ${chat.id ?? ''}`,
-            createdAt: Number(chat.createdAt) || null,
-            updatedAt: Number(chat.updatedAt) || null,
-            messageCount: visibleMessages.length,
-            hasSystemPrompt: Boolean(String(chat.systemPrompt || '').trim()),
-            attachmentsLabel: hasAttachments === null ? '不明' : hasAttachments ? 'あり' : 'なし',
-            totalTokens: stats ? Number(stats.totalTokens || 0).toLocaleString() : '—',
-            assetCount: stats ? Number(stats.assetCount || 0).toLocaleString() : '—',
-            totalAssetSize: stats ? formatFileSize(Number(stats.totalAssetSize || 0)) : '—',
-            firstUserMessage: this.createHistoryDetailSnippet(firstUserMessage?.historyText || ''),
-            latestRole: latestMessage?.role === 'user' ? '最新のユーザー' : latestMessage?.role === 'model' ? '最新のモデル' : '',
-            latestMessage: this.createHistoryDetailSnippet(latestMessage?.historyText || ''),
-            isPinned: pinState.isPinned
-        };
-    },
-
-    setHistoryDetailEmpty() {
-        elements.historyDetailEmpty?.classList.remove('hidden');
-        elements.historyDetailContent?.classList.add('hidden');
-        elements.historyDetailPinStatus?.classList.add('hidden');
-        elements.historyDetailPane?.querySelectorAll('[data-history-detail-action]').forEach(button => {
-            delete button.dataset.chatId;
-        });
-    },
-
-    renderHistoryDetail({ announce = false } = {}) {
-        if (!this.isHistoryDetailVisible()) return;
-        const detail = this.createHistoryDetailModel(this.getHistoryRecord(historyUiState.selectedChatId));
-        if (!detail) {
-            this.setHistoryDetailEmpty();
-            if (announce && elements.historyDetailLive) elements.historyDetailLive.textContent = '詳細表示するチャットがありません';
-            return;
-        }
-        elements.historyDetailEmpty.classList.add('hidden');
-        elements.historyDetailContent.classList.remove('hidden');
-        elements.historyDetailTitle.textContent = detail.title;
-        elements.historyDetailPinStatus?.classList.toggle('hidden', !detail.isPinned);
-        elements.historyDetailUpdated.textContent = this.formatDate(detail.updatedAt) || '日時不明';
-        elements.historyDetailCreated.textContent = this.formatDate(detail.createdAt) || '日時不明';
-        elements.historyDetailMessageCount.textContent = `${detail.messageCount.toLocaleString()}件`;
-        elements.historyDetailSystemPrompt.textContent = detail.hasSystemPrompt ? 'あり' : 'なし';
-        elements.historyDetailAttachments.textContent = detail.attachmentsLabel;
-        elements.historyDetailTokens.textContent = `${detail.totalTokens} tokens`;
-        elements.historyDetailAssets.textContent = `${detail.assetCount} assets`;
-        elements.historyDetailSize.textContent = detail.totalAssetSize;
-        elements.historyDetailFirstMessage.textContent = detail.firstUserMessage || '表示できるユーザーメッセージはありません';
-        elements.historyDetailLatestRole.textContent = detail.latestRole;
-        elements.historyDetailLatestMessage.textContent = detail.latestMessage || '表示できるメッセージはありません';
-        elements.historyDetailPane.querySelectorAll('[data-history-detail-action]').forEach(button => {
-            button.dataset.chatId = detail.id;
-        });
-        const menuButton = elements.historyDetailPane.querySelector('.history-detail-menu-button');
-        menuButton?.setAttribute('aria-label', `「${detail.title}」のその他の操作`);
-        if (announce && elements.historyDetailLive) elements.historyDetailLive.textContent = `「${detail.title}」の詳細を表示しました`;
-    },
-
-    updateHistorySelectionRows(chatIds = null) {
-        const isWide = this.isHistoryDetailVisible();
-        const targetIds = Array.isArray(chatIds) ? new Set(chatIds.filter(id => id !== null).map(String)) : null;
-        elements.historyList.querySelectorAll('.history-item').forEach(item => {
-            if (targetIds && !targetIds.has(String(item.dataset.chatId))) return;
-            const isSelected = isWide && String(item.dataset.chatId) === String(historyUiState.selectedChatId);
-            item.classList.toggle('is-selected', isSelected);
-            if (isWide) item.setAttribute('aria-selected', String(isSelected));
-            else item.removeAttribute('aria-selected');
-            item.setAttribute('role', isWide ? 'option' : 'listitem');
-            const openButton = item.querySelector('.history-item-open');
-            const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
-            openButton?.setAttribute('aria-label', historyUiState.deleteMode
-                ? `「${title}」の削除選択を切り替え`
-                : `「${title}」を開く`);
-        });
-        if (!targetIds) {
-            elements.historyList.querySelectorAll('.history-group-list').forEach(list => {
-                list.setAttribute('role', isWide ? 'listbox' : 'list');
-            });
-        }
-    },
-
-    selectHistoryChat(chatId, { announce = true } = {}) {
-        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
-        if (normalizedId === null || !historyUiState.displayedChatIds.some(id => String(id) === String(normalizedId))) return false;
-        if (String(historyUiState.selectedChatId) === String(normalizedId)) return false;
-        const previousId = historyUiState.selectedChatId;
-        historyUiState.selectedChatId = normalizedId;
-        this.updateHistorySelectionRows([previousId, normalizedId]);
-        this.renderHistoryDetail({ announce });
-        return true;
-    },
-
-    reconcileHistorySelection(models, { updateRows = true } = {}) {
-        historyUiState.displayedChatIds = models.map(model => model.id);
-        const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
-        let nextSelected = contains(historyUiState.selectedChatId) ? historyUiState.selectedChatId : null;
-        if (nextSelected === null && contains(historyUiState.deleteFallbackChatId)) nextSelected = historyUiState.deleteFallbackChatId;
-        if (nextSelected === null && contains(state.currentChatId)) nextSelected = state.currentChatId;
-        if (nextSelected === null) nextSelected = historyUiState.displayedChatIds[0] ?? null;
-        historyUiState.selectedChatId = nextSelected;
-        historyUiState.deleteFallbackChatId = null;
-        if (updateRows) this.updateHistorySelectionRows();
-        this.renderHistoryDetail();
-        if (historyUiState.deleteMode) this.updateHistoryDeleteControls();
-    },
-
-    getHistoryDeleteFallback(chatId) {
-        if (String(historyUiState.selectedChatId) !== String(chatId)) return null;
-        const index = historyUiState.displayedChatIds.findIndex(id => String(id) === String(chatId));
-        if (index < 0) return null;
-        return historyUiState.displayedChatIds[index + 1] ?? historyUiState.displayedChatIds[index - 1] ?? null;
-    },
-
-    getHistoryDeleteManyFallback(chatIds) {
-        const deletedIds = new Set(chatIds.map(String));
-        const selectedIndex = historyUiState.displayedChatIds.findIndex(id => String(id) === String(historyUiState.selectedChatId));
-        if (selectedIndex < 0) {
-            if (historyUiState.displayedChatIds.some(id => String(id) === String(historyUiState.deleteFallbackChatId))
-                && !deletedIds.has(String(historyUiState.deleteFallbackChatId))) {
-                return historyUiState.deleteFallbackChatId;
-            }
-            return historyUiState.displayedChatIds.find(id => !deletedIds.has(String(id))) ?? null;
-        }
-        if (!deletedIds.has(String(historyUiState.selectedChatId))) return historyUiState.selectedChatId;
-        for (let index = selectedIndex + 1; index < historyUiState.displayedChatIds.length; index++) {
-            if (!deletedIds.has(String(historyUiState.displayedChatIds[index]))) return historyUiState.displayedChatIds[index];
-        }
-        for (let index = selectedIndex - 1; index >= 0; index--) {
-            if (!deletedIds.has(String(historyUiState.displayedChatIds[index]))) return historyUiState.displayedChatIds[index];
-        }
-        return null;
-    },
-
-    getActiveHistoryDeleteTargetIds() {
-        const displayedIds = new Set(historyUiState.displayedChatIds.map(String));
-        return historyUiState.deleteTargetIds.filter(id => displayedIds.has(String(id)));
-    },
-
-    updateHistoryDeleteControls() {
-        const targetIds = this.getActiveHistoryDeleteTargetIds();
-        const selectedIds = targetIds.filter(id => historyUiState.deleteSelection.has(String(id)));
-        const selectedCount = selectedIds.length;
-        const targetCount = targetIds.length;
-        if (elements.historyDeleteSelectAll) {
-            elements.historyDeleteSelectAll.checked = targetCount > 0 && selectedCount === targetCount;
-            elements.historyDeleteSelectAll.indeterminate = selectedCount > 0 && selectedCount < targetCount;
-            elements.historyDeleteSelectAll.disabled = targetCount === 0;
-        }
-        if (elements.historyDeleteCount) elements.historyDeleteCount.textContent = `選択中 ${selectedCount}件`;
-        if (elements.historyDeleteConfirmBtn) elements.historyDeleteConfirmBtn.disabled = selectedCount === 0;
-        elements.historyList.querySelectorAll('.history-item').forEach(item => {
-            const checkbox = item.querySelector('.history-delete-checkbox');
-            if (checkbox) checkbox.checked = historyUiState.deleteSelection.has(String(item.dataset.chatId));
-        });
-    },
-
-    setHistoryDeleteSelection(chatId, selected) {
-        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
-        if (!historyUiState.deleteMode || normalizedId === null) return;
-        const idKey = String(normalizedId);
-        if (!this.getActiveHistoryDeleteTargetIds().some(id => String(id) === idKey)) return;
-        if (selected) historyUiState.deleteSelection.add(idKey);
-        else historyUiState.deleteSelection.delete(idKey);
-        const item = [...elements.historyList.querySelectorAll('.history-item')]
-            .find(candidate => String(candidate.dataset.chatId) === idKey);
-        const checkbox = item?.querySelector('.history-delete-checkbox');
-        if (checkbox) checkbox.checked = selected;
-        this.updateHistoryDeleteControls();
-    },
-
-    applyHistoryDeleteModeUi({ announce = '' } = {}) {
-        elements.historyWorkspace?.classList.toggle('is-delete-mode', historyUiState.deleteMode);
-        elements.historyToolbarStandard?.forEach(toolbar => toolbar.classList.toggle('hidden', historyUiState.deleteMode));
-        elements.historyDeleteToolbar?.classList.toggle('hidden', !historyUiState.deleteMode);
-        if (elements.historySearchInput) elements.historySearchInput.disabled = historyUiState.deleteMode;
-        if (elements.historySearchClearBtn) elements.historySearchClearBtn.disabled = historyUiState.deleteMode;
-        if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.disabled = historyUiState.deleteMode;
-        elements.historyPinFilterButtons?.forEach(button => { button.disabled = historyUiState.deleteMode; });
-        elements.historyDetailPane?.querySelectorAll('[data-history-detail-action]').forEach(button => {
-            button.disabled = historyUiState.deleteMode;
-            button.setAttribute('aria-disabled', String(historyUiState.deleteMode));
-        });
-        elements.historyList.querySelectorAll('.history-item').forEach(item => {
-            const title = item.querySelector('.history-item-title')?.textContent || 'チャット';
-            const checkboxControl = item.querySelector('.history-delete-checkbox-control');
-            const checkbox = item.querySelector('.history-delete-checkbox');
-            const menuButton = item.querySelector('.history-item-menu-button');
-            checkboxControl?.classList.toggle('hidden', !historyUiState.deleteMode);
-            menuButton?.classList.toggle('hidden', historyUiState.deleteMode);
-            item.classList.toggle('is-delete-mode', historyUiState.deleteMode);
-            if (checkbox) checkbox.setAttribute('aria-label', `「${title}」を削除対象に選択`);
-        });
-        this.updateHistorySelectionRows();
-        this.updateHistoryDeleteControls();
-        if (announce && elements.historyDeleteLive) elements.historyDeleteLive.textContent = announce;
-    },
-
-    enterHistoryDeleteMode() {
-        if (historyUiState.deleteMode || historyUiState.displayedChatIds.length === 0) return false;
-        this.captureHistoryScrollPosition();
-        this.closeHistoryItemMenu();
-        historyUiState.deleteMode = true;
-        historyUiState.deleteSelection.clear();
-        historyUiState.deleteTargetIds = [...historyUiState.displayedChatIds];
-        if (elements.historyDeleteSelectAllLabel) {
-            elements.historyDeleteSelectAllLabel.textContent = historyUiState.query ? '検索結果を全選択' : '全選択';
-        }
-        this.applyHistoryDeleteModeUi({ announce: '履歴削除モードを開始しました' });
-        elements.historyDeleteSelectAll?.focus();
-        return true;
-    },
-
-    exitHistoryDeleteMode({ announce = true, restoreSelection = true } = {}) {
-        if (!historyUiState.deleteMode) return;
-        historyUiState.deleteMode = false;
-        historyUiState.deleteSelection.clear();
-        historyUiState.deleteTargetIds = [];
-        const contains = chatId => historyUiState.displayedChatIds.some(id => String(id) === String(chatId));
-        if (restoreSelection && !contains(historyUiState.selectedChatId)) {
-            historyUiState.selectedChatId = contains(historyUiState.deleteFallbackChatId)
-                ? historyUiState.deleteFallbackChatId
-                : contains(state.currentChatId) ? state.currentChatId : historyUiState.displayedChatIds[0] ?? null;
-        }
-        historyUiState.deleteFallbackChatId = null;
-        this.applyHistoryDeleteModeUi({ announce: announce ? '履歴削除モードを終了しました' : '' });
-        this.renderHistoryDetail();
-        if (restoreSelection) void this.renderHistoryList({ refresh: false });
-    },
-
-    focusHistorySelection() {
-        const selectedItem = [...elements.historyList.querySelectorAll('.history-item')]
-            .find(item => String(item.dataset.chatId) === String(historyUiState.selectedChatId));
-        if (selectedItem) {
-            selectedItem.querySelector('.history-item-open')?.focus();
-            return;
-        }
-        if (this.isHistoryDetailVisible()) {
-            elements.historyDetailPane.querySelector('[data-history-detail-action="open"]')?.focus();
-        }
-    },
-
-    handleHistoryDetailViewportChange() {
-        if (state.currentScreen !== 'history') return;
-        const models = historyUiState.displayedChatIds
-            .filter(id => this.getHistoryRecord(id))
-            .map(id => ({ id }));
-        this.reconcileHistorySelection(models);
-    },
-
-    createHistoryItemElement(model, deleteMode) {
-        const item = elements.historyItemTemplate.content.firstElementChild.cloneNode(true);
-        item.dataset.chatId = model.id;
-        item.classList.toggle('is-current', model.isCurrent);
-        if (model.isCurrent) item.setAttribute('aria-current', 'page');
-        item.classList.toggle('is-delete-mode', deleteMode);
-        const isSelected = this.isHistoryDetailVisible() && String(historyUiState.selectedChatId) === String(model.id);
-        item.classList.toggle('is-selected', isSelected);
-        if (this.isHistoryDetailVisible()) item.setAttribute('aria-selected', String(isSelected));
-        item.setAttribute('role', this.isHistoryDetailVisible() ? 'option' : 'listitem');
-
-        const titleElement = item.querySelector('.history-item-title');
-        titleElement.textContent = '';
-        if (model.isPinned) {
-            const pinIcon = document.createElement('span');
-            pinIcon.className = 'material-symbols-outlined chat-pin-icon';
-            pinIcon.setAttribute('aria-hidden', 'true');
-            pinIcon.textContent = 'push_pin';
-            titleElement.appendChild(pinIcon);
-        }
-        titleElement.append(document.createTextNode(model.title));
-        titleElement.title = model.title;
-        const deleteControl = item.querySelector('.history-delete-checkbox-control');
-        const deleteCheckbox = item.querySelector('.history-delete-checkbox');
-        deleteControl.classList.toggle('hidden', !deleteMode);
-        deleteCheckbox.checked = historyUiState.deleteSelection.has(String(model.id));
-        deleteCheckbox.dataset.chatId = model.id;
-        deleteCheckbox.setAttribute('aria-label', `「${model.title}」を削除対象に選択`);
-        item.querySelector('.updated-date').textContent = `更新 ${this.formatDate(model.updatedAt) || '日時不明'}`;
-        item.querySelector('.created-date').textContent = `作成 ${this.formatDate(model.createdAt) || '日時不明'}`;
-        const openButton = item.querySelector('.history-item-open');
-        openButton.setAttribute('aria-label', deleteMode
-            ? `「${model.title}」の削除選択を切り替え`
-            : `「${model.title}」を開く`);
-        if (model.snippet) {
-            const snippetElement = document.createElement('span');
-            snippetElement.className = 'history-item-snippet';
-            snippetElement.textContent = model.snippet;
-            openButton.appendChild(snippetElement);
-        }
-        const menuButton = item.querySelector('.history-item-menu-button');
-        menuButton.setAttribute('aria-label', `「${model.title}」の操作メニュー`);
-        menuButton.classList.toggle('hidden', deleteMode);
-        item.querySelectorAll('[data-history-action]').forEach(button => {
-            button.dataset.chatId = model.id;
-        });
-        return item;
-    },
-
-    syncHistoryCurrentChat() {
-        const id = state.currentChatId;
-        if (id === historyUiState.renderedChatId) return;
-        const previous = elements.historyList.querySelector('.history-item.is-current');
-        previous?.classList.remove('is-current');
-        previous?.removeAttribute('aria-current');
-        if (id != null) {
-            const current = elements.historyList.querySelector(`.history-item[data-chat-id="${CSS.escape(String(id))}"]`);
-            current?.classList.add('is-current');
-            current?.setAttribute('aria-current', 'page');
-        }
-        historyUiState.renderedChatId = id;
-    },
-
-    async renderHistoryDisplayModels(generation, { preserveScroll }) {
-        if (!elements.historyScreen.classList.contains('active')) return;
-        this.closeHistoryItemMenu();
-        const query = this.normalizeHistoryText(historyUiState.query);
-        const sortOrder = HISTORY_SORT_OPTIONS.includes(historyUiState.sortOrder) ? historyUiState.sortOrder : 'updatedAt';
-        const pinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(historyUiState.pinFilter) ? historyUiState.pinFilter : 'all';
-        const filterChats = pinFilter === 'pinned'
-            ? historyUiState.cachedChats.filter(chat => normalizeChatPinState(chat).isPinned)
-            : historyUiState.cachedChats;
-        const sortedModels = this.sortHistoryDisplayModels(
-            filterChats.map(chat => this.createHistoryDisplayModel(chat, query)).filter(Boolean),
-            sortOrder
-        );
-        const { deleteMode, deleteTargetIds } = historyUiState;
-        const targetIds = new Set(deleteTargetIds.map(String));
-        const models = deleteMode
-            ? sortedModels.filter(model => targetIds.has(String(model.id)))
-            : sortedModels;
-        const currentChatId = state.currentChatId;
-        const rows = document.createDocumentFragment();
-        const groupLabels = {
-            today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
-        };
-        const groups = new Map();
-        const pinnedModels = this.sortPinnedHistoryDisplayModels(models.filter(model => model.isPinned), sortOrder);
-        const unpinnedModels = models.filter(model => !model.isPinned);
-        const groupDescriptors = [];
-        if (pinnedModels.length > 0) groupDescriptors.push(['pinned', 'ピン留め', pinnedModels]);
-        if (pinFilter !== 'pinned' && unpinnedModels.length > 0) {
-            if (query) {
-                groupDescriptors.push(['search', `検索結果 ${unpinnedModels.length}件`, unpinnedModels]);
-            } else if (sortOrder === 'title') {
-                groupDescriptors.push(['title', 'タイトル順', unpinnedModels]);
-            } else {
-                Object.entries(groupLabels).forEach(([key, label]) => {
-                    groupDescriptors.push([key, label, unpinnedModels.filter(model => model.groupKey === key)]);
-                });
-            }
-        }
-
-        groupDescriptors.forEach(([key, label, groupModels]) => {
-            if (groupModels.length === 0) return;
-            const groupItem = document.createElement('li');
-            groupItem.className = 'history-group';
-            const heading = document.createElement('h2');
-            heading.className = 'history-group-title';
-            heading.textContent = label;
-            const list = document.createElement('ul');
-            list.className = 'history-group-list';
-            list.setAttribute('role', this.isHistoryDetailVisible() ? 'listbox' : 'list');
-            groupItem.append(heading, list);
-            rows.appendChild(groupItem);
-            groups.set(key, { list, models: groupModels });
-        });
-
-        const descriptors = [];
-        groups.forEach((group, groupKey) => group.models.forEach(model => descriptors.push({ groupKey, model })));
-        for (let index = 0; index < descriptors.length; index += HISTORY_RENDER_CHUNK_SIZE) {
-            if (generation !== historyUiState.renderGeneration) return;
-            const fragments = new Map();
-            descriptors.slice(index, index + HISTORY_RENDER_CHUNK_SIZE).forEach(({ groupKey, model }) => {
-                if (!fragments.has(groupKey)) fragments.set(groupKey, document.createDocumentFragment());
-                fragments.get(groupKey).appendChild(this.createHistoryItemElement(model, deleteMode));
-            });
-            fragments.forEach((fragment, groupKey) => groups.get(groupKey).list.appendChild(fragment));
-            if (index + HISTORY_RENDER_CHUNK_SIZE < descriptors.length) {
-                await new Promise(resolve => requestAnimationFrame(resolve));
-                if (!elements.historyScreen.classList.contains('active')) return;
-            }
-        }
-        // Keep the previous list and its records together until the new rows are ready.
-        if (deleteTargetIds !== historyUiState.deleteTargetIds) {
-            return this.renderHistoryList({ refresh: false, preserveScroll });
-        }
-        const scrollTop = preserveScroll ? historyUiState.scrollTop : 0;
-        this.closeHistoryItemMenu();
-        this.rebuildHistoryRecordMap();
-        elements.historyList.replaceChildren(rows);
-        historyUiState.renderedChatId = currentChatId;
-        this.syncHistoryCurrentChat();
-        this.clearHistoryStatePanel();
-        this.reconcileHistorySelection(models);
-        if (elements.historyDeleteModeBtn) elements.historyDeleteModeBtn.disabled = models.length === 0;
-        if (historyUiState.cachedChats.length === 0) {
-            elements.historyStatus.textContent = '';
-            this.setHistoryStatePanel('empty');
-        } else if (models.length === 0) {
-            elements.historyStatus.textContent = query ? '検索結果 0件' : '';
-            this.setHistoryStatePanel(pinFilter === 'pinned'
-                ? query ? 'pinnedNoResults' : 'pinnedEmpty'
-                : 'noResults');
-        } else {
-            elements.historyStatus.textContent = query ? `検索結果 ${models.length}件` : `${models.length}件のチャット`;
-            if (historyUiState.deleteMode) this.applyHistoryDeleteModeUi();
-        }
-        const container = this.getHistoryScrollContainer();
-        container.scrollTop = scrollTop;
-        historyUiState.scrollTop = container.scrollTop;
-    },
-
-    async renderHistoryList({ refresh = true, preserveScroll = true, resetScroll = false } = {}) {
-        if (!elements.historyScreen.classList.contains('active')) return;
-        const generation = ++historyUiState.renderGeneration;
-        if (refresh) historyUiState.dataRevision++;
-        historyUiState.sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
-        historyUiState.pinFilter = HISTORY_PIN_FILTER_OPTIONS.includes(state.localUiSettings.historyPinFilter)
-            ? state.localUiSettings.historyPinFilter
-            : 'all';
-        if (elements.historySearchInput) elements.historySearchInput.value = historyUiState.query;
-        if (elements.historySearchClearBtn) elements.historySearchClearBtn.classList.toggle('hidden', !historyUiState.query);
-        if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = historyUiState.sortOrder;
-        elements.historyPinFilterButtons?.forEach(button => {
-            button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === historyUiState.pinFilter));
-            button.disabled = historyUiState.deleteMode;
-        });
-        try {
-            if (historyUiState.loadedRevision < 0) this.setHistoryStatePanel('loading');
-            while (historyUiState.loadedRevision !== historyUiState.dataRevision) {
-                const pending = historyUiState.pendingLoad ||= {
-                    revision: historyUiState.dataRevision,
-                    promise: dbUtils.getAllChats('updatedAt').finally(() => { historyUiState.pendingLoad = null; })
-                };
-                let chats;
-                try {
-                    chats = await pending.promise;
-                } catch (error) {
-                    if (generation !== historyUiState.renderGeneration) return;
-                    if (pending.revision !== historyUiState.dataRevision) continue;
-                    throw error;
-                }
-                if (generation !== historyUiState.renderGeneration) return;
-                if (pending.revision !== historyUiState.dataRevision) continue;
-                historyUiState.cachedChats = Array.isArray(chats) ? chats : [];
-                historyUiState.loadedRevision = pending.revision;
-            }
-            const view = JSON.stringify([
-                historyUiState.loadedRevision, this.normalizeHistoryText(historyUiState.query),
-                historyUiState.sortOrder, historyUiState.pinFilter, this.isHistoryDetailViewport(),
-                historyUiState.deleteMode, new Date().toDateString()
-            ]);
-            if (view === historyUiState.renderedView) {
-                this.syncHistoryCurrentChat();
-                if (resetScroll) {
-                    historyUiState.scrollTop = 0;
-                    this.getHistoryScrollContainer().scrollTop = 0;
-                }
-                return;
-            }
-            await this.renderHistoryDisplayModels(generation, { preserveScroll: preserveScroll && !resetScroll });
-            if (generation === historyUiState.renderGeneration) historyUiState.renderedView = view;
-        } catch (error) {
-            if (generation !== historyUiState.renderGeneration) return;
-            console.error('履歴リストのレンダリングエラー:', error);
-            this.setHistoryStatePanel('error', { preserveList: elements.historyList.childElementCount > 0 });
-        }
-    },
-
     closeHistoryItemMenu({ restoreFocus = false } = {}) {
         const context = historyUiState.menuContext;
         const anchor = context?.triggerElement;
@@ -6384,21 +5861,35 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const menu = elements.historyItemMenu;
         const anchor = historyUiState.menuContext?.triggerElement;
         if (!menu || !anchor?.isConnected || menu.classList.contains('hidden')) return;
+        this.positionRowMenu(menu, anchor);
+    },
+
+    positionRowMenu(menu, anchor, container = null) {
         const viewportMargin = 8;
         const gap = 4;
         const anchorRect = anchor.getBoundingClientRect();
+        const bounds = container?.getBoundingClientRect();
+        const viewport = window.visualViewport;
+        const x = viewport?.offsetLeft ?? 0, y = viewport?.offsetTop ?? 0;
+        const right = x + (viewport?.width ?? window.innerWidth), bottom = y + (viewport?.height ?? window.innerHeight);
+        const leftEdge = Math.max(x, bounds?.left ?? x) + viewportMargin;
+        const rightEdge = Math.min(right, bounds?.right ?? right) - viewportMargin;
+        const topEdge = Math.max(y, bounds?.top ?? y) + viewportMargin;
+        const bottomEdge = Math.min(bottom, bounds?.bottom ?? bottom) - viewportMargin;
+        menu.style.setProperty('--row-menu-width', `${Math.max(0, rightEdge - leftEdge)}px`);
+        menu.style.setProperty('--row-menu-height', `${Math.max(0, bottomEdge - topEdge)}px`);
         const menuRect = menu.getBoundingClientRect();
         const left = Math.min(
-            Math.max(viewportMargin, anchorRect.right - menuRect.width),
-            Math.max(viewportMargin, window.innerWidth - menuRect.width - viewportMargin)
+            Math.max(leftEdge, anchorRect.right - menuRect.width),
+            Math.max(leftEdge, rightEdge - menuRect.width)
         );
         const belowTop = anchorRect.bottom + gap;
         const aboveTop = anchorRect.top - menuRect.height - gap;
-        const top = belowTop + menuRect.height <= window.innerHeight - viewportMargin
+        const top = belowTop + menuRect.height <= bottomEdge
             ? belowTop
-            : Math.max(viewportMargin, aboveTop);
-        menu.style.left = `${Math.round(left)}px`;
-        menu.style.top = `${Math.round(top)}px`;
+            : Math.max(topEdge, aboveTop);
+        menu.style.left = `${Math.round(left - (bounds?.left ?? 0))}px`;
+        menu.style.top = `${Math.round(top - (bounds?.top ?? 0))}px`;
     },
 
     async resolveHistoryActionChat(chatId, { notifyMissing = true, action = '', source = '' } = {}) {
@@ -6408,10 +5899,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             if (notifyMissing) await this.showCustomAlert('操作対象のチャットが見つかりませんでした。');
             return null;
         }
-        const cachedRecord = source === 'sidebar'
-            ? this.getChatSidebarRecord(normalizedId) || this.getHistoryRecord(normalizedId)
-            : this.getHistoryRecord(normalizedId) || this.getChatSidebarRecord(normalizedId);
-        if (cachedRecord) return cachedRecord;
         const actionLabel = action ? ` (${action})` : '';
         try {
             const record = await dbUtils.getChat(normalizedId);
@@ -6447,45 +5934,37 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    configureHistoryItemMenu(source, record) {
-        if (!elements.historyItemMenu) return;
-        const isPinned = normalizeChatPinState(record || {}).isPinned;
-        const pinMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="pin"]');
-        const pinLabel = pinMenuItem?.querySelector('[data-history-pin-label]');
-        const pinIcon = pinMenuItem?.querySelector('.material-symbols-outlined');
-        const exportMenuItem = elements.historyItemMenu.querySelector('[data-history-menu-action="export"]');
-        const hideExport = source === 'history-detail';
-
-        if (pinLabel) pinLabel.textContent = isPinned ? 'ピン留めを解除' : 'ピン留め';
-        if (pinMenuItem) pinMenuItem.setAttribute('aria-label', isPinned ? 'ピン留めを解除' : 'ピン留め');
-        if (pinIcon) pinIcon.textContent = 'push_pin';
-        if (exportMenuItem) {
-            exportMenuItem.hidden = hideExport;
-            exportMenuItem.classList.toggle('hidden', hideExport);
+    showSidebarMenu(anchor, record = null) {
+        if (!anchor.isConnected || !chatSidebarUiState.isOpen || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
+        const menu = elements.historyItemMenu;
+        const importOnly = !record;
+        historyUiState.menuContext = { chatId: record?.id, source: 'sidebar', triggerElement: anchor, importOnly };
+        for (const item of menu.querySelectorAll('[data-history-menu-action]')) {
+            const hidden = (item.dataset.historyMenuAction === 'import') !== importOnly;
+            item.hidden = hidden;
+            item.classList.toggle('hidden', hidden);
         }
-        this.setHistoryItemMenuBusy(historyUiState.menuActionPending);
+        if (record) {
+            const label = normalizeChatPinState(record).isPinned ? 'ピン留めを解除' : 'ピン留め';
+            const pin = menu.querySelector('[data-history-menu-action="pin"]');
+            pin.setAttribute('aria-label', label);
+            pin.querySelector('[data-history-pin-label]').textContent = label;
+        }
+        menu.setAttribute('aria-label', importOnly ? '履歴の操作' : 'チャット操作');
+        anchor.closest('.chat-sidebar-item')?.classList.add('menu-active');
+        anchor.setAttribute('aria-expanded', 'true');
+        menu.classList.remove('hidden');
+        this.positionHistoryItemMenu();
+        menu.querySelector('[role="menuitem"]:not([hidden])')?.focus({ preventScroll: true });
     },
 
     focusHistoryActionTarget(context, { preferMenu = true } = {}) {
         if (!context) return;
-        if (context.source === 'sidebar') {
-            const item = [...(elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item') || [])]
-                .find(candidate => String(candidate.dataset.chatId) === String(context.chatId));
-            const target = preferMenu
-                ? item?.querySelector('[data-sidebar-action="menu"]')
-                : item?.querySelector('[data-sidebar-action="open"]');
-            if (target?.isConnected) {
-                target.focus();
-                return;
-            }
-            if (elements.chatSidebarSearchInput?.isConnected) {
-                elements.chatSidebarSearchInput.focus();
-                return;
-            }
-            elements.chatSidebarAllHistoryBtn?.focus();
-            return;
-        }
-        this.focusHistorySelection();
+        const item = [...elements.chatSidebarList.querySelectorAll('.chat-sidebar-item')]
+            .find(candidate => String(candidate.dataset.chatId) === String(context.chatId));
+        const target = item?.querySelector(preferMenu ? '[data-sidebar-action="menu"]' : '[data-sidebar-action="open"]') ||
+            (chatSidebarUiState.isOpen ? elements.chatSidebarSearchToggle : elements.gotoHistoryBtn);
+        target.focus({ preventScroll: true });
     },
 
     async executeHistoryAction(action, context, { record: resolvedRecord = null } = {}) {
@@ -6527,12 +6006,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return result;
         }
         if (action === 'delete') {
-            if (context.source !== 'sidebar') {
-                historyUiState.deleteFallbackChatId = this.getHistoryDeleteFallback(chatId);
-            }
             const result = await chatHistoryActions.delete(chatId, { title });
             if (!result?.ok) {
-                historyUiState.deleteFallbackChatId = null;
                 if (context.triggerElement?.isConnected) context.triggerElement.focus();
             } else if (!result.wasCurrent) {
                 this.focusHistoryActionTarget(context);
@@ -6543,32 +6018,109 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return { ok: false, unsupported: true, reason: 'invalid-action' };
     },
 
-    async openHistoryItemMenu(anchor, chatId, { selectHistoryDetail = true, source = '' } = {}) {
-        if (historyUiState.deleteMode) return;
-        const normalizedId = chatHistoryActions.normalizeChatId(chatId);
-        if (!anchor || normalizedId === null || !elements.historyItemMenu) return;
-        if (historyUiState.menuContext?.triggerElement === anchor && !elements.historyItemMenu.classList.contains('hidden')) {
+    openHistoryItemMenu(anchor, chatId = null) {
+        if (historyUiState.menuContext?.triggerElement === anchor) {
             this.closeHistoryItemMenu({ restoreFocus: true });
             return;
         }
-        const resolvedSource = source || (anchor.closest('.chat-sidebar-item')
-            ? 'sidebar'
-            : anchor.closest('.history-detail-pane') ? 'history-detail' : 'history-list');
         this.closeHistoryItemMenu();
-        const record = await this.resolveHistoryActionChat(normalizedId, { source: resolvedSource });
-        if (!record || !anchor.isConnected) return;
-        if (selectHistoryDetail && this.isHistoryDetailVisible()) this.selectHistoryChat(normalizedId);
-        historyUiState.menuContext = {
-            chatId: normalizedId,
-            source: resolvedSource,
-            triggerElement: anchor
-        };
-        this.configureHistoryItemMenu(resolvedSource, record);
-        anchor.closest('.history-item, .chat-sidebar-item')?.classList.add('menu-active');
-        anchor.setAttribute('aria-expanded', 'true');
-        elements.historyItemMenu.classList.remove('hidden');
-        this.positionHistoryItemMenu();
-        elements.historyItemMenu.querySelector('[role="menuitem"]')?.focus();
+        const record = chatId === null ? null : this.getChatSidebarRecord(chatId);
+        if (chatId === null || record) this.showSidebarMenu(anchor, record);
+    },
+
+    async openHistoryDeleteDialog() {
+        const dialog = elements.historyDeleteDialog;
+        if (dialog.open || state.currentScreen !== 'settings') return;
+        const view = this.historyDeleteView = { records: new Map(), busy: false };
+        elements.historyDeleteList.replaceChildren();
+        elements.historyDeleteStatus.textContent = '読み込み中…';
+        this.updateHistoryDeleteControls();
+        dialog.showModal();
+        try {
+            const chats = await dbUtils.getAllChats('updatedAt');
+            if (this.historyDeleteView !== view || !dialog.open) return;
+            const byId = new Map(chats.map(chat => [chat.id, chat]));
+            const models = chats.map(chat => this.createHistoryDisplayModel(chat));
+            const fragment = document.createDocumentFragment();
+            for (const model of this.sortHistoryDisplayModels(models, state.settings.historySortOrder)) {
+                const id = chatHistoryActions.normalizeChatId(model.id);
+                if (id === null) continue;
+                const record = byId.get(model.id);
+                view.records.set(String(id), { id, createdAt: record.createdAt, recordGenerationId: record.recordGenerationId });
+                const item = document.createElement('li');
+                const label = document.createElement('label');
+                const check = document.createElement('input');
+                check.type = 'checkbox';
+                check.value = String(id);
+                label.append(check, document.createTextNode(model.title));
+                item.append(label);
+                fragment.append(item);
+            }
+            elements.historyDeleteList.append(fragment);
+            elements.historyDeleteStatus.textContent = view.records.size ? '' : 'チャット履歴はありません。';
+        } catch (error) {
+            console.error('削除対象の履歴を読み込めませんでした:', error);
+            if (this.historyDeleteView === view && dialog.open) elements.historyDeleteStatus.textContent = '履歴を読み込めませんでした。';
+        } finally {
+            if (this.historyDeleteView === view && dialog.open) this.updateHistoryDeleteControls();
+        }
+    },
+
+    updateHistoryDeleteControls() {
+        const checks = [...elements.historyDeleteList.querySelectorAll('input')];
+        const selected = checks.filter(check => check.checked).length;
+        const busy = this.historyDeleteView?.busy;
+        elements.historyDeleteSelectAll.checked = selected > 0 && selected === checks.length;
+        elements.historyDeleteSelectAll.indeterminate = selected > 0 && selected < checks.length;
+        elements.historyDeleteSelectAll.disabled = Boolean(busy) || !checks.length;
+        elements.historyDeleteConfirmBtn.disabled = Boolean(busy) || !selected;
+        elements.historyDeleteCancelBtn.disabled = Boolean(busy);
+        elements.historyDeleteCount.textContent = selected ? `選択中 ${selected}件` : '';
+        for (const check of checks) check.disabled = Boolean(busy);
+    },
+
+    async deleteSelectedHistory() {
+        const view = this.historyDeleteView;
+        const dialog = elements.historyDeleteDialog;
+        if (!view || view.busy || !dialog.open) return;
+        const selected = [...elements.historyDeleteList.querySelectorAll('input:checked')]
+            .map(check => view.records.get(check.value)).filter(Boolean);
+        if (!selected.length) return;
+        const isCurrent = () => this.historyDeleteView === view && dialog.open && state.currentScreen === 'settings';
+        view.busy = true;
+        this.updateHistoryDeleteControls();
+        try {
+            const result = await chatHistoryActions.deleteMany(selected.map(record => record.id), {
+                expectedRecords: new Map(selected.map(record => [record.id, record])), isCurrent
+            });
+            if (result.wasCurrent) {
+                dialog.close();
+                appLogic.startNewChat();
+                await this.showScreen('chat');
+            }
+            if (result.failures.length) {
+                const successful = new Set(result.successfulIds.map(String));
+                if (isCurrent()) {
+                    for (const check of elements.historyDeleteList.querySelectorAll('input')) {
+                        if (successful.has(check.value)) check.closest('li').remove();
+                    }
+                    elements.historyDeleteStatus.textContent = `${result.failures.length}件を削除できませんでした。`;
+                } else {
+                    await this.showCustomAlert(`${result.failures.length}件を削除できませんでした。`);
+                }
+            } else if (result.ok && isCurrent()) {
+                dialog.close();
+            }
+        } catch (error) {
+            console.error('履歴の一括削除に失敗しました:', error);
+            if (isCurrent()) elements.historyDeleteStatus.textContent = '履歴の一括削除に失敗しました。';
+        } finally {
+            view.busy = false;
+            if (isCurrent()) {
+                this.updateHistoryDeleteControls();
+                elements.historyDeleteConfirmBtn.focus({ preventScroll: true });
+            }
+        }
     },
 
     // --- 背景画像UIヘルパー ---
@@ -6599,7 +6151,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     getBackgroundScreens() {
-        return [elements.chatScreen, elements.historyScreen, elements.settingsScreen].filter(Boolean);
+        return [elements.chatScreen, elements.settingsScreen].filter(Boolean);
     },
 
     setBackgroundImageVisible(isVisible) {
@@ -6753,13 +6305,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             : this.getReadableTextColor(headerColor);
     },
 
-    getEffectiveNewChatButtonColor() {
-        const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
-        return themeColorMode === 'accent'
-            ? this.deriveButtonColorFromAccentColor(this.getEffectiveAccentColor())
-            : this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
-    },
-
     getEffectiveSendButtonColor() {
         const themeColorMode = this.getValidThemeColorMode(state.settings.themeColorMode);
         return themeColorMode === 'accent'
@@ -6802,18 +6347,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         console.log(`ヘッダーカラー適用。背景色: ${finalHeaderColor}, 文字色: ${readableTextColor}, hover背景: ${hoverBackgroundColor}`);
     },
 
-    applyNewChatButtonColor() {
-        const buttonColor = this.getEffectiveNewChatButtonColor();
-        const buttonTextColor = this.getEffectiveHeaderTextColor();
-        const hoverBackgroundColor = this.deriveInteractiveColor(buttonColor, buttonTextColor);
-        const hoverTextColor = buttonTextColor;
-        this.setThemeCssVariable('--new-chat-button-bg', buttonColor);
-        this.setThemeCssVariable('--new-chat-button-fg', buttonTextColor);
-        this.setThemeCssVariable('--new-chat-button-hover-bg', hoverBackgroundColor);
-        this.setThemeCssVariable('--new-chat-button-hover-fg', hoverTextColor);
-        console.log(`新規チャットボタンカラー適用。背景: ${buttonColor}, 文字色: ${buttonTextColor}, hover背景: ${hoverBackgroundColor}`);
-    },
-
     applySendButtonColor() {
         const buttonColor = this.getEffectiveSendButtonColor();
         const buttonTextColor = this.getEffectiveHeaderTextColor();
@@ -6851,7 +6384,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     applyThemeColorSettings() {
         this.applyHeaderColor();
-        this.applyNewChatButtonColor();
         this.applySendButtonColor();
         this.applyOtherButtonColor();
         this.applyUserMessageColor();
@@ -6880,13 +6412,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         [
             elements.headerColorInput,
             elements.headerTextColorModeSelect,
-            elements.newChatButtonColorInput,
             elements.sendButtonColorInput,
             elements.otherButtonColorInput,
             elements.userMessageColorInput,
             elements.resetHeaderColorBtn,
             elements.resetHeaderTextColorBtn,
-            elements.resetNewChatButtonColorBtn,
             elements.resetSendButtonColorBtn,
             elements.resetOtherButtonColorBtn,
             elements.resetUserMessageColorBtn
@@ -6986,7 +6516,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.enterToSendCheckbox.checked = state.settings.enterToSend;
         const historySortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         elements.historySortOrderSelect.value = historySortOrder;
-        if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = historySortOrder;
         if (elements.themeSettingsProfileScopedToggle) {
             elements.themeSettingsProfileScopedToggle.checked = state.themeSettingsProfileScoped === true;
         }
@@ -7065,9 +6594,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (elements.headerTextColorInput) {
             elements.headerTextColorInput.value = this.getValidColor(state.settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR);
-        }
-        if (elements.newChatButtonColorInput) {
-            elements.newChatButtonColorInput.value = this.getValidColor(state.settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
         }
         if (elements.sendButtonColorInput) {
             elements.sendButtonColorInput.value = this.getValidColor(state.settings.sendButtonColor, DEFAULT_SEND_BUTTON_COLOR);
@@ -7262,28 +6788,24 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     // 画面を表示 (スワイプアニメーション + inert対応 + 戻るボタン対応)
     showScreen(screenName, fromPopState = false, settingsEntry = null) {
+        if (screenName !== 'chat' && screenName !== 'settings') return Promise.resolve();
         return new Promise((resolve) => {
           window.settingsUiV136?.closePopover(false);
+          if (screenName !== 'settings' && elements.historyDeleteDialog.open) elements.historyDeleteDialog.close();
 
           if (screenName !== 'chat') {
+            window.DocumentLibraryUI?.close();
             appLogic.invalidateSystemPromptOpen();
             this.closeHistoryItemMenu();
             if (chatSidebarUiState.mode === 'overlay') this.closeChatSidebar({ restoreFocus: false });
           }
 
-          if (screenName !== 'history' && elements.historyScreen.classList.contains('active')) {
-            this.captureHistoryScrollPosition();
-            this.closeHistoryItemMenu();
-            this.exitHistoryDeleteMode({ announce: true, restoreSelection: false });
-            historyUiState.renderGeneration++;
-          }
-      
           // --- 同一画面への重複遷移は無視 ---
           if (screenName === state.currentScreen) {
             resolve();
             return;
           }
-          const screens = [elements.historyScreen, elements.chatScreen, elements.settingsScreen];
+          const screens = [elements.chatScreen, elements.settingsScreen];
           const previousIndex = screens.findIndex(screen => screen.id === state.currentScreen + '-screen');
           const nextIndex = screens.findIndex(screen => screen.id === screenName + '-screen');
           const generation = this.screenNavigationGeneration = (this.screenNavigationGeneration || 0) + 1;
@@ -7304,11 +6826,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
       
           if (!fromPopState) {
             const entry = { screen: screenName };
-            if (screenName === 'chat' && state.__navSource === 'history-item') {
-              history.replaceState(entry, '', '#chat');
-            } else {
-              history.pushState(entry, '', `#${screenName}`);
-            }
+            history.pushState(entry, '', `#${screenName}`);
           }
           state.currentScreen = screenName;
 
@@ -7320,7 +6838,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             void elements.appContainer.offsetHeight;
             elements.appContainer.classList.remove('swipe-positioning');
           }
-          if (screenName === 'history') void this.renderHistoryList({ refresh: false });
       
           let finished = false;
           const finish = () => {
@@ -9035,7 +8552,7 @@ const apiUtils = {
             signal = state.abortController.signal;
         }
 
-        const model = executionConfig?.provider === 'gemini' ? executionConfig.modelName : settings.modelName;
+        const model = (executionConfig?.provider === 'gemini' ? executionConfig.modelName : settings.modelName)?.replace(/^models\//, '');
         if (!model) throw new Error('基本モデルが選択されていません。');
 
         if (model === 'gemini-2.5-pro') {
@@ -9115,6 +8632,7 @@ const apiUtils = {
         console.log("Geminiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         console.log("Geminiリクエストモデル:", model);
 
+        const thinking = finalGenerationConfig.thinkingConfig;
         try {
             signal.throwIfAborted();
             const timestamp = new Date().toLocaleTimeString();
@@ -9147,17 +8665,36 @@ const apiUtils = {
                 error.data = errorData;
                 throw error;
             }
-            if (stream && !response.headers?.get('content-type')?.includes('application/json')) {
-                const data = await StreamingV136.collectResponse('gemini', response.body, signal, onStream);
-                return { ok: true, status: response.status, json: async () => data };
+            const streamed = stream && !response.headers?.get('content-type')?.includes('application/json');
+            if (streamed || (thinking && executionConfig?.ref)) {
+                const data = streamed
+                    ? await StreamingV136.collectResponse('gemini', response.body, signal, onStream)
+                    : await response.json();
+                signal.throwIfAborted();
+                if (thinking && data?.error?.code === 400) {
+                    const error = Object.assign(new Error(data.error.message), { status: 400, data });
+                    if (SettingsV136.geminiThinkingRejection(error, thinking.thinkingLevel)) throw error;
+                }
+                if (thinking?.thinkingLevel && !data?.error && !data?.promptFeedback?.blockReason &&
+                    Array.isArray(data?.candidates) && data.candidates.some(candidate => (candidate?.content && !candidate.finishReason) ||
+                        ['STOP', 'MAX_TOKENS'].includes(candidate?.finishReason))) {
+                    appLogic.recordGeminiThinkingResult(executionConfig, thinking.thinkingLevel);
+                }
+                return { ok: true, status: response.status, headers: response.headers, json: async () => data };
             }
             return response;
         } catch (error) {
             if (error.name === 'AbortError') {
                 throw new DOMException("リクエストがキャンセルされました。", 'AbortError');
-            } else {
-                throw error;
             }
+            const rejection = thinking && !signal.aborted && SettingsV136.geminiThinkingRejection(error, thinking.thinkingLevel);
+            if (rejection) {
+                appLogic.recordGeminiThinkingResult(executionConfig, thinking.thinkingLevel, rejection);
+                error.message = rejection === 'level'
+                    ? `Gemini API が Thinking レベル「${thinking.thinkingLevel}」を拒否しました。別のレベルを選んでください。`
+                    : 'Gemini API がこのモデルのThinking設定を拒否しました。';
+            }
+            throw error;
         }
     },
 
@@ -10210,18 +9747,8 @@ function updateCurrentSystemPrompt() {
                 console.log(`[BroadcastChannel] 他のタブからメッセージを受信:`, event.data);
 
                 if (type === 'SYNC_COMPLETED' && newSyncId) {
-                    // 自身のメモリ上の状態を更新
-                    state.sync.lastSyncId = newSyncId;
-                    state.sync.isDirty = false;
-                    state.sync.lastError = null;
-                    
-                    // DBにも保存
-                    await dbUtils.saveSetting('lastSyncId', newSyncId);
-                    await dbUtils.saveSetting('syncIsDirty', false);
-                    await dbUtils.saveSetting('syncLastError', null);
-                    await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
-
-                    // UIを更新
+                    if (state.sync.isSyncing) return;
+                    await appLogic.initializeSyncState();
                     await appLogic.updateDropboxUIState();
                 }
             };
@@ -12736,7 +12263,6 @@ const appLogic = {
         normalized.headerColor = typeof settings.headerColor === 'string' ? settings.headerColor : DEFAULT_GLOBAL_THEME_SETTINGS.headerColor;
         normalized.headerTextColorMode = uiUtils.getValidHeaderTextColorMode(settings.headerTextColorMode);
         normalized.headerTextColor = uiUtils.getValidColor(settings.headerTextColor, DEFAULT_HEADER_TEXT_COLOR);
-        normalized.newChatButtonColor = uiUtils.getValidColor(settings.newChatButtonColor, DEFAULT_NEW_CHAT_BUTTON_COLOR);
         normalized.sendButtonColor = uiUtils.getValidColor(settings.sendButtonColor, DEFAULT_SEND_BUTTON_COLOR);
         normalized.otherButtonColor = uiUtils.getValidColor(settings.otherButtonColor, DEFAULT_OTHER_BUTTON_COLOR);
         normalized.userMessageColor = uiUtils.getValidColor(settings.userMessageColor, DEFAULT_USER_MESSAGE_COLOR);
@@ -12902,26 +12428,8 @@ const appLogic = {
     async updateHistorySortOrder(value, { render = true } = {}) {
         const normalizedValue = HISTORY_SORT_OPTIONS.includes(value) ? value : DEFAULT_LOCAL_UI_SETTINGS.historySortOrder;
         await this.updateLocalUiSetting('historySortOrder', normalizedValue);
-        historyUiState.sortOrder = normalizedValue;
-        if (elements.historySortOrderSelect) elements.historySortOrderSelect.value = normalizedValue;
-        if (elements.historySortOrderToolbar) elements.historySortOrderToolbar.value = normalizedValue;
-        if (render && elements.historyScreen.classList.contains('active')) {
-            historyUiState.scrollTop = 0;
-            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-        }
-    },
-
-    async updateHistoryPinFilter(value, { render = true } = {}) {
-        const normalizedValue = HISTORY_PIN_FILTER_OPTIONS.includes(value) ? value : DEFAULT_LOCAL_UI_SETTINGS.historyPinFilter;
-        await this.updateLocalUiSetting('historyPinFilter', normalizedValue);
-        historyUiState.pinFilter = normalizedValue;
-        elements.historyPinFilterButtons?.forEach(button => {
-            button.setAttribute('aria-pressed', String(button.dataset.historyPinFilter === normalizedValue));
-        });
-        if (render && elements.historyScreen.classList.contains('active')) {
-            historyUiState.scrollTop = 0;
-            await uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-        }
+        elements.historySortOrderSelect.value = normalizedValue;
+        if (render && chatSidebarUiState.isOpen) uiUtils.renderChatSidebarModels();
     },
 
     scheduleReleaseNotesPreload() {
@@ -13326,14 +12834,6 @@ const appLogic = {
         uiUtils.applyThemeColorSettings();
     },
 
-    async resetNewChatButtonColorSetting() {
-        await this.saveThemeSettingValues({ newChatButtonColor: DEFAULT_NEW_CHAT_BUTTON_COLOR });
-        if (elements.newChatButtonColorInput) {
-            elements.newChatButtonColorInput.value = DEFAULT_NEW_CHAT_BUTTON_COLOR;
-        }
-        uiUtils.applyThemeColorSettings();
-    },
-
     async resetSendButtonColorSetting() {
         await this.saveThemeSettingValues({ sendButtonColor: DEFAULT_SEND_BUTTON_COLOR });
         if (elements.sendButtonColorInput) {
@@ -13690,7 +13190,7 @@ const appLogic = {
 
     getCurrentUiSettings() {
         const settings = {};
-        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'summarySystemPrompt', 'dropboxAppKey'];
+        const stringKeys = ['apiProvider', 'apiConfigId', 'apiKey', 'zaiApiKey', 'openrouterApiKey', 'bedrockAccessKey', 'bedrockSecretKey', 'bedrockRegion', 'modelName', 'dummyUser', 'dummyModel', 'additionalModels', 'additionalOpenRouterModels', 'additionalZaiModels', 'additionalBedrockModels', 'proofreadingSystemInstruction', 'googleSearchApiKey', 'googleSearchEngineId', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode', 'headerTextColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor', 'summarySystemPrompt', 'dropboxAppKey'];
         const numberKeys = ['temperature', 'maxTokens', 'topK', 'topP', 'thinkingBudget', 'maxRetries', 'maxBackoffDelaySeconds', 'overlayOpacity', 'messageOpacity'];
         const booleanKeys = ['darkMode', 'geminiEnableGrounding', 'geminiEnableFunctionCalling', 'enableProofreading', 'enableAutoRetry', 'useFixedRetryDelay', 'reverseDummyOrder', 'concatDummyModel', 'includeThoughts', 'enableThoughtTranslation', 'applyDummyToProofread', 'applyDummyToTranslate', 'forceFunctionCalling', 'enableSummaryButton'];
         
@@ -13847,7 +13347,10 @@ const appLogic = {
             }
         }
         const prepared = [];
+        const projectedTools = new Set();
+        const unsafeContinuation = message => Object.assign(new Error(message), { code: 'unsafe-history-continuation' });
         for (const [index,msg] of historyToProcess.entries()) {
+            if (projectedTools.has(index)) continue;
             const parts = [];
             const continuation = msg.continuation;
             const prefixMismatch = continuation?.historyPrefixV136 !== undefined && continuation.historyPrefixV136 !== legacyPrefixes[index]?.prefix;
@@ -13864,20 +13367,44 @@ const appLogic = {
                 || continuation?.openai?.reasoning_details?.some(d => d.type === 'reasoning.encrypted' || d.signature));
             let dependentPrefixChanged = continuation?.historyPrefixInvalidV136 || (continuation?.historyPrefixV136 === undefined ? prefixChanged : prefixMismatch);
             let dependentTurnChanged = continuation?.historyTurnInvalidV136 || (continuation?.historyTurnV136 === undefined ? turnChanged : turnMismatch);
+            let ragSystemChangedOnly = false;
             if (continuation?.historyWireV136) {
                 const current = await SettingsV136.historyTaskV136('wire',{provider,messages:prepared,model,system:systemInstruction});
                 assertOwner();
                 dependentPrefixChanged = continuation.historyPrefixInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.prefix !== current.prefix;
                 dependentTurnChanged = continuation.historyTurnInvalidV136 || continuation.historyWireV136.version !== current.version || continuation.historyWireV136.turn !== current.turn;
+                if ((provider === 'bedrock' || opaqueRouter) && dependentPrefixChanged &&
+                    session?.baseSystemInstruction !== undefined && !edited &&
+                    !continuation.historyPrefixInvalidV136 && !continuation.historyTurnInvalidV136 &&
+                    (session.rag || msg.rag) && (historyToProcess[index + 1]?.role === 'tool' || !msg.content?.trim())) {
+                    const baseline = await SettingsV136.historyTaskV136('wire', {
+                        provider, messages: prepared, model, system: session.baseSystemInstruction
+                    });
+                    assertOwner();
+                    const previous = continuation.historyBaseWireV137 || continuation.historyWireV136;
+                    ragSystemChangedOnly = previous.version === baseline.version && previous.prefix === baseline.prefix &&
+                        previous.turn === baseline.turn;
+                }
             }
             const invalidContinuation = edited || (dependentPrefixChanged && (provider === 'bedrock' || opaqueRouter))
                 || (dependentTurnChanged && ['gemini', 'zai'].includes(provider));
             prefixChanged ||= prefixMismatch;
+            if (invalidContinuation && ragSystemChangedOnly && (historyToProcess[index + 1]?.role === 'tool' ||
+                !msg.content?.trim() && continuation?.turns?.some(turn => turn.parts?.some(part => part.functionCall || part.functionResponse)))) {
+                const tools = [];
+                let following = index + 1;
+                while (historyToProcess[following]?.role === 'tool') {
+                    tools.push(historyToProcess[following]);
+                    projectedTools.add(following++);
+                }
+                prepared.push({ role: 'model', parts: [{ text: window.DocumentRag.historicalToolText(msg, tools) }] });
+                continue;
+            }
             if (invalidContinuation && historyToProcess[index + 1]?.role === 'tool')
-                throw new Error('編集された応答と別保存のツール結果を安全に対応付けできません。編集を戻すか、この応答から再生成してください。');
+                throw unsafeContinuation('編集された応答と別保存のツール結果を安全に対応付けできません。編集を戻すか、この応答から再生成してください。');
             if (invalidContinuation && msg.role === 'model' && !msg.content?.trim()
                 && (msg.tool_calls?.length || continuation?.parts?.some(p => p.functionCall || p.functionResponse) || continuation?.turns?.some(t => t.parts?.some(p => p.functionCall || p.functionResponse))))
-                throw new Error('変更後のツール履歴を安全に再構築できません。この応答から再生成してください。');
+                throw unsafeContinuation('変更後のツール履歴を安全に再構築できません。この応答から再生成してください。');
             let contentText = msg.content || '';
             if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
                 const fileNames = msg.attachments.map(att => att.name).join(', ');
@@ -14672,7 +14199,6 @@ const appLogic = {
             // --- ステップ5: 最終的なUI設定と表示 ---
             if (isSyncReload) uiUtils.updateProgressMessage('画面を描画中...');
             elements.chatScreen.style.transform = 'translateX(0)';
-            elements.historyScreen.style.transform = 'translateX(-100%)';
             elements.settingsScreen.style.transform = 'translateX(100%)';
             const settingsEntry = window.settingsUiV136?.getHashEntry();
             if (settingsEntry) {
@@ -14743,14 +14269,15 @@ const appLogic = {
      * 同期関連の初期化処理
      */
     async initializeSyncState() {
-        const [lastSyncIdSetting, isDirtySetting, lastErrorSetting] = await Promise.all([
+        const [lastSyncIdSetting, isDirtySetting, lastErrorSetting, library] = await Promise.all([
             dbUtils.getSetting('lastSyncId'),
             dbUtils.getSetting('syncIsDirty'),
-            dbUtils.getSetting('syncLastError')
+            dbUtils.getSetting('syncLastError'),
+            dbUtils.getDocumentLibrarySyncState()
         ]);
 
         state.sync.lastSyncId = lastSyncIdSetting ? lastSyncIdSetting.value : null;
-        state.sync.isDirty = isDirtySetting ? isDirtySetting.value : false;
+        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision);
         state.sync.lastError = lastErrorSetting ? lastErrorSetting.value : null;
         
         console.log(`[Sync] 同期状態を初期化しました。lastSyncId: ${state.sync.lastSyncId}, isDirty: ${state.sync.isDirty}, lastError:`, state.sync.lastError);
@@ -14846,6 +14373,26 @@ const appLogic = {
 
 
 
+    async recordDropboxPush(metadata, librarySync) {
+        const db = await dbUtils.openDB();
+        return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readwrite', async tx => {
+            const settings = tx.objectStore(SETTINGS_STORE);
+            const current = DocumentLibrary.syncState(await DocumentLibrary.request(settings.get(DocumentLibrary.syncKey)));
+            if (current.syncedRevision !== librarySync.syncedRevision) {
+                // Another tab has already recorded a later library state.
+                return { acknowledged: false, dirty: true };
+            }
+            const next = { ...current, syncedRevision: librarySync.revision };
+            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision;
+            if (next.revision || next.syncedRevision) settings.put({ key: DocumentLibrary.syncKey, value: next });
+            settings.put({ key: 'lastSyncId', value: metadata.syncId });
+            settings.put({ key: 'lastSyncTimestamp', value: new Date(metadata.exportedAt).getTime() });
+            settings.put({ key: 'syncLastError', value: null });
+            settings.put({ key: 'syncIsDirty', value: dirty });
+            return { acknowledged: true, dirty };
+        });
+    },
+
     /**
      * [V2 Core Push] 実際にアップロード処理を行うコア関数
      * @private
@@ -14877,17 +14424,28 @@ const appLogic = {
 
             // --- Step 1: 競合検知 ---
             updateProgress('クラウドの状態を確認中...');
-            const cloudMetadataString = await window.dropboxApi.downloadMetadata();
-            
-            if (cloudMetadataString) {
-                const cloudData = JSON.parse(cloudMetadataString);
+            const remote = await window.dropboxApi.downloadMetadata({ withRevision: true });
+            const cloudData = remote ? JSON.parse(remote.content) : null;
+            if (cloudData) {
                 SettingsV136.assertCompatible(cloudData);
-                if (cloudData.syncId !== state.sync.lastSyncId) {
+                const remoteLibrary = cloudData.data.documentLibrary;
+                const local = await dbUtils.getDocumentLibrarySyncState();
+                if (remoteLibrary) {
+                    DocumentLibrary.validateManifest(remoteLibrary, cloudData.data.chats);
+                    if (remoteLibrary.revision !== local.revision && remoteLibrary.revision !== local.syncedRevision) {
+                        throw new Error('Dropboxに新しいファイル情報があります。先に手動で同期してください。');
+                    }
+                }
+                const recoveringLibrary = !remoteLibrary && local.revision &&
+                    (local.syncedRevision || await dbUtils.hasChatDocumentLinks());
+                if (recoveringLibrary || cloudData.syncId !== state.sync.lastSyncId) {
                     console.warn(`[Sync Push] 競合を検出！ Local: ${state.sync.lastSyncId}, Cloud: ${cloudData.syncId}`);
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：同期の競合】\n\n" +
-                        "クラウド上のデータが、このデバイスが最後に同期した状態から変更されています。（他のデバイスが先に同期した可能性があります）\n\n" +
+                        (recoveringLibrary
+                            ? "Dropboxの同期データに、この端末のファイルや紐づけの情報がありません。\n\n"
+                            : "クラウド上のデータが、このデバイスが最後に同期した状態から変更されています。（他のデバイスが先に同期した可能性があります）\n\n") +
                         "このまま同期を実行すると、クラウド上のデータがこのデバイスのデータで完全に上書きされます。\n\n" +
                         "クラウドのデータを上書きして同期を続行しますか？"
                     );
@@ -14921,18 +14479,26 @@ const appLogic = {
             await window.dropboxApi.ensureAssetsFolderExists();
             
             updateProgress('ローカルデータを準備中...');
-            const { metadataJson, localAssets } = await this._prepareExportData();
-            const localAssetIds = new Set(localAssets.keys());
+            const { metadataJson, localAssets, documentBlobs, librarySync } = await this._prepareExportData();
+            const parsedMetadata = JSON.parse(metadataJson);
+            const remoteLibraryRevision = cloudData?.data.documentLibrary?.revision;
+            if (remoteLibraryRevision && remoteLibraryRevision !== librarySync.revision &&
+                remoteLibraryRevision !== librarySync.syncedRevision) {
+                throw new Error('ファイルの同期状態が変わったため、上書きを中止しました。');
+            }
 
             const cloudAssetsList = await window.dropboxApi.listAssets();
             const cloudAssetIds = new Set(cloudAssetsList.map(asset => asset.name));
+            for (const id of this.getRequiredSyncAssetIds(parsedMetadata.data)) {
+                if (!localAssets.has(id) && !cloudAssetIds.has(id)) {
+                    throw new Error('必要な画像アセットが不足しているため、同期を中止しました。');
+                }
+            }
 
             const assetsToUploadArray = Array.from(localAssets.entries())
                 .filter(([assetId]) => !cloudAssetIds.has(assetId))
                 .map(([assetId, asset]) => ({ assetId, asset }));
                 
-            const assetsToDelete = Array.from(cloudAssetIds).filter(id => !localAssetIds.has(id));
-
             // --- Step 3: アセットのアップロード（バッチ処理） ---
             if (assetsToUploadArray.length > 0) {
                 console.log(`[Sync Core Push V2] ${assetsToUploadArray.length}個のアセットをバッチアップロードします。`);
@@ -14944,36 +14510,36 @@ const appLogic = {
                 console.log("[Sync Core Push V2] アップロードする新規アセットはありません。");
             }
 
-            // --- Step 4: 不要なアセットの削除 ---
-            if (assetsToDelete.length > 0) {
-                console.log(`[Sync Core Push V2] ${assetsToDelete.length}個の不要なアセットを削除します。`);
-                updateProgress(`${assetsToDelete.length}個の不要アセットを削除中...`);
-                await window.dropboxApi.deleteAssets(assetsToDelete);
+            // Originals are immutable and live outside the old clients' image cleanup directory.
+            if (documentBlobs.size) {
+                const path = window.dropboxApi.DOCUMENTS_DIR_PATH;
+                await window.dropboxApi.ensureAssetsFolderExists(path);
+                const existing = new Map((await window.dropboxApi.listAssets(path))
+                    .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size]));
+                let count = 0;
+                for (const [hash, blob] of documentBlobs) {
+                    updateProgress(`ファイル原本を確認中 (${++count}/${documentBlobs.size})`);
+                    if (existing.get(hash) !== blob.size) await window.dropboxApi.uploadLibraryOriginal(hash, blob);
+                }
             }
 
-            // --- Step 5: メタデータのアップロード ---
+            // A concurrent publisher or a previous revision may still need assets that this snapshot omits.
             updateProgress('最終データを保存中...');
-            const parsedMetadata = JSON.parse(metadataJson);
-
-            await window.dropboxApi.uploadMetadata(metadataJson);
+            await window.dropboxApi.uploadMetadata(metadataJson, remote?.rev ?? null);
 
             // --- Step 6: 状態の更新 ---
-            const syncTimestamp = new Date(parsedMetadata.exportedAt).getTime();
-            state.sync.lastSyncId = parsedMetadata.syncId;
-            const hasQueuedChanges = state.sync.pendingPush;
+            const result = await this.recordDropboxPush(parsedMetadata, librarySync);
+            if (result.acknowledged) {
+                state.sync.lastSyncId = parsedMetadata.syncId;
+                state.sync.lastError = null;
+            } else await this.initializeSyncState();
+            const hasQueuedChanges = result.dirty || state.sync.pendingPush;
             state.sync.isDirty = hasQueuedChanges;
-            state.sync.lastError = null;
-            await Promise.all([
-                dbUtils.saveSetting('lastSyncId', parsedMetadata.syncId),
-                dbUtils.saveSetting('syncIsDirty', hasQueuedChanges),
-                dbUtils.saveSetting('syncLastError', null),
-                dbUtils.saveSetting('lastSyncTimestamp', syncTimestamp)
-            ]);
 
             if (broadcastChannel) {
                 broadcastChannel.postMessage({
                     type: 'SYNC_COMPLETED',
-                    newSyncId: parsedMetadata.syncId,
+                    newSyncId: state.sync.lastSyncId,
                     sourceTabId: state.tabId
                 });
             }
@@ -14987,7 +14553,9 @@ const appLogic = {
             }
 
         } catch (error) {
-            const errorMessage = error.message || '不明なアップロードエラーが発生しました。';
+            const errorMessage = error.status === 409 && error.endpoint === '/files/upload' && error.message.includes('path/conflict')
+                ? '同期中にDropboxの保存先が変更されたため、上書きを中止しました。再度同期してください。'
+                : error.message || '不明なアップロードエラーが発生しました。';
             this.updateSyncStatusUI('error', errorMessage);
             console.error("[Sync Core Push V2] Push処理中にエラーが発生しました:", error);
             if (isManual) {
@@ -15069,10 +14637,18 @@ const appLogic = {
             SettingsV136.assertCompatible(cloudData);
             const cloudSyncId = cloudData.syncId;
             const localSyncId = state.sync.lastSyncId;
+            const library = await dbUtils.getDocumentLibrarySyncState();
+            const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
+            if (!cloudLibraryRevision && library.revision &&
+                (library.syncedRevision || await dbUtils.hasChatDocumentLinks())) {
+                state.sync.isSyncing = false;
+                await this._doPush(true);
+                return;
+            }
 
             console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
 
-            if (cloudSyncId !== localSyncId) {
+            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision) {
                 console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
                 uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
                 state.sync.isSyncing = false;
@@ -15083,20 +14659,20 @@ const appLogic = {
             console.log("[Manual Sync] syncIdは一致しています。アセットの整合性を確認します。");
             uiUtils.updateProgressMessage('アセットの整合性を確認中...');
 
-            const { localAssets } = await this._prepareExportData();
+            const { localAssets, documentBlobs } = await this._prepareExportData({ backup: true });
             const cloudAssetsList = await window.dropboxApi.listAssets();
-
-            const localAssetCount = localAssets.size;
-            const cloudAssetCount = cloudAssetsList.length;
-
-            console.log(`[Manual Sync] Local asset count: ${localAssetCount}, Cloud asset count: ${cloudAssetCount}`);
-
-            if (localAssetCount !== cloudAssetCount || state.sync.isDirty) {
-                if (state.sync.isDirty) {
+            const cloudAssets = new Set(cloudAssetsList.map(asset => asset.name));
+            const missingImages = [...localAssets.keys()].some(id => !cloudAssets.has(id));
+            const cloudOriginals = documentBlobs.size ? new Map((await window.dropboxApi.listAssets(window.dropboxApi.DOCUMENTS_DIR_PATH))
+                .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size])) : new Map();
+            const missingOriginals = [...documentBlobs].some(([hash, blob]) => cloudOriginals.get(hash) !== blob.size);
+            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision;
+            if (missingImages || missingOriginals || dirty) {
+                if (dirty) {
                     console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
                     uiUtils.updateProgressMessage('ローカルの変更を同期中...');
                 } else {
-                    console.log("[Manual Sync] アセット数が一致しないため、Push処理でクラウドの状態を調整します。");
+                    console.log("[Manual Sync] クラウドに不足するアセットを補います。");
                     uiUtils.updateProgressMessage('クラウドの状態を調整中...');
                 }
                 state.sync.isSyncing = false;
@@ -15104,7 +14680,7 @@ const appLogic = {
                 return;
             }
 
-            console.log("[Manual Sync] syncIdとアセット数が一致しており、差分はありません。");
+            console.log("[Manual Sync] 同期対象に差分はありません。");
             this.updateSyncStatusUI('idle');
             uiUtils.hideProgressDialog();
             await uiUtils.showCustomAlert("データは既に最新の状態です。");
@@ -15149,12 +14725,13 @@ const appLogic = {
         try {
             await window.dropboxApi.uploadLockFile('pull');
 
+            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
             const cloudMetadataString = await window.dropboxApi.downloadMetadata();
 
             if (cloudMetadataString === null) {
                 console.log("[Sync Pull V2] クラウドにファイルが見つかりません。");
                 const localChats = await dbUtils.getAllChats();
-                if (localChats.length > 0 || state.sync.isDirty) {
+                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision) {
                     console.log("[Sync Pull V2] ローカルにデータが存在するため、初回Pushを実行します。");
                     if (isManual) {
                         console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、updateProgressMessageを呼び出します。");
@@ -15178,18 +14755,27 @@ const appLogic = {
             SettingsV136.assertCompatible(cloudData);
 
             const cloudSyncId = cloudData.syncId;
+            const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
+            const libraryConflict = cloudLibraryRevision && libraryBefore.revision !== libraryBefore.syncedRevision &&
+                cloudLibraryRevision !== libraryBefore.revision;
+            if (!cloudLibraryRevision && libraryBefore.syncedRevision) {
+                throw new Error('以前同期したファイル情報がDropboxに見つかりません。手動同期でクラウドの状態を確認してください。');
+            }
+            if (libraryConflict && !isManual) {
+                throw new Error('未同期のファイル変更があります。バックアップを作成してから手動で同期してください。');
+            }
 
             console.log(`[Sync Pull V2] Cloud syncId: ${cloudSyncId}, Local lastSyncId: ${state.sync.lastSyncId}`);
 
-            if (cloudSyncId !== state.sync.lastSyncId) {
-                if (state.sync.isDirty) {
+            if (cloudSyncId !== state.sync.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision) {
+                if (state.sync.isDirty || libraryConflict) {
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：データの同期に関する重要な確認】\n\n" +
                         "クラウド上に、このデバイスとは異なるデータが見つかりました。\n\n" +
-                        "同期を実行すると、このデバイスの全てのデータ（チャット、プロファイル等）が完全に削除され、クラウド上のデータで置き換えられます。\n" +
-                        "（データが統合・マージされるわけではありません）\n\n" +
-                        "このデバイスのデータを残したい場合は、一度「キャンセル」を押し、履歴画面から各チャットを個別に出力してバックアップを作成してください。\n\n" +
+                        "同期を実行すると、このデバイスのチャット、画像、設定などがDropboxのデータで置き換わります。\n" +
+                        (libraryConflict ? "未同期のファイル・原本の版・チャットとの紐づけもDropboxのデータで置き換わります。\n" : "") +
+                        "現在のデータを残すには、キャンセルして設定画面から全データのバックアップを作成してください。\n\n" +
                         "クラウドのデータで同期を開始してもよろしいですか？"
                     );
                     if (!confirmed) {
@@ -15203,7 +14789,9 @@ const appLogic = {
                     if (isManual) uiUtils.showProgressDialog('同期を再開しています...');
                 }
 
-                const importResult = await this.importDataFromString(cloudMetadataString, { automatic: !isManual });
+                const importResult = await this.importDataFromString(cloudMetadataString, {
+                    automatic: !isManual, source: 'dropbox', libraryBefore, allowLibraryReplace: Boolean(libraryConflict && isManual)
+                });
                 if (!importResult) {
                     this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
                     return;
@@ -15216,17 +14804,11 @@ const appLogic = {
                 }
 
                 state.sync.lastSyncId = importResult.syncId;
-                const hasQueuedChanges = state.sync.pendingPush;
+                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending;
                 state.sync.isDirty = hasQueuedChanges;
                 state.sync.lastError = null;
                 
-                const syncTimestamp = new Date(importResult.exportedAt).getTime();
-                await Promise.all([
-                    dbUtils.saveSetting('lastSyncId', importResult.syncId),
-                    dbUtils.saveSetting('syncIsDirty', hasQueuedChanges),
-                    dbUtils.saveSetting('syncLastError', null),
-                    dbUtils.saveSetting('lastSyncTimestamp', syncTimestamp)
-                ]);
+                if (importResult.localPinStateWon) await dbUtils.saveSetting('syncIsDirty', true);
 
                 if (broadcastChannel) {
                     broadcastChannel.postMessage({
@@ -15255,7 +14837,8 @@ const appLogic = {
 
             } else {
                 console.log("[Sync Pull V2] ローカルは既に最新です。同期は不要です。");
-                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty;
+                const currentLibrary = await dbUtils.getDocumentLibrarySyncState();
+                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty || currentLibrary.revision !== currentLibrary.syncedRevision;
                 state.sync.isDirty = hasQueuedChanges;
                 await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
                 await dbUtils.saveSetting('syncIsDirty', hasQueuedChanges);
@@ -15301,6 +14884,7 @@ const appLogic = {
     
         this._setupEventListenersCallCount++;
         uiUtils.installDialogDismissal();
+        window.DocumentLibraryUI?.install();
         this.setupSwipeNavigation();
     
         // --- 画面遷移 ---
@@ -15310,218 +14894,15 @@ const appLogic = {
             if (state.isEditingSystemPrompt && !await this.closeSystemPromptDialog()) return;
             uiUtils.showScreen('settings');
         });
-        elements.backToChatFromHistoryBtn.addEventListener('click', () => uiUtils.showScreen('chat'));
         elements.backToChatFromSettingsBtn.addEventListener('click', () => window.settingsUiV136 ? window.settingsUiV136.back() : uiUtils.showScreen('chat'));
-
-        if (!this._historyEventsBound) {
-            const clearHistorySearch = () => {
-                if (historyUiState.searchTimer) clearTimeout(historyUiState.searchTimer);
-                historyUiState.query = '';
-                historyUiState.scrollTop = 0;
-                elements.historySearchInput.value = '';
-                elements.historySearchClearBtn.classList.add('hidden');
-                void uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-            };
-
-            elements.historySearchInput.addEventListener('input', () => {
-                historyUiState.query = elements.historySearchInput.value;
-                elements.historySearchClearBtn.classList.toggle('hidden', !historyUiState.query);
-                if (historyUiState.searchTimer) clearTimeout(historyUiState.searchTimer);
-                historyUiState.searchTimer = setTimeout(() => {
-                    historyUiState.searchTimer = null;
-                    historyUiState.scrollTop = 0;
-                    void uiUtils.renderHistoryList({ refresh: false, preserveScroll: false, resetScroll: true });
-                }, HISTORY_SEARCH_DEBOUNCE_MS);
-            });
-            elements.historySearchInput.addEventListener('keydown', event => {
-                if (event.key !== 'Escape') return;
-                event.preventDefault();
-                if (elements.historySearchInput.value) {
-                    clearHistorySearch();
-                } else {
-                    elements.historySearchInput.blur();
-                }
-            });
-            elements.historySearchClearBtn.addEventListener('click', () => {
-                clearHistorySearch();
-                elements.historySearchInput.focus();
-            });
-
-            const handleHistorySortChange = event => {
-                this.updateHistorySortOrder(event.target.value).catch(error => {
-                    console.error('履歴の並び替え設定を保存できませんでした:', error);
-                    uiUtils.showCustomAlert('履歴の並び替え設定を保存できませんでした。');
-                });
-            };
-            elements.historySortOrderToolbar.addEventListener('change', handleHistorySortChange);
-            elements.historySortOrderSelect.addEventListener('change', handleHistorySortChange);
-            elements.historyPinFilter?.addEventListener('click', event => {
-                const button = event.target.closest('[data-history-pin-filter]');
-                if (!button || historyUiState.deleteMode) return;
-                this.updateHistoryPinFilter(button.dataset.historyPinFilter).catch(error => {
-                    console.error('履歴のピンフィルターを保存できませんでした:', error);
-                    uiUtils.showCustomAlert('履歴の表示設定を保存できませんでした。');
-                });
-            });
-
-            elements.historyDeleteModeBtn.addEventListener('click', () => uiUtils.enterHistoryDeleteMode());
-            elements.historyDeleteCancelBtn.addEventListener('click', () => {
-                uiUtils.exitHistoryDeleteMode({ announce: true, restoreSelection: true });
-                elements.historyDeleteModeBtn.focus();
-            });
-            elements.historyDeleteSelectAll.addEventListener('change', () => {
-                const shouldSelect = elements.historyDeleteSelectAll.checked;
-                uiUtils.getActiveHistoryDeleteTargetIds().forEach(chatId => {
-                    const idKey = String(chatId);
-                    if (shouldSelect) historyUiState.deleteSelection.add(idKey);
-                    else historyUiState.deleteSelection.delete(idKey);
-                });
-                uiUtils.updateHistoryDeleteControls();
-            });
-            elements.historyDeleteConfirmBtn.addEventListener('click', async () => {
-                if (!historyUiState.deleteMode) return;
-                const selectedIds = uiUtils.getActiveHistoryDeleteTargetIds()
-                    .filter(chatId => historyUiState.deleteSelection.has(String(chatId)));
-                if (selectedIds.length === 0) return;
-                uiUtils.captureHistoryScrollPosition();
-                historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteManyFallback(selectedIds);
-                const result = await chatHistoryActions.deleteMany(selectedIds);
-                if (result.cancelled) {
-                    historyUiState.deleteFallbackChatId = null;
-                    elements.historyDeleteConfirmBtn.focus();
-                    return;
-                }
-                result.successfulIds.forEach(chatId => historyUiState.deleteSelection.delete(String(chatId)));
-                const successfulIdKeys = new Set(result.successfulIds.map(String));
-                historyUiState.deleteTargetIds = historyUiState.deleteTargetIds
-                    .filter(chatId => !successfulIdKeys.has(String(chatId)));
-
-                if (result.successfulIds.length === 0) {
-                    historyUiState.deleteFallbackChatId = null;
-                    await uiUtils.showCustomAlert(`0件を削除しました。\n${result.failures.length}件は削除できませんでした。`);
-                    uiUtils.updateHistoryDeleteControls();
-                    return;
-                }
-
-                if (result.failures.length > 0) {
-                    await uiUtils.showCustomAlert(`${result.successfulIds.length}件を削除しました。\n${result.failures.length}件は削除できませんでした。`);
-                } else {
-                    await uiUtils.showCustomAlert(`${result.successfulIds.length}件の履歴を削除しました。`);
-                }
-
-                if (result.wasCurrent) {
-                    uiUtils.exitHistoryDeleteMode({ announce: false, restoreSelection: false });
-                    this.startNewChat();
-                    await uiUtils.showScreen('chat');
-                    return;
-                }
-                if (result.failures.length === 0) {
-                    uiUtils.exitHistoryDeleteMode({ announce: true, restoreSelection: true });
-                    uiUtils.focusHistorySelection();
-                } else {
-                    uiUtils.applyHistoryDeleteModeUi({ announce: '削除できなかった履歴が選択されています' });
-                }
-            });
-
-            const previewHistoryItem = (item, { requireHover = false } = {}) => {
-                if (!item || !uiUtils.isHistoryDetailVisible()) return false;
-                if (requireHover && !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return false;
-                const chatId = chatHistoryActions.normalizeChatId(item.dataset.chatId);
-                if (chatId === null) return false;
-                if (historyUiState.menuContext?.chatId !== undefined
-                    && String(historyUiState.menuContext.chatId) !== String(chatId)) return false;
-                return uiUtils.selectHistoryChat(chatId, { announce: false });
-            };
-
-            elements.historyList.addEventListener('pointerover', event => {
-                const item = event.target.closest('.history-item');
-                if (!item || !elements.historyList.contains(item)) return;
-                if (event.relatedTarget && item.contains(event.relatedTarget)) return;
-                previewHistoryItem(item, { requireHover: true });
-            });
-
-            elements.historyList.addEventListener('focusin', event => {
-                const item = event.target.closest('.history-item');
-                if (!item || !elements.historyList.contains(item)) return;
-                previewHistoryItem(item);
-            });
-
-            elements.historyList.addEventListener('click', async event => {
-                const actionElement = event.target.closest('[data-history-action]');
-                if (!actionElement || !elements.historyList.contains(actionElement)) return;
-                const item = actionElement.closest('.history-item');
-                const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId || item?.dataset.chatId);
-                if (chatId === null || !item) return;
-                const action = actionElement.dataset.historyAction;
-
-                if (action === 'open') {
-                    if (historyUiState.deleteMode) {
-                        const shouldSelect = !historyUiState.deleteSelection.has(String(chatId));
-                        uiUtils.setHistoryDeleteSelection(chatId, shouldSelect);
-                    } else {
-                        uiUtils.captureHistoryScrollPosition();
-                        await chatHistoryActions.open(chatId, { source: 'history' });
-                    }
-                } else if (action === 'menu') {
-                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history-list' });
-                }
-            });
-            elements.historyList.addEventListener('change', event => {
-                const checkbox = event.target.closest('.history-delete-checkbox');
-                if (!checkbox || !historyUiState.deleteMode) return;
-                uiUtils.setHistoryDeleteSelection(checkbox.dataset.chatId, checkbox.checked);
-            });
-
-            elements.historyDetailPane.addEventListener('click', async event => {
-                if (historyUiState.deleteMode) return;
-                const actionElement = event.target.closest('[data-history-detail-action]');
-                if (!actionElement || !elements.historyDetailPane.contains(actionElement)) return;
-                const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId || historyUiState.selectedChatId);
-                if (chatId === null) return;
-                const action = actionElement.dataset.historyDetailAction;
-                if (action === 'open') {
-                    uiUtils.captureHistoryScrollPosition();
-                    await chatHistoryActions.open(chatId, { source: 'history-detail' });
-                } else if (action === 'export') {
-                    await uiUtils.executeHistoryAction('export', {
-                        chatId,
-                        source: 'history-detail',
-                        triggerElement: actionElement
-                    });
-                } else if (action === 'menu') {
-                    void uiUtils.openHistoryItemMenu(actionElement, chatId, { source: 'history-detail' });
-                }
-            });
-            const historyDetailMediaQuery = window.matchMedia('(min-width: 1000px)');
-            historyDetailMediaQuery.addEventListener?.('change', () => {
-                uiUtils.closeHistoryItemMenu();
-                uiUtils.handleHistoryDetailViewportChange();
-            });
-
-            elements.historyStateAction.addEventListener('click', () => {
-                const action = elements.historyStateAction.dataset.historyStateAction;
-                if (action === 'clear-search') clearHistorySearch();
-                if (action === 'retry') uiUtils.renderHistoryList({ refresh: true, preserveScroll: true });
-            });
-            elements.historyMainContent.addEventListener('scroll', () => {
-                if (state.currentScreen === 'history') {
-                    uiUtils.captureHistoryScrollPosition();
-                    uiUtils.closeHistoryItemMenu();
-                }
-            }, { passive: true });
-            elements.historyDetailPane.addEventListener('scroll', () => uiUtils.closeHistoryItemMenu(), { passive: true });
-            this._historyEventsBound = true;
-        }
 
         if (!this._historyActionMenuEventsBound) {
             document.addEventListener('keydown', event => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
-                const trigger = event.target.closest(
-                    '[data-history-action="menu"], [data-history-detail-action="menu"], [data-sidebar-action="menu"]'
-                );
+                if (event.defaultPrevented || event.key !== 'Enter' && event.key !== ' ') return;
+                const trigger = event.target.closest('[data-sidebar-action="menu"], #chat-sidebar-history-menu-btn');
                 if (!trigger || trigger.disabled) return;
                 event.preventDefault();
-                trigger.click();
+                if (!event.repeat) trigger.click();
             });
             elements.historyItemMenu.addEventListener('pointerdown', event => {
                 if (event.target.closest('[data-history-menu-action]')) {
@@ -15530,12 +14911,17 @@ const appLogic = {
             });
             elements.historyItemMenu.addEventListener('click', async event => {
                 const menuItem = event.target.closest('[data-history-menu-action]');
-                if (!menuItem || !elements.historyItemMenu.contains(menuItem)) return;
+                if (!menuItem || menuItem.hidden || !elements.historyItemMenu.contains(menuItem)) return;
                 if (historyUiState.menuActionPending) return;
                 const context = historyUiState.menuContext
                     ? { ...historyUiState.menuContext }
                     : null;
                 const action = menuItem.dataset.historyMenuAction;
+                if (context?.importOnly && action === 'import') {
+                    uiUtils.closeHistoryItemMenu({ restoreFocus: true });
+                    elements.importHistoryInput.click();
+                    return;
+                }
                 if (!context) {
                     await uiUtils.reportHistoryActionFailure({ action, reason: 'missing-menu-context' });
                     return;
@@ -15622,6 +15008,15 @@ const appLogic = {
         }
 
         if (!this._chatSidebarEventsBound) {
+            const clearSidebarTouchInput = () => elements.chatScreen.classList.remove('sidebar-touch-input');
+            document.addEventListener('pointerdown', event => {
+                elements.chatScreen.classList.toggle('sidebar-touch-input', event.pointerType === 'touch');
+            }, { capture: true, passive: true });
+            document.addEventListener('keydown', clearSidebarTouchInput, { capture: true });
+            elements.chatScreen.addEventListener('pointermove', event => {
+                if (event.pointerType === 'mouse') clearSidebarTouchInput();
+            }, { passive: true });
+
             const clearChatSidebarSearch = () => {
                 if (chatSidebarUiState.searchTimer) clearTimeout(chatSidebarUiState.searchTimer);
                 chatSidebarUiState.searchTimer = null;
@@ -15631,17 +15026,29 @@ const appLogic = {
                 void uiUtils.renderChatSidebar();
             };
 
-            elements.chatSidebarCloseBtn.addEventListener('click', () => {
-                uiUtils.closeChatSidebar({ restoreFocus: true });
-            });
             elements.chatSidebarBackdrop.addEventListener('click', () => {
                 uiUtils.closeChatSidebar({ restoreFocus: true });
             });
-            elements.chatSidebarAllHistoryBtn.addEventListener('click', async () => {
-                uiUtils.closeHistoryItemMenu();
-                if (chatSidebarUiState.mode === 'overlay') uiUtils.closeChatSidebar({ restoreFocus: false });
-                await uiUtils.showScreen('history');
+            elements.chatScreen.addEventListener('click', event => {
+                if (event.pointerType !== 'touch' || chatSidebarUiState.mode !== 'permanent' || !chatSidebarUiState.isOpen) return;
+                if (!event.target.closest('.chat-workspace') ||
+                    event.target.closest('#goto-history-btn, dialog, [role="dialog"], [role="menu"], [popover]')) return;
+                uiUtils.closeChatSidebar();
             });
+            const toggleSearch = open => {
+                elements.chatSidebarSearchField.classList.toggle('hidden', !open);
+                elements.chatSidebarSearchToggle.setAttribute('aria-expanded', String(open));
+                elements.chatSidebarSearchToggle.setAttribute('aria-label', open ? '履歴検索を閉じる' : '履歴を検索');
+                if (open) elements.chatSidebarSearchInput.focus();
+                else {
+                    clearChatSidebarSearch();
+                    elements.chatSidebarSearchToggle.focus();
+                }
+            };
+            elements.chatSidebarSearchToggle.addEventListener('click', () => {
+                toggleSearch(elements.chatSidebarSearchField.classList.contains('hidden'));
+            });
+            elements.chatSidebarHistoryMenuBtn.addEventListener('click', () => uiUtils.openHistoryItemMenu(elements.chatSidebarHistoryMenuBtn));
             elements.chatSidebarSearchInput.addEventListener('input', () => {
                 chatSidebarUiState.query = elements.chatSidebarSearchInput.value;
                 elements.chatSidebarSearchClearBtn.classList.toggle('hidden', !chatSidebarUiState.query);
@@ -15655,10 +15062,8 @@ const appLogic = {
             });
             elements.chatSidebarSearchInput.addEventListener('keydown', event => {
                 if (event.key !== 'Escape') return;
-                if (elements.chatSidebarSearchInput.value) {
-                    event.preventDefault();
-                    clearChatSidebarSearch();
-                }
+                event.preventDefault();
+                toggleSearch(false);
             });
             elements.chatSidebarSearchClearBtn.addEventListener('click', () => {
                 clearChatSidebarSearch();
@@ -15671,10 +15076,7 @@ const appLogic = {
                 if (chatId === null) return;
                 const action = actionElement.dataset.sidebarAction;
                 if (action === 'menu') {
-                    void uiUtils.openHistoryItemMenu(actionElement, chatId, {
-                        selectHistoryDetail: false,
-                        source: 'sidebar'
-                    });
+                    uiUtils.openHistoryItemMenu(actionElement, chatId);
                     return;
                 }
                 if (action === 'open') {
@@ -15691,7 +15093,8 @@ const appLogic = {
                 if (historyUiState.menuContext?.source === 'sidebar') uiUtils.closeHistoryItemMenu();
             }, { passive: true });
             document.addEventListener('keydown', event => {
-                if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen) return;
+                if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen ||
+                    document.querySelector('dialog[open]')) return;
                 if (!elements.historyItemMenu.classList.contains('hidden')) return;
                 event.preventDefault();
                 uiUtils.closeChatSidebar({ restoreFocus: true });
@@ -15730,7 +15133,20 @@ const appLogic = {
         }
 
         // --- チャット関連 ---
-        elements.newChatBtn.addEventListener('click', () => this.confirmStartNewChat());
+        elements.newChatBtn.addEventListener('click', async () => {
+            if (await this.confirmStartNewChat() && chatSidebarUiState.mode === 'overlay') uiUtils.closeChatSidebar({ restoreFocus: true });
+        });
+        elements.historyDeleteModeBtn.addEventListener('click', () => void uiUtils.openHistoryDeleteDialog());
+        elements.historyDeleteCancelBtn.addEventListener('click', () => elements.historyDeleteDialog.close());
+        elements.historyDeleteDialog.addEventListener('cancel', event => {
+            if (uiUtils.historyDeleteView?.busy) event.preventDefault();
+        });
+        elements.historyDeleteList.addEventListener('change', () => uiUtils.updateHistoryDeleteControls());
+        elements.historyDeleteSelectAll.addEventListener('change', () => {
+            for (const check of elements.historyDeleteList.querySelectorAll('input')) check.checked = elements.historyDeleteSelectAll.checked;
+            uiUtils.updateHistoryDeleteControls();
+        });
+        elements.historyDeleteConfirmBtn.addEventListener('click', () => void uiUtils.deleteSelectedHistory());
         elements.sendButton.addEventListener('click', () => {
             if (state.isSending) {
                 this.abortRequest();
@@ -16009,7 +15425,6 @@ const appLogic = {
                 uiUtils.applyThemeColorSettings();
             } },
             headerTextColor: { element: elements.headerTextColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
-            newChatButtonColor: { element: elements.newChatButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             sendButtonColor: { element: elements.sendButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             otherButtonColor: { element: elements.otherButtonColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
             userMessageColor: { element: elements.userMessageColorInput, event: 'input', onUpdate: () => uiUtils.applyThemeColorSettings() },
@@ -16200,7 +15615,6 @@ const appLogic = {
         });
 
         // --- その他 ---
-        elements.importHistoryBtn.addEventListener('click', () => elements.importHistoryInput.click());
         elements.importHistoryInput.addEventListener('change', (event) => {
             const file = event.target.files[0];
             if (file) this.handleHistoryImport(file);
@@ -16253,12 +15667,7 @@ const appLogic = {
             }
         }, true); 
     
-        if ('visualViewport' in window) {
-            window.visualViewport.addEventListener('resize', this.updateZoomState.bind(this));
-            window.visualViewport.addEventListener('scroll', this.updateZoomState.bind(this));
-        } else {
-            console.warn("VisualViewport API is not supported in this browser.");
-        }
+        window.visualViewport?.addEventListener('resize', () => this.updateZoomState(), { passive: true });
 
         elements.attachFileBtn.addEventListener('click', () => {
             this.attachmentPickerMessages = state.currentMessages;
@@ -16352,6 +15761,14 @@ const appLogic = {
             const file = event.target.files[0];
             if (file) this.handleAssetImport(file);
             event.target.value = null;
+        });
+        const backupInput = document.getElementById('full-backup-input');
+        document.getElementById('full-backup-export').addEventListener('click', () => this.handleFullBackupExport());
+        document.getElementById('full-backup-import').addEventListener('click', () => backupInput.click());
+        backupInput.addEventListener('change', () => {
+            const file = backupInput.files[0];
+            backupInput.value = '';
+            if (file) void this.handleFullBackupImport(file);
         });
 
         elements.manageAssetsBtn.addEventListener('click', () => this.openAssetManagementDialog());
@@ -16577,7 +15994,6 @@ const appLogic = {
         };
         elements.gotoHistoryBtn.addEventListener('click', resetHeaderVisibility);
         elements.gotoSettingsBtn.addEventListener('click', resetHeaderVisibility);
-        elements.backToChatFromHistoryBtn.addEventListener('click', resetHeaderVisibility);
         elements.backToChatFromSettingsBtn.addEventListener('click', resetHeaderVisibility);
 
         elements.sdTestConnectionBtn.addEventListener('click', async () => {
@@ -16621,52 +16037,61 @@ const appLogic = {
     handlePopState(event) {
     clearTimeout(this.swipeSettingsBackTimer);
     this.swipeSettingsBackTimer = null;
-    const entry = event.state?.screen ? event.state : window.settingsUiV136?.getHashEntry();
+    const legacyHistory = event.state?.screen === 'history' || location.hash === '#history';
+    const entry = legacyHistory ? { screen: 'chat' } : event.state?.screen ? event.state : window.settingsUiV136?.getHashEntry();
+    if (legacyHistory) history.replaceState(entry, '', '#chat');
     const targetScreen = entry?.screen || 'chat';
     if (window.settingsUiV136?.popover?.refreshProfiles) window.settingsUiV136.closePopover(false);
     if (targetScreen === state.currentScreen) {
       this.resetSwipeState();
       if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
       else window.settingsUiV136?.closePopover(false);
+      if (targetScreen === 'chat') window.DocumentLibraryUI?.handleHistory(entry);
+      if (legacyHistory) uiUtils.openChatSidebar();
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
       return;
     }
     console.log(`popstate event fired: Navigating to screen '${targetScreen}' from history state.`);
     // showScreenを呼び出す (fromPopState = true を渡して履歴操作を抑制)
-    void uiUtils.showScreen(targetScreen, true, entry);
+    void uiUtils.showScreen(targetScreen, true, entry).then(() => {
+        if (targetScreen === 'chat' && history.state?.documentLibrary) window.DocumentLibraryUI?.handleHistory(history.state);
+        if (legacyHistory && state.currentScreen === 'chat') uiUtils.openChatSidebar();
+    });
     },
 
     // ズーム状態を更新
     updateZoomState() {
-        if ('visualViewport' in window) {
-            // スケールが閾値より大きい場合をズームとみなす
-            const newZoomState = window.visualViewport.scale > ZOOM_THRESHOLD;
-            if (newZoomState) this.resetSwipeState();
-            if (state.isZoomed !== newZoomState) {
-                state.isZoomed = newZoomState;
-                console.log(`Zoom state updated: ${state.isZoomed}`);
-                // ズーム状態に応じてbodyにクラスを追加/削除
-                document.body.classList.toggle('zoomed', state.isZoomed);
-            }
-        }
+        const scale = window.visualViewport?.scale;
+        if (!Number.isFinite(scale)) return;
+        const zoomed = scale > (state.isZoomed ? 1.005 : ZOOM_THRESHOLD);
+        if (state.isZoomed === zoomed) return;
+        state.isZoomed = zoomed;
+        document.documentElement.classList.toggle('viewport-zoomed', zoomed);
+        if (zoomed) this.resetSwipeState();
     },
 
 
     async openHistoryFromChat() {
         if (state.isEditingSystemPrompt && !await this.closeSystemPromptDialog()) return;
-        if (chatSidebarUiState.mode !== 'disabled') return uiUtils.openChatSidebar();
-        return uiUtils.showScreen('history');
+        if (chatSidebarUiState.isOpen) return uiUtils.closeChatSidebar({ restoreFocus: true });
+        return uiUtils.openChatSidebar();
     },
 
     setupSwipeNavigation() {
         if (this._swipeNavigationBound) return;
         this._swipeNavigationBound = true;
-        this.swipeScreens = [elements.chatScreen, elements.historyScreen, elements.settingsScreen];
+        this.swipeScreens = [elements.chatScreen, elements.settingsScreen];
         this.swipeDetail = document.getElementById('settings-detail');
         this.swipeSettingsNav = elements.settingsScreen.querySelector('.settings-category-nav');
         this.swipeReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
         this.swipeReducedMotion.addEventListener('change', () => this.resetSwipeState());
-        window.addEventListener('resize', () => this.resetSwipeState(), { passive: true });
+        window.addEventListener('resize', () => {
+            const gesture = this.swipeGesture;
+            // Mobile browser controls can resize the viewport vertically during a drag.
+            if (this.isSidebarSwipe(gesture) &&
+                gesture.screen.getBoundingClientRect().width === gesture.width) return;
+            this.resetSwipeState();
+        }, { passive: true });
         const options = { capture: true, passive: true };
         document.addEventListener('beforetoggle', event => {
             if (event.target instanceof HTMLDialogElement && event.newState === 'open') this.resetSwipeState();
@@ -16675,17 +16100,27 @@ const appLogic = {
         document.addEventListener('touchmove', event => this.handleTouchMove(event), options);
         document.addEventListener('touchend', event => this.handleTouchEnd(event), { capture: true, passive: false });
         document.addEventListener('touchcancel', () => this.resetSwipeState(true), options);
+        document.addEventListener('pointercancel', event => {
+            if (event.pointerType === 'touch' && event.isPrimary && this.isSidebarSwipe(this.swipeGesture)) {
+                this.resetSwipeState(true);
+            }
+        }, options);
     },
 
-    isSwipeNavigationTarget(target, screen, control) {
+    isSidebarSwipe(gesture) {
+        return Boolean(gesture?.sidebarDirection &&
+            (gesture.sidebarDrag || gesture.sidebarSurface || (gesture.dx ?? 0) >= 0));
+    },
+
+    isSwipeNavigationTarget(target, screen, control, sidebarSurface) {
         if (target.closest(`
             input:is([type="range"], [type="color"], [type="file"], [type="date"], [type="datetime-local"],
                 [type="time"], [type="month"], [type="week"]), [role="slider"], [draggable="true"],
             [role="menu"], [inert], dialog, [role="dialog"], [popover],
-            .execution-popover, #chat-search-dialog, #chat-history-sidebar, #chat-sidebar-backdrop
+            .execution-popover, #chat-search-dialog
         `)) return false;
         if (control instanceof HTMLSelectElement && (control.multiple || control.size > 1)) return false;
-        if (screen === elements.chatScreen && !control && target.closest(SWIPE_TAP_TARGETS) &&
+        if (screen === elements.chatScreen && !sidebarSurface && !control && target.closest(SWIPE_TAP_TARGETS) &&
             !target.closest('.app-header, ' + SWIPE_CHAT_ACTION_TARGETS)) return false;
 
         for (let node = target; node && node !== screen; node = node.parentElement) {
@@ -16696,16 +16131,22 @@ const appLogic = {
     },
 
     canContinueSwipeNavigation(gesture) {
-        if (gesture) {
-            if (gesture.control?.contains(document.activeElement)) return false;
-            const selection = window.getSelection();
-            if (selection && !selection.isCollapsed && gesture.screen.contains(selection.anchorNode)) return false;
+        if (!gesture || gesture.control?.contains(document.activeElement)) return false;
+        const selection = window.getSelection();
+        const surface = gesture.sidebarSurface ? elements.chatHistorySidebar
+            : gesture.librarySurface ? elements.documentLibraryWorkspace
+            : gesture.screen === elements.chatScreen ? elements.chatWorkspace : gesture.screen;
+        if (selection && !selection.isCollapsed &&
+            (surface.contains(selection.anchorNode) || surface.contains(selection.focusNode))) return false;
+        if (state.currentScreen === 'chat') {
+            const workspace = gesture.librarySurface ? elements.documentLibraryWorkspace : elements.chatWorkspace;
+            const available = gesture.sidebarSurface ? chatSidebarUiState.isOpen : !workspace.hidden && !workspace.inert;
+            if (!available) return false;
         }
-        return Boolean(gesture && state.settings.enableSwipeNavigation && !this.swipeSettingsBackTimer &&
+        return Boolean(state.settings.enableSwipeNavigation && !this.swipeSettingsBackTimer &&
             !state.isZoomed && !(window.visualViewport?.scale > ZOOM_THRESHOLD) &&
             gesture.screen.id === state.currentScreen + '-screen' && gesture.hash === location.hash &&
             gesture.screen.classList.contains('active') && !gesture.screen.inert &&
-            (state.currentScreen !== 'chat' || !elements.chatWorkspace.inert) &&
             !state.isEditingSystemPrompt && !window.settingsUiV136?.popover &&
             !document.querySelector('dialog[open], #image-modal-overlay:not(.hidden)'));
     },
@@ -16721,11 +16162,19 @@ const appLogic = {
 
         const { identifier, clientX, clientY } = event.touches[0];
         const control = target.closest(SWIPE_FOCUS_CONTROLS);
-        const gesture = { identifier, clientX, clientY, screen, control, hash: location.hash };
-        if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen, control) ||
+        const sidebarSurface = Boolean(target.closest('#chat-history-sidebar, #chat-sidebar-backdrop'));
+        const librarySurface = Boolean(target.closest('#document-library-workspace'));
+        const gesture = { identifier, clientX, clientY, screen, control, sidebarSurface, librarySurface, hash: location.hash };
+        if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen, control, sidebarSurface) ||
             screen.getAnimations?.().some(animation => animation.transitionProperty === 'transform' && animation.playState === 'running')) return;
         gesture.width = screen.getBoundingClientRect().width;
         gesture.suppressTap = Boolean(control || target.closest(SWIPE_TAP_TARGETS));
+        const sidebarDestination = this.getSwipeDestination(!sidebarSurface, gesture);
+        if (sidebarDestination === 'sidebar-open') gesture.sidebarDirection = 1;
+        if (sidebarDestination === 'sidebar-close') gesture.sidebarDirection = -1;
+        if (gesture.sidebarDirection && chatSidebarUiState.mode === 'overlay') {
+            gesture.sidebarSamples = [{ x: 0, time: event.timeStamp }];
+        }
         this.swipeGesture = gesture;
     },
 
@@ -16740,18 +16189,36 @@ const appLogic = {
 
         const x = touch.clientX - gesture.clientX;
         const y = Math.abs(touch.clientY - gesture.clientY);
-        // Discard a vertical or diagonal gesture for the rest of this contact.
-        if (Math.max(Math.abs(x), y) >= SWIPE_DIRECTION_THRESHOLD && Math.abs(x) <= y * SWIPE_HORIZONTAL_RATIO) {
+        if (gesture.sidebarDrag && y >= 2 * SWIPE_DIRECTION_THRESHOLD && y > Math.abs(x) &&
+            Math.abs(touch.clientY - gesture.sidebarDrag.lastY) > Math.abs(x - gesture.dx)) {
+            this.resetSwipeState(true);
+            return;
+        }
+        // An initially diagonal drawer swipe can become horizontal before release.
+        // Keep it pending only while movement toward the drawer destination exceeds vertical drift.
+        const leadingTowardSidebar = gesture.sidebarDirection && gesture.sidebarDirection * x > y;
+        if (!gesture.sidebarDrag && !leadingTowardSidebar &&
+            Math.max(Math.abs(x), y) >= SWIPE_DIRECTION_THRESHOLD && Math.abs(x) <= y * SWIPE_HORIZONTAL_RATIO) {
             this.resetSwipeState(true);
             return;
         }
         gesture.dx = x;
+        if (gesture.sidebarSamples) {
+            gesture.sidebarSamples.push({ x, time: event.timeStamp });
+            if (gesture.sidebarSamples.length > 8) gesture.sidebarSamples.shift();
+            if (this.canStartSidebarDrag(gesture, x, y)) this.startSidebarDrag(gesture);
+            if (gesture.sidebarDrag) gesture.sidebarDrag.lastY = touch.clientY;
+        }
         if (!gesture.frame) gesture.frame = requestAnimationFrame(() => {
             gesture.frame = 0;
             if (this.swipeGesture !== gesture) return;
+            if (gesture.sidebarDrag) {
+                this.positionSidebarDrag(gesture, gesture.dx);
+                return;
+            }
             const delta = Math.sign(gesture.dx) * Math.max(0, Math.abs(gesture.dx) - SWIPE_DIRECTION_THRESHOLD);
-            const destination = delta && this.getSwipeDestination(delta > 0);
-            if (destination && destination !== 'sidebar') {
+            const destination = delta && this.getSwipeDestination(delta > 0, gesture);
+            if (destination && !destination.startsWith('sidebar-')) {
                 if (this.swipeSnap) {
                     // Keep the displayed position at the instant the finger takes over.
                     gesture.initialOffset = this.interruptSwipeSnap();
@@ -16760,12 +16227,44 @@ const appLogic = {
                 this.prepareSwipePreview(destination, gesture.width);
             }
             if (this.swipeSnap || !this.swipePreview) return;
-            const left = this.getSwipeDestination(false), right = this.getSwipeDestination(true);
+            const left = this.getSwipeDestination(false, gesture), right = this.getSwipeDestination(true, gesture);
             const initial = gesture.initialOffset || 0;
-            const min = Math.min(initial, left && left !== 'sidebar' ? -gesture.width : 0);
-            const max = Math.max(initial, right && right !== 'sidebar' ? gesture.width : 0);
+            const min = Math.min(initial, left && !left.startsWith('sidebar-') ? -gesture.width : 0);
+            const max = Math.max(initial, right && !right.startsWith('sidebar-') ? gesture.width : 0);
             this.setSwipeOffset(Math.max(min, Math.min(delta + (gesture.grabOffset || 0), max)));
         });
+    },
+
+    canStartSidebarDrag(gesture, x, y) {
+        return gesture.sidebarSamples && !gesture.sidebarDrag && !this.swipePreview && !this.swipeSnap &&
+            gesture.sidebarDirection * x >= SWIPE_DIRECTION_THRESHOLD && Math.abs(x) > y * SWIPE_HORIZONTAL_RATIO;
+    },
+
+    startSidebarDrag(gesture) {
+        const sidebar = elements.chatHistorySidebar.getBoundingClientRect();
+        gesture.sidebarDrag = {
+            width: sidebar.width,
+            initialOffset: sidebar.left - gesture.screen.getBoundingClientRect().left
+        };
+        this.positionSidebarDrag(gesture, gesture.dx || 0);
+        gesture.screen.classList.add('chat-sidebar-dragging');
+    },
+
+    positionSidebarDrag(gesture, x) {
+        const { initialOffset, width } = gesture.sidebarDrag;
+        const offset = Math.max(-width, Math.min(0, initialOffset + x));
+        const progress = width ? 1 + offset / width : 0;
+        gesture.screen.style.setProperty('--sidebar-offset', `${offset}px`);
+        gesture.screen.style.setProperty('--sidebar-progress', progress);
+        return progress;
+    },
+
+    clearSidebarDrag() {
+        const { chatScreen } = elements;
+        if (!chatScreen.classList.contains('chat-sidebar-dragging')) return;
+        chatScreen.classList.remove('chat-sidebar-dragging');
+        chatScreen.style.removeProperty('--sidebar-offset');
+        chatScreen.style.removeProperty('--sidebar-progress');
     },
 
     handleTouchEnd(event) {
@@ -16774,12 +16273,33 @@ const appLogic = {
         this.swipeGesture = null;
         cancelAnimationFrame(gesture.frame);
         const touch = event.changedTouches[0];
+        const valid = !event.touches.length && touch?.identifier === gesture.identifier && this.canContinueSwipeNavigation(gesture);
+        const x = valid ? touch.clientX - gesture.clientX : 0;
+        const y = valid ? Math.abs(touch.clientY - gesture.clientY) : 0;
+        if (this.canStartSidebarDrag(gesture, x, y)) this.startSidebarDrag(gesture);
+        if (gesture.sidebarDrag) {
+            const direction = gesture.sidebarDirection;
+            const travel = direction * x;
+            const progress = valid ? this.positionSidebarDrag(gesture, x) : 0;
+            const moved = direction > 0 ? progress : 1 - progress;
+            const sample = gesture.sidebarSamples.find(({ time }) =>
+                event.timeStamp - time >= 16 && event.timeStamp - time <= SIDEBAR_FLING_WINDOW);
+            const fling = sample && travel >= SIDEBAR_FLING_MIN_DISTANCE &&
+                direction * (x - sample.x) / (event.timeStamp - sample.time) >= SIDEBAR_FLING_MIN_SPEED;
+            const commit = valid && travel >= SWIPE_DIRECTION_THRESHOLD && travel > y * SWIPE_HORIZONTAL_RATIO &&
+                (moved >= SIDEBAR_DRAG_COMMIT_FRACTION || fling);
+            // Apply the last drag position before restoring CSS transitions.
+            elements.chatHistorySidebar.getBoundingClientRect();
+            this.clearSidebarDrag();
+            if (event.cancelable) event.preventDefault();
+            if (commit) this.navigateBySwipe(direction > 0 ? 'sidebar-open' : 'sidebar-close', gesture.width);
+            return;
+        }
         let destination = null;
-        if (!event.touches.length && touch?.identifier === gesture.identifier && this.canContinueSwipeNavigation(gesture)) {
-            const x = touch.clientX - gesture.clientX;
-            const y = Math.abs(touch.clientY - gesture.clientY);
+        if (valid) {
             if (Math.abs(x) >= SWIPE_THRESHOLD && Math.abs(x) > y * SWIPE_HORIZONTAL_RATIO) {
-                destination = this.getSwipeDestination(x > 0);
+                destination = this.getSwipeDestination(x > 0, gesture);
+                if (chatSidebarUiState.mode === 'overlay' && destination?.startsWith('sidebar-')) destination = null;
             }
         }
         if (!destination) {
@@ -16787,18 +16307,21 @@ const appLogic = {
             return;
         }
         // A committed swipe must not produce a compatibility click on its start control.
-        if (gesture.suppressTap && event.cancelable) event.preventDefault();
+        if ((gesture.suppressTap || gesture.sidebarSurface) && event.cancelable) event.preventDefault();
         this.navigateBySwipe(destination, gesture.width);
     },
 
-    getSwipeDestination(right) {
+    getSwipeDestination(right, gesture) {
         const screen = state.currentScreen;
         if (screen === 'chat') {
-            if (!right) return 'settings';
-            if (chatSidebarUiState.mode === 'disabled') return 'history';
-            return chatSidebarUiState.isOpen ? null : 'sidebar';
+            if (gesture.sidebarSurface) return !right && chatSidebarUiState.isOpen ? 'sidebar-close' : null;
+            if (!right) return gesture.librarySurface ? null : 'settings';
+            if (chatSidebarUiState.isOpen) return null;
+            if (chatSidebarUiState.mode === 'overlay') {
+                return !gesture.librarySurface || gesture.clientX <= SIDEBAR_LIBRARY_DRAG_EDGE ? 'sidebar-open' : null;
+            }
+            return gesture.clientX <= SIDEBAR_PERMANENT_SWIPE_EDGE ? 'sidebar-open' : null;
         }
-        if (screen === 'history' && !right) return 'chat';
         if (screen === 'settings' && right) {
             const settings = window.settingsUiV136;
             return settings && !settings.media.matches && settings.category ? 'settings-top' : 'chat';
@@ -16808,9 +16331,10 @@ const appLogic = {
 
     navigateBySwipe(destination, width) {
         document.body.classList.remove('header-force-show');
-        if (destination === 'sidebar') {
+        if (destination === 'sidebar-open' || destination === 'sidebar-close') {
             if (!this.swipeSnap) this.snapSwipePreview(0, false);
-            uiUtils.openChatSidebar({ preserveSwipe: true });
+            if (destination === 'sidebar-open') uiUtils.openChatSidebar({ preserveSwipe: true });
+            else uiUtils.closeChatSidebar({ restoreFocus: true });
         } else if (destination === 'settings-top') {
             if (this.swipeSnap) this.interruptSwipeSnap();
             const settings = window.settingsUiV136;
@@ -16891,6 +16415,7 @@ const appLogic = {
     resetSwipeState(restore = false) {
         cancelAnimationFrame(this.swipeGesture?.frame);
         this.swipeGesture = null;
+        this.clearSidebarDrag();
         if (restore) {
             if (!this.swipeSnap) this.snapSwipePreview(0, false);
             return;
@@ -16958,8 +16483,22 @@ const appLogic = {
     },
 
     // 新規チャットを開始する (状態リセット)
+    async setCurrentChatDocuments(documentIds, mode = 'replace') {
+        const ids = DocumentLibrary.normalizeIds(documentIds);
+        const chatId = state.currentChatId;
+        const owner = dbUtils.chatSaveOwners?.get(state.currentMessages);
+        if (state.chatDataChangesV136.has(undefined)) throw new Error('会話データを更新中です。');
+        if (chatId != null) return dbUtils.setChatDocuments(chatId, ids, owner, mode);
+        if (!ids.length || mode === 'remove') return null;
+        if (state.sendPreparationV136 || state.chatDataChangesV136.has(null) || this.chatParameterOperation) {
+            throw new Error('チャットを保存中です。');
+        }
+        return dbUtils.saveChat(null, null, { documentIds: ids, documentLinkMode: mode });
+    },
+
     startNewChat(options = {}) {
         if (this.chatParameterOperation) return;
+        window.DocumentLibraryUI?.close();
         this.chatNavigationV136 = {};
         this.invalidateSystemPromptOpen();
         this.clearComposerAttachments();
@@ -17104,6 +16643,7 @@ const appLogic = {
             }
         });
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
+        window.DocumentLibraryUI?.close();
         uiUtils.closeChatSearch({ restoreFocus: false });
 
         state.syncMessageCounter = 0;
@@ -17406,6 +16946,13 @@ const appLogic = {
             }
     
             if (chatToExport.messages) {
+                const references = chatToExport.messages.filter(message => message.role === 'user' || message.role === 'model')
+                    .flatMap((message, index) => {
+                        const metadata = message.role === 'model' && window.DocumentRag?.normalize(message.rag);
+                        return metadata ? [{ index, metadata }] : [];
+                    });
+                if (references.length) exportText += '<|#|ragreferences|#|>\n' +
+                    window.DocumentRag.safeJson(references) + '\n<|#|/ragreferences|#|>\n\n';
                 chatToExport.messages.forEach(msg => {
                     if (msg.role === 'user' || msg.role === 'model') {
                         let attributes = '';
@@ -17496,7 +17043,7 @@ const appLogic = {
 
     // 履歴アイテムのタイトルを編集
     async editHistoryTitle(chatId, titleSource = '') {
-        const record = uiUtils.getHistoryRecord(chatId);
+        const record = uiUtils.getChatSidebarRecord(chatId);
         const currentTitle = typeof titleSource === 'string' && titleSource.trim()
             ? titleSource
             : titleSource?.textContent || uiUtils.normalizeChatTitleText(record?.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
@@ -17806,6 +17353,11 @@ const appLogic = {
         const requestOwner = session || {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
         const wasAborted = requestOwner.signal?.aborted;
         const requestContext = await SettingsV136.historyTaskV136('wire',{provider:session?.apiConfig.provider ?? this.getExecutionProvider(),messages:messagesForApi,model:session?.apiConfig.modelName ?? this.getExecutionModelName(),system:systemInstruction});
+        const baseRequestContext = session?.rag && ['openrouter', 'bedrock'].includes(session.apiConfig.provider) &&
+            systemInstruction !== session.baseSystemInstruction ? await SettingsV136.historyTaskV136('wire', {
+            provider: session.apiConfig.provider, messages: messagesForApi, model: session.apiConfig.modelName,
+            system: session.baseSystemInstruction
+        }) : null;
 
         const assertOwner = () => {
             if (session) return this.assertSendExecutionV136(session);
@@ -17816,7 +17368,7 @@ const appLogic = {
         assertOwner();
         const rememberRequest = result => {
             if (requestContext && result.continuation) Object.assign(result.continuation, {
-                historyWireV136: requestContext });
+                historyWireV136: requestContext, ...(baseRequestContext && { historyBaseWireV137: baseRequestContext }) });
         };
         let loopCount = 0;
         // Z.ai API(OpenAI互換)は1回のレスポンスで1つのtool_callしか返さないため、
@@ -17832,6 +17384,7 @@ const appLogic = {
         while (loopCount < MAX_LOOPS) {
             loopCount++;
 
+            if (session?.rag) session.ragRequested = true;
             const result = await this.callApiWithRetry({
                 messagesForApi: currentTurnHistory,
                 generationConfig,
@@ -17843,6 +17396,12 @@ const appLogic = {
 
             assertOwner();
             rememberRequest(result);
+            if (session?.rag && result.toolCalls?.length &&
+                (!session.settings.geminiEnableFunctionCalling || session.rag.status === 'unsupported')) {
+                result.toolCalls = [];
+                // An unexecuted call must not survive in the provider history.
+                delete result.continuation;
+            }
             const modelMessage = {
                 role: 'model',
                 content: result.content || '',
@@ -17890,6 +17449,9 @@ const appLogic = {
 
                 let toolResult;
                 try {
+                    if (window.DocumentRag && !window.DocumentRag.canExecuteTool(session, functionName)) {
+                        throw new Error('この送信で許可されていないツールです。');
+                    }
                     const argsWithContext = { ...functionArgs, _responseTextForQc: responseTextForQc };
                     toolResult = await waitForToolV136(window.functionCallingTools[functionName](argsWithContext, {
                         messages: historyForFunctions.filter(m => m.role !== 'tool'),
@@ -18184,6 +17746,7 @@ const appLogic = {
         session.memoryEnabled = state.isMemoryEnabledForChat;
         session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
             pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
+        window.DocumentRag?.capture(session);
         session.streaming = session.settings.enableStreamingOutput === true
             && StreamingV136.canStream(session.apiConfig.provider, session.apiConfig.modelName);
         session.auxiliary = {};
@@ -18263,8 +17826,9 @@ const appLogic = {
     getIncompleteStreamMessageV136(session) {
         const thoughtSummary = session.getStreamThought?.();
         if (!session.streamContent && !thoughtSummary) return null;
-        return { role: 'model', content: session.streamContent || '', thoughtSummary: thoughtSummary || null,
+        const message = { role: 'model', content: session.streamContent || '', thoughtSummary: thoughtSummary || null,
             incomplete: true, timestamp: Date.now() };
+        return window.DocumentRag?.attach(message, session) || message;
     },
     finishSendExecutionV136(session) {
         cancelAnimationFrame(session.streamFrame);
@@ -18305,6 +17869,42 @@ const appLogic = {
         try { await this._handleSendPreparedV136(preparation); }
         catch (error) { if (error.name !== 'AbortError') throw error; }
         finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
+    },
+    async buildSendSystemInstruction(session, question) {
+        let text = session.systemPrompt?.trim() || '';
+        const summary = this._buildSummaryForPrompt(session.persistentMemory);
+        if (summary) text += '\n\n' + summary;
+        if (session.settings.enableMemory && session.memoryEnabled && session.profileId) {
+            const memory = await dbUtils.getMemory(session.profileId);
+            this.assertSendExecutionV136(session);
+            if (memory?.items?.length) text = '[長期記憶]\n- ' + memory.items.join('\n- ') + '\n---\n\n' + text;
+        }
+        const base = text ? { role: 'system', parts: [{ text }] } : null;
+        session.baseSystemInstruction = base;
+        if (!window.DocumentRag) return base;
+        if (session.documentSnapshot?.chatId != null) this.setSendProgressV136(session, 'ファイルを検索中...');
+        const instruction = await window.DocumentRag.build(session, question, base);
+        this.assertSendExecutionV136(session);
+        if (session.rag && session.apiConfig.provider === 'gemini' && session.apiConfig.modelName === 'gemini-2.5-flash-image-preview') {
+            // This adapter omits system instructions for the image preview model.
+            session.rag = { schemaVersion: 1, status: 'unsupported', sources: [], unavailable: [] };
+            return base;
+        }
+        return instruction;
+    },
+    async prepareSendHistory(baseHistory, systemInstruction, session) {
+        try {
+            return { historyForApi: await this._prepareApiHistory(baseHistory, systemInstruction, session), systemInstruction };
+        } catch (error) {
+            const base = session.baseSystemInstruction;
+            if (error.code !== 'unsafe-history-continuation' || !session.rag || systemInstruction === base) throw error;
+            this.assertSendExecutionV136(session);
+            // Keep the original wire format when adding references would make
+            // the historical tool conversation unsafe to reconstruct.
+            const historyForApi = await this._prepareApiHistory(baseHistory, base, session);
+            session.rag = { schemaVersion: 1, status: 'history-unavailable', sources: [], unavailable: [] };
+            return { historyForApi, systemInstruction: base };
+        }
     },
     async _handleSendPreparedV136(preparation) {
         if (state.isSending) { return; }
@@ -18377,30 +17977,16 @@ const appLogic = {
             const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
 
-            const summaryText = this._buildSummaryForPrompt(preparation.persistentMemory);
-            let finalSystemPrompt = preparation.systemPrompt?.trim() || '';
-            if (summaryText) {
-                finalSystemPrompt += `\n\n${summaryText}`;
-            }
+            const instruction = await this.buildSendSystemInstruction(preparation,
+                text || attachmentsToSend.map(attachment => attachment.name).join(' '));
 
-            if (preparation.settings.enableMemory && preparation.memoryEnabled && preparation.profileId) {
-                const memoryData = await dbUtils.getMemory(preparation.profileId);
-                this.assertSendExecutionV136(preparation);
-                if (memoryData && memoryData.items && memoryData.items.length > 0) {
-                    const memoryBlock = `[長期記憶]\n- ${memoryData.items.join('\n- ')}\n---\n\n`;
-                    finalSystemPrompt = memoryBlock + finalSystemPrompt;
-                    console.log("長期記憶をシステムプロンプトに挿入しました。");
-                }
-            }
-
-            const systemInstruction = finalSystemPrompt ? { role: "system", parts: [{ text: finalSystemPrompt }] } : null;
-
-            const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction, preparation);
+            const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
             this.assertSendExecutionV136(preparation);
             const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
             this.assertSendExecutionV136(preparation);
             
             const finalAggregatedMessage = this._aggregateMessages(newMessages);
+            window.DocumentRag?.attach(finalAggregatedMessage, preparation);
             await this.translateThoughtSummary(finalAggregatedMessage, preparation);
             this.assertSendExecutionV136(preparation);
             this.attachExecutionMetadataToModelMessage(finalAggregatedMessage,
@@ -18621,11 +18207,12 @@ const appLogic = {
         let pinState = normalizeChatPinState({});
         const imageData = {};
         const attachmentData = {}; // 添付ファイルデータ保持用オブジェクト
+        let ragReferences = [];
 
         let remainingText = text;
 
         // 正規表現を更新し、attachmentdataも捕捉できるようにする
-        const dataBlockRegex = /<\|#\|(metadata|summary|imagedata|attachmentdata)\|#\|>([\s\S]*?)<\|#\|\/\1\|#\|>\s*/g;
+        const dataBlockRegex = /<\|#\|(metadata|summary|imagedata|attachmentdata|ragreferences)\|#\|>([\s\S]*?)<\|#\|\/\1\|#\|>\s*/g;
         let dataMatch;
         while ((dataMatch = dataBlockRegex.exec(text)) !== null) {
             const blockType = dataMatch[1];
@@ -18633,6 +18220,9 @@ const appLogic = {
             try {
                 const jsonData = JSON.parse(blockContent);
                 switch (blockType) {
+                    case 'ragreferences':
+                        if (Array.isArray(jsonData)) ragReferences = jsonData;
+                        break;
                     case 'metadata':
                         if (jsonData && typeof jsonData === 'object') {
                             pinState = normalizeChatPinState(jsonData.__chatPinState || {});
@@ -18705,6 +18295,11 @@ const appLogic = {
                 }
                 messages.push(messageData);
             }
+        }
+        for (const reference of ragReferences) {
+            const message = Number.isSafeInteger(reference?.index) && messages[reference.index];
+            const metadata = window.DocumentRag?.normalize(reference?.metadata);
+            if (message?.role === 'model' && metadata) message.rag = metadata;
         }
         console.log(`インポートテキストから ${messages.length} 件のメッセージとシステムプロンプト(${systemPrompt ? 'あり' : 'なし'})、要約データ(${summarizedContext ? 'あり' : 'なし'})をパースしました。`);
 
@@ -18792,7 +18387,7 @@ const appLogic = {
 
     // 全データ削除の確認と実行
     async confirmClearAllData() {
-        const confirmed = await uiUtils.showCustomConfirm("本当にすべてのデータ（チャット履歴、プロファイル、アセット、設定）を削除しますか？この操作は元に戻せません。");
+        const confirmed = await uiUtils.showCustomConfirm("本当にすべてのデータ（チャット履歴、プロファイル、画像、設定、共通ファイルと原本の全版）を削除しますか？この操作は元に戻せません。");
         if (confirmed) {
             try {
                 uiUtils.revokeExistingObjectUrl();
@@ -20081,9 +19676,10 @@ const appLogic = {
                     else uiUtils.renderChatMessages();
                 }
 
-                const systemInstruction = preparation.systemPrompt?.trim() ? { role: "system", parts: [{ text: preparation.systemPrompt.trim() }] } : null;
+                const instruction = await this.buildSendSystemInstruction(preparation,
+                    userMessage.content || userMessage.attachments?.map(attachment => attachment.name).join(' ') || '');
                 const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
-                const historyForApi = await this._prepareApiHistory(baseHistory, systemInstruction, preparation);
+                const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
                 this.assertSendExecutionV136(preparation);
     
                 const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
@@ -20104,6 +19700,7 @@ const appLogic = {
                 const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
                 this.assertSendExecutionV136(preparation);
                 const newAggregatedMessage = this._aggregateMessages(newMessages);
+                window.DocumentRag?.attach(newAggregatedMessage, preparation);
                 await this.translateThoughtSummary(newAggregatedMessage, preparation);
                 this.assertSendExecutionV136(preparation);
                 this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
@@ -23197,7 +22794,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
     scrollToBottom(force = false) {
         const mainContent = elements.chatScreen.querySelector('.main-content');
-        if (!mainContent) return;
+        if (!mainContent || !elements.documentLibraryWorkspace.hidden) return;
 
         if (state.suppressAutoScrollForCollapse && !force) {
             return;
@@ -23212,6 +22809,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         let startTime = null;
 
         const step = (currentTime) => {
+            if (!elements.documentLibraryWorkspace.hidden) return;
             if (startTime === null) startTime = currentTime;
             const elapsed = currentTime - startTime;
             
@@ -23238,36 +22836,27 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
     /**
      * [V2] 同期用にメタデータとアセットリストを分離して準備する
-     * @param {boolean} isManual - 手動実行かどうか
-     * @returns {Promise<{metadataJson: string, localAssets: Map<string, {blob: Blob, hash: string}>}>}
+     * Backups read a consistent snapshot without rewriting local attachments.
      */
-     async _prepareExportData() {
+     async _prepareExportData({ backup = false } = {}) {
         try {
-            // ディープコピーの対象を、Blobを含まないメタデータのみに限定する
-            const [profiles, chats, memories, allSettings] = await Promise.all([
-                dbUtils.getAllProfiles(),
-                dbUtils.getAllChats().then(data => JSON.parse(JSON.stringify(data))),
-                dbUtils.getAllMemories().then(data => JSON.parse(JSON.stringify(data))),
-                new Promise((res, rej) => {
-                    const store = dbUtils._getStore(SETTINGS_STORE);
-                    const request = store.getAll();
-                    request.onsuccess = () => res(JSON.parse(JSON.stringify(request.result)));
-                    request.onerror = (e) => rej(e.target.error);
-                })
-            ]);
-            // Blobを含むアセットは、後で直接DBから読み込む
-            const imageAssets = await dbUtils.getAllAssets();
-            const chatImages = await new Promise((res, rej) => {
-                const store = dbUtils._getStore('image_store');
-                const request = store.getAll();
-                request.onsuccess = () => res(request.result);
-                request.onerror = (e) => rej(e.target.error);
-            });
+            const db = await dbUtils.openDB();
+            const names = [PROFILES_STORE, CHATS_STORE, 'memory_store', SETTINGS_STORE, 'image_assets',
+                IMAGE_STORE, ...DocumentLibrary.stores];
+            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...libraryRecords] =
+                await DocumentLibrary.transaction(db, names, 'readonly', tx => Promise.all(names.map(name => {
+                    const store = tx.objectStore(name);
+                    return DocumentLibrary.request(store.getAll());
+                })));
+            chats.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) || indexedDB.cmp(b.id, a.id));
+            const librarySync = DocumentLibrary.syncState(allSettings.find(setting => setting.key === DocumentLibrary.syncKey));
+            const library = DocumentLibrary.exportSnapshot(librarySync.revision, libraryRecords, chats);
 
             const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
             const settingsForExport = allSettings
                 .filter(setting =>
-                    !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY, 'backgroundImageBlob'].includes(setting.key)
+                    !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY,
+                        DocumentLibrary.syncKey, 'backgroundImageBlob'].includes(setting.key)
                     && !localUiSettingKeysForExport.has(setting.key)
                 )
                 .map(setting => {
@@ -23315,7 +22904,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             const chatAssets = new Map();
             for (const chat of chats) {
                 // Keep inline attachments while the editor owns this snapshot.
-                if (chat.id === state.currentChatId) continue;
+                if (backup || chat.id === state.currentChatId) continue;
                 if (chat.messages) {
                     for (const message of chat.messages) {
                         if (message.imageIds && Array.isArray(message.imageIds)) {
@@ -23357,7 +22946,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             console.log("[Data Export V2] アセット化とクレンジングが完了しました。");
 
             const assetsToUpdate = imageAssets.filter(a => a._needsUpdate);
-            if (assetsToUpdate.length > 0) {
+            if (!backup && assetsToUpdate.length > 0) {
                 console.log(`[Data Export V2] ${assetsToUpdate.length}件のimage_assetsにassetIdを永続化します。`);
                 const tx = state.db.transaction('image_assets', 'readwrite');
                 const store = tx.objectStore('image_assets');
@@ -23428,7 +23017,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             const metadata = {
                 version: "2.0",
                 settingsSchemaVersion: 136,
-                minimumReaderVersion: 136,
+                minimumReaderVersion: library.manifest || backup ? SettingsV136.READER_VERSION : 136,
                 exportedAt: new Date().toISOString(),
                 syncId: syncId,
                 data: {
@@ -23436,7 +23025,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                     chats,
                     memories,
                     assets: imageAssets.map(a => ({ name: a.name, assetId: a.assetId, createdAt: a.createdAt })),
-                    settings: settingsForExport
+                    settings: settingsForExport,
+                    ...(library.manifest && { documentLibrary: library.manifest })
                 }
             };
 
@@ -23445,7 +23035,9 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
             return {
                 metadataJson: JSON.stringify(metadata),
-                localAssets: localAssets
+                localAssets,
+                documentBlobs: library.blobs,
+                librarySync
             };
 
         } catch (error) {
@@ -23458,22 +23050,135 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 
 
+    getRequiredSyncAssetIds(data) {
+        const ids = new Set();
+        const add = id => { if (id) ids.add(id); };
+        add(data.settings?.find(s => s.key === SettingsV136.GLOBAL_KEY)?.value?.appearance?.backgroundAssetId);
+        for (const profile of data.profiles || []) {
+            add(profile.settings?.appearance?.backgroundAssetId);
+            add(profile.iconAssetId);
+        }
+        for (const asset of data.assets || []) add(asset.assetId);
+        for (const chat of data.chats || []) {
+            for (const message of chat.messages || []) {
+                for (const id of message.imageIds || []) add(id);
+                for (const attachment of message.attachments || []) {
+                    if (!attachment.base64Data) add(attachment.assetId);
+                }
+            }
+        }
+        return ids;
+    },
+
+    async createFullBackup() {
+        const { metadataJson, localAssets, documentBlobs } = await this._prepareExportData({ backup: true });
+        const envelope = JSON.parse(metadataJson);
+        const encode = async (id, blob, hash) => ({
+            id, type: blob.type, size: blob.size, hash: hash ?? await DocumentLibrary.digest(blob),
+            base64: await this.fileToBase64(blob)
+        });
+        for (const id of this.getRequiredSyncAssetIds(envelope.data)) {
+            if (!localAssets.has(id)) throw new Error('必要な画像アセットが不足しているため出力を中止しました。');
+        }
+        envelope.backupSchemaVersion = 1;
+        envelope.data.documentLibrary ??= {
+            schemaVersion: 1, revision: DocumentLibrary.uniqueId(), documents: [], originals: [], links: []
+        };
+        envelope.backupAssets = [];
+        envelope.backupOriginals = [];
+        for (const [id, { blob }] of localAssets) envelope.backupAssets.push(await encode(id, blob));
+        for (const [hash, blob] of documentBlobs) envelope.backupOriginals.push(await encode(hash, blob, hash));
+        return new Blob([JSON.stringify(envelope)], { type: 'application/json' });
+    },
+
+    async readBackupBlobs(records) {
+        if (!Array.isArray(records)) throw new Error('バックアップの原本一覧が無効です。');
+        const blobs = new Map();
+        for (const record of records) {
+            if (!record || typeof record.id !== 'string' || !record.id || blobs.has(record.id) ||
+                typeof record.type !== 'string' || typeof record.base64 !== 'string' || !DocumentLibrary.isHash(record.hash)) {
+                throw new Error('バックアップの原本情報が無効です。');
+            }
+            const bytes = Uint8Array.from(atob(record.base64), char => char.charCodeAt(0));
+            const blob = new Blob([bytes], { type: record.type });
+            if (blob.size !== record.size || await DocumentLibrary.digest(blob) !== record.hash) {
+                throw new Error('バックアップの原本が破損しています。');
+            }
+            blobs.set(record.id, blob);
+        }
+        return blobs;
+    },
+
+    async handleFullBackupExport() {
+        uiUtils.showProgressDialog('全データのバックアップを作成中...');
+        try {
+            const backup = await this.createFullBackup();
+            const url = URL.createObjectURL(backup);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `chatai-backup-${new Date().toISOString().slice(0, 10)}.json`;
+            anchor.click();
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+        } catch (error) {
+            uiUtils.hideProgressDialog();
+            await uiUtils.showCustomAlert(`バックアップを作成できませんでした。\n${error.message}`);
+        } finally {
+            uiUtils.hideProgressDialog();
+        }
+    },
+
+    async handleFullBackupImport(file) {
+        if (state.sync.isSyncing) {
+            await uiUtils.showCustomAlert('同期または復元が終わってからお試しください。');
+            return;
+        }
+        state.sync.isSyncing = true;
+        try {
+            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
+            const json = await file.text();
+            const envelope = JSON.parse(json);
+            SettingsV136.assertCompatible(envelope);
+            const message = envelope.data.documentLibrary
+                ? 'チャット、設定、画像、メモリ、共通ファイル（原本・旧版・紐づけ）をバックアップの内容で置き換えます。必要なデータは先にバックアップしてください。復元しますか？'
+                : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。復元しますか？';
+            if (!await uiUtils.showCustomConfirm(message)) return;
+            await this.importDataFromString(json, { source: 'file', libraryBefore });
+            uiUtils.hideProgressDialog();
+            state.sync.isDirty = true;
+            await uiUtils.showCustomAlert('バックアップを復元しました。アプリを再起動します。');
+            window.location.reload();
+        } catch (error) {
+            uiUtils.hideProgressDialog();
+            await uiUtils.showCustomAlert(`復元できませんでした。\n${error.message}`);
+        } finally {
+            state.sync.isSyncing = false;
+        }
+    },
+
     async importDataFromString(jsonString, options = {}) {
         console.log("[Data Import V2] 文字列からのデータインポートを開始します。");
         uiUtils.showProgressDialog('インポートデータを準備中...');
     
         try {
+            const libraryBefore = options.libraryBefore ?? await dbUtils.getDocumentLibrarySyncState();
             const parsedData = JSON.parse(jsonString);
             SettingsV136.assertCompatible(parsedData);
-            if (parsedData.version !== "2.0" || !parsedData.data) {
-                throw new Error("インポートデータの形式が無効か、バージョンが古いです。");
-            }
-            
+            const portableBackup = parsedData.backupSchemaVersion === 1;
+            if (portableBackup && options.source !== 'file') throw new Error('ファイルから復元してください。');
             const cloudData = parsedData.data;
+            if (options.source && (!Array.isArray(cloudData.chats) || !Array.isArray(cloudData.profiles) ||
+                ['settings', 'memories', 'assets'].some(key =>
+                    (portableBackup || cloudData.documentLibrary || Object.hasOwn(cloudData, key)) && !Array.isArray(cloudData[key])))) {
+                throw new Error('バックアップまたは同期データの一覧が不足しています。');
+            }
+            if (options.source === 'dropbox' &&
+                (typeof parsedData.syncId !== 'string' || !parsedData.syncId || !Number.isFinite(Date.parse(parsedData.exportedAt)))) {
+                throw new Error('Dropboxの同期IDまたは保存日時が無効です。');
+            }
             if (Array.isArray(cloudData.profiles) && cloudData.profiles.length > MAX_PROFILES) {
                 throw new Error(PROFILE_LIMIT_MESSAGE);
             }
-            const localChatsForPinMerge = await dbUtils.getAllChats('updatedAt');
+            const localChatsForPinMerge = options.source === 'file' ? [] : await dbUtils.getAllChats('updatedAt');
             const localChatsById = new Map(localChatsForPinMerge.map(chat => [String(chat.id), chat]));
             let localPinStateWon = false;
             cloudData.chats = (Array.isArray(cloudData.chats) ? cloudData.chats : []).map(remoteChat => {
@@ -23489,12 +23194,27 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 return applyNormalizedChatPinState(remoteChat, selectedPin);
             });
 
+            let originals;
+            const manifest = cloudData.documentLibrary;
+            if (manifest) {
+                DocumentLibrary.validateManifest(manifest, cloudData.chats);
+                const backupOriginals = portableBackup ? await this.readBackupBlobs(parsedData.backupOriginals) : null;
+                if (options.source === 'file' && !backupOriginals) throw new Error('ファイル原本を含むバックアップファイルが必要です。');
+                if (backupOriginals && backupOriginals.size !== new Set(manifest.originals.map(original => original.hash)).size) {
+                    throw new Error('バックアップのファイル原本一覧が管理情報と一致しません。');
+                }
+                originals = await DocumentLibrary.restoreOriginals(manifest, hash =>
+                    backupOriginals ? backupOriginals.get(hash) : window.dropboxApi.downloadLibraryOriginal(hash));
+            } else if (portableBackup && (!Array.isArray(parsedData.backupOriginals) || parsedData.backupOriginals.length)) {
+                throw new Error('バックアップにファイル管理情報がありません。');
+            }
+
             const localAssetsBeforeClear = new Map();
-            const localImageAssets = await dbUtils.getAllAssets();
+            const localImageAssets = portableBackup ? [] : await dbUtils.getAllAssets();
             localImageAssets.forEach(asset => {
                 if(asset.assetId && asset.blob) localAssetsBeforeClear.set(asset.assetId, asset.blob);
             });
-            const localChatImages = await new Promise((res, rej) => {
+            const localChatImages = portableBackup ? [] : await new Promise((res, rej) => {
                 const store = dbUtils._getStore('image_store');
                 const request = store.getAll();
                 request.onsuccess = () => res(request.result);
@@ -23505,24 +23225,15 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             });
             console.log(`[Sync Pull] ローカルに存在するアセットBlob: ${localAssetsBeforeClear.size}件をメモリに保持しました。`);
 
-            const requiredAssetIds = new Set();
-            const appearanceGlobal = cloudData.settings?.find(s => s.key === SettingsV136.GLOBAL_KEY)?.value?.appearance;
-            if (appearanceGlobal?.backgroundAssetId) requiredAssetIds.add(appearanceGlobal.backgroundAssetId);
-            (cloudData.profiles || []).forEach(p => { if (p.settings?.appearance?.backgroundAssetId) requiredAssetIds.add(p.settings.appearance.backgroundAssetId); });
-            (cloudData.profiles || []).forEach(p => { if (p.iconAssetId) requiredAssetIds.add(p.iconAssetId); });
-            (cloudData.assets || []).forEach(a => { if (a.assetId) requiredAssetIds.add(a.assetId); });
-            (cloudData.chats || []).forEach(c => {
-                (c.messages || []).forEach(m => {
-                    if (m.imageIds) m.imageIds.forEach(id => { if(id) requiredAssetIds.add(id); });
-                });
-            });
+            const requiredAssetIds = this.getRequiredSyncAssetIds(cloudData);
             console.log(`[Sync Pull] クラウドが必要とするアセットID: ${requiredAssetIds.size}件`);
 
             const assetsToDownloadIds = [...requiredAssetIds].filter(id => !localAssetsBeforeClear.has(id));
             console.log(`[Sync Pull] ダウンロードが必要なアセットID: ${assetsToDownloadIds.length}件`);
 
-            const downloadedAssets = new Map();
-            if (assetsToDownloadIds.length > 0) {
+            const downloadedAssets = portableBackup ? await this.readBackupBlobs(parsedData.backupAssets) : new Map();
+            for (const id of downloadedAssets.keys()) requiredAssetIds.add(id);
+            if (options.source !== 'file' && assetsToDownloadIds.length > 0) {
                 for (let i = 0; i < assetsToDownloadIds.length; i++) {
                     const assetId = assetsToDownloadIds[i];
                     uiUtils.updateProgressMessage(`アセットをダウンロード中 (${i + 1}/${assetsToDownloadIds.length})`);
@@ -23540,19 +23251,26 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             }
 
             // clearAndImportDataからの戻り値を受け取る
-            const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options);
+            const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, {
+                ...options, libraryBefore, originals, syncId: parsedData.syncId,
+                syncTimestamp: new Date(parsedData.exportedAt).getTime()
+            });
             if (!result) return null;
-            const { removedAssetInfo } = result;
-            await this.loadGlobalSettings();
-            await this.loadProfiles();
+            const { removedAssetInfo, libraryPending } = result;
+            try {
+                await this.loadGlobalSettings();
+                await this.loadProfiles();
+            } catch (error) {
+                console.error('復元は完了しましたが、表示への反映に失敗しました。', error);
+                if (!options.source) throw error;
+            }
     
             console.log("[Data Import V2] データのインポートに成功しました。");
             
             // 戻り値にクレンジング情報とメタデータを両方含める
             return {
-                ...parsedData, // syncId, exportedAtなどを含む
-                removedAssetInfo: removedAssetInfo, // クレンジング情報を追加
-                localPinStateWon
+                syncId: parsedData.syncId, exportedAt: parsedData.exportedAt,
+                removedAssetInfo, localPinStateWon, libraryPending
             };
     
         } catch (error) {
@@ -24095,14 +23813,9 @@ const chatHistoryActions = {
             await uiUtils.showCustomAlert('ピン留め対象のチャットが見つかりません。');
             return { ok: false, notFound: true };
         }
-        if (historyUiState.deleteMode) return { ok: false, disabled: true };
         try {
             const updatedChat = await dbUtils.updateChatPinState(normalizedId, shouldPin === true);
             const pinState = normalizeChatPinState(updatedChat);
-            if (historyUiState.pinFilter === 'pinned' && !pinState.isPinned
-                && String(historyUiState.selectedChatId) === String(normalizedId)) {
-                historyUiState.deleteFallbackChatId = uiUtils.getHistoryDeleteFallback(normalizedId);
-            }
             if (String(state.currentChatId) === String(normalizedId)) {
                 state.currentChatIsPinned = pinState.isPinned;
                 state.currentChatPinnedAt = pinState.isPinned ? pinState.pinnedAt : null;
@@ -24117,7 +23830,6 @@ const chatHistoryActions = {
                 pinStateUpdatedAt: pinState.pinStateUpdatedAt
             });
             const announcement = pinState.isPinned ? 'チャットをピン留めしました' : 'チャットのピン留めを解除しました';
-            if (elements.historyDetailLive) elements.historyDetailLive.textContent = announcement;
             if (elements.chatSidebarLive) elements.chatSidebarLive.textContent = announcement;
             return { ok: true, chatId: normalizedId, ...pinState };
         } catch (error) {
@@ -24156,9 +23868,6 @@ const chatHistoryActions = {
             sourceChatId: normalizedId,
             title: result.title
         });
-        if (state.currentScreen !== 'history') {
-            await uiUtils.showCustomAlert(`チャット「${result.title}」を複製しました。`);
-        }
         return result;
     },
 
@@ -24179,7 +23888,7 @@ const chatHistoryActions = {
         return result;
     },
 
-    async deleteMany(chatIds) {
+    async deleteMany(chatIds, { expectedRecords, isCurrent = () => true } = {}) {
         const normalizedIds = [...new Map(
             (Array.isArray(chatIds) ? chatIds : [])
                 .map(chatId => this.normalizeChatId(chatId))
@@ -24195,7 +23904,7 @@ const chatHistoryActions = {
         const confirmed = await uiUtils.showCustomConfirm(
             `選択した${normalizedIds.length}件の履歴を削除しますか？\nこの操作は元に戻せません。${currentNotice}`
         );
-        if (!confirmed) return { ok: false, cancelled: true, successfulIds: [], failures: [] };
+        if (!confirmed || !isCurrent()) return { ok: false, cancelled: true, successfulIds: [], failures: [] };
 
         const successfulIds = [];
         const failures = [];
@@ -24203,7 +23912,11 @@ const chatHistoryActions = {
         try {
             for (const chatId of normalizedIds) {
                 try {
-                    await dbUtils.deleteChat(chatId, { markDirty: false });
+                    const expectedRecord = expectedRecords?.get(chatId);
+                    if (expectedRecord && !dbUtils.matchesHistoryDeleteRecord(await dbUtils.getChat(chatId), expectedRecord)) {
+                        throw new Error('チャットが変更または削除されました。');
+                    }
+                    await dbUtils.deleteChat(chatId, { markDirty: false, expectedRecord });
                     successfulIds.push(chatId);
                 } catch (error) {
                     console.error(`[History Delete Many] チャット ${chatId} の削除に失敗しました:`, error);
@@ -24234,30 +23947,6 @@ const chatHistoryActions = {
         };
     }
 };
-
-// 履歴画面の購読は一度だけ登録し、検索・並び替え・スクロール状態を維持して更新する。
-chatListChangeController.subscribe(async detail => {
-    const wasCurrent = historyUiState.loadedRevision === historyUiState.dataRevision;
-    const revision = ++historyUiState.dataRevision;
-    if (wasCurrent && (detail.type === 'rename' || detail.type === 'pin')) {
-        const cachedIndex = historyUiState.cachedChats.findIndex(chat => String(chat.id) === String(detail.chatId));
-        if (cachedIndex >= 0) {
-            const patch = detail.type === 'rename' ? {
-                title: detail.title,
-                updatedAt: detail.updatedAt
-            } : {
-                isPinned: detail.isPinned === true,
-                pinnedAt: detail.isPinned === true ? detail.pinnedAt : null,
-                pinStateUpdatedAt: detail.pinStateUpdatedAt
-            };
-            historyUiState.cachedChats[cachedIndex] = { ...historyUiState.cachedChats[cachedIndex], ...patch };
-            historyUiState.loadedRevision = revision;
-        }
-    }
-    if (!elements.historyScreen.classList.contains('active')) return;
-    uiUtils.captureHistoryScrollPosition();
-    await uiUtils.renderHistoryList({ refresh: false });
-});
 
 Object.assign(appLogic, SettingsV136.createMethods({ state, dbUtils, uiUtils, defaults: INITIAL_SETTINGS_V136, localUiKeys: LOCAL_UI_SETTING_KEYS }));
 window.uiUtilsV136 = uiUtils;

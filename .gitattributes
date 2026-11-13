@@ -6,6 +6,16 @@
 /settings-ui-v136.js text eol=lf
 /streaming-v136.js text eol=lf
 /dropbox.js text eol=lf
+/document-library.js text eol=lf
+/document-library-ui.js text eol=lf
+/document-search.js text eol=lf
+/document-rag.js text eol=lf
+/document-analysis-worker.js text eol=lf
+/vendor/document-analysis/* text eol=lf
+/vendor/document-analysis/LICENSES.txt whitespace=-blank-at-eol
+/vendor/document-analysis/text-parsers.js whitespace=-blank-at-eol
+/tests/fixtures/document-analysis/*.pdf binary
+/tests/fixtures/document-analysis/*.docx binary
 /function-calling.js text eol=lf
 /marked.js text eol=lf
 /purify.min.js text eol=lf

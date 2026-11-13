@@ -44,7 +44,7 @@
     const verifyWidths = () => ids.forEach(id => {
         check(Math.abs(open(id).getBoundingClientRect().width - widths[id]) < 1, 'menu visibility keeps title column width');
     });
-    const resetFocus = () => $('chat-sidebar-search-input').focus();
+    const resetFocus = () => $('chat-sidebar-search-toggle').focus();
     const api = window.sidebarHoverV1361 = {
         ids,
         diagnostics() {
@@ -133,7 +133,7 @@
             check(menu(id).getAttribute('aria-expanded') === 'true' && row(id).classList.contains('menu-active'), 'menu expansion state applied');
             check(getComputedStyle(menu(id)).opacity === '1', 'menu remains visible while focus is in popup');
             check(getComputedStyle(row(id)).backgroundColor === (row(id).hasAttribute('aria-current') ? palette.selected : palette.tertiary), 'popup keeps row background');
-            const items = [...$('history-item-menu').querySelectorAll('[data-history-menu-action]')];
+            const items = [...$('history-item-menu').querySelectorAll('[data-history-menu-action]:not([hidden])')];
             check(items.every(item => !item.hidden && !item.disabled), 'all five actions enabled');
             check(items.map(item => item.dataset.historyMenuAction).join() === 'pin,rename,export,duplicate,delete', 'all five existing actions retained');
         },
@@ -188,7 +188,12 @@
             await wait(() => row(ids[1])?.getAttribute('aria-current') === 'page', 'selection updated after chat switch');
             check(!row(ids[0]).hasAttribute('aria-current'), 'old row selection cleared');
             await wait(() => !window.testSidebarUiState.refreshTimer && !db.pendingChatSaves, 'chat switch persistence settles');
-            ui.openChatSidebar(); await ui.renderChatSidebar({ refreshRecent: true }); await frame(); resetFocus();
+            if (ui.getChatSidebarMode() === 'overlay') {
+                await wait(() => !window.testSidebarUiState.isOpen, 'overlay closes after selecting a chat');
+            }
+            ui.openChatSidebar(); await ui.renderChatSidebar({ refreshRecent: true });
+            await Promise.all($('chat-history-sidebar').getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
+            await frame(); resetFocus();
             check(getComputedStyle(row(ids[1])).backgroundColor === palette.selected, 'switched selection color retained');
         },
         beginActions() {
@@ -223,10 +228,15 @@
             await ui.renderChatSidebar({ refreshRecent: true }); await frame();
         },
         endActions() { restoreActions?.(); return actions.map(entry => ({ action: entry.action, ok: entry.result.ok })); },
-        phone() {
-            check(ui.getChatSidebarMode() === 'disabled', 'existing phone sidebar breakpoint retained');
-            check($('chat-history-sidebar').getBoundingClientRect().width === 0, 'phone sidebar remains hidden');
-            check(getComputedStyle(menu(ids[1])).opacity === '1', 'touch CSS remains accessible at phone width');
+        async phone() {
+            check(ui.getChatSidebarMode() === 'overlay', 'phone uses an overlay sidebar');
+            const sidebar = $('chat-history-sidebar');
+            await wait(() => sidebar.inert && sidebar.getAttribute('aria-hidden') === 'true' &&
+                sidebar.getBoundingClientRect().right <= 0, 'phone sidebar begins closed and offscreen');
+            check(getComputedStyle(sidebar).pointerEvents === 'none', 'closed phone sidebar does not capture input');
+            ui.openChatSidebar();
+            await wait(() => menu(ids[1]) && getComputedStyle(menu(ids[1])).opacity === '1', 'touch CSS remains accessible at phone width');
+            ui.closeChatSidebar();
         }
     };
 })();

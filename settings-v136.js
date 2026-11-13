@@ -21,7 +21,7 @@
     };
     const appearanceKeys = ['backgroundAssetId', 'overlayOpacity', 'messageOpacity'];
     const themeKeys = ['darkMode', 'themeColorMode', 'accentColor', 'headerColor', 'headerTextColorMode',
-        'headerTextColor', 'newChatButtonColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor'];
+        'headerTextColor', 'sendButtonColor', 'otherButtonColor', 'userMessageColor'];
     const profileKeys = ['systemPrompt', 'temperature', 'maxTokens', 'topK', 'topP', 'dummyUser', 'dummyModel',
         'reverseDummyOrder', 'concatDummyModel', 'applyDummyToProofread', 'applyDummyToTranslate',
         'geminiEnableFunctionCalling', 'geminiEnableGrounding', 'forceFunctionCalling', 'allowPromptUiChanges',
@@ -116,8 +116,9 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
     }
     const cap = (mode, levels = [], defaultEffort = null, extra = {}) =>
         ({ mode, levels, defaultEffort, supported: mode !== 'unknown' && mode !== 'none', ...extra });
-    // Exact model IDs only. Unlisted models receive no guessed reasoning parameters.
-    // GenerateContent thinking levels/defaults (not the Interactions API's 2.5 mapping):
+    const GEMINI_MODELS_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+    const MODEL_DEFAULT_EFFORT = 'model-default';
+    // Exact GenerateContent overrides for models with documented levels/defaults.
     // https://ai.google.dev/gemini-api/docs/generate-content/thinking
     // https://ai.google.dev/gemini-api/docs/generate-content/image-generation
     const geminiThinkingModels = {
@@ -140,8 +141,68 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         'anthropic.claude-sonnet-4-20250514-v1:0', 'anthropic.claude-opus-4-20250514-v1:0',
         'anthropic.claude-sonnet-4-5-20250929-v1:0', 'anthropic.claude-haiku-4-5-20251001-v1:0',
         'anthropic.claude-opus-4-5-20251101-v1:0']);
+    const geminiModelId = name => String(name || '').replace(/^models\//, '');
+    const geminiMajor = id => Number(/^gemini-([1-9]\d*)(?:\.\d+)*(?:-[a-z0-9]+)*$/.exec(id)?.[1]) || 0;
+    // The GenerateContent guide documents HIGH as the maximum for these two Gemini 4 models.
+    const geminiHighMaximumModels = new Set(['gemini-4-carbon', 'gemini-4-argon']);
+    // https://aistudio.google.com/docs/thinking?generate-content=true#thinking-levels
+    const geminiDocumentedDefaults = new Map([
+        ['gemini-4-hydrogen', 'high'],
+        ['gemini-4-carbon', 'medium'],
+        ['gemini-4-argon', 'medium'],
+        ['gemini-robotics-er-2-preview', 'high']
+    ]);
+    function geminiCapability(id, metadata) {
+        if (metadata?.thinking === false ||
+            (Array.isArray(metadata?.supportedGenerationMethods) && !metadata.supportedGenerationMethods.includes('generateContent'))) {
+            return cap('none', [], null, { source: 'metadata', preserveEffort: true });
+        }
+        if (metadata?.configRejected) return cap('none', [], null, { source: 'response', preserveEffort: true });
+        const base = geminiModelId(metadata?.baseModelId);
+        const known = Object.hasOwn(geminiThinkingModels, id) ? geminiThinkingModels[id]
+            : Object.hasOwn(geminiThinkingModels, base) ? geminiThinkingModels[base] : null;
+        const documentedDefault = geminiDocumentedDefaults.get(id) ?? known?.defaultEffort ?? geminiDocumentedDefaults.get(base);
+        const major = geminiMajor(base) || geminiMajor(id);
+        if (!known && (['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'].includes(id)
+            || (major > 0 && major < 3 && metadata?.thinking === true))) {
+            return cap('legacy-default', [], null, { summary: true,
+                limitation: 'No thinkingLevel; native default only. Flash-Lite needs a budget to force thinking.' });
+        }
+        const specialized = /(?:^|-)(?:tts|live|embedding|native-audio)(?:-|$)/.test(base || id);
+        if (!documentedDefault && (major < 3 || specialized) && metadata?.thinking !== true) return cap('unknown');
+        const acceptedLevels = metadata?.acceptedLevels || [];
+        const rejectedLevels = metadata?.rejectedLevels || [];
+        const candidates = ['low', 'medium', 'high'];
+        if (major >= 4 && !geminiHighMaximumModels.has(id) && !geminiHighMaximumModels.has(base)) candidates.push('xhigh');
+        const levels = (known?.levels || candidates).filter(level => !rejectedLevels.includes(level));
+        const modelDefault = !known || !levels.includes(known.defaultEffort);
+        return cap('level', levels, modelDefault ? MODEL_DEFAULT_EFFORT : known.defaultEffort, {
+            source: known ? 'known' : 'inferred', thinkingConfirmed: Boolean(known || metadata?.thinking === true || acceptedLevels.length),
+            initialEffort: levels.includes(documentedDefault) ? documentedDefault : MODEL_DEFAULT_EFFORT,
+            modelDefault, acceptedLevels, rejectedLevels
+        });
+    }
+
+    function geminiThinkingRejection(error, level) {
+        if (error?.status !== 400) return null;
+        const message = error.data?.error?.message || error.message || '';
+        const fields = Array.isArray(error.data?.error?.details) ? error.data.error.details.flatMap(detail =>
+            Array.isArray(detail?.fieldViolations) ? detail.fieldViolations : []) : [];
+        if (/\bthinking(?:[_ ]?config(?:uration)?)? (?:is )?not supported(?: (?:by|for|on) (?:this |the )?model)?[.!]?$/i.test(message.trim())
+            || /\b(?:does not|doesn't) support thinking(?:[_ ]?config(?:uration)?| features)?[.!]?$/i.test(message.trim())) return 'config';
+        if (!level) return null;
+        const unsupported = /\b(?:not supported|unsupported|does not support|only supports)\b/i;
+        const levelField = /\bthinking[_ ]?level\b/i;
+        const conditional = /\b(?:in combination|when|with|unless)\b/i;
+        if (levelField.test(message) && unsupported.test(message) && !conditional.test(message)) return 'level';
+        if (/\binvalid value at ['"][\w.]*thinking_?level['"]/i.test(message)) return 'level';
+        if (/\bunknown name ['"]thinking_?level['"].*cannot find field/i.test(message)) return 'level';
+        return fields.some(field => /(?:^|\.)thinking_?level$/i.test(field?.field || '') &&
+            unsupported.test(field?.description || '') && !conditional.test(field?.description || '')) ? 'level' : null;
+    }
+
     function capability(provider, name, metadata) {
-        const id = String(name || '').replace(/^models\//, '');
+        const id = geminiModelId(name);
         if (provider === 'openrouter' && metadata) {
             const r = metadata.reasoning;
             if (r && Object.prototype.hasOwnProperty.call(r, 'supported_efforts')) {
@@ -153,16 +214,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             }
             return cap(r ? 'enabled' : 'none', [], null, { source: 'metadata' });
         }
-        if (provider === 'gemini') {
-            if (Object.hasOwn(geminiThinkingModels, id)) {
-                const model = geminiThinkingModels[id];
-                return cap('level', model.levels, model.defaultEffort);
-            }
-            if (['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'].includes(id)) {
-                return cap('legacy-default', [], null, { summary: true,
-                    limitation: 'No thinkingLevel; native default only. Flash-Lite needs a budget to force thinking.' });
-            }
-        }
+        if (provider === 'gemini') return geminiCapability(id, metadata);
         if (provider === 'openrouter') {
             const googleId = id.replace(/^google\//, '');
             if (id.startsWith('google/') && Object.hasOwn(geminiThinkingModels, googleId)) {
@@ -212,20 +264,28 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         if (provider === 'bedrock' && bedrockImageModels.has(id.replace(/^(us|eu|apac|jp|global)\./, ''))) return 'supported';
         return 'unknown';
     }
-    const normalizeEffort = (value, c) => c.levels.includes(value) ? value : c.defaultEffort;
+    const canSelectEffort = (value, c) => c.levels.includes(value) || (c.modelDefault && value === MODEL_DEFAULT_EFFORT);
+    const normalizeEffort = (value, c) => canSelectEffort(value, c) ? value : c.defaultEffort;
     function executionSettings(source, fallbackRef, resolveCapability, preserveUnknown = false) {
         const needsSelection = source?.modelSelectionRequired === true && source.modelRef === null;
         const ref = needsSelection ? null : modelRef(source?.modelRef) || modelRef(fallbackRef);
         const c = resolveCapability(ref);
+        const effort = source?.thinkingEffort ?? null;
+        const useGeminiDefault = c.initialEffort && (effort === null || effort === MODEL_DEFAULT_EFFORT);
         return { schemaVersion: 1, modelRef: ref,
-            thinkingEffort: c.mode === 'unknown' ? (source?.thinkingEffort ?? null)
-                : preserveUnknown && source?.thinkingEffort == null ? null : normalizeEffort(source?.thinkingEffort, c),
+            thinkingEffort: c.mode === 'unknown' || c.preserveEffort || c.rejectedLevels?.includes(effort)
+                || useGeminiDefault || (preserveUnknown && effort === null) ? effort : normalizeEffort(effort, c),
             updatedAt: source?.updatedAt || Date.now(), ...(needsSelection && { modelSelectionRequired: true }) };
     }
     function applyThinking(body, provider, c, effort) {
         if (provider === 'gemini') {
             delete body.thinkingConfig;
-            if (c.mode === 'level') body.thinkingConfig = { thinkingLevel: normalizeEffort(effort, c), includeThoughts: true };
+            if (c.mode === 'level') {
+                const level = effort == null || effort === MODEL_DEFAULT_EFFORT ? null : normalizeEffort(effort, c);
+                if (level && level !== MODEL_DEFAULT_EFFORT) {
+                    body.thinkingConfig = { thinkingLevel: c.source === 'inferred' ? level.toUpperCase() : level, includeThoughts: true };
+                } else if (c.thinkingConfirmed) body.thinkingConfig = { includeThoughts: true };
+            }
             else if (c.mode === 'legacy-default') body.thinkingConfig = { includeThoughts: true };
         } else if (provider === 'openrouter') {
             delete body.reasoning;
@@ -249,9 +309,14 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         }
         return body;
     }
+    const READER_VERSION = 137;
     function assertCompatible(envelope) {
         if (!envelope || envelope.version !== '2.0' || !envelope.data) throw new Error('同期データの形式が無効です。');
-        if ((envelope.settingsSchemaVersion || 0) > 136 || (envelope.minimumReaderVersion || 0) > 136 ||
+        if ((envelope.settingsSchemaVersion || 0) > 136 || (envelope.minimumReaderVersion || 0) > READER_VERSION ||
+            (Object.hasOwn(envelope.data, 'documentLibrary') &&
+                (envelope.minimumReaderVersion !== READER_VERSION || envelope.data.documentLibrary?.schemaVersion !== 1)) ||
+            (Object.hasOwn(envelope, 'backupSchemaVersion') &&
+                (envelope.minimumReaderVersion !== READER_VERSION || envelope.backupSchemaVersion !== 1)) ||
             envelope.data.settings?.some(s => s.key === GLOBAL_KEY && s.value?.schemaVersion > 1) ||
             envelope.data.settings?.some(s => s.key === MIGRATION_KEY && s.value > 136) ||
             envelope.data.profiles?.some(p => p.profileSchemaVersion > 1) ||
@@ -747,6 +812,20 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
     function createMethods({ state, dbUtils, uiUtils, defaults, localUiKeys = [] }) {
         let globalSaveQueue = Promise.resolve();
         const capabilityRequests = new Map();
+        const geminiConnections = new Map();
+        const geminiBase = config => (config.baseUrl || GEMINI_MODELS_BASE).replace(/\/$/, '');
+        const geminiFingerprint = config => hashV136(JSON.stringify([geminiBase(config), config.apiKey]));
+        function geminiRecord(config, modelName) {
+            const fingerprint = geminiFingerprint(config);
+            let connection = geminiConnections.get(config.id);
+            if (connection?.fingerprint !== fingerprint) {
+                connection = { fingerprint, models: new Map() };
+                geminiConnections.set(config.id, connection);
+            }
+            const id = geminiModelId(modelName);
+            if (!connection.models.has(id)) connection.models.set(id, { accepted: new Set(), rejected: new Set() });
+            return connection.models.get(id);
+        }
         const importedBackgrounds = new WeakMap();
         const profileReads = new Map();
         const notify = (type, detail = {}) => root.dispatchEvent?.(new CustomEvent('execution-settings-changed', { detail: { type, ...detail } }));
@@ -890,7 +969,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 if (!g) return;
                 state.themeSettingsProfileScoped = p.useCustomTheme === true;
                 state.settings.themeSettingsProfileScoped = state.themeSettingsProfileScoped;
-                Object.assign(state.settings, g.theme, p.useCustomTheme ? p.theme : {},
+                Object.assign(state.settings, pick(g.theme ?? {}, themeKeys), p.useCustomTheme ? pick(p.theme ?? {}, themeKeys) : {},
                     g.appearance, p.useCustomAppearance ? p.appearance : {});
                 document.documentElement.style.setProperty('--message-bubble-opacity', String(state.settings.messageOpacity));
                 uiUtils.applyOverlayOpacity();
@@ -1226,6 +1305,12 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             getModelThinkingCapability(ref = this.getCurrentChatModelRef()) {
                 const config = this.getApiConfigById(ref?.apiConfigId);
+                if (config?.provider === 'gemini') {
+                    const record = geminiRecord(config, ref.modelName);
+                    return capability('gemini', ref.modelName, { ...record.metadata,
+                        acceptedLevels: [...record.accepted], rejectedLevels: [...record.rejected],
+                        configRejected: record.configRejected });
+                }
                 const metadata = this.getModelMetadataV136(ref);
                 const noReasoningInfo = metadata && metadata.reasoning === undefined
                     && (!Array.isArray(metadata.supportedParameters) || metadata.supportedParameters.some(p => p === 'reasoning' || p === 'reasoning.effort'));
@@ -1234,6 +1319,68 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     return cap('unknown', [], null, { status: status === 'ready' ? 'missing' : status });
                 }
                 return capability(config?.provider, ref?.modelName, metadata);
+            },
+            ensureGeminiThinkingCapabilities(ref) {
+                const config = this.getApiConfigById(ref?.apiConfigId);
+                if (config?.provider !== 'gemini' || config.enabled === false || !config.apiKey) return;
+                const model = geminiModelId(ref.modelName);
+                if (!/^[a-z0-9][a-z0-9._-]*$/i.test(model)) return;
+                let url;
+                try {
+                    url = new URL(geminiBase(config) + '/' + encodeURIComponent(model));
+                    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return;
+                } catch { return; }
+                const record = geminiRecord(config, model);
+                if (record.pending || record.refreshAfter > Date.now()) return record.pending;
+                const apiConfigId = config.id;
+                const current = () => {
+                    const latest = this.getApiConfigById(apiConfigId);
+                    return latest?.provider === 'gemini' && latest.enabled !== false && geminiRecord(latest, model) === record;
+                };
+                record.pending = Promise.resolve().then(async () => {
+                    try {
+                        if (!current()) return;
+                        const response = await fetch(url, {
+                            headers: { 'x-goog-api-key': config.apiKey }, cache: 'no-store',
+                            redirect: 'error', signal: AbortSignal.timeout(5000)
+                        });
+                        if (!response.ok) throw new Error('Models API request failed');
+                        const data = await response.json();
+                        if (!data || typeof data.name !== 'string') throw new Error('Invalid Models API response');
+                        if (!current()) return;
+                        record.metadata = {
+                            thinking: typeof data.thinking === 'boolean' ? data.thinking : undefined,
+                            baseModelId: typeof data.baseModelId === 'string' ? data.baseModelId : undefined,
+                            supportedGenerationMethods: Array.isArray(data.supportedGenerationMethods) ? data.supportedGenerationMethods : undefined
+                        };
+                        record.refreshAfter = Date.now() + 15 * 60 * 1000;
+                        notify('capabilities', { apiConfigId, modelName: ref.modelName });
+                    } catch {
+                        record.refreshAfter = Date.now() + 20 * 1000;
+                    } finally { record.pending = null; }
+                });
+                return record.pending;
+            },
+            recordGeminiThinkingResult(config, level, rejection = null) {
+                if (!config?.ref || config.provider !== 'gemini') return;
+                const { apiConfigId, modelName } = config.ref;
+                const latest = this.getApiConfigById(apiConfigId);
+                if (latest?.provider !== 'gemini' || latest.enabled === false || geminiFingerprint(latest) !== geminiFingerprint(config)) return;
+                const record = geminiRecord(latest, modelName);
+                if (rejection === 'config') {
+                    if (record.configRejected) return;
+                    record.configRejected = true;
+                } else {
+                    const value = level?.toLowerCase();
+                    if (!['minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)) return;
+                    const target = rejection === 'level' ? record.rejected : record.accepted;
+                    if (target.has(value) && (rejection || !record.configRejected)) return;
+                    const previous = rejection === 'level' ? record.accepted : record.rejected;
+                    previous.delete(value);
+                    target.add(value);
+                    if (!rejection) record.configRejected = false;
+                }
+                notify('capabilities', { apiConfigId, modelName });
             },
             async refreshModelThinkingCapabilities(apiConfigId) {
                 const config = this.getApiConfigById(apiConfigId);
@@ -1277,6 +1424,10 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             ensureModelThinkingCapabilities(ref = this.getCurrentChatModelRef()) {
                 const config = this.getApiConfigById(ref?.apiConfigId);
+                if (config?.provider === 'gemini') {
+                    void this.ensureGeminiThinkingCapabilities(ref);
+                    return;
+                }
                 if (config?.provider !== 'openrouter' || config.enabled === false
                     || this.getModelThinkingCapability(ref).mode !== 'unknown') return;
                 return this.refreshModelThinkingCapabilities(ref.apiConfigId).catch(() => { /* Keep unverified capabilities unknown. */ });
@@ -1401,6 +1552,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 this.syncActiveApiConfigState();
                 this.renderApiConfigList();
                 uiUtils.updateUserModelOptions();
+                void this.ensureGeminiThinkingCapabilities(this.getCurrentChatModelRef());
                 root.settingsUiV136?.refresh();
             },
             async waitForGenerationCompletionV136(session = state.sendExecutionV136) {
@@ -1415,7 +1567,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 while (state.isSending && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
                 return !state.isSending;
             },
-            async setCurrentChatExecution(updates) {
+            async setCurrentChatExecution(updates, { validateThinkingEffort = false } = {}) {
                 const contextId = state.currentChatId, contextGeneration = state.executionInitGeneration;
                 const selection = (state.executionSelectionGenerationV136 || 0) + 1;
                 state.executionSelectionGenerationV136 = selection;
@@ -1432,7 +1584,14 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
                 if (capabilityRequest) await capabilityRequest;
                 if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
-                const next = executionSettings({ ...current, ...updates, updatedAt: Date.now() }, ref, r => this.getModelThinkingCapability(r));
+                const capability = this.getModelThinkingCapability(ref);
+                const changingModel = ref.apiConfigId !== current.modelRef?.apiConfigId || ref.modelName !== current.modelRef?.modelName;
+                const gemini = this.getApiConfigById(ref.apiConfigId)?.provider === 'gemini';
+                if (gemini && validateThinkingEffort && !canSelectEffort(updates.thinkingEffort, capability))
+                    throw new Error('このモデルでは利用できないThinkingレベルです。');
+                const useDefault = gemini && changingModel && (capability.modelDefault || capability.preserveEffort || capability.mode === 'unknown');
+                const desired = useDefault ? { ...current, thinkingEffort: null } : current;
+                const next = executionSettings({ ...desired, ...updates, updatedAt: Date.now() }, ref, () => capability);
                 assertContext();
                 if (state.currentChatId) {
                     const id = state.currentChatId;
@@ -1458,8 +1617,8 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             setCurrentChatModelRef(ref) { return this.setCurrentChatExecution({ modelRef: ref }); },
             setCurrentChatThinkingEffort(value) {
-                if (!this.getModelThinkingCapability().levels.includes(value)) throw new Error('このモデルでは利用できないThinkingレベルです。');
-                return this.setCurrentChatExecution({ thinkingEffort: value });
+                if (!canSelectEffort(value, this.getModelThinkingCapability())) throw new Error('このモデルでは利用できないThinkingレベルです。');
+                return this.setCurrentChatExecution({ thinkingEffort: value }, { validateThinkingEffort: true });
             },
             freezeExecutionSettings() {
                 this.applyRemovedExecutionSelectionV136();
@@ -1467,9 +1626,15 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 const c = this.getModelThinkingCapability(config.ref);
                 if (config.provider === 'openrouter' && c.mode === 'unknown' && this.getCurrentChatThinkingEffort() != null)
                     throw new Error('Thinking能力を確認できません。設定は保持しています。接続を確認して再送信してください。');
+                const selected = this.getCurrentChatThinkingEffort();
+                if (c.rejectedLevels?.includes(selected)) throw new Error('選択したThinkingレベルはGemini APIで拒否されました。別のレベルかモデル既定を選んでください。');
+                const useGeminiDefault = config.provider === 'gemini' && c.mode === 'level'
+                    && (selected == null || selected === MODEL_DEFAULT_EFFORT);
                 config.thinkingCapability = c;
-                config.thinkingEffort = c.mode === 'unknown' ? this.getCurrentChatThinkingEffort() : normalizeEffort(this.getCurrentChatThinkingEffort(), c);
-                state.currentExecutionSettings = { ...state.currentExecutionSettings, thinkingEffort: config.thinkingEffort };
+                config.thinkingEffort = c.mode === 'unknown' || useGeminiDefault ? selected : normalizeEffort(selected, c);
+                if (config.provider !== 'gemini' || (c.mode !== 'none' && !useGeminiDefault)) {
+                    state.currentExecutionSettings = { ...state.currentExecutionSettings, thinkingEffort: config.thinkingEffort };
+                }
                 state.currentExecutionApiConfig = Object.freeze(config);
                 return config;
             },
@@ -1703,7 +1868,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         DEFAULT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_OUTPUT_FORMAT,
         chatContentVersion, sameChatContentVersion, nextChatContentVersion,
         themeKeys, appearanceKeys, pick, modelRef, profileSettings, capability, normalizeEffort, executionSettings,
-        applyThinking, imageInputCapability, assertCompatible, createMethods,
+        applyThinking, MODEL_DEFAULT_EFFORT, geminiThinkingRejection, imageInputCapability, assertCompatible, READER_VERSION, createMethods,
         hashV136, historySeedV136, historyStepV136, historyContextV136, rememberHistoryContextsV136,
         configureHistoryWorkerV136, historyTaskV136, rememberHistoryContextsAsyncV136, wireConvertersV136 };
     if (typeof module !== 'undefined') module.exports = root.SettingsV136;

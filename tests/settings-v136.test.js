@@ -9,9 +9,13 @@ test('profile allowlist excludes global, local and execution settings', () => {
     assert.deepEqual(result, { systemPrompt: 'p', temperature: 0.4, useCustomTheme: false, useCustomAppearance: false, theme: { darkMode: true } });
 });
 test('legacy theme conversion and idempotency', () => {
-    const result = S.profileSettings({ darkMode: true, accentColor: '#fff' }, true);
+    const result = S.profileSettings({ darkMode: true, accentColor: '#fff',
+        newChatButtonColor: '#112233', otherButtonColor: '#778899' }, true);
     assert.equal(result.useCustomTheme, true);
+    assert.deepEqual(result.theme, { darkMode: true, accentColor: '#fff', otherButtonColor: '#778899' });
     assert.deepEqual(S.profileSettings(result), result);
+    assert.deepEqual(S.profileSettings({ useCustomTheme: true,
+        theme: { newChatButtonColor: '#112233', otherButtonColor: '#778899' } }).theme, { otherButtonColor: '#778899' });
 });
 const fourLevels = ['minimal','low','medium','high'];
 for (const [id, levels, defaultEffort] of [
@@ -33,21 +37,72 @@ for (const [id, levels, defaultEffort] of [
     test(id + ' has verified levels/default and sends only supported values', () => {
         const c = S.capability('gemini', id);
         assert.equal(c.mode, 'level'); assert.deepEqual(c.levels, levels); assert.equal(c.defaultEffort, defaultEffort);
+        assert.equal(c.initialEffort, defaultEffort);
         assert.deepEqual(S.capability('gemini', 'models/' + id), c);
         const fallback = S.capability('openrouter', 'google/' + id);
         assert.deepEqual(fallback.levels, levels); assert.equal(fallback.defaultEffort, defaultEffort);
-        for (const effort of [...levels, null, 'unsupported']) {
+        for (const effort of [...levels, 'unsupported']) {
             assert.deepEqual(S.applyThinking({thinkingConfig:{thinkingBudget:8000}}, 'gemini', c, effort),
                 {thinkingConfig:{thinkingLevel:levels.includes(effort) ? effort : defaultEffort,includeThoughts:true}});
+        }
+        for (const effort of [null, S.MODEL_DEFAULT_EFFORT]) {
+            assert.deepEqual(S.applyThinking({}, 'gemini', c, effort), {thinkingConfig:{includeThoughts:true}});
         }
     });
 }
 test('substring lookalikes are unknown', () => {
     for (const p of ['gemini','openrouter','zai','bedrock']) assert.equal(S.capability(p, 'fake-gemini-3-pro-preview-claude-sonnet-4-6-glm-4.6').mode, 'unknown');
-    for (const id of ['fake-gemini-3.8-flash','gemini-3.8-flash-preview','gemini-3.8-flash-tts','gemini-3.8-flash-custom','constructor','__proto__']) {
+    for (const id of ['fake-gemini-3.8-flash','gemini-3.8-flash-tts','gemini-3.8-flash/foreign','constructor','__proto__']) {
         assert.equal(S.capability('gemini', id).mode, 'unknown');
         assert.equal(S.capability('openrouter', 'google/' + id).mode, 'unknown');
     }
+});
+test('Gemini families use candidate levels and display documented defaults without forcing them', () => {
+    for (const [id, initial] of [['gemini-4-hydrogen', 'high'], ['models/gemini-12.1-nova-preview-11-2027', S.MODEL_DEFAULT_EFFORT]]) {
+        const c = S.capability('gemini', id);
+        assert.equal(c.source, 'inferred');
+        assert.deepEqual(c.levels, ['low', 'medium', 'high', 'xhigh']);
+        assert.equal(c.initialEffort, initial);
+        assert.deepEqual(c.acceptedLevels, []);
+        assert.deepEqual(S.applyThinking({}, 'gemini', c, null), {});
+        for (const level of c.levels)
+            assert.deepEqual(S.applyThinking({}, 'gemini', c, level).thinkingConfig,
+                { thinkingLevel: level.toUpperCase(), includeThoughts: true });
+        assert.equal(S.capability('openrouter', 'google/' + id).mode, 'unknown');
+    }
+    assert.deepEqual(S.capability('gemini','gemini-3.8-flash-preview').levels, ['low','medium','high']);
+    for (const id of ['gemini-4-carbon', 'gemini-4-argon']) {
+        const c = S.capability('gemini', id);
+        assert.deepEqual(c.levels, ['low','medium','high']);
+        assert.equal(c.initialEffort, 'medium');
+    }
+    assert.equal(S.capability('gemini', 'gemini-robotics-er-2-preview').initialEffort, 'high');
+    assert.equal(S.capability('gemini', 'gemini-latest', {baseModelId:'models/gemini-4-hydrogen'}).initialEffort, 'high');
+    assert.equal(S.capability('gemini', 'gemini-4-hydrogen', {rejectedLevels:['high']}).initialEffort, S.MODEL_DEFAULT_EFFORT);
+});
+test('Gemini Models metadata wins and cannot invent levels', () => {
+    for (const metadata of [{ thinking:false }, { supportedGenerationMethods:['embedContent'] }]) {
+        const c = S.capability('gemini','gemini-3.8-flash',metadata);
+        assert.equal(c.mode,'none');
+        assert.deepEqual(S.applyThinking({},'gemini',c,'low'),{});
+    }
+    const alias = S.capability('gemini','gemini-alias', { thinking:true, baseModelId:'gemini-4-new',
+        supportedThinkingLevels:['minimal'], defaultThinkingLevel:'low' });
+    assert.deepEqual(alias.levels,['low','medium','high','xhigh']);
+    assert.equal(alias.initialEffort, S.MODEL_DEFAULT_EFFORT);
+    assert.deepEqual(S.applyThinking({},'gemini',alias,S.MODEL_DEFAULT_EFFORT),{thinkingConfig:{includeThoughts:true}});
+    const legacy = S.capability('gemini','gemini-2.5-future', { thinking:true });
+    assert.equal(legacy.mode,'legacy-default');
+});
+test('Gemini records only explicit Thinking rejections', () => {
+    const rejected = (message,status=400,level='XHIGH') => S.geminiThinkingRejection({message,status},level);
+    assert.equal(rejected('Thinking level XHIGH is not supported for this model.'),'level');
+    assert.equal(rejected("Invalid value at 'generation_config.thinking_config.thinking_level' (type: enum), XHIGH"),'level');
+    assert.equal(rejected('This model does not support thinking.'),'config');
+    assert.equal(rejected('ThinkingConfig is not supported for this model.'),'config');
+    assert.equal(rejected('Thinking level is not supported with this tool.'),null);
+    assert.equal(rejected('Thinking level XHIGH is not supported.',503),null);
+    assert.equal(rejected('Invalid max_output_tokens.'),null);
 });
 test('Gemini 3.8 unsupported minimal normalizes to medium', () => {
     const c = S.capability('gemini', 'gemini-3.8-flash');
@@ -92,7 +147,12 @@ test('Bedrock rejects invalid token limit and forced tool choice', () => {
 });
 test('future sync versions rejected; legacy v2 accepted', () => {
     S.assertCompatible({version:'2.0',data:{}});
-    for(const value of [{settingsSchemaVersion:137},{minimumReaderVersion:137},{data:{profiles:[{profileSchemaVersion:2}]}},{data:{chats:[{executionSettings:{schemaVersion:2}}]}},{data:{settings:[{key:'globalSettingsV136',value:{schemaVersion:2}}]}}])
+    S.assertCompatible({version:'2.0',minimumReaderVersion:137,data:{documentLibrary:{schemaVersion:1}}});
+    for(const value of [{settingsSchemaVersion:137},{minimumReaderVersion:138},
+        {minimumReaderVersion:136,data:{documentLibrary:{schemaVersion:1}}},
+        {minimumReaderVersion:137,data:{documentLibrary:{schemaVersion:2}}},
+        {minimumReaderVersion:137,backupSchemaVersion:2},
+        {data:{profiles:[{profileSchemaVersion:2}]}},{data:{chats:[{executionSettings:{schemaVersion:2}}]}},{data:{settings:[{key:'globalSettingsV136',value:{schemaVersion:2}}]}}])
         assert.throws(()=>S.assertCompatible({version:'2.0',data:{},...value}));
 });
 console.log(`${count} tests passed`);

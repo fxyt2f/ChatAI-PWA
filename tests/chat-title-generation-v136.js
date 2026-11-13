@@ -219,7 +219,7 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
         await test('chat title can finish last, uses OpenRouter settings and stays on the original chat', async () => {
             const titleGate = deferred();
             const previousScreen = st.currentScreen;
-            const previousHistoryQuery = el.historySearchInput.value;
+            const previousHistoryQuery = el.chatSidebarSearchInput.value;
             titleReply = () => titleGate.promise;
             await app.saveGlobalSettingsV136({chatTitleModelRef: router, chatTitleSystemPrompt: customPrompt});
             await start();
@@ -243,13 +243,9 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
                 await renderSidebar();
                 assert(isDotVisible(sidebarRow(id)) && !isDotVisible(sidebarRow(autoId)));
                 assert((await app.loadChat(autoId)).ok);
-                await ui.showScreen('history', true);
-                el.historySearchClearBtn.click();
-                await ui.renderHistoryList({refresh: true});
-                const historyTitle = () => document.querySelector(`#history-list [data-chat-id="${id}"] .history-item-title`)?.textContent;
+                await ui.showScreen('chat', true);
                 const sidebarTitle = () => el.chatSidebarList.querySelector(`[data-chat-id="${id}"] .chat-sidebar-item-title`)?.textContent;
                 await renderSidebar();
-                eq(historyTitle(), '後からタイトルが届く');
                 eq(sidebarTitle(), '後からタイトルが届く');
                 assert(isDotVisible(sidebarRow(id)) && !isDotVisible(sidebarRow(autoId)));
                 assert(sidebarRow(id).querySelector('.chat-sidebar-item-open').ariaLabel.includes('タイトル生成中'));
@@ -257,7 +253,6 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
                 titleGate.resolve(routerResponse('「' + '😀'.repeat(55) + '」'));
                 await completeTitle(id);
                 await assertTitle(id, '😀'.repeat(50), 'auto');
-                eq(historyTitle(), '😀'.repeat(50));
                 await waitFor(() => sidebarTitle() === '😀'.repeat(50), 'updated sidebar title');
                 assert(!isDotVisible(sidebarRow(id)));
                 eq(st.currentChatId, autoId);
@@ -265,8 +260,8 @@ window.runChatTitleGenerationTests = async ({app, db, st, ui, el, test, assert, 
             } finally {
                 titleGate.resolve(routerResponse('予備タイトル'));
                 Object.assign(sidebar, previousSidebar);
-                el.historySearchInput.value = previousHistoryQuery;
-                el.historySearchInput.dispatchEvent(new Event('input'));
+                el.chatSidebarSearchInput.value = previousHistoryQuery;
+                el.chatSidebarSearchInput.dispatchEvent(new Event('input'));
                 await ui.showScreen(previousScreen, true);
                 resetReplies();
             }

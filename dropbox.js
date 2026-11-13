@@ -5,6 +5,7 @@ window.dropboxApi = {
     APP_KEY: '',
     METADATA_PATH: '/gemini_pwa_data.json',
     ASSETS_DIR_PATH: '/Gemini_PWA_Assets',
+    DOCUMENTS_DIR_PATH: '/Gemini_PWA_Documents',
     DRAFTS_DIR_PATH: '/drafts',
     MAX_RETRY_COUNT: 3,
     BASE_RETRY_DELAY_MS: 1000,
@@ -188,7 +189,8 @@ window.dropboxApi = {
         };
 
         try {
-            const response = await fetch(url, { ...options, headers });
+            const { withMetadata, ...fetchOptions } = options;
+            const response = await fetch(url, { ...fetchOptions, headers });
 
             if (!response.ok) {
                 if (response.status === 401 && !hasRefreshedToken) {
@@ -215,6 +217,10 @@ window.dropboxApi = {
             }
 
             if (endpoint === '/files/download') {
+                if (withMetadata) {
+                    const metadata = JSON.parse(response.headers.get('Dropbox-API-Result'));
+                    return { blob: await response.blob(), metadata };
+                }
                 return response.blob();
             }
             
@@ -249,9 +255,17 @@ window.dropboxApi = {
         return this._request('api', '/users/get_current_account', { method: 'POST' });
     },
 
-    async uploadMetadata(content) {
-        window.SettingsV136.assertCompatible(JSON.parse(content));
-        const args = { path: this.METADATA_PATH, mode: 'overwrite', mute: true };
+    async uploadMetadata(content, expectedRev) {
+        const envelope = JSON.parse(content);
+        window.SettingsV136.assertCompatible(envelope);
+        if (Object.hasOwn(envelope, 'backupSchemaVersion')) throw new Error('Dropbox同期ファイルの形式が無効です。');
+        if (expectedRev !== null && (typeof expectedRev !== 'string' || !expectedRev)) {
+            throw new Error('Dropboxのリビジョンを確認できないため、上書きを中止しました。');
+        }
+        const args = {
+            path: this.METADATA_PATH, mode: expectedRev ? { '.tag': 'update', update: expectedRev } : 'add',
+            autorename: false, strict_conflict: true, mute: true
+        };
         return this._request('content', '/files/upload', {
             method: 'POST',
             headers: {
@@ -262,16 +276,22 @@ window.dropboxApi = {
         });
     },
 
-    async downloadMetadata() {
+    async downloadMetadata({ withRevision = false } = {}) {
         const args = { path: this.METADATA_PATH };
         try {
-            const blob = await this._request('content', '/files/download', {
+            const result = await this._request('content', '/files/download', {
                 method: 'POST',
                 headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
+                withMetadata: withRevision
             });
-            const content = await blob.text();
-            window.SettingsV136.assertCompatible(JSON.parse(content));
-            return content;
+            const content = await (withRevision ? result.blob : result).text();
+            const envelope = JSON.parse(content);
+            window.SettingsV136.assertCompatible(envelope);
+            if (Object.hasOwn(envelope, 'backupSchemaVersion')) throw new Error('Dropbox同期ファイルの形式が無効です。');
+            if (!withRevision) return content;
+            const rev = result.metadata?.rev;
+            if (typeof rev !== 'string' || !rev) throw new Error('Dropboxのリビジョンを取得できませんでした。');
+            return { content, rev };
         } catch (error) {
             // "path/not_found" という文字列を含むエラーの場合のみ、ファイルなし(null)として扱う
             if (error && error.message && error.message.includes('path/not_found')) {
@@ -280,6 +300,38 @@ window.dropboxApi = {
             // それ以外のエラーは、一時的なネットワークエラーの可能性があるので、そのままスローする
             throw error;
         }
+    },
+
+    libraryOriginalPath(hash) {
+        if (!DocumentLibrary.isHash(hash)) throw new Error('ファイル原本の識別子が無効です。');
+        return `${this.DOCUMENTS_DIR_PATH}/${hash}`;
+    },
+
+    async uploadLibraryOriginal(hash, blob) {
+        const args = { path: this.libraryOriginalPath(hash), mode: 'add', autorename: false, mute: true };
+        try {
+            await this._request('content', '/files/upload', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'Dropbox-API-Arg': JSON.stringify(args)
+                },
+                body: blob
+            });
+        } catch (error) {
+            // A simultaneous writer may already have uploaded the same original.
+            if (error.status !== 409 || !error.message.includes('path/conflict')) throw error;
+            const existing = await this.downloadLibraryOriginal(hash);
+            if (existing.size !== blob.size || await DocumentLibrary.digest(existing) !== hash) throw error;
+        }
+    },
+
+    async downloadLibraryOriginal(hash) {
+        const args = { path: this.libraryOriginalPath(hash) };
+        return this._request('content', '/files/download', {
+            method: 'POST',
+            headers: { 'Dropbox-API-Arg': JSON.stringify(args) }
+        });
     },
 
 
@@ -400,11 +452,10 @@ window.dropboxApi = {
         });
     },
 
-    async listAssets() {
+    async listAssets(path = this.ASSETS_DIR_PATH) {
         let allEntries = [];
         let hasMore = true;
         let cursor = null;
-        const path = this.ASSETS_DIR_PATH;
 
         try {
             while (hasMore) {
@@ -440,26 +491,24 @@ window.dropboxApi = {
     },
 
 
-    async ensureAssetsFolderExists() {
+    async ensureAssetsFolderExists(path = this.ASSETS_DIR_PATH) {
+        const getMetadata = () => this._request('api', '/files/get_metadata', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path })
+        });
         try {
-            // フォルダのメタデータを取得しようと試みる
-            await this._request('api', '/files/get_metadata', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: this.ASSETS_DIR_PATH }),
-            });
+            if ((await getMetadata())['.tag'] !== 'folder') throw new Error('Dropboxの保存先に同名のファイルがあります。');
         } catch (error) {
-            if (error.message.includes('path/not_found')) {
-                // フォルダが存在しない場合のみ作成する
-                console.log(`[Dropbox API] Assets folder not found. Creating folder: ${this.ASSETS_DIR_PATH}`);
+            if (!error.message.includes('path/not_found')) throw error;
+            try {
                 await this._request('api', '/files/create_folder_v2', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: this.ASSETS_DIR_PATH, autorename: false }),
+                    body: JSON.stringify({ path, autorename: false }),
                 });
-            } else {
-                // その他のエラーはそのままスローする
-                throw error;
+            } catch (createError) {
+                if (createError.status !== 409 || (await getMetadata())['.tag'] !== 'folder') throw createError;
             }
         }
     },

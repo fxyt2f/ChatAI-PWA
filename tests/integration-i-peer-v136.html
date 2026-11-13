@@ -1,4 +1,7 @@
 <!doctype html><meta charset="utf-8"><title>Isolated integration storage peer</title>
+<script src="../document-library.js"></script>
+<script src="../document-search.js"></script>
+<script src="../document-rag.js"></script>
 <script src="../settings-v136.js">window.openFullIntegrationPeerV136=async name=>{
     const base=await openIntegrationPeerV136(name);
     const html=new DOMParser().parseFromString(await(await fetch('/index.html')).text(),'text/html');document.body.innerHTML=html.body.innerHTML;document.querySelectorAll('script').forEach(n=>n.remove());

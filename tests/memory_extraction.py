@@ -52,6 +52,7 @@ def run(client, url):
                 {id: 'mem-no-key', name: 'Without credentials', provider: 'openrouter', modelCandidates: ['fixture/no-key']},
                 {id: 'mem-off', name: 'Disabled route', provider: 'openrouter', apiKey: 'off-fixture', enabled: false, modelCandidates: ['fixture/off']}
             ]);
+            await appLogic.setCurrentChatModelRef({apiConfigId:'mem-gem',modelName:'gemini-2.5-flash'});
         })()''')
         check("(() => { const options = [...document.querySelector('#memory-extraction-model').options]; return options.length === 7 && options.some(o => o.text === 'Second Gemini / gemini-2.5-flash') && options.some(o => o.text === 'Memory Gemini / gemini-2.5-flash') && !options.some(o => o.text.includes('Disabled route')); })()",
               'Registered enabled routes list API setting names and distinguish identical model names')
