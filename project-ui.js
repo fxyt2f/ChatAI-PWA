@@ -15,7 +15,7 @@ window.ProjectUI = (() => {
     const returns = new Map();
     const chatEntries = new Map();
     const tabs = new Map();
-    let dataGeneration = 0, draftLabelGeneration = 0;
+    let dataGeneration = 0;
     const expansionKey = 'chatai-expanded-projects';
 
     function node(tag, text, className) {
@@ -78,9 +78,6 @@ window.ProjectUI = (() => {
         revealCurrentChat(memberships);
         sidebar = { rows, visible };
         byId('sidebar').hidden = !visible;
-        const historyButton = byId('all-history');
-        historyButton.hidden = Boolean(document.getElementById('chat-sidebar-search-input').value.trim());
-        historyButton.textContent = visible ? '全履歴を表示' : '最近のチャットに戻る';
         if (visible) drawSidebar();
     }
 
@@ -101,21 +98,24 @@ window.ProjectUI = (() => {
                 else expanded.add(project.id);
                 persistExpansion();
                 drawSidebar();
-            }, 'chat-sidebar-icon-button project-expand');
+            }, 'chat-sidebar-item-open project-folder-toggle');
             toggle.dataset.projectFocus = 'expand';
-            toggle.append(icon(isExpanded ? 'expand_more' : 'chevron_right'));
-            toggle.setAttribute('aria-label', `「${project.name}」のチャット${isExpanded ? 'を折りたたむ' : 'を展開'}`);
+            const titleLine = node('span', '', 'chat-sidebar-title-line');
+            titleLine.append(icon(isExpanded ? 'folder_open' : 'folder'), node('span', project.name, 'chat-sidebar-item-title'));
+            toggle.append(titleLine);
+            toggle.title = project.name;
             toggle.setAttribute('aria-expanded', String(isExpanded));
             toggle.setAttribute('aria-controls', 'project-members-' + project.id);
-            const openButton = button('', () => open(project.id), 'chat-sidebar-item-open project-folder-open');
+            const openButton = button('', () => open(project.id), 'chat-sidebar-item-menu project-folder-compose');
             openButton.dataset.projectFocus = 'open';
-            openButton.append(icon('folder_open'), node('span', project.name, 'chat-sidebar-item-title'));
-            openButton.title = project.name;
-            if (view?.id === project.id) openButton.setAttribute('aria-current', 'page');
+            openButton.append(icon('edit_square'));
+            openButton.title = `「${project.name}」を開く`;
+            openButton.setAttribute('aria-label', openButton.title);
             const options = button('', () => openMenu(options, project.id), 'chat-sidebar-item-menu project-folder-options');
             options.dataset.projectFocus = 'menu';
             options.append(icon('more_vert'));
             options.setAttribute('aria-label', `「${project.name}」のプロジェクト操作`);
+            options.title = options.getAttribute('aria-label');
             options.setAttribute('aria-haspopup', 'menu');
             options.setAttribute('aria-controls', 'project-menu');
             options.setAttribute('aria-expanded', 'false');
@@ -164,15 +164,35 @@ window.ProjectUI = (() => {
         element.querySelector(':scope > :not([hidden])')?.focus({ preventScroll: true });
     }
 
-    function markOpenFolder() {
-        for (const button of byId('sidebar-list').querySelectorAll('.project-folder-open')) {
-            if (button.closest('[data-project-id]').dataset.projectId === view?.id) button.setAttribute('aria-current', 'page');
-            else button.removeAttribute('aria-current');
+    function moveChatControls(toProject) {
+        const chat = document.getElementById('chat-workspace');
+        const header = document.querySelector('#chat-workspace > .app-header, #project-workspace > .app-header');
+        const composer = ui().getComposerElement();
+        for (const id of ['back', 'title', 'options']) byId(id).hidden = !toProject;
+        for (const id of ['chat-title', 'goto-settings-btn']) document.getElementById(id).hidden = toProject;
+        const input = document.getElementById('user-input');
+        input.placeholder = toProject ? 'このプロジェクトでメッセージを送信…' : 'メッセージを入力...';
+        if (toProject) {
+            byId('workspace').prepend(header);
+            byId('composer-slot').append(composer);
+        } else {
+            document.getElementById('header-trigger-area').after(header);
+            chat.append(composer);
         }
+        ui().scheduleComposerTextareaResize(true);
     }
 
     function open(id, { fromHistory = false } = {}) {
-        if (!installed || window.state.currentScreen !== 'chat' || !DocumentLibrary.isId(id)) return;
+        if (!installed || handoff || app().chatParameterOperation || window.state.isEditingSystemPrompt ||
+            window.state.isEditingChatTitle || window.state.editingMessageIndex !== null ||
+            window.state.currentScreen !== 'chat' || !DocumentLibrary.isId(id)) return;
+        if (app().attachmentOperation) {
+            const navigation = app().chatNavigationV136 = {};
+            void app().attachmentOperation.finished.then(() => {
+                if (app().chatNavigationV136 === navigation) open(id, { fromHistory });
+            });
+            return;
+        }
         if (view?.id === id) {
             if (!document.getElementById('chat-sidebar-backdrop').hidden) ui().closeChatSidebar();
             byId('title').focus({ preventScroll: true });
@@ -194,13 +214,15 @@ window.ProjectUI = (() => {
         window.DocumentLibraryUI.close({ fromHistory: true });
         ui().closeHistoryItemMenu();
         if (fromOverlay) ui().closeChatSidebar();
+        app().flushInputDraft();
         view = { id, returnFocus, scroller, scrollTop: previous?.scrollTop ?? scroller.scrollTop,
-            messages: window.state.currentMessages, version: 0, notice: '' };
+            origin: app().captureChatViewForProject(), version: 0, notice: '' };
         if (!fromHistory) {
             const method = returnState?.projectId ? 'replaceState' : 'pushState';
             history[method]({ screen: 'chat', projectId: id }, '', '#chat');
         }
         byId('workspace').hidden = false;
+        moveChatControls(true);
         byId('content').scrollTop = 0;
         activateTab(tabs.get(id) || 'chats');
         attachDraft(view);
@@ -212,24 +234,26 @@ window.ProjectUI = (() => {
         setViewReady(false);
         ui().syncChatWorkspaceInteractivity();
         ui().syncChatSidebarCurrentSelection();
-        markOpenFolder();
         byId('title').focus({ preventScroll: true });
         void refresh(view);
     }
 
-    function close({ fromHistory = false, restoreFocus = false } = {}) {
+    function close({ fromHistory = false, restoreFocus = false, sent = false } = {}) {
         closeMenu();
         if (dialog) byId('dialog').close();
         if (!view) return;
+        window.settingsUiV136?.closePopover(false);
         const previous = view;
+        if (!sent) saveProfileDraft();
         view = null;
         ui().closeHistoryItemMenu();
         byId('workspace').hidden = true;
+        moveChatControls(false);
+        if (!sent) app().restoreChatViewForProject(previous.origin);
         if (!fromHistory && history.state?.projectId) history.replaceState({ screen: 'chat' }, '', '#chat');
         ui().syncChatWorkspaceInteractivity();
         ui().syncChatSidebarCurrentSelection();
-        markOpenFolder();
-        if (previous.messages === window.state.currentMessages) {
+        if (previous.origin.values.currentMessages === window.state.currentMessages) {
             previous.scroller.scrollTop = previous.scrollTop;
             if (restoreFocus) {
                 const target = previous.returnFocus?.getClientRects().length && !previous.returnFocus.closest('[inert]')
@@ -240,6 +264,13 @@ window.ProjectUI = (() => {
     }
 
     async function handleHistory(entry) {
+        if (handoff) {
+            // Finish the atomic first save before swapping the shared composer.
+            await handoff.finished;
+            if (history.state?.projectId !== entry?.projectId ||
+                history.state?.projectChatToken !== entry?.projectChatToken) return;
+        }
+        if (view && entry?.projectId !== view.id) close({ fromHistory: true, restoreFocus: !entry?.documentLibrary && !entry?.projectId });
         if (entry?.projectReturn && !handoff) {
             const origin = returns.get(entry.projectReturn);
             if (origin && window.state.currentMessages !== origin.values.currentMessages) {
@@ -286,7 +317,7 @@ window.ProjectUI = (() => {
     function setViewReady(ready) {
         for (const id of ['options', 'add-chat', 'file-add']) byId(id).disabled = !ready;
         if (view) view.ready = ready;
-        renderComposer();
+        ui().updateComposerSendButton();
     }
 
     function setNotice(owner, message) {
@@ -308,118 +339,51 @@ window.ProjectUI = (() => {
 
     function attachDraft(owner) {
         const key = app().getNewInputDraftContextKey(owner.id);
-        let draft = drafts.get(key);
-        if (!draft) {
-            const local = app().loadInputDraftLocal(key);
-            draft = { key, text: local?.text ?? '', attachments: [], changed: false, execution: null };
-            drafts.set(key, draft);
-            void app().loadInputDraftDropbox(key).then(remote => {
-                if (drafts.get(key) !== draft || draft.changed || draft.busy) return;
-                const latest = app().chooseLatestInputDraftRecord(local, remote);
-                draft.text = latest?.deleted ? '' : latest?.text ?? '';
-                if (view?.draft === draft) {
-                    byId('input').value = draft.text;
-                    renderComposer();
-                }
-            });
-        }
-        owner.draft = draft;
-        byId('input').value = draft.text;
-        renderComposer();
+        const saved = drafts.get(key);
+        const readSetting = setting => {
+            try { return JSON.parse(sessionStorage.getItem(app().getProjectDraftSettingsKey(setting, owner.id))); }
+            catch { return null; }
+        };
+        const execution = saved?.execution ?? readSetting(SettingsV136.DRAFT_KEY) ?? (owner.origin.profileId === window.state.activeProfileId
+            ? owner.origin.values.currentExecutionSettings : null);
+        owner.draftKey = key;
+        app().startNewChat({ projectId: owner.id, homeDraft: {
+            text: saved?.text ?? app().loadInputDraftLocal(key)?.text ?? '',
+            attachments: saved?.attachments ?? [],
+            execution: execution?.modelRef || execution?.modelSelectionRequired
+                ? app().clearUnavailableExecutionSelectionV136(execution) : app().newChatExecutionDefaults(),
+            parameters: saved?.parameters ?? readSetting(SettingsV136.CHAT_PARAMETER_DRAFT_KEY) ?? app().profileChatParameters(window.state.settings)
+        } });
+        if (!saved) app().scheduleInputDraftRestore(0, true);
     }
 
-    function renderComposer() {
-        if (!view?.draft) return;
-        const draft = view.draft;
-        const input = byId('input');
-        input.disabled = !view.ready || !!draft.busy;
-        const model = byId('model');
-        model.disabled = !view.ready || !!draft.busy || !!draft.selectingModel;
-        const execution = draftExecution(draft);
-        const ref = execution.modelRef;
-        model.textContent = ref?.modelName ?? 'モデルを選択';
-        model.title = model.textContent;
-        model.setAttribute('aria-label', `モデルを選択（${model.textContent}）`);
-        byId('send').disabled = !view.ready || !!draft.busy || !!draft.processing || !!draft.selectingModel ||
-            !(draft.text.trim() || draft.attachments.length);
-        byId('attach').disabled = !view.ready || !!draft.busy || !!draft.processing;
-        const list = byId('attachments');
-        list.hidden = !draft.attachments.length;
-        list.replaceChildren(...draft.attachments.map(attachment => {
-            const label = node('span', attachment.name);
-            label.title = attachment.name;
-            const remove = button('×', () => {
-                draft.attachments = draft.attachments.filter(item => item !== attachment);
-                renderComposer();
-                byId('attach').focus({ preventScroll: true });
-            }, 'chat-sidebar-icon-button');
-            remove.disabled = !!draft.busy || !!draft.processing;
-            remove.setAttribute('aria-label', `${attachment.name} を削除`);
-            const item = node('li');
-            item.append(icon('attach_file'), label, remove);
-            return item;
-        }));
-        const status = byId('composer-status');
-        status.textContent = draft.busy ? 'チャットを保存中…' : draft.processing ? '添付ファイルを準備中…' : draft.notice || '';
-        status.hidden = !status.textContent;
-        status.dataset.error = String(Boolean(draft.notice && !draft.busy && !draft.processing));
+    function saveProfileDraft() {
+        if (!view || handoff || window.state.currentChatId != null) return;
+        app().flushInputDraft();
+        const state = window.state;
+        drafts.set(view.draftKey, {
+            text: document.getElementById('user-input').value,
+            attachments: [...state.pendingAttachments],
+            execution: state.currentExecutionSettings,
+            parameters: { systemPrompt: state.currentSystemPrompt, generationParameters: app().getChatGenerationParameters() }
+        });
     }
 
-    function draftExecution(draft) {
-        if (draft.execution) return draft.execution;
-        return app().getCurrentChatModelRef() ? window.state.currentExecutionSettings : app().newChatExecutionDefaults();
-    }
-
-    function persistDraft(draft) {
-        if (!draft.changed) return;
-        app().persistInputDraft(draft.key, draft.text);
-        void app().flushInputDraftDropboxSave();
-    }
-
-    function prepareForUpdate() {
-        for (const draft of drafts.values()) {
-            if (draft.busy || draft.processing || draft.attachments.length) return false;
-            if (draft.changed && draft.text && app().loadInputDraftLocal(draft.key)?.text !== draft.text) return false;
-        }
+    function restoreProfileDraft() {
+        if (!view) return false;
+        const owner = view;
+        // Profile switch clears its operation guard in finally before changing the composer context.
+        queueMicrotask(() => { if (view === owner) attachDraft(owner); });
         return true;
     }
 
-    async function addDraftAttachments(draft, files) {
-        if (!files.length || draft.processing || draft.busy) return;
-        draft.processing = true;
-        draft.notice = '';
-        if (view?.draft === draft) renderComposer();
-        try {
-            draft.notice = await app().addComposerFiles(files, draft.attachments, {
-                current: () => drafts.get(draft.key) === draft,
-                onAdd: () => { if (view?.draft === draft) renderComposer(); }
-            });
-        } finally {
-            draft.processing = false;
-            if (view?.draft === draft) renderComposer();
+    function prepareForUpdate() {
+        if (handoff) return false;
+        for (const [key, draft] of drafts) {
+            if (draft.attachments.length) return false;
+            if (draft.text && app().loadInputDraftLocal(key)?.text !== draft.text) return false;
         }
-    }
-
-    function chooseDraftModel(owner) {
-        const draft = owner.draft;
-        window.settingsUiV136?.openModels(byId('model'), '', {
-            getRef: () => draftExecution(draft).modelRef,
-            select: async ref => {
-                draft.selectingModel = true;
-                draft.notice = '';
-                renderComposer();
-                try {
-                    const execution = await app().prepareChatExecutionSelection(draftExecution(draft), { modelRef: ref });
-                    if (view === owner && owner.draft === draft) draft.execution = execution;
-                } catch (error) {
-                    draft.notice = error.message || String(error);
-                    throw error;
-                } finally {
-                    draft.selectingModel = false;
-                    if (view?.draft === draft) renderComposer();
-                }
-            }
-        });
+        return !view?.origin.attachments.length;
     }
 
     function rememberOrigin(owner, snapshot) {
@@ -441,82 +405,47 @@ window.ProjectUI = (() => {
         }
     }
 
-    async function openChat(owner, chatId) {
-        if (handoff || view !== owner) return;
+    async function openChat(chatId) {
+        const owner = view;
+        if (!owner || handoff) return;
         if (app().attachmentOperation?.finished) await app().attachmentOperation.finished;
         if (view !== owner || handoff) return;
-        const snapshot = app().captureChatViewForProject();
-        const token = rememberOrigin(owner, snapshot);
+        const token = rememberOrigin(owner, owner.origin);
         const result = await window.chatHistoryActions.open(chatId, { keepProjectHistory: true });
         if (result?.ok && token && history.state?.projectReturn === token) {
             pushChatEntry(result.chatId, token);
         }
+        return result;
     }
 
-    async function sendDraft() {
+    function beginSend() {
         const owner = view;
-        if (!owner || handoff || byId('send').disabled) return;
-        const { draft } = owner;
-        draft.busy = true;
-        draft.notice = '';
-        renderComposer();
-        const attempt = handoff = { owner };
-        let snapshot;
-        try {
-            const messages = window.state.currentMessages;
-            await window.state.executionSettingsReady;
-            if (app().attachmentOperation?.finished) await app().attachmentOperation.finished;
-            if (view !== owner || owner.draft !== draft || messages !== window.state.currentMessages) return;
-            if (app().chatParameterOperation || window.state.isEditingSystemPrompt || window.state.isEditingChatTitle ||
-                window.state.editingMessageIndex !== null || window.state.chatDataChangesV136.has(undefined)) {
-                draft.notice = '現在の会話の編集またはデータ更新が終わってから送信してください。';
-                return;
-            }
-            const execution = draftExecution(draft);
-            if (!execution.modelRef) {
-                draft.notice = '送信するモデルを選択してください。';
-                return;
-            }
-            snapshot = app().captureChatViewForProject();
-            const token = rememberOrigin(owner, snapshot);
-            app().startNewChat({ projectId: owner.id, homeDraft: {
-                text: draft.text, attachments: draft.attachments, execution,
-                parameters: app().profileChatParameters(window.state.settings)
-            } });
-            attempt.messages = window.state.currentMessages;
-            await app().handleSend({
-                onInitialError: message => { draft.notice = message; },
-                onInitialSave: session => {
-                    if (handoff !== attempt) return;
-                    attempt.committed = true;
-                    draft.text = '';
-                    draft.changed = false;
-                    draft.attachments = [];
-                    draft.execution = null;
-                    draft.busy = false;
-                    handoff = null;
-                    if (view === owner && window.state.currentMessages === session.messages) {
-                        close({ fromHistory: true });
-                        if (token && history.state?.projectReturn === token)
-                            pushChatEntry(session.chatId, token);
-                    } else if (window.state.currentMessages === session.messages) {
-                        app().restoreChatViewForProject(snapshot);
-                        return;
-                    }
-                    app().scrollToBottom();
-                }
-            });
-        } catch (error) {
-            if (attempt.committed) await ui().showCustomAlert(error.message || String(error));
-            else draft.notice = error.message || String(error);
-        } finally {
-            if (handoff === attempt) {
+        if (!owner?.ready || handoff) return null;
+        saveProfileDraft();
+        const token = rememberOrigin(owner, owner.origin);
+        const attempt = handoff = {};
+        attempt.finished = new Promise(resolve => { attempt.finish = resolve; });
+        return {
+            onInitialSave(session) {
+                if (handoff !== attempt) return;
+                drafts.delete(owner.draftKey);
                 handoff = null;
-                if (snapshot && attempt.messages === window.state.currentMessages) app().restoreChatViewForProject(snapshot);
-                draft.busy = false;
-                if (view?.draft === draft) renderComposer();
+                attempt.finish();
+                if (view !== owner || window.state.currentMessages !== session.messages) return;
+                if (history.state?.projectId !== owner.id) {
+                    close({ fromHistory: true, sent: true });
+                    app().restoreChatViewForProject(owner.origin);
+                    return;
+                }
+                close({ fromHistory: true, sent: true });
+                if (token && history.state?.projectReturn === token) pushChatEntry(session.chatId, token);
+                app().scrollToBottom();
+            },
+            onFinished() {
+                if (handoff === attempt) handoff = null;
+                attempt.finish();
             }
-        }
+        };
     }
 
     async function refresh(owner) {
@@ -553,12 +482,11 @@ window.ProjectUI = (() => {
         list.replaceChildren(...models.map(model => {
             const item = ui().createChatSidebarItem(model);
             const openButton = item.querySelector('[data-sidebar-action="open"]');
-            openButton.addEventListener('click', () => openChat(owner, model.id));
-            if (!model.isPinned) openButton.querySelector('.chat-sidebar-title-line').prepend(icon('chat_bubble_outline'));
+            openButton.addEventListener('click', () => openChat(model.id));
             const stamp = model.updatedAt && new Date(model.updatedAt);
             if (stamp && Number.isFinite(stamp.getTime())) {
                 const time = node('time', new Intl.DateTimeFormat('ja', { year: 'numeric', month: 'short', day: 'numeric',
-                    hour: '2-digit', minute: '2-digit' }).format(stamp), 'project-chat-date');
+                    hour: '2-digit', minute: '2-digit' }).format(stamp), 'chat-sidebar-item-snippet');
                 time.dateTime = stamp.toISOString();
                 openButton.append(time);
             }
@@ -578,24 +506,9 @@ window.ProjectUI = (() => {
         if (owner.documentSignature === signature) return;
         owner.documentSignature = signature;
         if (!entries.length) return emptyList(list, '共有ファイルはありません。');
-        list.replaceChildren(...entries.map(entry => {
-            const item = node('li', '', 'project-document-row');
-            const preview = button('', () => window.DocumentLibraryUI.openProjectPreview(entry, owner.id), 'project-file-open');
-            const name = node('span', entry.fileName, 'project-file-name');
-            name.title = entry.fileName;
-            const details = node('span', '', 'project-file-details');
-            details.append(name, node('span', `${entry.format.toUpperCase()} · ${window.DocumentLibraryUI.fileSize(entry.size)} · 版 ${entry.version}`,
-                'chat-sidebar-item-snippet'));
-            preview.append(icon(entry.format === 'pdf' ? 'picture_as_pdf' : 'description'), details);
-            const options = button('', () => openMenu(options, owner.id, ['unlink-file'], entry.id), 'chat-sidebar-icon-button');
-            options.append(icon('more_horiz'));
-            options.setAttribute('aria-label', `「${entry.fileName}」の操作`);
-            options.setAttribute('aria-haspopup', 'menu');
-            options.setAttribute('aria-expanded', 'false');
-            options.setAttribute('aria-controls', 'project-menu');
-            item.append(preview, options);
-            return item;
-        }));
+        window.DocumentLibraryUI.renderRows({ kind: 'project' }, list, entries,
+            entry => window.DocumentLibraryUI.openProjectPreview(entry, owner.id), 'project-menu',
+            (_, anchor, entry) => openMenu(anchor, owner.id, ['unlink-file'], entry.id));
     }
 
     function finishDialog(context) {
@@ -710,8 +623,10 @@ window.ProjectUI = (() => {
         return showDialog(choosingChats ? '既存チャットを追加' : 'ファイルライブラリから追加', '追加', (context, fields) => {
             const search = field(fields, choosingChats ? 'チャット名で絞り込み' : 'ファイル名で絞り込み', node('input'));
             search.type = 'search';
-            const list = node('div', '読み込み中…', 'project-picker-list');
-            fields.append(list);
+            const status = node('p', '読み込み中…', 'document-library-muted');
+            status.setAttribute('role', 'status');
+            const list = node('ul', '', 'project-picker-list checklist');
+            fields.append(status, list);
             const submit = byId('dialog-submit');
             submit.disabled = true;
             const load = choosingChats ? db().getProjectSidebarSnapshot() : Promise.all([
@@ -726,26 +641,26 @@ window.ProjectUI = (() => {
                 const entries = choosingChats ? chatModels(records.filter(record => current.get(record.id) !== owner.id)) :
                     records.filter(record => !shared.has(record.id)).sort(window.DocumentLibraryUI.byName);
                 const byRecord = new Map(records.map(record => [record.id, record]));
+                const updateCount = () => {
+                    status.textContent = `${selected.size}件を選択中`;
+                    submit.disabled = !selected.size;
+                };
                 const draw = () => {
                     const query = ui().normalizeHistoryText(search.value).toLocaleLowerCase('ja');
                     const matches = entries.filter(entry => (entry.title ?? entry.fileName).toLocaleLowerCase('ja').includes(query));
                     list.replaceChildren(...matches.map(entry => {
-                        const label = node('label');
-                        const input = node('input');
-                        input.type = choosingChats ? 'radio' : 'checkbox';
-                        input.name = 'project-choice';
-                        input.checked = selected.has(entry.id);
-                        input.addEventListener('change', () => {
-                            if (choosingChats) selected.clear();
-                            if (input.checked) selected.add(entry.id);
-                            else selected.delete(entry.id);
-                            submit.disabled = !selected.size;
-                        });
                         const origin = labels?.get(current.get(entry.id));
-                        label.append(input, node('span', (entry.title ?? entry.fileName) + (origin ? `（${origin} から移動）` : '')));
-                        return label;
+                        return ui().createChecklistItem(entry.id, (entry.title ?? entry.fileName) + (origin ? `（${origin} から移動）` : ''), {
+                            checked: selected.has(entry.id),
+                            onChange(checked) {
+                                if (checked) selected.add(entry.id);
+                                else selected.delete(entry.id);
+                                updateCount();
+                            }
+                        });
                     }));
-                    if (!matches.length) list.textContent = query ? '該当する項目がありません。' : '追加できる項目がありません。';
+                    if (!matches.length) list.append(node('li', query ? '該当する項目がありません。' : '追加できる項目がありません。'));
+                    updateCount();
                 };
                 search.addEventListener('input', draw);
                 draw();
@@ -796,23 +711,7 @@ window.ProjectUI = (() => {
             closeMenu();
         }
         if (view) void refresh(view);
-        syncDraftLabel();
         window.DocumentLibraryUI?.refreshProjectPicker();
-    }
-
-    function syncDraftLabel() {
-        const label = byId('draft-label');
-        const messages = window.state.currentMessages;
-        const id = window.state.currentChatId == null && db().projectDrafts?.get(messages);
-        const generation = ++draftLabelGeneration;
-        label.hidden = true;
-        if (!id) return;
-        void db().getProject(id).then(project => {
-            if (generation !== draftLabelGeneration || messages !== window.state.currentMessages || window.state.currentChatId != null) return;
-            label.textContent = project ? `プロジェクト「${project.name}」の新規チャット` : '所属予定のプロジェクトは削除されました';
-            label.title = label.textContent;
-            label.hidden = false;
-        }).catch(() => {});
     }
 
     function install() {
@@ -916,56 +815,7 @@ window.ProjectUI = (() => {
             activateTab(name);
             byId('tab-' + name).focus();
         });
-        byId('model').addEventListener('click', () => { if (view) chooseDraftModel(view); });
-        byId('input').addEventListener('input', event => {
-            if (!view?.draft) return;
-            const { draft } = view;
-            draft.text = event.target.value;
-            draft.changed = true;
-            draft.notice = '';
-            app().persistInputDraft(draft.key, draft.text);
-            renderComposer();
-        });
-        byId('input').addEventListener('focusout', () => { if (view?.draft) persistDraft(view.draft); });
-        byId('input').addEventListener('keydown', event => {
-            if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
-            if (!event.ctrlKey && (!window.state.settings.enterToSend || event.shiftKey || event.altKey || event.metaKey)) return;
-            event.preventDefault();
-            if (!byId('send').disabled) byId('composer').requestSubmit();
-        });
-        byId('attach').addEventListener('click', () => {
-            const draft = view?.draft;
-            if (!draft) return;
-            const input = byId('attachment-input');
-            input.value = '';
-            input.onchange = () => {
-                const files = [...input.files];
-                input.value = '';
-                void addDraftAttachments(draft, files);
-            };
-            input.click();
-        });
-        byId('composer').addEventListener('dragover', event => {
-            if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
-        });
-        byId('composer').addEventListener('drop', event => {
-            if (!view?.draft || !event.dataTransfer?.files.length) return;
-            event.preventDefault();
-            event.stopPropagation();
-            void addDraftAttachments(view.draft, [...event.dataTransfer.files]);
-        });
-        byId('composer').addEventListener('submit', event => {
-            event.preventDefault();
-            void sendDraft();
-        });
-        window.addEventListener('execution-settings-changed', () => {
-            if (!view) return;
-            if (view.draft?.key !== app().getNewInputDraftContextKey(view.id)) attachDraft(view);
-            else renderComposer();
-        });
-        window.addEventListener('pagehide', () => {
-            if (view?.draft) persistDraft(view.draft);
-        });
+
     }
 
     function chooseUpload(owner) {
@@ -978,6 +828,7 @@ window.ProjectUI = (() => {
         input.click();
     }
 
-    return { install, open, close, closeMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged, syncDraftLabel,
-        prepareForUpdate };
+    return { install, open, close, closeMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged,
+        prepareForUpdate, saveProfileDraft, restoreProfileDraft, beginSend, openChat, isReady: () => view?.ready === true,
+        isSavingFirstMessage: () => Boolean(handoff) };
 })();

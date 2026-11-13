@@ -97,14 +97,14 @@ def run(client, url):
             const left = element => element.getBoundingClientRect().left;
             const contentLeft = element => left(element) + parseFloat(getComputedStyle(element).paddingLeft);
             const history = get('.chat-sidebar-history-header');
-            const group = get('.chat-sidebar-group-title');
-            const title = get('.chat-sidebar-item:not(:has(.chat-pin-icon)) .chat-sidebar-item-title');
+            const group = get('#chat-sidebar-pinned:not([hidden]) .chat-sidebar-group-title');
+            const title = get('#chat-sidebar-list .chat-sidebar-item:not(:has(.chat-pin-icon)) .chat-sidebar-item-title');
             const leading = group ? contentLeft(group) : contentLeft(history);
             const aligned = [get('.chat-sidebar-brand'), get('#new-chat-btn .material-symbols-outlined'),
                 get('#document-library-open .document-library-icon'), get('.chat-sidebar-history-header h2'),
                 ...(title ? [title] : [])].every(element => Math.abs(left(element) - leading) < 0.5);
             const menu = get('#chat-sidebar-history-menu-btn');
-            const rowMenu = get('.chat-sidebar-item .chat-sidebar-item-menu');
+            const rowMenu = get('#chat-sidebar-list .chat-sidebar-item-menu, #chat-sidebar-pinned:not([hidden]) .chat-sidebar-item-menu');
             const geometry = element => {
                 const {left, width, height} = element.getBoundingClientRect();
                 return [left + width / 2, width, height, getComputedStyle(element.firstElementChild).fontSize];
@@ -139,7 +139,7 @@ def run(client, url):
             const [newChat, library]=document.querySelector('.chat-sidebar-navigation').children;
             const heading=document.querySelector('.chat-sidebar-history-header');
             return newChat.textContent.endsWith('新規チャット') && library.textContent.trim()==='ファイルライブラリ' &&
-                heading.querySelector('h2').textContent==='履歴' && !document.querySelector('#history-screen, #chat-sidebar-close-btn') &&
+                heading.querySelector('h2').textContent==='チャット' && !document.querySelector('#history-screen, #chat-sidebar-close-btn') &&
                 !document.querySelector('#chat-workspace #document-library-open, #chat-workspace #new-chat-btn') &&
                 newChat.getBoundingClientRect().bottom <= library.getBoundingClientRect().top &&
                 library.getBoundingClientRect().bottom <= heading.getBoundingClientRect().top &&
@@ -741,7 +741,7 @@ def run(client, url):
     assert ev(f"dbUtils.getChat({chat1}).then(Boolean)"), 'New chat keeps the previous conversation'
 
     def chat_menu(chat_id, action):
-        row = f'#chat-sidebar-list [data-chat-id="{chat_id}"]'
+        row = f'#chat-sidebar-scroll [data-chat-id="{chat_id}"]'
         wait(f"document.querySelector({json.dumps(row)})", 'Chat row is available')
         position = ev(f"""(() => {{
             const row=document.querySelector({json.dumps(row)});

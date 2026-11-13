@@ -50,11 +50,10 @@
                 if ((this.popover?.refreshModels || this.popover?.refreshProfiles) &&
                     !this.popover.profileSwitchPending && (this.popover instanceof HTMLDialogElement) === this.media.matches) {
                     const anchor = this.anchor, query = this.popover.querySelector('.model-picker-search').value;
-                    const selection = this.popover.modelSelection;
                     const profiles = Boolean(this.popover.refreshProfiles);
                     this.closePopover(false);
                     if (profiles) this.openProfiles(anchor, query);
-                    else this.openModels(anchor, query, selection);
+                    else this.openModels(anchor, query);
                 }
             });
             for (const kind of ['theme', 'appearance']) {
@@ -451,7 +450,7 @@
                 }));
             }
             select.value = effort || ''; select.title = `Thinkingレベル: ${levelName(effort, c)}`;
-            if (this.state.isSending && !this.popover?.modelSelection) this.closePopover(false);
+            if (this.state.isSending) this.closePopover(false);
         }
         openExecution(anchor) {
             if (this.state.isSending || anchor.disabled) return;
@@ -503,16 +502,15 @@
             const list = make('div', 'model-picker-list'); panel.append(list);
             return { close, search, list };
         }
-        openModels(anchor, query = '', selection = null) {
-            if (this.state.isSending && !selection) return;
+        openModels(anchor, query = '') {
+            if (this.state.isSending) return;
             const modal = !this.media.matches;
             const panel = this.newPopover(anchor, 'チャットモデルを選択', modal); if (!panel) return;
-            panel.modelSelection = selection;
             const { close, search, list } = this.createSearchPicker(panel, 'モデル', 'モデルを検索', query);
             const render = () => {
                 const focused = list.contains(document.activeElement) ? document.activeElement.dataset.modelRefValue : null;
                 list.replaceChildren(); let group = null;
-                const current = selection ? selection.getRef() : this.app.getCurrentChatModelRef();
+                const current = this.app.getCurrentChatModelRef();
                 const filter = search.value.toLowerCase();
                 this.app.buildModelRefOptions().filter(c => c.label.toLowerCase().includes(filter)).forEach(choice => {
                     if (group !== choice.apiConfigId) { list.append(make('h3', 'model-picker-group', choice.apiConfigName)); group = choice.apiConfigId; }
@@ -523,13 +521,8 @@
                     button.addEventListener('click', () => {
                         const chatId = this.state.currentChatId, generation = this.state.executionInitGeneration;
                         this.save(modal ? list : anchor, async () => {
-                            if (this.popover !== panel) return;
-                            const ref = { apiConfigId: choice.apiConfigId, modelName: choice.modelName };
-                            if (selection) await selection.select(ref);
-                            else {
-                                if (chatId !== this.state.currentChatId || generation !== this.state.executionInitGeneration) return;
-                                await this.app.setCurrentChatModelRef(ref);
-                            }
+                            if (this.popover !== panel || chatId !== this.state.currentChatId || generation !== this.state.executionInitGeneration) return;
+                            await this.app.setCurrentChatModelRef({ apiConfigId: choice.apiConfigId, modelName: choice.modelName });
                             if (this.popover === panel) this.closePopover(true);
                         });
                     }); list.append(button);

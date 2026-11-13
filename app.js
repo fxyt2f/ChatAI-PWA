@@ -682,7 +682,6 @@ try {
         chatSidebarSearchToggle: document.getElementById('chat-sidebar-search-toggle'),
         chatSidebarSearchField: document.getElementById('chat-sidebar-search-field'),
         chatSidebarHistoryMenuBtn: document.getElementById('chat-sidebar-history-menu-btn'),
-        chatSidebarHistoryTitle: document.getElementById('chat-sidebar-history-title'),
         settingsScreen: document.getElementById('settings-screen'),
         chatTitle: document.getElementById('chat-title'),
         messageContainer: document.getElementById('message-container'),
@@ -1825,6 +1824,7 @@ const dbUtils = {
             const chats = tx.objectStore(CHATS_STORE);
             const chat = chatId ? chats.get(chatId) : null;
             const profile = switching ? tx.objectStore(PROFILES_STORE).get(switching) : null;
+            const draftKey = appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, save.messages);
             let failure, result, previousDraft, draftWritten = false;
             let pending = Number(Boolean(chat)) + Number(Boolean(profile));
             const apply = () => {
@@ -1845,8 +1845,8 @@ const dbUtils = {
                     if (previous) chats.put({ ...previous, ...snapshot, parameterRevision: revision });
                     if (switching) {
                         if (!chatId) {
-                            previousDraft = sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
-                            sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(snapshot));
+                            previousDraft = sessionStorage.getItem(draftKey);
+                            sessionStorage.setItem(draftKey, JSON.stringify(snapshot));
                             draftWritten = true;
                         }
                         tx.objectStore(SETTINGS_STORE).put({ key: 'activeProfileId', value: switching });
@@ -1860,8 +1860,8 @@ const dbUtils = {
             tx.onabort = () => {
                 try {
                     if (draftWritten) {
-                        if (previousDraft === null) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
-                        else sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, previousDraft);
+                        if (previousDraft === null) sessionStorage.removeItem(draftKey);
+                        else sessionStorage.setItem(draftKey, previousDraft);
                     }
                 } finally { reject(failure || tx.error || new Error('パラメータを保存できませんでした。')); }
             };
@@ -1991,7 +1991,7 @@ const dbUtils = {
                     ? await this.commitChatParametersV136(targetChatId, expectedVersion, promptSave, ownsContext)
                     : { snapshot: { systemPrompt: promptSave.value, generationParameters: promptSave.parameters }, revision: 0 };
                 if (!targetChatId && !promptSave.profileSwitch && ownsContext())
-                    sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(result.snapshot));
+                    sessionStorage.setItem(appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, contextMessages), JSON.stringify(result.snapshot));
                 promptSave.result = result;
                 if (targetChatId) appLogic.markAsDirtyAndSchedulePush();
                 return targetChatId;
@@ -2147,7 +2147,6 @@ const dbUtils = {
                                 if (!contextChatId && savedChatId) {
                                     const projectDraftKey = draftProjectId && appLogic.getInputDraftContextKey();
                                     state.currentChatId = contextChatId = savedChatId;
-                                    if (projectDraftKey) window.ProjectUI?.syncDraftLabel();
                                     if (projectDraftKey && !session) appLogic.clearInputDraftAfterSend(projectDraftKey);
                                     if (documentIds || (projectDraftKey && !session)) appLogic.flushInputDraft();
                                 }
@@ -2157,8 +2156,8 @@ const dbUtils = {
                                 uiUtils.updateChatTitle(savedUiState.title);
                             }
                             if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush(documentIds ? true : 'message');
-                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
-                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(appLogic.getChatDraftSettingsKey(SettingsV136.DRAFT_KEY, contextMessages));
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, contextMessages));
                             if (savedSuccessfulExecution) state.lastSuccessfulExecution = savedSuccessfulExecution;
                         } catch (error) {
                             // A committed write must resolve even if a view/storage side effect fails.
@@ -3270,7 +3269,6 @@ const chatSidebarUiState = {
     mode: 'disabled',
     isOpen: false,
     query: '',
-    showAll: false,
     projects: [],
     memberships: new Map(),
     allChats: [],
@@ -6004,54 +6002,30 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
-        const { showAll, projects, memberships } = chatSidebarUiState;
-        const showProjects = !query && !showAll;
+        const { projects, memberships } = chatSidebarUiState;
+        const showProjects = !query;
         const projectNames = new Map(projects.map(project => [project.id, project.name]));
         const sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         const allModels = chatSidebarUiState.allChats
-            .filter(chat => !showProjects || !memberships.has(chat.id))
             .map(chat => this.createHistoryDisplayModel(chat, query, sortOrder))
             .filter(Boolean);
         const pinnedModels = this.sortPinnedHistoryDisplayModels(allModels.filter(model => model.isPinned), sortOrder);
-        const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model => !model.isPinned), sortOrder);
-        const models = [...pinnedModels, ...unpinnedModels];
+        const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model =>
+            !model.isPinned && (!showProjects || !memberships.has(model.id))), showProjects ? 'updatedAt' : sortOrder);
         chatSidebarUiState.recordsById = new Map(chatSidebarUiState.allChats.map(chat => [String(chat.id), chat]));
         window.ProjectUI?.renderSidebar(projects, memberships, chatSidebarUiState.allChats, showProjects);
-        elements.chatSidebarHistoryTitle.textContent = query ? '検索結果' : showAll ? '全履歴' : '最近のチャット';
         const createItem = model => this.createChatSidebarItem(model, {
-            isSearch: Boolean(query), projectName: projectNames.get(memberships.get(model.id))
+            isSearch: Boolean(query), projectName: query || model.isPinned ? projectNames.get(memberships.get(model.id)) : undefined
         });
-        elements.chatSidebarList.replaceChildren();
-        elements.chatSidebarStatus.textContent = '';
-
-        if (models.length === 0) {
-            elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : 'チャット履歴はありません';
-        } else if (query || sortOrder === 'title') {
-            const fragment = document.createDocumentFragment();
-            models.forEach(model => fragment.appendChild(createItem(model)));
-            elements.chatSidebarList.appendChild(fragment);
-        } else {
-            const labels = {
-                today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
-            };
-            const appendGroup = (label, groupModels) => {
-                if (groupModels.length === 0) return;
-                const group = document.createElement('section');
-                group.className = 'chat-sidebar-group';
-                group.setAttribute('role', 'group');
-                const heading = document.createElement('h2');
-                heading.className = 'chat-sidebar-group-title';
-                heading.textContent = label;
-                group.setAttribute('aria-label', label);
-                group.appendChild(heading);
-                groupModels.forEach(model => group.appendChild(createItem(model)));
-                elements.chatSidebarList.appendChild(group);
-            };
-            appendGroup('ピン留め', pinnedModels);
-            ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
-                appendGroup(labels[groupKey], unpinnedModels.filter(model => model.groupKey === groupKey));
-            });
-        }
+        const pinned = document.getElementById('chat-sidebar-pinned');
+        pinned.hidden = !showProjects || !pinnedModels.length;
+        document.getElementById('chat-sidebar-pinned-list').replaceChildren(...(showProjects ? pinnedModels.map(createItem) : []));
+        const models = showProjects ? unpinnedModels : [...pinnedModels, ...unpinnedModels];
+        const fragment = document.createDocumentFragment();
+        for (const model of models) fragment.append(createItem(model));
+        elements.chatSidebarList.replaceChildren(fragment);
+        elements.chatSidebarStatus.textContent = !allModels.length
+            ? query ? '一致するチャットはありません' : 'チャットはありません' : '';
         elements.chatSidebarLive.textContent = query
             ? `検索結果 ${models.length}件`
             : `ピン留め ${pinnedModels.length}件、チャット ${unpinnedModels.length}件`;
@@ -6302,14 +6276,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 if (id === null) continue;
                 const record = byId.get(model.id);
                 view.records.set(String(id), { id, createdAt: record.createdAt, recordGenerationId: record.recordGenerationId });
-                const item = document.createElement('li');
-                const label = document.createElement('label');
-                const check = document.createElement('input');
-                check.type = 'checkbox';
-                check.value = String(id);
-                label.append(check, document.createTextNode(model.title));
-                item.append(label);
-                fragment.append(item);
+                fragment.append(this.createChecklistItem(id, model.title));
             }
             elements.historyDeleteList.append(fragment);
             elements.historyDeleteStatus.textContent = view.records.size ? '' : 'チャット履歴はありません。';
@@ -6319,6 +6286,21 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         } finally {
             if (this.historyDeleteView === view && dialog.open) this.updateHistoryDeleteControls();
         }
+    },
+
+    createChecklistItem(id, text, { checked = false, onChange } = {}) {
+        const item = document.createElement('li');
+        const label = document.createElement('label');
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.value = String(id);
+        check.checked = checked;
+        if (onChange) check.addEventListener('change', () => onChange(check.checked));
+        const name = document.createElement('span');
+        name.textContent = text;
+        label.append(check, name);
+        item.append(label);
+        return item;
     },
 
     updateHistoryDeleteControls() {
@@ -7150,11 +7132,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     updateComposerSendButton() {
         if (state.isSending) return;
         elements.sendButton.disabled = Boolean(appLogic.attachmentOperation) ||
+            (!elements.projectWorkspace.hidden && !window.ProjectUI?.isReady()) ||
             (elements.userInput.value.trim() === '' && state.pendingAttachments.length === 0);
     },
 
     getComposerElement() {
-        return document.querySelector('#chat-screen .chat-workspace > footer.chat-input-area');
+        return elements.userInput?.closest('.chat-input-area');
     },
 
     updateComposerHeight() {
@@ -12826,6 +12809,15 @@ const appLogic = {
         return projectId ? `new:project:${projectId}:${profile}` : `new:${profile}`;
     },
 
+    getChatDraftSettingsKey(key, messages = state.currentMessages) {
+        const projectId = dbUtils.projectDrafts?.get(messages);
+        return projectId ? this.getProjectDraftSettingsKey(key, projectId) : key;
+    },
+
+    getProjectDraftSettingsKey(key, projectId) {
+        return `${key}:${this.getNewInputDraftContextKey(projectId)}`;
+    },
+
     getInputDraftStorageKey(contextKey) {
         return `${INPUT_DRAFT_STORAGE_PREFIX}${contextKey}`;
     },
@@ -13312,11 +13304,14 @@ const appLogic = {
     async switchProfile(newProfileId) {
         newProfileId = Number(newProfileId);
         if (!newProfileId || newProfileId === state.activeProfileId) return;
+        if (window.ProjectUI?.isSavingFirstMessage()) return false;
+        if (!elements.projectWorkspace.hidden && this.attachmentOperation) await this.attachmentOperation.finished;
         const operation = this.beginChatParameterOperation();
         if (!operation) return false;
         try {
             if (!await this.flushChatParameterEdits(operation)) return false;
             this.flushInputDraft();
+            window.ProjectUI?.saveProfileDraft();
             const save = this.chatParameterSaveRequest({ systemPrompt: state.currentSystemPrompt,
                 generationParameters: this.getChatGenerationParameters() });
             save.profileSwitch = newProfileId;
@@ -13330,7 +13325,7 @@ const appLogic = {
             this.applyActiveProfile();
             this.applyChatParameterSnapshot(snapshot, revision);
             uiUtils.updateProfileSwitcherUI();
-            this.scheduleInputDraftRestore(80, true);
+            if (!window.ProjectUI?.restoreProfileDraft()) this.scheduleInputDraftRestore(80, true);
             return true;
         } catch (error) {
             if (this.ownsChatParameterOperation(operation)) await uiUtils.showCustomAlert(error.message || 'プロファイルを切り替えられませんでした。');
@@ -15346,7 +15341,6 @@ const appLogic = {
                 if (chatSidebarUiState.searchTimer) clearTimeout(chatSidebarUiState.searchTimer);
                 chatSidebarUiState.searchTimer = null;
                 chatSidebarUiState.query = '';
-                chatSidebarUiState.showAll = false;
                 elements.chatSidebarSearchInput.value = '';
                 elements.chatSidebarSearchClearBtn.classList.add('hidden');
                 void uiUtils.renderChatSidebar();
@@ -15395,10 +15389,6 @@ const appLogic = {
                 clearChatSidebarSearch();
                 elements.chatSidebarSearchInput.focus();
             });
-            document.getElementById('project-all-history').addEventListener('click', () => {
-                chatSidebarUiState.showAll = !chatSidebarUiState.showAll;
-                void uiUtils.renderChatSidebar();
-            });
             elements.chatSidebarScroll.addEventListener('click', async event => {
                 const actionElement = event.target.closest('[data-sidebar-action]');
                 if (!actionElement || !elements.chatSidebarScroll.contains(actionElement)) return;
@@ -15411,7 +15401,9 @@ const appLogic = {
                 }
                 if (action === 'open') {
                     uiUtils.closeHistoryItemMenu();
-                    const result = await chatHistoryActions.open(chatId, { source: 'chat-sidebar' });
+                    const result = !elements.projectWorkspace.hidden
+                        ? await window.ProjectUI.openChat(chatId)
+                        : await chatHistoryActions.open(chatId, { source: 'chat-sidebar' });
                     if (!result?.ok) return;
                     uiUtils.syncChatSidebarCurrentSelection();
                     if (chatSidebarUiState.mode === 'overlay') {
@@ -15492,6 +15484,7 @@ const appLogic = {
         });
         elements.userInput.addEventListener('focusout', () => this.flushInputDraft());
         elements.userInput.addEventListener('keydown', (e) => {
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.ctrlKey && e.key === 'Enter') {
                 e.preventDefault();
                 if (!elements.sendButton.disabled) this.handleSend();
@@ -16029,7 +16022,7 @@ const appLogic = {
         chatScreen.addEventListener('dragover', event => {
             if (!event.dataTransfer?.types.includes('Files')) return;
             event.preventDefault();
-            const canAttach = state.currentScreen === 'chat' && !state.isSending && elements.projectWorkspace.hidden;
+            const canAttach = state.currentScreen === 'chat' && !state.isSending;
             event.dataTransfer.dropEffect = canAttach ? 'copy' : 'none';
             chatScreen.classList.toggle('drag-over', canAttach);
         });
@@ -16042,7 +16035,7 @@ const appLogic = {
             const transfer = event.dataTransfer;
             if (!transfer?.files.length && !transfer?.types.includes('Files')) return;
             event.preventDefault();
-            if (state.currentScreen === 'chat' && elements.projectWorkspace.hidden) void this.handleFileSelection(transfer.files);
+            if (state.currentScreen === 'chat') void this.handleFileSelection(transfer.files);
         });
         window.addEventListener('drop', clearAttachmentDropHighlight, true);
         window.addEventListener('dragend', clearAttachmentDropHighlight, true);
@@ -16777,6 +16770,7 @@ const appLogic = {
     // 新規チャット開始の確認と実行
     async confirmStartNewChat() {
         if (this.chatParameterOperation) return false;
+        if (window.ProjectUI?.isSavingFirstMessage()) return false;
         const navigation = this.chatNavigationV136 = {};
         const confirmed = await uiUtils.showCustomConfirm(this.hasComposerAttachments()
             ? "添付ファイルを破棄し、現在のチャットを保存して新規チャットを開始しますか？"
@@ -16844,7 +16838,7 @@ const appLogic = {
         this.invalidateSystemPromptOpen();
         this.clearComposerAttachments();
         this.cancelSendPreparationV136();
-        this.flushInputDraft();
+        if (!homeDraft) this.flushInputDraft();
         state.currentExecutionSettings = null;
         state.executionInitializingV136 = true;
         window.settingsUiV136?.renderExecution();
@@ -16858,7 +16852,6 @@ const appLogic = {
             dbUtils.projectDrafts ||= new WeakMap();
             dbUtils.projectDrafts.set(state.currentMessages, options.projectId);
         }
-        window.ProjectUI?.syncDraftLabel();
         this.projectSendJobV136();
         let draft = null;
         if (options.restoreDraft) {
@@ -16888,6 +16881,7 @@ const appLogic = {
             state.executionInitializingV136 = false;
             state.currentExecutionSettings = structuredClone(homeDraft.execution);
             state.executionSettingsReady = Promise.resolve();
+            this.persistExecutionDraft();
             this.syncChatExecutionToLegacySettings();
             uiUtils.applySettingsToUI();
         } else {
@@ -16908,9 +16902,10 @@ const appLogic = {
             values: Object.fromEntries(keys.map(key => [key, state[key]])), text: elements.userInput.value,
             recordGenerationId: dbUtils.chatSaveOwners?.get(state.currentMessages)?.recordGenerationId,
             attachments: [...state.pendingAttachments], title: elements.chatTitle.title,
+            profileId: state.activeProfileId,
             scrollTop: elements.chatWorkspace.querySelector('.main-content').scrollTop,
             draftSettings: state.currentChatId == null ? [SettingsV136.DRAFT_KEY, SettingsV136.CHAT_PARAMETER_DRAFT_KEY]
-                .map(key => [key, sessionStorage.getItem(key)]) : []
+                .map(key => this.getChatDraftSettingsKey(key)).map(key => [key, sessionStorage.getItem(key)]) : []
         };
     },
 
@@ -16935,14 +16930,22 @@ const appLogic = {
         this.applyChatParameterSnapshot({
             systemPrompt: state.currentSystemPrompt, generationParameters: state.currentChatGenerationParameters
         }, state.currentChatParameterRevision);
-        for (const [key, value] of state.currentChatId == null ? snapshot.draftSettings : []) {
+        const sameDraft = state.currentChatId != null || snapshot.profileId === state.activeProfileId;
+        if (!sameDraft) {
+            this.applyChatParameterSnapshot(this.profileChatParameters(state.settings));
+            state.currentExecutionSettings = this.newChatExecutionDefaults();
+            this.persistExecutionDraft();
+            sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        }
+        for (const [key, value] of state.currentChatId == null && sameDraft ? snapshot.draftSettings : []) {
             if (value === null) sessionStorage.removeItem(key);
             else sessionStorage.setItem(key, value);
         }
         this.syncChatExecutionToLegacySettings();
         uiUtils.applySettingsToUI();
-        elements.userInput.value = snapshot.text;
-        this.restoreComposerAttachments(snapshot.attachments);
+        elements.userInput.value = sameDraft ? snapshot.text : '';
+        this.restoreComposerAttachments(sameDraft ? snapshot.attachments : []);
+        if (!sameDraft) this.scheduleInputDraftRestore(0, true);
         uiUtils.updateChatTitle(previous.currentChatId === state.currentChatId ? snapshot.title : null);
         uiUtils.renderChatMessages();
         this.restoreSendProgressV136(state.sendExecutionV136);
@@ -16950,7 +16953,6 @@ const appLogic = {
         this.updateCharacterProfileButtonVisibility();
         uiUtils.adjustTextareaHeight();
         elements.chatWorkspace.querySelector('.main-content').scrollTop = snapshot.scrollTop;
-        window.ProjectUI?.syncDraftLabel();
         uiUtils.syncChatSidebarCurrentSelection();
     },
 
@@ -16965,6 +16967,7 @@ const appLogic = {
     // チャットの切り替え準備と読み込み。成功するまでは現在のstateを破壊しない。
     async loadChat(id, options = {}) {
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
+        if (window.ProjectUI?.isSavingFirstMessage()) return { ok: false, cancelled: true, reason: 'project-saving' };
         const normalizedId = chatHistoryActions.normalizeChatId(id);
         if (normalizedId === null) {
             await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
@@ -17073,7 +17076,6 @@ const appLogic = {
         this.clearComposerAttachments();
         state.currentChatId = chat.id;
         state.currentMessages = nextMessages;
-        window.ProjectUI?.syncDraftLabel();
         state.currentExecutionSettings = job?.execution ?? this.getChatExecutionSettingsV136(chat);
         this.projectSendJobV136();
         state.executionInitializingV136 = false;
@@ -18288,11 +18290,22 @@ const appLogic = {
         if (finished.includes(false)) throw new Error('応答生成の停止を確認できませんでした。');
     },
     async handleSend(options) {
+        const fromProject = !elements.projectWorkspace.hidden;
+        if (fromProject && !window.ProjectUI.isReady()) return;
         const preparation = this.beginSendPreparationV136();
         if (!preparation) return;
-        try { await this._handleSendPreparedV136(preparation, options); }
+        try {
+            if (fromProject) {
+                options = window.ProjectUI.beginSend();
+                if (!options) return;
+            }
+            await this._handleSendPreparedV136(preparation, options);
+        }
         catch (error) { if (error.name !== 'AbortError') throw error; }
-        finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
+        finally {
+            if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136();
+            options?.onFinished?.();
+        }
     },
     async buildSendSystemInstruction(session, question) {
         let text = session.systemPrompt?.trim() || '';
@@ -18330,7 +18343,7 @@ const appLogic = {
             return { historyForApi, systemInstruction: base };
         }
     },
-    async _handleSendPreparedV136(preparation, { onInitialSave, onInitialError } = {}) {
+    async _handleSendPreparedV136(preparation, { onInitialSave } = {}) {
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
         if (state.isEditingSystemPrompt) {
@@ -18362,8 +18375,7 @@ const appLogic = {
         } catch (error) {
             if (error.name === 'AbortError') return;
             const message = error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。';
-            if (onInitialError) onInitialError(message);
-            else await uiUtils.showCustomAlert(message);
+            await uiUtils.showCustomAlert(message);
             return;
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
@@ -18459,8 +18471,7 @@ const appLogic = {
                 }
                 if (!preparation.controller.signal.aborted) {
                     const message = `チャットと所属を保存できませんでした。\n${error.message || error}`;
-                    if (onInitialError) onInitialError(message);
-                    else await uiUtils.showCustomAlert(message);
+                    await uiUtils.showCustomAlert(message);
                 }
                 return;
             }

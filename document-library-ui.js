@@ -115,7 +115,7 @@ window.DocumentLibraryUI = (() => {
         menu.firstElementChild.focus({ preventScroll: true });
     }
 
-    function renderRows(view, list, entries, openEntry, menuId) {
+    function renderRows(view, list, entries, openEntry, menuId, showMenu = openMenu) {
         const focused = list.contains(document.activeElement) ? document.activeElement : null;
         const focusedId = focused?.closest('li')?.dataset.documentId;
         if (rowMenu && list.contains(rowMenu.anchor)) closeMenu();
@@ -135,7 +135,7 @@ window.DocumentLibraryUI = (() => {
             const match = view.matches?.get(entry.id);
             if (match) main.append(node('span', window.DocumentSearch.formatLocation(match.location) +
                 ' · ' + match.excerpt, 'document-library-file-excerpt'));
-            if (view.kind === 'workspace') {
+            if (view.kind === 'workspace' || view.kind === 'project') {
                 row.classList.add('document-library-collection-row');
                 const selected = !view.reference && view.selected?.versionId === entry.versionId;
                 row.dataset.selected = String(selected);
@@ -148,7 +148,7 @@ window.DocumentLibraryUI = (() => {
             if (menuId) {
                 const inPicker = view.kind === 'picker';
                 const style = inPicker ? 'chat-dialog-icon-button' : 'chat-sidebar-item-menu';
-                const more = button(null, () => openMenu(view, more, entry), style + ' document-library-more');
+                const more = button(null, () => showMenu(view, more, entry), style + ' document-library-more');
                 const glyph = inPicker ? icon('more') : node('span', 'more_vert', 'material-symbols-outlined');
                 glyph.setAttribute('aria-hidden', 'true');
                 more.append(glyph);
@@ -1057,6 +1057,6 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName, fileSize,
+    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName, renderRows,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

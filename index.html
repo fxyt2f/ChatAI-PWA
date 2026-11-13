@@ -60,7 +60,7 @@
                         <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ファイルライブラリ</button>
                     </nav>
                     <div class="chat-sidebar-history-header">
-                        <h2>履歴</h2>
+                        <h2 id="chat-sidebar-history-title">チャット</h2>
                         <button id="chat-sidebar-search-toggle" class="chat-sidebar-icon-button" type="button" aria-label="履歴を検索" aria-expanded="false" aria-controls="chat-sidebar-search-field"><span class="material-symbols-outlined" aria-hidden="true">search</span></button>
                         <button id="chat-sidebar-history-menu-btn" class="chat-sidebar-item-menu" type="button" aria-label="履歴の操作" aria-haspopup="menu" aria-expanded="false" aria-controls="history-item-menu"><span class="material-symbols-outlined" aria-hidden="true">more_vert</span></button>
                         <input type="file" id="import-history-input" accept=".txt,text/plain" hidden>
@@ -74,6 +74,10 @@
                     <p id="chat-sidebar-live" class="visually-hidden" aria-live="polite"></p>
                 </div>
                 <div id="chat-sidebar-scroll" class="chat-sidebar-scroll">
+                    <section id="chat-sidebar-pinned" class="chat-sidebar-group" aria-label="ピン留め" hidden>
+                        <h2 class="chat-sidebar-group-title">ピン留め</h2>
+                        <div id="chat-sidebar-pinned-list" role="list"></div>
+                    </section>
                     <section id="project-sidebar" aria-labelledby="project-sidebar-title" hidden>
                         <div class="chat-sidebar-history-header">
                             <h2 id="project-sidebar-title">プロジェクト</h2>
@@ -81,22 +85,22 @@
                         </div>
                         <div id="project-sidebar-list"></div>
                     </section>
-                    <h2 id="chat-sidebar-history-title" class="chat-sidebar-group-title">最近のチャット</h2>
                     <p id="chat-sidebar-status" class="chat-sidebar-status" role="status"></p>
                     <div id="chat-sidebar-list" class="chat-sidebar-list" role="list" aria-labelledby="chat-sidebar-history-title"></div>
-                    <button id="project-all-history" type="button" class="chat-sidebar-nav-button">全履歴を表示</button>
                 </div>
             </aside>
             <div id="chat-sidebar-backdrop" class="chat-sidebar-backdrop" hidden aria-hidden="true"></div>
             <div id="chat-workspace" class="chat-workspace">
             <div id="header-trigger-area"></div>
             <header class="app-header">
+                <button id="project-back" class="header-button" type="button" aria-label="前の画面へ戻る" title="前の画面へ戻る" hidden><span class="material-symbols-outlined" aria-hidden="true">arrow_back</span></button>
                 <button id="goto-history-btn" class="header-button" title="サイドバーを開く" aria-label="サイドバーを開く" aria-controls="chat-history-sidebar" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">menu</span></button>
                 <span id="sync-status-header-icon" class="material-symbols-outlined sync-status-header-icon" title="同期ステータス"></span>
                 <h1 id="chat-title" role="button" tabindex="0" aria-label="チャットタイトル。タップして編集" title="新規チャット">新規チャット</h1>
+                <h1 id="project-title" tabindex="-1" hidden>プロジェクト</h1>
+                <button id="project-options" class="header-button" type="button" aria-label="プロジェクトの操作" title="プロジェクトの操作" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false" hidden><span class="material-symbols-outlined" aria-hidden="true">more_vert</span></button>
                 <button id="goto-settings-btn" class="header-button" title="設定へ"><span class="material-symbols-outlined">settings</span></button>
             </header>
-            <p id="project-draft-label" hidden></p>
 
             <main class="main-content">
                 <!-- メッセージコンテナ -->
@@ -279,26 +283,10 @@
             <section id="project-workspace" class="chat-workspace" aria-labelledby="project-title" hidden>
                 <div id="project-content">
                     <div class="project-home">
-                        <header class="project-header">
-                            <button id="project-back" class="chat-sidebar-icon-button" type="button" aria-label="前の画面へ戻る" title="前の画面へ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back</span></button>
-                            <span data-document-icon="folder" aria-hidden="true"></span>
-                            <h1 id="project-title" tabindex="-1">プロジェクト</h1>
-                            <button id="project-options" class="chat-sidebar-icon-button" type="button" aria-label="プロジェクトの操作" title="プロジェクトの操作" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">more_horiz</span></button>
-                        </header>
                         <p id="project-description" hidden></p>
                         <p id="project-notice" class="document-library-notice" role="status"></p>
                         <div class="project-home-grid" data-tab="chats">
-                            <form id="project-composer" class="project-composer">
-                                <textarea id="project-input" placeholder="このプロジェクトでメッセージを送信…" rows="2" aria-label="プロジェクトへのメッセージ"></textarea>
-                                <ul id="project-attachments" class="project-attachments" aria-label="送信待ちの添付ファイル" hidden></ul>
-                                <div class="project-composer-controls">
-                                    <button id="project-attach" class="chat-sidebar-icon-button" type="button" aria-label="ファイルを添付" title="ファイルを添付"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
-                                    <input id="project-attachment-input" type="file" multiple hidden>
-                                    <button id="project-model" class="project-model-button" type="button" aria-haspopup="dialog" aria-expanded="false">モデルを選択</button>
-                                    <button id="project-send" type="submit" title="送信" aria-label="送信" disabled><span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span></button>
-                                </div>
-                                <p id="project-composer-status" role="status" hidden></p>
-                            </form>
+                            <div id="project-composer-slot"></div>
                             <div id="project-tabs" class="project-tabs" role="tablist" aria-label="プロジェクトの内容">
                                 <button type="button" id="project-tab-chats" role="tab" aria-controls="project-chat-panel" aria-selected="true">チャット</button>
                                 <button type="button" id="project-tab-files" role="tab" aria-controls="project-file-panel" aria-selected="false" tabindex="-1">ファイル</button>
@@ -316,7 +304,7 @@
                                     <button id="project-file-add" class="chat-sidebar-icon-button" type="button" title="共有ファイルを追加" aria-label="共有ファイルを追加" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false"><span class="material-symbols-outlined" aria-hidden="true">add</span></button>
                                     <input id="project-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
                                 </div>
-                                <ul id="project-documents" aria-labelledby="project-documents-title"></ul>
+                                <ul id="project-documents" class="document-library-list" aria-labelledby="project-documents-title"></ul>
                             </section>
                         </div>
                     </div>
@@ -1509,7 +1497,7 @@
             <span id="history-delete-count" role="status"></span>
         </div>
         <p id="history-delete-status" role="status"></p>
-        <ul id="history-delete-list" aria-label="削除するチャット"></ul>
+        <ul id="history-delete-list" class="checklist" aria-label="削除するチャット"></ul>
         <div class="dialog-actions">
             <button id="history-delete-cancel-btn" type="button">閉じる</button>
             <button id="history-delete-confirm-btn" type="button" disabled>選択した履歴を削除</button>

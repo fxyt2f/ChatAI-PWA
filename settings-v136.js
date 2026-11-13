@@ -1458,11 +1458,11 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.settings.apiProvider = this.getApiConfigById(ref.apiConfigId)?.provider || '';
             },
             readExecutionDraft() {
-                try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null'); } catch { return null; }
+                try { return JSON.parse(sessionStorage.getItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY) || 'null'); } catch { return null; }
             },
             persistExecutionDraft() {
                 // sessionStorage is isolated per browsing context, including independent duplicated tabs.
-                sessionStorage.setItem(DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
+                sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
             },
             newChatExecutionDefaults() {
                 const success = state.lastSuccessfulExecution;
@@ -1528,7 +1528,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             applyRemovedExecutionSelectionV136(storedExecution = null) {
                 const draft = this.readExecutionDraft(), nextDraft = this.clearUnavailableExecutionSelectionV136(draft);
-                if (nextDraft !== draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(nextDraft));
+                if (nextDraft !== draft) sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(nextDraft));
                 if (state.isSending || state.currentExecutionApiConfig) return;
                 const execution = state.currentExecutionSettings;
                 const next = storedExecution?.modelSelectionRequired && !execution?.modelSelectionRequired
@@ -1609,7 +1609,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     assertContext();
                     if (state.isSending || state.currentExecutionApiConfig || matchesRemovedModel(ref, removed?.value))
                         throw new Error('選択したモデルを適用できません。設定を確認してください。');
-                    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+                    sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(next));
                 }
                 if (contextId !== state.currentChatId || contextGeneration !== state.executionInitGeneration || selection !== state.executionSelectionGenerationV136) return next;
                 state.currentExecutionSettings = next; this.syncChatExecutionToLegacySettings();
