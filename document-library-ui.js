@@ -61,8 +61,9 @@ window.DocumentLibraryUI = (() => {
 
     function ownsPicker(view) {
         const state = window.state;
-        return picker === view && controls.picker.open && state.currentScreen === 'chat' &&
-            state.currentMessages === view.messages && (state.currentChatId === view.chatId ||
+        if (picker !== view || !controls.picker.open || state.currentScreen !== 'chat') return false;
+        if (view.projectTarget) return view.projectTarget.isCurrent();
+        return state.currentMessages === view.messages && (state.currentChatId === view.chatId ||
                 (view.chatId == null && window.dbUtils.chatSaveOwners?.get(view.messages)?.id === state.currentChatId));
     }
 
@@ -189,7 +190,7 @@ window.DocumentLibraryUI = (() => {
         if (view.project && !view.shared.length) controls.pickerProjectList.append(node('li', '共有ファイルはありません。'));
         controls.pickerCount.hidden = selecting;
         controls.pickerCount.textContent = view.linked.length + '件';
-        controls.pickerBack.hidden = !selecting;
+        controls.pickerBack.hidden = !selecting || Boolean(view.projectTarget);
         controls.pickerActions.hidden = selecting;
         controls.pickerSearch.hidden = !selecting;
         controls.pickerSelect.disabled = view.mutating;
@@ -218,6 +219,22 @@ window.DocumentLibraryUI = (() => {
 
     async function refreshPicker(view) {
         if (!ownsPicker(view)) return;
+        if (view.projectTarget) {
+            const request = ++view.refreshVersion;
+            try {
+                const [entries, linked] = await Promise.all([
+                    window.dbUtils.listLibraryDocuments(), window.dbUtils.listProjectDocuments(view.projectTarget.id)
+                ]);
+                if (!ownsPicker(view) || request !== view.refreshVersion) return;
+                view.entries = entries.sort(byName);
+                view.linked = linked.filter(Boolean).sort(byName);
+                view.loaded = true;
+                renderPickerRows(view);
+            } catch {
+                if (request === view.refreshVersion) notice(view, 'ファイルの一覧を読み取れませんでした。');
+            }
+            return;
+        }
         view.chatId = window.state.currentChatId;
         const request = ++view.refreshVersion;
         const id = view.chatId;
@@ -251,14 +268,24 @@ window.DocumentLibraryUI = (() => {
     }
 
     function openPicker() {
+        showPicker();
+    }
+
+    function openProjectPicker(id, isCurrent) {
+        install();
+        showPicker({ id, isCurrent });
+    }
+
+    function showPicker(projectTarget = null) {
         if (picker || workspace || window.state.currentScreen !== 'chat') return;
-        const view = picker = { kind: 'picker', chatId: window.state.currentChatId, messages: window.state.currentMessages,
-            entries: [], linked: [], shared: [], refreshVersion: 0, selecting: false, loaded: false, mutating: false };
+        const view = picker = { kind: 'picker', projectTarget, chatId: window.state.currentChatId, messages: window.state.currentMessages,
+            entries: [], linked: [], shared: [], refreshVersion: 0, selecting: Boolean(projectTarget), loaded: false, mutating: false };
         controls.pickerNotice.textContent = '';
         controls.pickerQuery.value = '';
         renderPicker(view);
         window.uiUtilsV136.prepareChatDialog(controls.picker);
         controls.picker.showModal();
+        if (projectTarget) controls.pickerTitle.focus({ preventScroll: true });
         void refreshPicker(view);
     }
 
@@ -270,7 +297,7 @@ window.DocumentLibraryUI = (() => {
     }
 
     function pickerSelection(selecting) {
-        if (!picker || picker.mutating) return;
+        if (!picker || picker.mutating || picker.projectTarget) return;
         picker.selecting = selecting;
         notice(picker, '');
         renderPicker(picker);
@@ -288,6 +315,12 @@ window.DocumentLibraryUI = (() => {
     }
 
     function setLinked(view, entry, checked) {
+        if (view.projectTarget) {
+            return mutate(view, async () => {
+                await window.dbUtils.addProjectDocument(view.projectTarget.id, entry.id);
+                if (ownsPicker(view)) closePicker();
+            });
+        }
         return mutate(view, () => updateLinks(view, [entry], checked ? 'add' : 'remove'));
     }
 
@@ -914,7 +947,7 @@ window.DocumentLibraryUI = (() => {
             event.preventDefault();
             event.stopPropagation();
             const surface = picker ? controls.picker : controls.workspace;
-            const canDrop = owns(view) && !view.mutating && !surface.inert &&
+            const canDrop = owns(view) && !view.mutating && !view.projectTarget && !surface.inert &&
                 !(workspace?.selected && isNarrow()) && surface.contains(event.target);
             if (event.type === 'drop') {
                 clear();
@@ -1057,6 +1090,7 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName, renderRows,
+    return { install, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
+        closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

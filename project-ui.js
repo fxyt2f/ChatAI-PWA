@@ -175,13 +175,13 @@ window.ProjectUI = (() => {
         const chat = document.getElementById('chat-workspace');
         const header = document.querySelector('#chat-workspace > .app-header, #project-workspace > .app-header');
         const composer = ui().getComposerElement();
-        for (const id of ['back', 'title', 'options']) byId(id).hidden = !toProject;
+        for (const id of ['title', 'options']) byId(id).hidden = !toProject;
         for (const id of ['chat-title', 'goto-settings-btn']) document.getElementById(id).hidden = toProject;
         const input = document.getElementById('user-input');
         input.placeholder = toProject ? 'このプロジェクトでメッセージを送信…' : 'メッセージを入力...';
         if (toProject) {
             byId('workspace').prepend(header);
-            byId('composer-slot').append(composer);
+            byId('workspace').append(composer);
         } else {
             document.getElementById('header-trigger-area').after(header);
             chat.append(composer);
@@ -249,6 +249,7 @@ window.ProjectUI = (() => {
         closeMenu();
         if (dialog) byId('dialog').close();
         if (!view) return;
+        window.DocumentLibraryUI.closeProjectPicker();
         window.settingsUiV136?.closePopover(false);
         const previous = view;
         if (!sent) saveProfileDraft();
@@ -322,7 +323,7 @@ window.ProjectUI = (() => {
     }
 
     function setViewReady(ready) {
-        for (const id of ['options', 'add-chat', 'file-add']) byId(id).disabled = !ready;
+        for (const id of ['options', 'file-add']) byId(id).disabled = !ready;
         if (view) view.ready = ready;
         ui().updateComposerSendButton();
     }
@@ -335,13 +336,17 @@ window.ProjectUI = (() => {
 
     function activateTab(tab) {
         if (!view) return;
+        ui().closeHistoryItemMenu();
+        closeMenu();
         tabs.set(view.id, tab);
-        byId('tabs').parentElement.dataset.tab = tab;
         for (const name of ['chats', 'files']) {
             const selected = tab === name;
-            byId('tab-' + name).setAttribute('aria-selected', String(selected));
-            byId('tab-' + name).tabIndex = selected ? 0 : -1;
+            const button = byId('tab-' + name);
+            button.setAttribute('aria-selected', String(selected));
+            button.tabIndex = selected ? 0 : -1;
+            document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
         }
+        byId('content').scrollTop = 0;
     }
 
     function attachDraft(owner) {
@@ -500,7 +505,7 @@ window.ProjectUI = (() => {
             const options = item.querySelector('[data-sidebar-action="menu"]');
             options.addEventListener('click', () => {
                 ui().closeHistoryItemMenu();
-                ui().showSidebarMenu(options, byChat.get(model.id), 'project');
+                ui().showSidebarMenu(options, byChat.get(model.id), 'project', owner.id);
             });
             return item;
         }));
@@ -554,7 +559,7 @@ window.ProjectUI = (() => {
         return input;
     }
 
-    async function editProject(project = null) {
+    async function editProject(project = null, assignment) {
         let created;
         const result = await showDialog(project ? 'プロジェクトを編集' : '新規プロジェクト', project ? '保存' : '作成', (context, fields) => {
             const name = field(fields, '名前', node('input'));
@@ -566,11 +571,12 @@ window.ProjectUI = (() => {
             context.save = async () => {
                 const values = { name: name.value, description: description.value };
                 if (project) await db().updateProject(project.id, values);
-                else created = await db().createProject(values);
+                else created = await db().createProject(values, assignment);
             };
             return name;
         });
-        if (result.ok && created) open(created.id);
+        if (result.ok && created && !assignment) open(created.id);
+        return result;
     }
 
     async function removeProject(project) {
@@ -599,94 +605,14 @@ window.ProjectUI = (() => {
             labels.indexOf(labels[i]) === labels.lastIndexOf(labels[i]) ? labels[i] : `${labels[i]} · ${project.id.slice(0, 8)}`]));
     }
 
-    function moveChat(record) {
-        return showDialog('チャットの所属を変更', '適用', (context, fields) => {
-            const select = field(fields, '移動先', node('select'));
-            select.disabled = true;
-            byId('dialog-submit').disabled = true;
-            void Promise.all([db().listProjects(), db().getChatProject(record.id)]).then(([projects, current]) => {
-                if (!ownsDialog(context)) return;
-                const labels = projectLabels(projects);
-                const option = (id, title) => new Option(title + ((current?.id ?? '') === id ? '（現在）' : ''), id);
-                select.replaceChildren(option('', 'プロジェクトに所属しない'), ...projects.map(project => option(project.id, labels.get(project.id))));
-                select.value = current?.id ?? '';
-                select.disabled = false;
-                byId('dialog-submit').disabled = false;
-                context.save = () => db().setChatProject(record.id, select.value || null, {
-                    expectedRecord: record, expectedProjectId: current?.id ?? null
-                });
-                select.focus({ preventScroll: true });
-            }).catch(error => dialogError(context, error));
-            return null;
-        });
+    async function moveChat(record, currentProjectId, destination) {
+        if (destination === 'new') return editProject(null, { record, currentProjectId });
+        await db().setChatProject(record.id, destination, { expectedRecord: record, expectedProjectId: currentProjectId });
+        return { ok: true };
     }
 
     function dialogError(context, error) {
         if (ownsDialog(context)) byId('dialog-notice').textContent = error.message || String(error);
-    }
-
-    function chooseExisting(owner, kind) {
-        const choosingChats = kind === 'chat';
-        return showDialog(choosingChats ? '既存チャットを追加' : 'ライブラリから追加', '追加', (context, fields) => {
-            const search = field(fields, choosingChats ? 'チャット名で絞り込み' : 'ファイル名で絞り込み', node('input'));
-            search.type = 'search';
-            const status = node('p', '読み込み中…', 'document-library-muted');
-            status.setAttribute('role', 'status');
-            const list = node('ul', '', 'project-picker-list checklist');
-            fields.append(status, list);
-            const submit = byId('dialog-submit');
-            submit.disabled = true;
-            const load = choosingChats ? db().getProjectSidebarSnapshot() : Promise.all([
-                db().listLibraryDocuments(), db().listProjectDocuments(owner.id)
-            ]);
-            void load.then(([records, projectsOrShared, memberships]) => {
-                if (!ownsDialog(context) || view !== owner) return;
-                const current = new Map(memberships?.map(link => [link.chatId, link.projectId]));
-                const labels = choosingChats ? projectLabels(projectsOrShared) : null;
-                const shared = new Set(choosingChats ? [] : projectsOrShared.map(entry => entry.id));
-                const selected = new Set();
-                const entries = choosingChats ? chatModels(records.filter(record => current.get(record.id) !== owner.id)) :
-                    records.filter(record => !shared.has(record.id)).sort(window.DocumentLibraryUI.byName);
-                const byRecord = new Map(records.map(record => [record.id, record]));
-                const updateCount = () => {
-                    status.textContent = `${selected.size}件を選択中`;
-                    submit.disabled = !selected.size;
-                };
-                const draw = () => {
-                    const query = ui().normalizeHistoryText(search.value).toLocaleLowerCase('ja');
-                    const matches = entries.filter(entry => (entry.title ?? entry.fileName).toLocaleLowerCase('ja').includes(query));
-                    list.replaceChildren(...matches.map(entry => {
-                        const origin = labels?.get(current.get(entry.id));
-                        return ui().createChecklistItem(entry.id, (entry.title ?? entry.fileName) + (origin ? `（${origin} から移動）` : ''), {
-                            checked: selected.has(entry.id),
-                            onChange(checked) {
-                                if (checked) selected.add(entry.id);
-                                else selected.delete(entry.id);
-                                updateCount();
-                            }
-                        });
-                    }));
-                    if (!matches.length) list.append(node('li', query ? '該当する項目がありません。' : '追加できる項目がありません。'));
-                    updateCount();
-                };
-                search.addEventListener('input', draw);
-                draw();
-                context.save = async () => {
-                    for (const id of [...selected]) {
-                        if (!ownsDialog(context) || view !== owner) return;
-                        if (choosingChats) await db().setChatProject(id, owner.id, {
-                            expectedRecord: byRecord.get(id), expectedProjectId: current.get(id) ?? null
-                        });
-                        else await db().addProjectDocument(owner.id, id);
-                        selected.delete(id);
-                        const index = entries.findIndex(entry => entry.id === id);
-                        if (index >= 0) entries.splice(index, 1);
-                        draw();
-                    }
-                };
-            }).catch(error => dialogError(context, error));
-            return search;
-        });
     }
 
     async function upload(owner, files) {
@@ -727,11 +653,6 @@ window.ProjectUI = (() => {
         try { expanded = new Set(JSON.parse(localStorage.getItem(expansionKey) || '[]').filter(DocumentLibrary.isId)); }
         catch { expanded = new Set(); }
         byId('create').addEventListener('click', () => editProject());
-        byId('back').addEventListener('click', () => {
-            if (handoff) return;
-            if (history.state?.projectId === view?.id) history.back();
-            else close({ restoreFocus: true });
-        });
         byId('options').addEventListener('click', () => { if (view) openMenu(byId('options'), view.id); });
         byId('file-add').addEventListener('click', () => { if (view) openMenu(byId('file-add'), view.id, ['add-file', 'upload']); });
         byId('menu').addEventListener('click', async event => {
@@ -742,7 +663,10 @@ window.ProjectUI = (() => {
             const generation = dataGeneration;
             closeMenu(true);
             try {
-                if (action === 'add-file') { if (owner?.id === id) await chooseExisting(owner, 'document'); return; }
+                if (action === 'add-file') {
+                    if (owner?.id === id) window.DocumentLibraryUI.openProjectPicker(id, () => view === owner && dataGeneration === generation);
+                    return;
+                }
                 if (action === 'upload') { if (owner?.id === id) chooseUpload(owner); return; }
                 if (action === 'unlink-file') {
                     if (owner?.id === id) {
@@ -783,13 +707,6 @@ window.ProjectUI = (() => {
         window.addEventListener('resize', () => {
             if (menu && !menu.anchor.closest('#project-sidebar')) closeMenu();
         });
-        const viewport = window.visualViewport;
-        const updateViewport = () => {
-            const workspace = byId('workspace');
-            if (viewport.scale > 1.01 || viewport.height >= window.innerHeight) workspace.style.removeProperty('--project-viewport-height');
-            else workspace.style.setProperty('--project-viewport-height', `${viewport.height}px`);
-        };
-        viewport?.addEventListener('resize', updateViewport, { passive: true });
         document.addEventListener('scroll', event => {
             if (menu && event.target === byId('content') && !menu.anchor.closest('#project-sidebar')) closeMenu();
         }, true);
@@ -814,7 +731,6 @@ window.ProjectUI = (() => {
                 if (ownsDialog(context)) submit.disabled = false;
             }
         });
-        byId('add-chat').addEventListener('click', () => { if (view) void chooseExisting(view, 'chat'); });
         for (const name of ['chats', 'files']) byId('tab-' + name).addEventListener('click', () => activateTab(name));
         byId('tabs').addEventListener('keydown', event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -837,7 +753,7 @@ window.ProjectUI = (() => {
         input.click();
     }
 
-    return { install, open, close, closeMenu, positionSidebarMenu, handleHistory, moveChat, renderSidebar, revealCurrentChat, dataChanged,
+    return { install, open, close, closeMenu, positionSidebarMenu, handleHistory, moveChat, projectLabels, renderSidebar, revealCurrentChat, dataChanged,
         prepareForUpdate, saveProfileDraft, restoreProfileDraft, beginSend, openChat, isReady: () => view?.ready === true,
         isSavingFirstMessage: () => Boolean(handoff) };
 })();

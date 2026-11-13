@@ -33,7 +33,10 @@ def run(client, url, screenshots=None):
             sidebar: [chatSidebarUiState.mode, chatSidebarUiState.isOpen],
             chat: state.currentChatId, history: history.state, url: location.href,
             startupPaused: Boolean(window.resumeSidebarStartup), setup: appLogic._setupEventListenersCallCount,
-            cached: chatSidebarUiState.projects.length, loaded: chatSidebarUiState.hasLoadedAll
+            cached: chatSidebarUiState.projects.length, loaded: chatSidebarUiState.hasLoadedAll,
+            menu: [historyUiState.menuContext?.source, historyUiState.menuContext?.projectId,
+                historyUiState.menuActionPending, elements.historyItemMenu.className,
+                elements.historyProjectMenu.className, document.activeElement?.outerHTML.slice(0,150)]
         })""")))
 
     def click(selector, touch=False):
@@ -88,7 +91,7 @@ def run(client, url, screenshots=None):
     def key(name):
         for kind in ['keyDown', 'keyUp']:
             params = {'type': kind, 'key': name, 'code': name,
-                      'windowsVirtualKeyCode': {'Tab': 9, 'Enter': 13, 'Escape': 27}[name]}
+                      'windowsVirtualKeyCode': {'Tab': 9, 'Enter': 13, 'Escape': 27, 'ArrowLeft': 37, 'ArrowRight': 39}[name]}
             if kind == 'keyDown' and name == 'Enter':
                 params['text'] = '\r'
             client.call('Input.dispatchKeyEvent', params)
@@ -154,11 +157,31 @@ def run(client, url, screenshots=None):
 
     def move(chat_id, project_id, scope='#chat-sidebar-list'):
         click(f'{scope} [data-chat-id="{chat_id}"] [data-sidebar-action="menu"]')
-        click('#history-item-menu [data-history-menu-action="project"]')
-        wait("document.querySelector('#project-dialog-fields select:not(:disabled)')", 'move picker loaded')
-        change('#project-dialog-fields select', project_id or '', 'change')
-        click('#project-dialog-submit')
-        wait("!document.querySelector('#project-dialog').open", 'move committed')
+        wait(f"historyUiState.menuContext?.chatId==={chat_id}", 'chat row menu opens')
+        if project_id is None:
+            click('#history-item-menu [data-history-menu-action="project-remove"]:not([hidden])')
+        else:
+            click('#history-project-move')
+            destination = f'#history-project-menu [data-project-destination="{project_id}"]'
+            wait(f"document.querySelector({json.dumps(destination)})", 'destination submenu loaded')
+            click(destination)
+        wait(f"(async()=>((await dbUtils.getChatProject({chat_id}))?.id??null)==={json.dumps(project_id)})()", 'move committed')
+
+    def check_home(tab):
+        baseline = json.dumps(normal_chat_layout)
+        assert ev(f"""(() => {{
+            const normalChatLayout={baseline};
+            const root=elements.projectWorkspace;
+            const footer=root.querySelector(':scope > footer.chat-input-area');
+            const tabs=root.querySelector('#project-tabs');
+            const expectedBottom=normalChatLayout.bottom-(matchMedia('(max-width: 600px)').matches ? 2 : 0);
+            return Boolean(footer) && getComputedStyle(root).backgroundColor===normalChatLayout.background &&
+                getComputedStyle(root.querySelector('.main-content')).backgroundColor===normalChatLayout.contentBackground &&
+                Math.abs(root.getBoundingClientRect().bottom-footer.getBoundingClientRect().bottom-expectedBottom)<1 &&
+                getComputedStyle(tabs).display==='flex' && document.querySelector('#project-tab-{tab}').getAttribute('aria-selected')==='true' &&
+                [...root.querySelectorAll('[role=tabpanel]')].filter(panel=>panel.getClientRects().length).length===1 &&
+                !root.querySelector('#project-back, #project-add-chat') && !!root.querySelector('#goto-history-btn').getClientRects().length;
+        }})()""")
 
     viewport(1280, False)
     client.call('Page.navigate', {'url': url + '?projectUiFixture=1'})
@@ -173,6 +196,13 @@ def run(client, url, screenshots=None):
     open_sidebar()
     ev("""window.originalProjectControls = ['#chat-workspace > .app-header', '#user-input', '#send-button',
         '#chat-model-button', '#attach-file-btn', '#file-input'].map(selector=>document.querySelector(selector))""")
+    normal_chat_layout = ev("""({
+        background:getComputedStyle(elements.chatWorkspace).backgroundColor,
+        contentBackground:getComputedStyle(elements.chatWorkspace.querySelector('.main-content')).backgroundColor,
+        bottom:elements.chatWorkspace.getBoundingClientRect().bottom -
+            elements.chatWorkspace.querySelector('footer').getBoundingClientRect().bottom
+    })""")
+    capture('pc-normal-chat')
     assert ev("document.querySelectorAll('.project-folder').length===0")
     click('#project-create')
     change('#project-dialog-fields input', '  ')
@@ -186,6 +216,7 @@ def run(client, url, screenshots=None):
     assert ev("document.querySelector('#project-chats').textContent.includes('チャットはありません') && "
               "document.querySelector('#project-documents').textContent.includes('共有ファイルはありません')")
     assert ev("document.querySelector('#project-description').textContent==='最初の説明'")
+    check_home('chats')
     capture('pc-empty')
     click('#project-options')
     click('#project-menu [data-project-action="edit"]')
@@ -197,11 +228,11 @@ def run(client, url, screenshots=None):
          "document.querySelector('#project-description').textContent==='更新した説明'", 'editing updates visible view')
     beta = create('第二プロジェクト')
     assert ev("document.querySelectorAll('.project-folder').length===2")
-    click('#project-back')
+    ev('history.back()')
     wait('elements.projectWorkspace.hidden', 'back from second project returns to chat')
     ev('history.forward()')
     wait("history.state?.projectId && document.querySelector('#project-title').textContent==='第二プロジェクト'", 'forward reopens project')
-    click('#project-back')
+    ev('history.back()')
     wait('elements.projectWorkspace.hidden', 'return to chat again')
     checks.append('empty list, form validation, creation, editing, back and forward')
 
@@ -491,58 +522,71 @@ def run(client, url, screenshots=None):
     assert ev(f"dbUtils.getChat({member}).then(chat=>chat.isPinned && chat.messages[0].content==='検証文')")
     open_project(beta, '第二プロジェクト')
     wait(f"""document.querySelector('#project-chats [data-chat-id="{member}"]')""", 'moved chat appears in destination')
-    click(f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="menu"]')
-    click('#history-item-menu [data-history-menu-action="project"]')
-    wait("document.querySelector('#project-dialog-fields select:not(:disabled)')", 'move picker captures current membership')
-    assert ev(f"document.querySelector('#project-dialog-fields select').value==={json.dumps(beta)}")
-    ev(f'dbUtils.setChatProject({member},{json.dumps(alpha)})')
-    change('#project-dialog-fields select', '', 'change')
-    click('#project-dialog-submit')
-    wait("document.querySelector('#project-dialog-notice').textContent.includes('チャットの所属が変更されました')",
-         'stale move cannot overwrite newer membership')
-    assert ev(f"dbUtils.getChatProject({member}).then(project=>project.id==={json.dumps(alpha)})")
-    click('#project-dialog-cancel')
-    ev(f'dbUtils.setChatProject({member},{json.dumps(beta)})')
-    wait(f"""document.querySelector('#project-chats [data-chat-id="{member}"]')""", 'chat returned to destination')
+    member_menu = f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="menu"]'
+    mouse_click(member_menu)
+    assert ev("!document.querySelector('[data-history-menu-action=project-remove]').hidden")
+    ev("document.querySelector('#history-project-move').focus()")
+    key('ArrowRight')
+    wait("document.activeElement.dataset.projectDestination==='new'", 'keyboard opens and focuses move submenu')
+    assert menu_in_bounds('#history-project-menu')
+    assert ev(f"""!document.querySelector('#history-project-menu [data-project-destination="{beta}"]')""")
+    capture('pc-project-move')
+    key('ArrowLeft')
+    wait("document.activeElement.id==='history-project-move' && elements.historyProjectMenu.classList.contains('hidden')",
+         'keyboard returns to parent menu')
+    key('Escape')
+    wait("elements.historyItemMenu.classList.contains('hidden')", 'close parent menu')
     move(member, None, '#project-chats')
-    wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-pin-icon')""", 'detached chat returns to recent')
-    click('#project-add-chat')
-    wait("document.querySelector('#project-dialog-fields input[type=checkbox]')", 'existing chat chooser loaded')
-    capture('pc-chat-picker')
-    change('#project-dialog-fields input[type=search]', 'AB12')
-    ev("document.querySelector('.project-picker-list label').click()")
-    change('#project-dialog-fields input[type=search]', '共通語')
-    ev("""[...document.querySelectorAll('.project-picker-list label')].find(label=>label.textContent==='共通語 所属チャット').click()""")
-    wait("document.querySelector('#project-dialog-fields [role=status]').textContent.includes('2件')", 'selection survives filtering')
-    change('#project-dialog-fields input[type=search]', 'AB12')
-    assert ev("document.querySelector('.project-picker-list input').checked")
-    ev("document.querySelector('.project-picker-list label').click()")
-    wait("document.querySelector('#project-dialog-fields [role=status]').textContent.includes('1件')", 'unselect updates count')
-    ev("document.querySelector('.project-picker-list label').click()")
+    wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-pin-icon')""", 'detached chat stays pinned')
+    pinned_menu = f'#chat-sidebar-pinned-list [data-chat-id="{member}"] [data-sidebar-action="menu"]'
+    mouse_click(pinned_menu)
+    assert ev("document.querySelector('[data-history-menu-action=project-remove]').hidden")
+    mouse_click('#history-project-move')
+    wait("document.querySelector('#history-project-menu [data-project-destination=new]')", 'same submenu opens from sidebar')
+    capture('sidebar-project-move')
+    mouse_click('#history-project-menu [data-project-destination=new]')
+    wait("document.querySelector('#project-dialog').open", 'reuse project creation dialog')
+    change('#project-dialog-fields input', '移動で作成したプロジェクト')
     click('#project-dialog-submit')
-    wait(f"""document.querySelector('#project-chats [data-chat-id="{member}"]') &&
-        document.querySelector('#project-chats [data-chat-id="{old}"]')""", 'add both selected chats from chooser')
-    assert ev(f"""dbUtils.getChatProject({old}).then(project=>project.id==={json.dumps(beta)})""")
-    ev(f'dbUtils.setChatProject({old},null)')
-    checks.append('pinned shortcuts, folders, old unassigned chats, global search and multi-select chat assignment')
+    wait(f"dbUtils.getChatProject({member}).then(project=>project?.name==='移動で作成したプロジェクト')", 'create and assign atomically')
+    created = ev(f'dbUtils.getChatProject({member}).then(project=>project.id)')
+    wait(f"""chatSidebarUiState.memberships.get({member})==={json.dumps(created)} &&
+        !chatSidebarUiState.refreshTimer && !document.querySelector('#project-dialog').open &&
+        document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-sidebar-item-snippet')?.textContent==='移動で作成したプロジェクト'""",
+        'sidebar membership and project creation dialog settled')
+    mouse_click(pinned_menu)
+    wait(f"historyUiState.menuContext?.chatId==={member}", 'pinned shortcut menu reopens after creation')
+    mouse_click('#history-project-move')
+    wait(f"""document.querySelector('#history-project-menu [data-project-destination="{beta}"]')""", 'destination submenu loaded')
+    mouse_click(f'#history-project-menu [data-project-destination="{beta}"]')
+    wait(f"dbUtils.getChatProject({member}).then(project=>project?.id==={json.dumps(beta)})", 'pinned shortcut can move')
+    ev(f'dbUtils.deleteProject({json.dumps(created)})')
+    wait(f"""document.querySelector('#project-chats [data-chat-id="{member}"]')""", 'member returns to project')
+    assert ev("!document.querySelector('#project-add-chat')")
+    checks.append('shared move submenu, keyboard navigation, new project assignment, detach and pinned shortcut')
 
     doc = ev("""dbUtils.addLibraryDocument(new File(['共有ファイル本文'], '共有資料.md')).then(entry=>entry.id)""")
     extra_doc = ev("""dbUtils.addLibraryDocument(new File(['second'], '日本語とEnglish AB12 ' + '長いファイル名'.repeat(12) + '.txt')).then(entry=>entry.id)""")
     ev(f'dbUtils.setChatDocuments({member},[{json.dumps(doc)}])')
-    click('#project-file-add')
-    click('#project-add-document')
-    wait("document.querySelector('#project-dialog-fields input[type=checkbox]')", 'library chooser loaded')
-    capture('pc-file-picker')
-    change('#project-dialog-fields input[type=search]', 'AB12')
-    click('.project-picker-list label')
-    change('#project-dialog-fields input[type=search]', '共有資料')
-    click('.project-picker-list label')
-    click('#project-dialog-submit')
-    wait("document.querySelector('#project-documents').textContent.includes('共有資料.md')", 'existing original shared')
-    assert ev(f'dbUtils.listProjectDocuments({json.dumps(beta)}).then(items=>items.some(item=>item.id==={json.dumps(extra_doc)}))')
-    ev('window.projectFixtureDark=state.settings.darkMode; state.settings.darkMode=true; uiUtilsV136.applyDarkMode()')
-    capture('pc-chats-and-files')
-    ev('state.settings.darkMode=window.projectFixtureDark; uiUtilsV136.applyDarkMode()')
+    capture('pc-project-chats')
+    click('#project-tab-files')
+    check_home('files')
+    for query, document_id in [('AB12', extra_doc), ('共有資料', doc)]:
+        click('#project-file-add')
+        click('#project-add-document')
+        wait("document.querySelector('#document-library-picker').open && !document.querySelector('#project-dialog').open && "
+             "document.querySelector('#document-library-picker-heading').textContent==='ライブラリから追加'", 'shared library chooser opens')
+        change('#document-library-picker-query', query)
+        row = f'#document-library-picker-list [data-document-id="{document_id}"] .document-library-file'
+        wait(f"document.querySelector({json.dumps(row)}) && document.querySelectorAll('#document-library-picker-list .document-library-row').length===1",
+             'existing file rows and search are reused')
+        capture('pc-library-picker')
+        click(row)
+        wait(f"!document.querySelector('#document-library-picker').open && "
+             f"dbUtils.listProjectDocuments({json.dumps(beta)}).then(items=>items.some(item=>item.id==={json.dumps(document_id)}))",
+             'file selected and added to project')
+    assert ev(f"dbUtils.getChatDocuments({member}).then(items=>items.length===1 && items[0].id==={json.dumps(doc)})")
+    capture('pc-project-files')
     click(f'#project-documents [data-document-id="{doc}"] .document-library-file')
     wait("document.querySelector('#document-library-extracts').textContent.includes('共有ファイル本文')", 'shared document previews')
     ev('history.back()')
@@ -552,6 +596,7 @@ def run(client, url, screenshots=None):
     wait("!elements.documentLibraryWorkspace.hidden && elements.projectWorkspace.hidden", 'forward restores preview')
     ev('history.back()')
     wait("!elements.projectWorkspace.hidden && document.querySelector('#project-chats [data-sidebar-action=open]')", 'project restored')
+    click('#project-tab-chats')
     click(f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="open"]')
     wait(f'state.currentChatId==={member} && elements.projectWorkspace.hidden', 'chat returns')
     click('#document-library-picker-open')
@@ -613,7 +658,7 @@ def run(client, url, screenshots=None):
     change('#user-input', '第二の下書き')
     open_project(alpha, '第一・編集済み')
     wait("document.querySelector('#user-input').value==='第一の未送信下書き'", 'project drafts are isolated')
-    click('#project-back')
+    ev('history.back()')
     wait('elements.projectWorkspace.hidden', 'back to original conversation')
     change('#user-input', '会話の入力を保持')
     original_id = ev('state.currentChatId')
@@ -688,7 +733,7 @@ def run(client, url, screenshots=None):
     ev('history.back()')
     wait("!elements.projectWorkspace.hidden && state.currentChatId===null", 'back restores project draft during generation')
     assert ev(f"Boolean(appLogic.getSendJobV136({project_chat}))")
-    click('#project-back')
+    ev('history.back()')
     wait(f"elements.projectWorkspace.hidden && state.currentChatId==={original_id}", 'project back restores origin during generation')
     assert ev("document.querySelector('#user-input').value==='会話の入力を保持' && "
               "state.pendingAttachments[0].name==='keep.txt' && state.currentExecutionSettings.modelRef.modelName==='gemini-2.5-flash'")
@@ -716,34 +761,30 @@ def run(client, url, screenshots=None):
         }})()""")
         wait("document.querySelectorAll('#project-documents .document-library-row').length>=14 && "
              "document.querySelectorAll('#project-chats [data-chat-id]').length>=14", 'many chats and files')
-    viewport(1600, False)
-    wait("innerWidth===1600 && getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'wide PC columns')
-    assert ev("""(() => {
-        const composer=document.querySelector('#project-composer-slot').getBoundingClientRect();
-        const files=document.querySelector('#project-file-panel').getBoundingClientRect();
-        const list=document.querySelector('#project-documents');
-        return composer.width>files.width && files.width>=245 && composer.right<files.left &&
-            list.scrollWidth<=list.clientWidth+1;
-    })()""")
-    capture('pc-many-chats-and-files')
-    viewport(1200, True)
-    wait("innerWidth===1200 && chatSidebarUiState.mode==='permanent' && "
-         "getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'tablet wide uses available width')
-    capture('tablet-wide')
-    ev("appLogic.updateLocalUiSetting('enableWideMode',false)")
-    viewport(1024, True)
-    wait("chatSidebarUiState.mode==='overlay' && "
-         "getComputedStyle(document.querySelector('#project-tabs')).display==='none'", 'tablet regular uses two columns')
-    ev("appLogic.updateLocalUiSetting('enableWideMode',true)")
-    viewport(390, True)
-    wait("innerWidth===390 && getComputedStyle(document.querySelector('#project-tabs')).display==='flex'", 'phone uses tabs')
+    for width, mobile in [(1600, False), (1200, True), (1024, True), (390, True)]:
+        viewport(width, mobile)
+        wait(f'innerWidth==={width}', 'project viewport resized')
+        click('#project-tab-chats', mobile and width==390)
+        check_home('chats')
+        if width==1200:
+            capture('tablet-project-home')
+        if width==390:
+            capture('mobile-project-chats')
+        click('#project-tab-files', mobile and width==390)
+        check_home('files')
     click('#project-tab-chats', True)
-    assert ev("getComputedStyle(document.querySelector('#project-file-panel')).display==='none'")
-    capture('mobile-project-home')
-    click('#project-add-chat', True)
-    wait("document.querySelector('.project-picker-list input')", 'mobile picker loaded')
-    capture('mobile-picker')
-    click('#project-dialog-cancel', True)
+    mobile_row_menu = f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="menu"]'
+    click(mobile_row_menu, True)
+    wait("!elements.historyItemMenu.classList.contains('hidden') && historyUiState.menuContext?.source==='project'",
+         'touch opens the chat menu')
+    click('#history-project-move', True)
+    wait("document.querySelector('#history-project-menu [data-project-destination=new]')", 'touch opens the project submenu')
+    assert menu_in_bounds('#history-project-menu')
+    key('Escape')
+    wait("elements.historyProjectMenu.classList.contains('hidden') && !elements.historyItemMenu.classList.contains('hidden')",
+         'Escape closes only the submenu')
+    key('Escape')
+    wait("elements.historyItemMenu.classList.contains('hidden')", 'Escape closes the chat menu')
     ev("appLogic.handleFileSelection([new File(['keep'], 'mobile-tabs.txt', {type:'text/plain'})])")
     wait("document.querySelector('.composer-attachment-remove')", 'project attachment is visible')
     click('#project-tab-files', True)
@@ -764,10 +805,10 @@ def run(client, url, screenshots=None):
     })()""")
     click('#project-file-add', True)
     wait("document.querySelector('#project-menu').hidden", 'file menu closed before capture')
-    capture('mobile-files')
+    capture('mobile-project-files')
     viewport(1280, False)
     wait("innerWidth===1280 && chatSidebarUiState.mode==='permanent'", 'PC restored for remaining actions')
-    checks.append('responsive columns, phone tabs, file menu bounds and draft preservation')
+    checks.append('responsive tabs and bottom composer, file menu bounds and draft preservation')
 
     click('#project-options')
     click('#project-menu [data-project-action="delete"]')
@@ -899,7 +940,7 @@ def run(client, url, screenshots=None):
         click(f'#project-chats [data-chat-id="{chat}"] [data-sidebar-action="open"]')
         wait(f'elements.projectWorkspace.hidden && state.currentChatId==={chat} && {visible}', 'return to chat with projects')
         open_project(project, '起動時サイドバー検証')
-        click('#project-back')
+        ev('history.back()')
         wait(f'elements.projectWorkspace.hidden && {visible}', 'return from project home')
         ev('uiUtilsV136.closeChatSidebar(); uiUtilsV136.openChatSidebar()')
         wait(visible, 'reopened sidebar')

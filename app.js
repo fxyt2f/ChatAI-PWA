@@ -690,6 +690,7 @@ try {
         loadingIndicator: document.getElementById('loading-indicator'),
         generationStatusIndicator: document.getElementById('generation-status-indicator'),
         historyItemMenu: document.getElementById('history-item-menu'),
+        historyProjectMenu: document.getElementById('history-project-menu'),
         historyDeleteModeBtn: document.getElementById('history-delete-mode-btn'),
         historyDeleteDialog: document.getElementById('history-delete-dialog'),
         historyDeleteList: document.getElementById('history-delete-list'),
@@ -2305,12 +2306,17 @@ const dbUtils = {
         return DocumentLibrary.request(this._getStore(ProjectStore.projects).get(projectId));
     },
 
-    createProject({ name, description }) {
-        return this._writeProjectData([ProjectStore.projects], async tx => {
+    createProject({ name, description }, assignment) {
+        const stores = [ProjectStore.projects];
+        if (assignment) stores.push(CHATS_STORE, ProjectStore.chats);
+        return this._writeProjectData(stores, async tx => {
             const fields = ProjectStore.projectFields(name, description);
             const now = Date.now();
             const project = { id: DocumentLibrary.uniqueId(), ...fields, createdAt: now, updatedAt: now };
             await DocumentLibrary.request(tx.objectStore(ProjectStore.projects).add(project));
+            if (assignment) await this._setChatProject(tx, assignment.record.id, project.id, {
+                expectedRecord: assignment.record, expectedProjectId: assignment.currentProjectId
+            });
             return project;
         });
     },
@@ -2377,20 +2383,23 @@ const dbUtils = {
     },
 
     setChatProject(chatId, projectId, { expectedRecord, expectedProjectId } = {}) {
-        return this._writeProjectData([CHATS_STORE, ProjectStore.projects, ProjectStore.chats], async tx => {
-            const read = DocumentLibrary.request;
-            const chat = await read(tx.objectStore(CHATS_STORE).get(chatId));
-            if (!chat) throw new Error('チャットが見つかりません。');
-            if (expectedRecord && !this.matchesHistoryDeleteRecord(chat, expectedRecord)) throw new Error('チャットが変更されました。');
-            const store = tx.objectStore(ProjectStore.chats);
-            const previous = (await read(store.get(chatId)))?.projectId ?? null;
-            if (previous === projectId) return false;
-            if (expectedProjectId !== undefined && previous !== expectedProjectId) throw new Error('チャットの所属が変更されました。');
-            if (projectId === null) return ProjectStore.detachChat(tx, chatId);
-            await ProjectStore.requireProject(tx, projectId);
-            store.put({ chatId, projectId });
-            return true;
-        });
+        return this._writeProjectData([CHATS_STORE, ProjectStore.projects, ProjectStore.chats],
+            tx => this._setChatProject(tx, chatId, projectId, { expectedRecord, expectedProjectId }));
+    },
+
+    async _setChatProject(tx, chatId, projectId, { expectedRecord, expectedProjectId }) {
+        const read = DocumentLibrary.request;
+        const chat = await read(tx.objectStore(CHATS_STORE).get(chatId));
+        if (!chat) throw new Error('チャットが見つかりません。');
+        if (expectedRecord && !this.matchesHistoryDeleteRecord(chat, expectedRecord)) throw new Error('チャットが変更されました。');
+        const store = tx.objectStore(ProjectStore.chats);
+        const previous = (await read(store.get(chatId)))?.projectId ?? null;
+        if (previous === projectId) return false;
+        if (expectedProjectId !== undefined && previous !== expectedProjectId) throw new Error('チャットの所属が変更されました。');
+        if (projectId === null) return ProjectStore.detachChat(tx, chatId);
+        await ProjectStore.requireProject(tx, projectId);
+        store.put({ chatId, projectId });
+        return true;
     },
 
     listProjectDocuments(projectId) {
@@ -5753,7 +5762,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
         elements.gotoHistoryBtn.title = label;
         if (restoreFocus && !isOpen) {
-            const trigger = !elements.projectWorkspace.hidden ? document.getElementById('project-back') : elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
+            const trigger = elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
                 document.getElementById('document-library-back');
             trigger.focus({ preventScroll: true });
         }
@@ -5808,7 +5817,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     // Native modal dialogs live in the top layer (viewport coordinates); panels
     // inside the workspace use local coordinates and need no sidebar offsets.
     updateChatWorkspaceLayout() {
-        const workspace = elements.chatWorkspace;
+        const workspace = elements.projectWorkspace?.hidden === false ? elements.projectWorkspace : elements.chatWorkspace;
         if (!workspace) return;
         if (!this.chatWorkspaceLayoutObserver) {
             const schedule = () => {
@@ -5819,7 +5828,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 });
             };
             this.chatWorkspaceLayoutObserver = new ResizeObserver(schedule);
-            [workspace, workspace.querySelector('.app-header'), workspace.querySelector('footer')]
+            [elements.chatWorkspace, elements.projectWorkspace, workspace.querySelector('.app-header'), workspace.querySelector('footer')]
                 .filter(Boolean).forEach(node => this.chatWorkspaceLayoutObserver.observe(node));
             window.addEventListener('resize', schedule, { passive: true });
             window.visualViewport?.addEventListener('resize', schedule, { passive: true });
@@ -5865,9 +5874,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 ? COMPOSER_TEXTAREA_MAX_HEIGHT
                 : Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, Math.min(COMPOSER_TEXTAREA_MAX_HEIGHT,
                     Math.floor(bottom - contentTop - bottomGap - controlsHeight - 64)));
+            workspace.style.setProperty('--composer-textarea-max-height', `${maxHeight}px`);
             if (this.composerTextareaMaxHeight !== maxHeight) {
                 this.composerTextareaMaxHeight = maxHeight;
-                workspace.style.setProperty('--composer-textarea-max-height', `${maxHeight}px`);
                 this.scheduleComposerTextareaResize(true);
             }
         }
@@ -6098,6 +6107,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const anchor = context?.triggerElement;
         anchor?.closest('.history-item, .chat-sidebar-item')?.classList.remove('menu-active');
         if (anchor?.isConnected) anchor.setAttribute('aria-expanded', 'false');
+        this.closeHistoryProjectMenu();
         elements.historyItemMenu?.classList.add('hidden');
         if (elements.historyItemMenu) {
             elements.historyItemMenu.style.left = '';
@@ -6112,10 +6122,78 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const context = historyUiState.menuContext;
         const anchor = context?.triggerElement;
         if (!menu || !context || menu.classList.contains('hidden')) return;
+        if (!anchor.isConnected || !anchor.getClientRects().length) {
+            this.closeHistoryItemMenu();
+            return;
+        }
         if (context.source === 'sidebar') {
-            if (!this.positionSidebarRowMenu(menu, anchor)) this.closeHistoryItemMenu();
-        } else if (anchor.isConnected) {
+            if (!this.positionSidebarRowMenu(menu, anchor)) {
+                this.closeHistoryItemMenu();
+                return;
+            }
+        } else {
             this.positionRowMenu(menu, anchor);
+        }
+        if (elements.historyProjectMenu && !elements.historyProjectMenu.classList.contains('hidden')) this.positionHistoryProjectMenu();
+    },
+
+    closeHistoryProjectMenu({ restoreFocus = false } = {}) {
+        const menu = elements.historyProjectMenu;
+        if (!menu || menu.classList.contains('hidden')) return;
+        const anchor = document.getElementById('history-project-move');
+        menu.classList.add('hidden');
+        menu.replaceChildren();
+        anchor.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) anchor.focus({ preventScroll: true });
+    },
+
+    positionHistoryProjectMenu() {
+        const anchor = document.getElementById('history-project-move');
+        const parent = elements.historyItemMenu.getBoundingClientRect();
+        const row = anchor.getBoundingClientRect();
+        if (row.bottom <= parent.top || row.top >= parent.bottom) {
+            this.closeHistoryProjectMenu();
+            return;
+        }
+        this.positionRowMenu(elements.historyProjectMenu, anchor, null, {
+            besideAnchor: true, besideBounds: parent
+        });
+    },
+
+    async openHistoryProjectMenu(context) {
+        const menu = elements.historyProjectMenu;
+        if (!menu.classList.contains('hidden')) return;
+        const anchor = document.getElementById('history-project-move');
+        try {
+            const projects = await dbUtils.listProjects();
+            if (historyUiState.menuContext !== context || !menu.classList.contains('hidden')) return;
+            const available = projects.filter(project => project.id !== context.projectId);
+            const labels = window.ProjectUI.projectLabels(available);
+            const choices = [['new', '新しいプロジェクト'], ...available.map(project => [project.id, labels.get(project.id)])];
+            menu.replaceChildren(...choices.map(([id, title]) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.setAttribute('role', 'menuitem');
+                button.dataset.projectDestination = id;
+                button.title = title;
+                const icon = document.createElement('span');
+                icon.className = 'material-symbols-outlined';
+                icon.setAttribute('aria-hidden', 'true');
+                icon.textContent = id === 'new' ? 'create_new_folder' : 'folder';
+                const label = document.createElement('span');
+                label.textContent = title;
+                button.append(icon, label);
+                return button;
+            }));
+            anchor.setAttribute('aria-expanded', 'true');
+            menu.classList.remove('hidden');
+            this.positionHistoryProjectMenu();
+            menu.scrollTop = 0;
+            menu.firstElementChild.focus({ preventScroll: true });
+        } catch {
+            if (historyUiState.menuContext !== context) return;
+            this.closeHistoryItemMenu({ restoreFocus: true });
+            await this.showCustomAlert('プロジェクトの一覧を読み込めませんでした。');
         }
     },
 
@@ -6131,7 +6209,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return true;
     },
 
-    positionRowMenu(menu, anchor, container = null, { besideAnchor = false } = {}) {
+    positionRowMenu(menu, anchor, container = null, { besideAnchor = false, besideBounds = null } = {}) {
         const viewportMargin = 8;
         const gap = 4;
         const anchorRect = anchor.getBoundingClientRect();
@@ -6146,13 +6224,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.setProperty('--row-menu-width', `${Math.max(0, rightEdge - leftEdge)}px`);
         menu.style.setProperty('--row-menu-height', `${Math.max(0, bottomEdge - topEdge)}px`);
         const menuRect = menu.getBoundingClientRect();
-        const besideLeft = anchorRect.right + gap;
-        const beside = besideAnchor && besideLeft + menuRect.width <= rightEdge;
-        const left = beside ? besideLeft : Math.min(
-            Math.max(leftEdge, anchorRect.right - menuRect.width), Math.max(leftEdge, rightEdge - menuRect.width));
+        const besideLeft = (besideBounds?.right ?? anchorRect.right) + (besideBounds ? -gap : gap);
+        const leftOfMenu = (besideBounds?.left ?? 0) - menuRect.width + gap;
+        const besideRight = besideAnchor && besideLeft + menuRect.width <= rightEdge;
+        const besideLeftFits = besideBounds && leftOfMenu >= leftEdge;
+        const beside = besideRight || besideLeftFits;
+        const left = besideRight ? besideLeft : besideLeftFits ? leftOfMenu : Math.min(
+            Math.max(leftEdge, (besideBounds?.right ?? anchorRect.right) - menuRect.width), Math.max(leftEdge, rightEdge - menuRect.width));
         const belowTop = anchorRect.bottom + gap;
         const aboveTop = anchorRect.top - menuRect.height - gap;
-        const top = beside ? Math.max(topEdge, Math.min(anchorRect.top, bottomEdge - menuRect.height))
+        const top = beside || besideBounds ? Math.max(topEdge, Math.min(anchorRect.top, bottomEdge - menuRect.height))
             : belowTop + menuRect.height <= bottomEdge ? belowTop : Math.max(topEdge, aboveTop);
         menu.style.left = `${Math.round(left - (bounds?.left ?? 0))}px`;
         menu.style.top = `${Math.round(top - (bounds?.top ?? 0))}px`;
@@ -6200,15 +6281,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    showSidebarMenu(anchor, record = null, source = 'sidebar') {
+    showSidebarMenu(anchor, record = null, source = 'sidebar', projectId = record ? chatSidebarUiState.memberships.get(record.id) ?? null : null) {
         if (!anchor.isConnected || (source === 'sidebar' && !chatSidebarUiState.isOpen) || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
         window.ProjectUI?.closeMenu();
         const menu = elements.historyItemMenu;
         const importOnly = !record;
         const identity = record && { createdAt: record.createdAt, recordGenerationId: record.recordGenerationId };
-        historyUiState.menuContext = { chatId: record?.id, source, triggerElement: anchor, importOnly, identity };
+        historyUiState.menuContext = { chatId: record?.id, source, triggerElement: anchor, importOnly, identity, projectId };
         for (const item of menu.querySelectorAll('[data-history-menu-action]')) {
-            const hidden = (item.dataset.historyMenuAction === 'import') !== importOnly;
+            const action = item.dataset.historyMenuAction;
+            const hidden = (action === 'import') !== importOnly || (action === 'project-remove' && !projectId);
             item.hidden = hidden;
             item.classList.toggle('hidden', hidden);
         }
@@ -6255,7 +6337,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!record) return { ok: false, notFound: true, reason: 'record-not-found' };
         const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
 
-        if (action === 'project') return window.ProjectUI?.moveChat(record);
+        if (action === 'project' || action === 'project-remove') {
+            return window.ProjectUI.moveChat(record, context.projectId, context.destination);
+        }
         if (action === 'pin') {
             return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
         }
@@ -15260,19 +15344,21 @@ const appLogic = {
                 event.preventDefault();
                 if (!event.repeat) trigger.click();
             });
-            elements.historyItemMenu.addEventListener('pointerdown', event => {
-                if (event.target.closest('[data-history-menu-action]')) {
-                    historyUiState.menuPointerActive = true;
-                }
-            });
-            elements.historyItemMenu.addEventListener('click', async event => {
-                const menuItem = event.target.closest('[data-history-menu-action]');
-                if (!menuItem || menuItem.hidden || !elements.historyItemMenu.contains(menuItem)) return;
+            const historyMenus = [elements.historyItemMenu, elements.historyProjectMenu];
+            const inHistoryMenus = target => historyMenus.some(menu => menu.contains(target));
+            const onMenuClick = async event => {
+                const menuItem = event.target.closest('[role="menuitem"]');
+                if (!menuItem || menuItem.hidden || menuItem.disabled) return;
                 if (historyUiState.menuActionPending) return;
-                const context = historyUiState.menuContext
-                    ? { ...historyUiState.menuContext }
-                    : null;
-                const action = menuItem.dataset.historyMenuAction;
+                const context = historyUiState.menuContext;
+                if (menuItem.id === 'history-project-move') {
+                    if (!elements.historyProjectMenu.classList.contains('hidden')) {
+                        uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
+                    } else if (context) await uiUtils.openHistoryProjectMenu(context);
+                    return;
+                }
+                const destination = menuItem.dataset.projectDestination;
+                const action = destination ? 'project' : menuItem.dataset.historyMenuAction;
                 if (context?.importOnly && action === 'import') {
                     uiUtils.closeHistoryItemMenu({ restoreFocus: true });
                     elements.importHistoryInput.click();
@@ -15292,33 +15378,47 @@ const appLogic = {
                     await uiUtils.reportHistoryActionFailure({ action, chatId, source, reason: 'invalid-action' });
                     return;
                 }
-                const actionContext = { chatId, source, triggerElement };
+                const actionContext = { chatId, source, triggerElement, projectId: context.projectId,
+                    destination: destination ?? null };
 
                 historyUiState.menuActionPending = true;
                 uiUtils.setHistoryItemMenuBusy(true);
                 try {
                     const record = await uiUtils.resolveHistoryActionChat(chatId, { action, source });
                     if (!record) return;
-                    if (action === 'project' && context.identity?.recordGenerationId &&
+                    const membershipAction = action === 'project' || action === 'project-remove';
+                    if (membershipAction && historyUiState.menuContext !== context) return;
+                    if (membershipAction && context.identity &&
                         !dbUtils.matchesHistoryDeleteRecord(record, context.identity)) {
                         uiUtils.closeHistoryItemMenu();
                         await uiUtils.showCustomAlert('チャットが変更されました。履歴を開き直してください。');
                         return;
                     }
-                    uiUtils.closeHistoryItemMenu();
+                    uiUtils.closeHistoryItemMenu({ restoreFocus: membershipAction });
                     const result = await uiUtils.executeHistoryAction(action, actionContext, { record });
                     if (action === 'pin' && result?.ok) uiUtils.focusHistoryActionTarget(actionContext);
                 } catch (error) {
                     console.error(`[History Action] ${action} の実行に失敗しました (chatId: ${chatId}):`, error);
-                    await uiUtils.showCustomAlert('チャット操作を完了できませんでした。');
+                    await uiUtils.showCustomAlert(error.message || 'チャット操作を完了できませんでした。');
                 } finally {
                     historyUiState.menuActionPending = false;
                     historyUiState.menuPointerActive = false;
                     uiUtils.setHistoryItemMenuBusy(false);
                 }
-            });
-            elements.historyItemMenu.addEventListener('keydown', event => {
-                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')]
+            };
+            const onMenuKey = event => {
+                if (event.key === 'ArrowRight' && event.target.id === 'history-project-move') {
+                    event.preventDefault();
+                    if (elements.historyProjectMenu.classList.contains('hidden')) event.target.click();
+                    else elements.historyProjectMenu.firstElementChild?.focus({ preventScroll: true });
+                    return;
+                }
+                if (event.currentTarget === elements.historyProjectMenu && ['Escape', 'ArrowLeft'].includes(event.key)) {
+                    event.preventDefault();
+                    uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
+                    return;
+                }
+                const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')]
                     .filter(item => !item.hidden && !item.disabled);
                 if (items.length === 0) return;
                 const currentIndex = items.indexOf(document.activeElement);
@@ -15335,17 +15435,27 @@ const appLogic = {
                 if (nextIndex === null) return;
                 event.preventDefault();
                 items[nextIndex]?.focus();
-            });
-            elements.historyItemMenu.addEventListener('focusout', () => {
+            };
+            const onMenuFocusOut = event => {
+                // Touch can move focus to another menu item before document.activeElement updates.
+                if (inHistoryMenus(event.relatedTarget) || event.relatedTarget === historyUiState.menuContext?.triggerElement) return;
                 queueMicrotask(() => {
                     if (historyUiState.menuPointerActive) return;
                     const activeElement = document.activeElement;
                     const triggerElement = historyUiState.menuContext?.triggerElement;
-                    if (!elements.historyItemMenu.contains(activeElement) && activeElement !== triggerElement) {
+                    if (!inHistoryMenus(activeElement) && activeElement !== triggerElement) {
                         uiUtils.closeHistoryItemMenu();
                     }
                 });
-            });
+            };
+            for (const menu of historyMenus) {
+                menu.addEventListener('pointerdown', event => {
+                    if (event.target.closest('[role="menuitem"]')) historyUiState.menuPointerActive = true;
+                });
+                menu.addEventListener('click', onMenuClick);
+                menu.addEventListener('keydown', onMenuKey);
+                menu.addEventListener('focusout', onMenuFocusOut);
+            }
             document.addEventListener('pointerup', () => {
                 setTimeout(() => {
                     historyUiState.menuPointerActive = false;
@@ -15357,25 +15467,32 @@ const appLogic = {
             document.addEventListener('click', event => {
                 if (elements.historyItemMenu.classList.contains('hidden')) return;
                 const triggerElement = historyUiState.menuContext?.triggerElement;
-                if (elements.historyItemMenu.contains(event.target) || triggerElement?.contains(event.target)) return;
+                if (inHistoryMenus(event.target) || triggerElement?.contains(event.target)) return;
                 uiUtils.closeHistoryItemMenu();
             });
             document.addEventListener('keydown', event => {
-                if (event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
+                if (event.defaultPrevented || event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
                 event.preventDefault();
                 uiUtils.closeHistoryItemMenu({ restoreFocus: true });
             });
             const repositionSidebarMenus = () => {
-                if (historyUiState.menuContext?.source === 'sidebar') uiUtils.positionHistoryItemMenu();
+                uiUtils.positionHistoryItemMenu();
                 window.ProjectUI?.positionSidebarMenu();
             };
-            window.addEventListener('resize', () => {
-                if (historyUiState.menuContext?.source !== 'sidebar') uiUtils.closeHistoryItemMenu();
-                repositionSidebarMenus();
-            }, { passive: true });
+            window.addEventListener('resize', repositionSidebarMenus, { passive: true });
             window.visualViewport?.addEventListener('resize', repositionSidebarMenus, { passive: true });
             window.visualViewport?.addEventListener('scroll', repositionSidebarMenus, { passive: true });
             elements.chatSidebarScroll.addEventListener('scroll', repositionSidebarMenus, { passive: true });
+            elements.historyItemMenu.addEventListener('scroll', () => {
+                if (!elements.historyProjectMenu.classList.contains('hidden')) uiUtils.positionHistoryProjectMenu();
+            }, { passive: true });
+            document.getElementById('project-content')?.addEventListener('scroll', event => {
+                if (historyUiState.menuContext?.source !== 'project') return;
+                const anchor = historyUiState.menuContext.triggerElement.getBoundingClientRect();
+                const bounds = event.currentTarget.getBoundingClientRect();
+                if (anchor.bottom <= bounds.top || anchor.top >= bounds.bottom) uiUtils.closeHistoryItemMenu();
+                else uiUtils.positionHistoryItemMenu();
+            }, { passive: true });
             this._historyActionMenuEventsBound = true;
         }
 
@@ -24294,7 +24411,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 // 現行履歴画面と将来の履歴サイドバーが共有する、既存処理の薄い入口。
 const chatHistoryActions = {
-    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'project', 'delete']),
+    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'project', 'project-remove', 'delete']),
 
     isSupportedMenuAction(action) {
         return this.supportedMenuActions.has(action);
