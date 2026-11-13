@@ -320,6 +320,12 @@ a.app-info-action:hover {
 }
 
 .history-submenu-arrow { margin-inline-start: auto; }
+#history-project-move {
+    margin-top: 4px;
+    border-top: 1px solid var(--border-primary);
+    border-start-start-radius: 0;
+    border-start-end-radius: 0;
+}
 #history-project-menu button > span:last-child {
     min-width: 0;
     overflow: hidden;
@@ -738,7 +744,8 @@ body:not(.dark-mode) .app-container {
     border-radius: 9px;
 }
 
-:is(.chat-sidebar-item, .document-library-collection-row):is(:hover, :focus-within, .menu-active) {
+.chat-sidebar-item:is(:hover, :has(> :focus-visible), .menu-active),
+.document-library-collection-row:is(:hover, :focus-within, .menu-active) {
     background: var(--bg-tertiary);
 }
 
@@ -775,6 +782,11 @@ body:not(.dark-mode) .app-container {
     text-align: left;
 }
 
+.chat-sidebar-scroll .chat-sidebar-item-open {
+    min-height: 42px;
+    align-self: stretch;
+}
+
 :is(.chat-sidebar-item .chat-sidebar-item-open, .document-library-collection-row .document-library-file):hover:not(:disabled) {
     background: transparent;
     color: var(--text-primary);
@@ -802,9 +814,9 @@ body:not(.dark-mode) .app-container {
 }
 
 .chat-sidebar-history-header .chat-sidebar-item-menu,
-.chat-sidebar-group-heading:is(:hover, :focus-within) > .chat-sidebar-item-menu,
-:is(.chat-sidebar-item, .document-library-collection-row):is(:hover, .menu-active, :focus-within:not(.project-folder-row)) .chat-sidebar-item-menu,
-.project-folder-row:has(> :focus-visible) > .chat-sidebar-item-menu {
+.chat-sidebar-group-heading:is(:hover, :has(:focus-visible)) > .chat-sidebar-item-menu,
+.chat-sidebar-item:is(:hover, :has(> :focus-visible), .menu-active) > .chat-sidebar-item-menu,
+.document-library-collection-row:is(:hover, .menu-active, :focus-within) .chat-sidebar-item-menu {
     opacity: 1;
     pointer-events: auto;
 }
@@ -816,8 +828,7 @@ body:not(.dark-mode) .app-container {
     box-shadow: none;
 }
 
-/* Keep touch and hybrid devices operable without hover. Opacity preserves
-   the grid column and keyboard tab order on mouse-only devices. */
+/* Keep touch and hybrid devices operable without hover. */
 @media (hover: none), (any-pointer: coarse) {
     .chat-sidebar-item-menu {
         opacity: 1;
@@ -861,8 +872,49 @@ body:not(.dark-mode) .app-container {
     padding-inline-start: calc(var(--sidebar-row-icon-width) + var(--sidebar-row-icon-gap));
 }
 
-.chat-sidebar-title-dot {
-    margin-left: 6px;
+.chat-sidebar-item[data-chat-id] > :is(.chat-sidebar-item-menu, .chat-sidebar-title-dot) {
+    grid-area: 1 / 2;
+    justify-self: end;
+}
+
+.chat-sidebar-item[data-chat-id] > .chat-sidebar-title-dot {
+    justify-self: center;
+    pointer-events: none;
+}
+
+.chat-sidebar-item[data-chat-id]:has(> .chat-sidebar-title-dot:not([hidden])) > .chat-sidebar-item-menu {
+    transition-property: background-color;
+}
+
+.chat-sidebar-item[data-chat-id] > .chat-sidebar-title-dot[hidden],
+.chat-sidebar-item[data-chat-id]:is(:hover, :has(> :focus-visible), .menu-active) > .chat-sidebar-title-dot {
+    display: none;
+}
+
+.chat-sidebar-title-line > .chat-sidebar-title-dot { margin-inline-start: 6px; }
+
+@media (hover: hover) and (pointer: fine) {
+    .chat-sidebar-scroll .chat-sidebar-item[data-chat-id] {
+        grid-template-columns: minmax(0, 1fr) 0;
+    }
+
+    .chat-sidebar-scroll .chat-sidebar-item[data-chat-id]:is(:hover, :has(> :focus-visible, > .chat-sidebar-title-dot:not([hidden])), .menu-active) {
+        grid-template-columns: minmax(0, 1fr) var(--sidebar-menu-size);
+    }
+}
+
+@media (hover: none), (any-pointer: coarse) {
+    .chat-sidebar-scroll .chat-sidebar-item[data-chat-id] {
+        grid-template-columns: minmax(0, 1fr) var(--sidebar-menu-size);
+    }
+    .chat-sidebar-item[data-chat-id] > .chat-sidebar-title-dot { display: none; }
+}
+
+@media (min-width: 900px) and (hover: none), (min-width: 900px) and (pointer: coarse) {
+    .wide-mode-enabled :is(.chat-sidebar-mode-overlay, .chat-sidebar-mode-permanent) #chat-history-sidebar
+        .chat-sidebar-item[data-chat-id]:not([aria-current="page"], .menu-active, :focus-within, #chat-sidebar-pinned-list *) > .chat-sidebar-title-dot:not([hidden]) {
+        display: block;
+    }
 }
 
 .chat-sidebar-item-title,
@@ -878,7 +930,7 @@ body:not(.dark-mode) .app-container {
 .chat-sidebar-item-title {
     width: auto;
     font-size: 0.875rem;
-    line-height: 1.45;
+    line-height: 1.5;
     white-space: nowrap;
 }
 
@@ -6360,7 +6412,7 @@ button.document-library-file { cursor: pointer; }
 .document-library-menu.history-item-menu { position: absolute; min-width: min(210px, var(--row-menu-width, calc(100% - 16px))); }
 #document-library-picker button.document-library-file:hover, .document-library-action:hover:not(:disabled),
 .document-library-results button:hover { background: var(--sidebar-selected-bg); box-shadow: none; }
-#document-library-workspace :is(button, input):not(:where(.chat-sidebar-item-menu)):focus-visible {
+#document-library-workspace :is(button, input):not(:where(.chat-sidebar-item-menu, #goto-history-btn)):focus-visible {
     outline: 2px solid var(--text-link);
     outline-offset: -2px;
 }
@@ -6426,7 +6478,10 @@ button.document-library-file { cursor: pointer; }
     }
     .document-library-layout[data-detail="true"] .document-library-collection { display: none; }
     .document-library-detail { border-inline-start: 0; }
-    .document-library-preview-header { display: none; }
+    .document-library-preview-header {
+        justify-content: flex-end;
+    }
+    .document-library-preview-header > :not(#document-library-detail-close) { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
     .document-library-layout { transition: none; }

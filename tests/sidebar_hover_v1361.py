@@ -1,12 +1,11 @@
 """Focused native input matrix; invoked by run-browser-tests.py --sidebar-hover."""
 import base64
 import json
+import time
 
 
-def run(client, root):
-    output = root / 'docs' / 'sidebar-hover-v1361'
-    output.mkdir(exist_ok=True)
-
+def run(client, root, url, output):
+    output.mkdir(parents=True, exist_ok=True)
     def ev(expression):
         result = client.call('Runtime.evaluate', {'expression': expression, 'awaitPromise': True, 'returnByValue': True})
         if 'exceptionDetails' in result:
@@ -38,12 +37,32 @@ def run(client, root):
                 client.call('Input.dispatchMouseEvent', {'type': kind, **coords, 'button': 'left', 'clickCount': 1})
 
     def item(ident, target='open'):
-        return f'.chat-sidebar-item[data-chat-id="{ident}"] .chat-sidebar-item-{target}'
+        return f'#chat-history-sidebar .chat-sidebar-item[data-chat-id="{ident}"] .chat-sidebar-item-{target}'
 
     def capture(name):
         screenshot = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})['data']
         (output / name).write_bytes(base64.b64decode(screenshot))
 
+    client.call('Page.navigate', {'url': url + '?sidebarHoverFixture=1'})
+    def wait_for_page(controlled=False, newer_than=0):
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            result = client.call('Runtime.evaluate', {'expression': f"""Boolean(location.search.includes('sidebarHoverFixture') &&
+                performance.timeOrigin>{newer_than} && window.settingsUiV136 &&
+                window.appLogic?._setupEventListenersCallCount && window.state?.activeProfile &&
+                ({str(not controlled).lower()} || navigator.serviceWorker.controller))""", 'returnByValue': True})
+            if result.get('result', {}).get('value'):
+                return
+            time.sleep(.05)
+        raise TimeoutError('Real sidebar page did not initialize')
+
+    wait_for_page()
+    ev("""(async()=>{ await appLogic.updateLocalUiSetting('lastSeenReleaseVersion',APP_VERSION);
+        document.querySelector('dialog[open]')?.close(); })()""")
+    wait_for_page(controlled=True)
+    previous_load = ev('performance.timeOrigin')
+    client.call('Page.reload')
+    wait_for_page(controlled=True, newer_than=previous_load)
     ev((root / 'tests' / 'sidebar-hover-v1361.js').read_text(encoding='utf-8'))
     ids = ev('sidebarHoverV1361.ids')
     records = []

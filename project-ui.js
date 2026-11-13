@@ -492,7 +492,7 @@ window.ProjectUI = (() => {
         owner.chatSignature = signature;
         if (!models.length) return emptyList(list, 'チャットはありません。');
         list.replaceChildren(...models.map(model => {
-            const item = ui().createChatSidebarItem(model);
+            const item = ui().createChatSidebarItem(model, { inlineStatus: true });
             const openButton = item.querySelector('[data-sidebar-action="open"]');
             openButton.addEventListener('click', () => openChat(model.id));
             const stamp = model.updatedAt && new Date(model.updatedAt);

@@ -21,12 +21,12 @@
     }
     const ids = [936101, 936102, 936103];
     const longTitle = 'サイドバーでピンとタイトル生成を同時に表示する長いチャット名'.repeat(2);
-    const row = id => document.querySelector(`#chat-sidebar-list .chat-sidebar-item[data-chat-id="${id}"]`);
+    const row = id => document.querySelector(`#chat-history-sidebar .chat-sidebar-item[data-chat-id="${id}"]`);
     const menu = id => row(id).querySelector('.chat-sidebar-item-menu');
     const open = id => row(id).querySelector('.chat-sidebar-item-open');
     const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const rect = node => node.getBoundingClientRect().toJSON();
-    let assertions = 0, palette, widths, originalRow, actions, downloads, restoreActions;
+    let assertions = 0, palette, originalRow, actions, downloads, restoreActions;
     const check = (ok, label) => { assertions++; if (!ok) throw new Error(label); };
     const wait = async (predicate, label) => {
         const deadline = performance.now() + 3000;
@@ -42,7 +42,10 @@
         const value = getComputedStyle(probe).backgroundColor; probe.remove(); return value;
     };
     const verifyWidths = () => ids.forEach(id => {
-        check(Math.abs(open(id).getBoundingClientRect().width - widths[id]) < 1, 'menu visibility keeps title column width');
+        const available = row(id).getBoundingClientRect().width;
+        const reserve = matchMedia('(any-pointer: coarse)').matches || getComputedStyle(menu(id)).pointerEvents === 'auto';
+        check(Math.abs(open(id).getBoundingClientRect().width - available + (reserve ? rect(menu(id)).width : 0)) < 1,
+            'title uses full idle width and reserves exactly one visible action slot');
     });
     const resetFocus = () => $('chat-sidebar-search-toggle').focus();
     const api = window.sidebarHoverV1361 = {
@@ -74,28 +77,27 @@
             });
             await app.loadChat(ids[0], { scrollAfterLoad: false });
             ui.updateChatSidebarResponsiveState(); ui.openChatSidebar();
-            await wait(() => !window.testSidebarUiState.refreshTimer && !db.pendingChatSaves, 'sidebar saves and trailing refresh settle');
+            await wait(() => !chatSidebarUiState.refreshTimer && !db.pendingChatSaves, 'sidebar saves and trailing refresh settle');
             await ui.renderChatSidebar({ refreshRecent: true });
             await Promise.all($('chat-history-sidebar').getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
             await frame(); resetFocus();
             palette = { tertiary: cssColor('--bg-tertiary'), selected: cssColor('--sidebar-selected-bg'),
                 primary: cssColor('--text-primary'), secondary: cssColor('--text-secondary'),
                 menuHover: cssColor('color-mix(in srgb, var(--text-primary) 8%, var(--bg-tertiary))') };
-            widths = Object.fromEntries(ids.map(id => [id, open(id).getBoundingClientRect().width]));
             check(document.body.classList.contains('dark-mode') === dark, 'requested theme applied');
             check(getComputedStyle(row(ids[0])).backgroundColor === palette.selected, 'selected background retained');
             return { mode: ui.getChatSidebarMode(), palette };
         },
         point(id, target = 'open') { return rect(target === 'menu' ? menu(id) : open(id)); },
         async baseline(touch) {
-            const shown = id => touch && row(id).getAttribute('aria-current') === 'page';
+            const shown = id => touch && (row(id).getAttribute('aria-current') === 'page' || row(id).closest('#chat-sidebar-pinned-list'));
             await wait(() => ids.every(id => getComputedStyle(menu(id)).opacity === (shown(id) ? '1' : '0')), 'idle menu opacity');
             ids.forEach(id => {
                 check(getComputedStyle(menu(id)).pointerEvents === (shown(id) ? 'auto' : 'none'), 'idle pointer handling');
                 check(menu(id).tabIndex === 0, 'menu remains in keyboard tab order');
                 const b = rect(menu(id));
                 check(b.width === 40 && b.height === 40, '40px menu column');
-                check((document.elementFromPoint(b.x + 20, b.y + 20)?.closest('.chat-sidebar-item-menu') === menu(id)) === shown(id),
+                check((document.elementFromPoint(b.x + 20, b.y + 20)?.closest('.chat-sidebar-item-menu') === menu(id)) === Boolean(shown(id)),
                     'only visible menu participates in hit testing');
             });
             verifyWidths();
@@ -134,8 +136,9 @@
             check(getComputedStyle(menu(id)).opacity === '1', 'menu remains visible while focus is in popup');
             check(getComputedStyle(row(id)).backgroundColor === (row(id).hasAttribute('aria-current') ? palette.selected : palette.tertiary), 'popup keeps row background');
             const items = [...$('history-item-menu').querySelectorAll('[data-history-menu-action]:not([hidden])')];
-            check(items.every(item => !item.hidden && !item.disabled), 'all five actions enabled');
-            check(items.map(item => item.dataset.historyMenuAction).join() === 'pin,rename,export,duplicate,delete', 'all five existing actions retained');
+            check(items.every(item => !item.hidden && !item.disabled), 'all available actions enabled');
+            check(items.map(item => item.dataset.historyMenuAction).join() === 'pin,rename,export,duplicate,project,delete',
+                'existing actions and project move retained');
         },
         async escaped(id) {
             await wait(() => $('history-item-menu').classList.contains('hidden'), 'Escape closes popup');
@@ -160,18 +163,17 @@
             const id = ids[2], button = open(id);
             const pin = button.querySelector('.chat-pin-icon');
             const title = button.querySelector('.chat-sidebar-item-title');
-            const dot = button.querySelector('.chat-sidebar-title-dot');
+            const dot = row(id).querySelector('.chat-sidebar-title-dot');
             check(pin && rect(pin).width > 0 && dot.hidden, 'pinned icon visible and idle indicator hidden');
             st.chatTitleGenerations.set(String(id), new AbortController());
             try {
                 ui.syncChatSidebarTitleGeneration(id);
                 const titleRect = rect(title), dotRect = rect(dot);
-                check(!dot.hidden && dotRect.width > 0 && button.getAttribute('aria-label').includes('タイトル生成中'),
-                    'title generation indicator shown');
+                check(!dot.hidden && button.getAttribute('aria-label').includes('タイトル生成中'), 'title generation status is announced');
                 check(title.title === longTitle && title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === 'ellipsis',
                     'long title retains ellipsis and full title');
-                check(rect(pin).right <= titleRect.left && titleRect.right <= dotRect.left && dotRect.right <= rect(menu(id)).left,
-                    'pin, title, and indicator fit before the menu');
+                check(rect(pin).right <= titleRect.left && titleRect.right <= rect(menu(id)).left && dotRect.width === 0,
+                    'pinned touch row prioritizes its menu while keeping its accessible generation status');
             } finally {
                 st.chatTitleGenerations.delete(String(id));
                 ui.syncChatSidebarTitleGeneration(id);
@@ -187,9 +189,9 @@
             await wait(() => st.currentChatId === ids[1], 'native row activation switches chat');
             await wait(() => row(ids[1])?.getAttribute('aria-current') === 'page', 'selection updated after chat switch');
             check(!row(ids[0]).hasAttribute('aria-current'), 'old row selection cleared');
-            await wait(() => !window.testSidebarUiState.refreshTimer && !db.pendingChatSaves, 'chat switch persistence settles');
+            await wait(() => !chatSidebarUiState.refreshTimer && !db.pendingChatSaves, 'chat switch persistence settles');
             if (ui.getChatSidebarMode() === 'overlay') {
-                await wait(() => !window.testSidebarUiState.isOpen, 'overlay closes after selecting a chat');
+                await wait(() => !chatSidebarUiState.isOpen, 'overlay closes after selecting a chat');
             }
             ui.openChatSidebar(); await ui.renderChatSidebar({ refreshRecent: true });
             await Promise.all($('chat-history-sidebar').getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));

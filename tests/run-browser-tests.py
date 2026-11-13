@@ -248,7 +248,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             output+=f"\nALL PASSED ({details['assertions']} runtime theme color assertions; light/dark, header/accent independence, settings reload, CSS source)"
         if args.sidebar_hover and 'ALL PASSED' in output and 'FAIL' not in output:
             from sidebar_hover_v1361 import run as run_sidebar_hover
-            output+='\n'+run_sidebar_hover(client,root)
+            output+='\n'+run_sidebar_hover(client, root, f'http://localhost:{server.server_port}/',
+                (args.project_screenshots or Path(profile)) / 'sidebar-hover-v1361')
         if args.scroll_buttons and 'ALL PASSED' in output and 'FAIL' not in output:
             def scroll_eval(expression):
                 result=client.call('Runtime.evaluate',{'expression':expression,'awaitPromise':True,'returnByValue':True})

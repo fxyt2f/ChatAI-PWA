@@ -113,6 +113,18 @@ def run(client, url, screenshots=None):
                 }});
         }})()""")
 
+    def check_chat_menu(assigned):
+        expected = ['pin', 'rename', 'export', 'duplicate', 'project']
+        if assigned:
+            expected.append('project-remove')
+        expected.append('delete')
+        assert ev(f"""(() => {{
+            const buttons=[...elements.historyItemMenu.querySelectorAll('[data-history-menu-action]:not([hidden])')];
+            const borders=buttons.filter(button=>getComputedStyle(button).borderTopWidth==='1px');
+            return JSON.stringify(buttons.map(button=>button.dataset.historyMenuAction))===JSON.stringify({json.dumps(expected)}) &&
+                borders.map(button=>button.dataset.historyMenuAction).join()==='project,delete';
+        }})()""")
+
     def capture(name):
         if screenshots:
             screenshots.mkdir(parents=True, exist_ok=True)
@@ -194,6 +206,36 @@ def run(client, url, screenshots=None):
     wait(f"performance.timeOrigin>{first_load} && {ready} && !document.querySelector('dialog[open]')", 'controlled startup')
     ev("appLogic.updateLocalUiSetting('enableWideMode',true)")
     open_sidebar()
+    ev("window.sharedSidebarToggle=document.getElementById('goto-history-btn')")
+    click('#document-library-open')
+    wait("!elements.documentLibraryWorkspace.hidden && document.querySelector('#document-library-workspace #goto-history-btn')===sharedSidebarToggle",
+         'library uses the actual chat sidebar button')
+    capture('pc-library-header')
+    mouse_click('#goto-history-btn')
+    wait("!chatSidebarUiState.isOpen && !elements.documentLibraryWorkspace.hidden", 'wide library hides the sidebar')
+    mouse_click('#goto-history-btn')
+    wait("chatSidebarUiState.isOpen && !elements.documentLibraryWorkspace.hidden", 'wide library reopens the sidebar')
+    ev('history.back()')
+    wait("elements.documentLibraryWorkspace.hidden && document.querySelector('#chat-workspace #goto-history-btn')===sharedSidebarToggle",
+         'Back restores the chat button')
+    ev('history.forward()')
+    wait("!elements.documentLibraryWorkspace.hidden && document.querySelector('#document-library-workspace #goto-history-btn')===sharedSidebarToggle",
+         'Forward moves the button to library again')
+    viewport(390, True)
+    wait("chatSidebarUiState.mode==='overlay' && !chatSidebarUiState.isOpen", 'library switches to mobile overlay')
+    capture('mobile-library-header')
+    click('#goto-history-btn', True)
+    wait("chatSidebarUiState.isOpen && !elements.documentLibraryWorkspace.hidden && !elements.chatSidebarBackdrop.hidden",
+         'mobile library opens the shared sidebar overlay')
+    click('#chat-sidebar-backdrop', True)
+    wait("!chatSidebarUiState.isOpen && !elements.documentLibraryWorkspace.hidden && document.activeElement===sharedSidebarToggle",
+         'closing the overlay restores focus to the library hamburger')
+    ev('history.back()')
+    wait("elements.documentLibraryWorkspace.hidden && document.querySelector('#chat-workspace #goto-history-btn')===sharedSidebarToggle",
+         'mobile Back restores chat with the same hamburger')
+    viewport(1280, False)
+    open_sidebar()
+    checks.append('library reuses hamburger and sidebar navigation on wide and mobile, including Back and Forward')
     ev("""window.originalProjectControls = ['#chat-workspace > .app-header', '#user-input', '#send-button',
         '#chat-model-button', '#attach-file-btn', '#file-input'].map(selector=>document.querySelector(selector))""")
     normal_chat_layout = ev("""({
@@ -403,6 +445,74 @@ def run(client, url, screenshots=None):
     mouse_click(folder(alpha, 'expand'))
     wait(f"document.querySelector({toggle}).getAttribute('aria-expanded')==='false'", 'folder restored for later scenarios')
     checks.append('mouse hover resets after folder redraw and keyboard focus is retained')
+    click(folder(alpha, 'expand'))
+    pinned_row = f'#chat-sidebar-pinned-list [data-chat-id="{member}"]'
+    member_row = f'#project-sidebar-list [data-chat-id="{member}"]'
+    recent_row = f'#chat-sidebar-list [data-chat-id="{old}"]'
+    for row, name in [(pinned_row, 'pinned'), (member_row, 'member'), (recent_row, 'recent')]:
+        action = row + ' [data-sidebar-action="menu"]'
+        open_button = row + ' [data-sidebar-action="open"]'
+        hover(open_button)
+        wait(f"getComputedStyle(document.querySelector({json.dumps(action)})).opacity==='1'", 'hover shows ' + name + ' menu')
+        mouse_click(open_button)
+        wait(f"document.querySelector({json.dumps(row)}).hasAttribute('aria-current')", 'mouse selects ' + name + ' row')
+        hover('.chat-sidebar-brand')
+        wait(f"getComputedStyle(document.querySelector({json.dumps(action)})).opacity==='0'", 'hover exit hides ' + name + ' menu')
+        if name != 'recent':
+            capture('pc-' + name + '-after-hover')
+        mouse_click(action)
+        wait("!elements.historyItemMenu.classList.contains('hidden')", 'row menu opens')
+        check_chat_menu(name != 'recent')
+        if name == 'pinned':
+            capture('pc-chat-menu')
+        ev('uiUtilsV136.closeHistoryItemMenu({restoreFocus:true})')
+        hover('.chat-sidebar-brand')
+        wait(f"getComputedStyle(document.querySelector({json.dumps(action)})).opacity==='0'", 'mouse menu closes without retained hover')
+    long_open = recent_row + ' [data-sidebar-action="open"]'
+    title = recent_row + ' .chat-sidebar-item-title'
+    dot = recent_row + ' .chat-sidebar-title-dot'
+    dots = recent_row + ' .chat-sidebar-item-menu'
+    bounds = lambda selector: ev(f"document.querySelector({json.dumps(selector)}).getBoundingClientRect().toJSON()")
+    idle_title = bounds(title)
+    row_height = bounds(recent_row)['height']
+    capture('pc-chat-idle')
+    hover(long_open)
+    wait(f"getComputedStyle(document.querySelector({json.dumps(dots)})).opacity==='1'", 'long title yields space to three dots')
+    assert 38 < idle_title['width'] - bounds(title)['width'] < 42
+    assert bounds(title)['right'] <= bounds(dots)['left'] and bounds(recent_row)['height'] == row_height
+    capture('pc-chat-hover')
+    ev(f"""state.chatTitleGenerations.set({json.dumps(str(old))},new AbortController());
+        uiUtilsV136.syncChatSidebarTitleGeneration({old})""")
+    hover('.chat-sidebar-brand')
+    wait(f"getComputedStyle(document.querySelector({json.dumps(dot)})).display!=='none'", 'generation dot appears')
+    assert abs((bounds(dot)['left'] + bounds(dot)['right'] - bounds(dots)['left'] - bounds(dots)['right']) / 2) < 1
+    assert abs((bounds(dot)['top'] + bounds(dot)['bottom'] - bounds(dots)['top'] - bounds(dots)['bottom']) / 2) < 1
+    assert bounds(recent_row)['height'] == row_height and bounds(title)['right'] <= bounds(dots)['left']
+    capture('pc-generating-idle')
+    hover(long_open)
+    wait(f"getComputedStyle(document.querySelector({json.dumps(dots)})).opacity==='1' && "
+         f"getComputedStyle(document.querySelector({json.dumps(dot)})).display==='none'", 'hover swaps dot for menu')
+    capture('pc-generating-hover')
+    hover('.chat-sidebar-brand')
+    wait(f"getComputedStyle(document.querySelector({json.dumps(dot)})).display!=='none'", 'dot returns after hover')
+    mouse_click(f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="open"]')
+    wait(f"state.currentChatId==={loose}", 'select another conversation')
+    assert ev(f"""!document.querySelector({json.dumps(dot)}).hidden &&
+        document.querySelector('#chat-sidebar-list [data-chat-id="{loose}"] .chat-sidebar-title-dot').hidden""")
+    ev(f"state.chatTitleGenerations.delete({json.dumps(str(old))}); uiUtilsV136.syncChatSidebarTitleGeneration({old})")
+    for row in [pinned_row, member_row, recent_row]:
+        assert ev(f"""(() => {{
+            const row=document.querySelector({json.dumps(row)});
+            const center=el=>{{const r=el.getBoundingClientRect();return r.top+r.height/2;}};
+            const title=row.querySelector('.chat-sidebar-title-line'), pin=row.querySelector('.chat-pin-icon');
+            const open=row.firstElementChild, last=open.lastElementChild;
+            return Math.abs(center(row)-center(open))<1 &&
+                Math.abs(center(row)-(title.getBoundingClientRect().top+last.getBoundingClientRect().bottom)/2)<1 &&
+                (!pin || Math.abs(center(pin)-center(title))<1);
+        }})()"""), row
+    hover('.chat-sidebar-brand')
+    click(folder(alpha, 'expand'))
+    checks.append('mouse focus clears all sidebar action reveals, long titles reclaim width, and generation shares the menu slot')
     wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-sidebar-item-snippet')?.textContent==='第一・編集済み'""",
          'project member is also in pinned shortcuts')
     click('#chat-sidebar-search-toggle')
@@ -495,6 +605,10 @@ def run(client, url, screenshots=None):
     viewport(1280, False)
     open_sidebar()
     ev('elements.chatSidebarScroll.scrollTop=0')
+    viewport(1200, True)
+    wait("innerWidth===1200 && chatSidebarUiState.mode==='permanent'", 'tablet sidebar visible')
+    capture('tablet-sidebar')
+    viewport(1280, False)
     mouse_click(f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="open"]')
     wait(f'state.currentChatId==={loose}', 'normal chat selected')
     for scope, pinned in [('#chat-sidebar-list', 'true'), ('#chat-sidebar-pinned-list', 'false')]:
@@ -524,6 +638,7 @@ def run(client, url, screenshots=None):
     wait(f"""document.querySelector('#project-chats [data-chat-id="{member}"]')""", 'moved chat appears in destination')
     member_menu = f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="menu"]'
     mouse_click(member_menu)
+    check_chat_menu(True)
     assert ev("!document.querySelector('[data-history-menu-action=project-remove]').hidden")
     ev("document.querySelector('#history-project-move').focus()")
     key('ArrowRight')
@@ -727,6 +842,9 @@ def run(client, url, screenshots=None):
     ev("""document.querySelector('#user-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}))""")
     wait('window.finishProjectSend && state.isSending && elements.projectWorkspace.hidden', 'first network request begins from chat')
     project_chat = ev('state.currentChatId')
+    generating_dot = f'#chat-history-sidebar [data-chat-id="{project_chat}"] > .chat-sidebar-title-dot'
+    wait(f"document.querySelector({json.dumps(generating_dot)})?.title==='応答生成中' && "
+         f"!document.querySelector({json.dumps(generating_dot)}).hidden", 'actual send marks the owning sidebar row')
     assert ev(f'window.firstWireMembership.then(project=>project.id==={json.dumps(alpha)})')
     assert ev("projectRequest.url.includes('gemini-3-flash-preview:generateContent') && "
               "JSON.stringify(projectRequest.body).includes('application/pdf')")
@@ -740,6 +858,7 @@ def run(client, url, screenshots=None):
     assert ev(f"Boolean(appLogic.getSendJobV136({project_chat}))")
     ev('window.finishProjectSend()')
     wait(f"!appLogic.getSendJobV136({project_chat})", 'send completes under project home')
+    wait(f"document.querySelector({json.dumps(generating_dot)})?.hidden", 'completed response clears sidebar status')
     assert ev(f"dbUtils.getChat({project_chat}).then(chat=>chat.messages.at(-1).content==='検証用回答')")
     ev('history.forward()')
     wait("!elements.projectWorkspace.hidden", 'forward restores project home')

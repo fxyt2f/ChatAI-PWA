@@ -165,21 +165,19 @@ def run(client, url):
                 box.right<=header.right && box.height>=40 && button.scrollWidth<=button.clientWidth;
         })()"""), 'The labeled upload button fits on the right side of the header'
         assert ev("""(() => {
-            const back=document.querySelector('#document-library-back');
-            const settingsBack=document.querySelector('#back-to-chat-from-settings');
+            const toggle=document.querySelector('#goto-history-btn');
             const library=document.querySelector('#document-library-workspace');
-            return back.firstElementChild.textContent===settingsBack.firstElementChild.textContent &&
-                back.className===settingsBack.className && !library.querySelector('#document-library-sidebar') &&
+            return toggle.closest('.app-header').parentElement===library &&
+                toggle.firstElementChild.textContent==='menu' && !library.querySelector('#document-library-sidebar, #document-library-back') &&
                 document.querySelector('#chat-overlay').parentElement===library.parentElement &&
                 getComputedStyle(library).backgroundColor===getComputedStyle(document.querySelector('#chat-workspace')).backgroundColor;
-        })()"""), 'Library uses the chat background and settings Back control'
+        })()"""), 'Library uses the chat background and shared sidebar toggle'
 
     def close_workspace(touch):
-        if ev("""document.querySelector('#document-library-mobile-search').offsetWidth &&
-                !document.querySelector('#document-library-preview').hidden"""):
-            pointer(prefix + 'back', touch)
+        if ev("Boolean(history.state?.documentLibraryDetail)"):
+            ev('history.back()')
             wait("document.querySelector('#document-library-preview').hidden", 'Back returns to the collection')
-        pointer(prefix + 'back', touch)
+        ev('history.back()')
         wait("document.querySelector('#document-library-workspace').hidden", 'Back returns to the conversation')
         assert ev("!document.querySelector('#document-library-open').hasAttribute('aria-current')")
 
@@ -340,7 +338,7 @@ def run(client, url):
         document.querySelector('#document-library-extracts pre').textContent.includes('<img')"""), 'Preview renders literal text'
     assert ev("""document.querySelector('#document-library-mobile-title').textContent==='返品案内.md' &&
         !document.querySelector('#document-library-add').offsetWidth &&
-        !document.querySelector('#document-library-detail-close').offsetWidth &&
+        document.querySelector('#document-library-detail-close').offsetWidth>0 &&
         document.querySelector('#document-library-detail-find').hidden &&
         document.querySelector('#document-library-show-original').disabled &&
         !document.querySelector('#document-library-workspace button[type=submit]')""")
@@ -352,7 +350,7 @@ def run(client, url):
     assert ev("document.activeElement.matches('.document-library-extract[data-highlight=true]')")
     pointer(prefix + 'mobile-search', True)
     assert ev("document.querySelector('#document-library-detail-find').hidden")
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-list .document-library-file-excerpt') && document.querySelector('#document-library-preview').hidden",
          'Back to the matching search results')
     close_workspace(True)
@@ -903,7 +901,7 @@ def run(client, url):
         const search=document.querySelector('#document-library-mobile-search').getBoundingClientRect();
         return title.scrollWidth>title.clientWidth && search.right<=innerWidth && search.width>=40;
     })()""")
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("""document.querySelector('#document-library-preview').hidden &&
         document.querySelector('#document-library-collection-scroll').scrollTop===250 &&
         document.querySelector('#document-library-sort').value==='updated' &&
@@ -1060,7 +1058,7 @@ def run(client, url):
         !document.querySelector('#document-library-search-status').textContent""")
     checks.append('native library drop, PDF canvas, page and zoom controls, PDF hit navigation and all search scopes')
     viewport(390, 760, True)
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden", 'Header returns to the mobile collection after resize')
     pointer('#document-library-list button[title="japanese.pdf"]', True)
     wait("document.querySelector('#document-library-pdf-viewport canvas')", 'Mobile PDF original rendered')
@@ -1072,7 +1070,7 @@ def run(client, url):
     wait("!document.querySelector('#document-library-extracted').hidden && document.querySelector('#document-library-extracts pre')",
          'Mobile PDF extraction tab')
     assert ev("!document.querySelector('#document-library-add').offsetWidth"), 'Mobile extraction hides upload'
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden", 'Return from mobile PDF')
     pointer('#document-library-list button[title="upload-first.txt"]', True)
     wait("!document.querySelector('#document-library-pages').hidden", 'Long extraction has multiple pages')
@@ -1124,14 +1122,14 @@ def run(client, url):
     assert ev(f"""(() => {{
         const header=document.querySelector('#document-library-workspace > .app-header');
         const bounds=name=>document.querySelector('#document-library-'+name).getBoundingClientRect();
-        const back=bounds('back'), title=bounds('title'), search=bounds('mobile-search'), add=bounds('add');
+        const back=document.querySelector('#goto-history-btn').getBoundingClientRect(), title=bounds('title'), search=bounds('mobile-search'), add=bounds('add');
         const center=box=>(box.top+box.bottom)/2;
         return getComputedStyle(header).display==='flex' && header.getBoundingClientRect().height==={header_height} &&
             add.width===0 && back.width>0 && title.width>=140 && search.width>0 &&
             back.right<=title.left && title.right<=search.left && search.right<=innerWidth &&
             Math.abs(center(back)-center(title))<1 && Math.abs(center(search)-center(title))<1;
-    }})()"""), 'Compact extraction header has only back, filename and search on one row'
-    pointer(prefix + 'back', True)
+    }})()"""), 'Compact extraction header has sidebar toggle, filename and search on one row'
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden && document.querySelector('#document-library-add').offsetWidth",
          'Mobile list restores the upload button')
     checks.append('one-row mobile extraction header and upload visibility on return to the list')

@@ -5761,11 +5761,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.gotoHistoryBtn.setAttribute('aria-label', label);
         elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
         elements.gotoHistoryBtn.title = label;
-        if (restoreFocus && !isOpen) {
-            const trigger = elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
-                document.getElementById('document-library-back');
-            trigger.focus({ preventScroll: true });
-        }
+        if (restoreFocus && !isOpen) elements.gotoHistoryBtn.focus({ preventScroll: true });
     },
 
     updateChatSidebarResponsiveState() {
@@ -5938,7 +5934,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         const generatingTitle = state.chatTitleGenerations.has(String(chatId));
         const generatingAnswer = Boolean(appLogic.getSendJobV136(chatId));
-        const dot = openButton.querySelector('.chat-sidebar-title-dot');
+        const dot = openButton.parentElement.querySelector('.chat-sidebar-title-dot');
         const title = openButton.querySelector('.chat-sidebar-item-title').title;
         dot.hidden = !(generatingTitle || generatingAnswer);
         dot.title = generatingAnswer ? '応答生成中' : 'タイトル生成中';
@@ -5946,7 +5942,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         openButton.setAttribute('aria-label', `「${title}」を開く${project ? `（${project}）` : ''}${dot.hidden ? '' : `（${dot.title}）`}`);
     },
 
-    createChatSidebarItem(model, { isSearch = false, projectName } = {}) {
+    createChatSidebarItem(model, { isSearch = false, projectName, inlineStatus = false } = {}) {
         const item = document.createElement('div');
         item.className = 'chat-sidebar-item';
         item.dataset.chatId = model.id;
@@ -5975,9 +5971,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const dot = document.createElement('span');
         dot.className = 'generation-status-dot chat-sidebar-title-dot';
         dot.setAttribute('aria-hidden', 'true');
-        titleLine.append(title, dot);
+        titleLine.append(title);
+        if (inlineStatus) titleLine.append(dot);
         openButton.appendChild(titleLine);
-        this.syncChatSidebarTitleGeneration(model.id, openButton);
         if (projectName) {
             const project = document.createElement('span');
             project.className = 'chat-sidebar-item-snippet';
@@ -5985,7 +5981,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             project.title = projectName;
             openButton.dataset.projectName = projectName;
             openButton.append(project);
-            this.syncChatSidebarTitleGeneration(model.id, openButton);
         }
         if (isSearch) {
             if (model.snippet) {
@@ -6007,6 +6002,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menuButton.setAttribute('aria-controls', 'history-item-menu');
         menuButton.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">more_vert</span>';
         item.append(openButton, menuButton);
+        if (!inlineStatus) item.append(dot);
+        this.syncChatSidebarTitleGeneration(model.id, openButton);
         return item;
     },
 

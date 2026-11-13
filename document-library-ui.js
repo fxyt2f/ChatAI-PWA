@@ -385,8 +385,6 @@ window.DocumentLibraryUI = (() => {
         controls.preview.hidden = true;
         controls.layout.dataset.detail = 'false';
         controls.workspace.removeAttribute('data-viewing-file');
-        controls.back.title = 'チャットへ戻る';
-        controls.back.setAttribute('aria-label', controls.back.title);
         controls.mobileTitle.textContent = '';
         controls.extracts.replaceChildren();
     }
@@ -552,10 +550,6 @@ window.DocumentLibraryUI = (() => {
         controls.previewTitle.textContent = (entry.fileName || entry.name) + (reference ? ' · 版 ' + entry.version : '');
         controls.mobileTitle.textContent = entry.fileName || entry.name;
         const narrow = isNarrow();
-        if (narrow) {
-            controls.back.title = 'ライブラリへ戻る';
-            controls.back.setAttribute('aria-label', controls.back.title);
-        }
         controls.originalStatus.textContent = '';
         controls.showOriginal.disabled = entry.format !== 'pdf';
         controls.previewStatus.textContent = '本文を読み込み中…';
@@ -815,6 +809,9 @@ window.DocumentLibraryUI = (() => {
         if (sidebarOverlay) window.uiUtilsV136.closeChatSidebar();
         if (!fromHistory) history.pushState({ screen: 'chat', documentLibrary: true }, '', '#chat');
         controls.workspace.hidden = false;
+        const sidebarToggle = document.getElementById('goto-history-btn');
+        view.sidebarToggleNext = sidebarToggle.nextElementSibling;
+        controls.title.before(sidebarToggle);
         chat.classList.add('document-library-covered');
         window.uiUtilsV136.syncChatWorkspaceInteractivity();
         window.uiUtilsV136.syncChatSidebarCurrentSelection();
@@ -840,6 +837,7 @@ window.DocumentLibraryUI = (() => {
         view.searchController?.abort();
         clearPreview(view);
         controls.workspace.removeAttribute('data-file-drop');
+        view.sidebarToggleNext.before(document.getElementById('goto-history-btn'));
         controls.workspace.hidden = true;
         view.chat.classList.remove('document-library-covered');
         window.uiUtilsV136.syncChatWorkspaceInteractivity();
@@ -852,13 +850,6 @@ window.DocumentLibraryUI = (() => {
                 target.focus({ preventScroll: true });
             }
         }
-    }
-
-    function back() {
-        if (!workspace) return;
-        if (history.state?.documentLibraryDetail && !history.state?.projectPreview) history.go(-2);
-        else if (history.state?.documentLibrary) history.back();
-        else closeWorkspace({ restoreFocus: true });
     }
 
     function returnToCollection(view) {
@@ -969,7 +960,7 @@ window.DocumentLibraryUI = (() => {
 
     function install() {
         if (controls) return;
-        const ids = ['open', 'workspace', 'back', 'detail-close', 'title', 'mobile-title', 'mobile-search', 'desktop-search',
+        const ids = ['open', 'workspace', 'detail-close', 'title', 'mobile-title', 'mobile-search', 'desktop-search',
             'notice', 'add', 'files', 'replacement', 'sort',
             'collection', 'collection-scroll', 'list', 'empty', 'menu', 'search', 'query', 'search-mode',
             'search-status', 'preview', 'preview-title', 'preview-status', 'detail-search', 'detail-find',
@@ -999,10 +990,6 @@ window.DocumentLibraryUI = (() => {
             if (picker?.selecting && ownsPicker(picker)) renderPickerRows(picker);
         });
         controls.open.addEventListener('click', () => openWorkspace());
-        controls.back.addEventListener('click', () => {
-            if (workspace?.selected && isNarrow()) closePreview(workspace);
-            else back();
-        });
         controls.detailClose.addEventListener('click', () => { if (workspace) closePreview(workspace); });
         installFilePicker(controls.files, controls.add, () => workspace, true);
         installFilePicker(controls.pickerFiles, controls.pickerUpload, () => picker);
@@ -1076,9 +1063,6 @@ window.DocumentLibraryUI = (() => {
         }, true);
         new ResizeObserver(() => {
             if (rowMenu) window.uiUtilsV136.positionRowMenu(rowMenu.menu, rowMenu.anchor, rowMenu.container);
-            const label = workspace?.selected && isNarrow() ? 'ライブラリへ戻る' : 'チャットへ戻る';
-            controls.back.title = label;
-            controls.back.setAttribute('aria-label', label);
         }).observe(controls.workspace);
         new ResizeObserver(([entry]) => {
             const view = workspace;
