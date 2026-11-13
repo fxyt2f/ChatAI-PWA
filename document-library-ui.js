@@ -181,7 +181,12 @@ window.DocumentLibraryUI = (() => {
 
     function renderPicker(view) {
         const selecting = view.selecting;
-        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : 'このチャットのファイル';
+        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : view.project ? 'チャット固有資料' : 'このチャットのファイル';
+        controls.pickerProject.hidden = selecting || !view.project;
+        controls.pickerProjectOpen.textContent = view.project ? `「${view.project.name}」で管理` : 'プロジェクトで管理';
+        controls.pickerProjectList.replaceChildren(...(view.shared ?? []).map(entry =>
+            node('li', `${entry.fileName} · 版 ${entry.version}`)));
+        if (view.project && !view.shared.length) controls.pickerProjectList.append(node('li', '共有資料はありません。'));
         controls.pickerCount.hidden = selecting;
         controls.pickerCount.textContent = view.linked.length + '件';
         controls.pickerBack.hidden = !selecting;
@@ -217,17 +222,28 @@ window.DocumentLibraryUI = (() => {
         const request = ++view.refreshVersion;
         const id = view.chatId;
         try {
-            const [entries, linked] = await Promise.all([
+            const [entries, linked, projectInfo] = await Promise.all([
                 window.dbUtils.listLibraryDocuments(),
-                window.dbUtils.getChatDocuments(id, chatOwner(view))
+                window.dbUtils.getChatDocuments(id, chatOwner(view)),
+                (async () => {
+                    const pending = window.dbUtils.projectDrafts?.get(view.messages);
+                    const project = id != null ? await window.dbUtils.getChatProject(id) :
+                        pending ? await window.dbUtils.getProject(pending) : undefined;
+                    return { project, shared: project ? await window.dbUtils.listProjectDocuments(project.id) : [] };
+                })()
             ]);
             if (!ownsPicker(view) || request !== view.refreshVersion || id !== view.chatId) return;
             const sorted = entries.sort(byName);
             const links = linked.filter(Boolean).sort(byName);
-            const changed = !view.loaded || !sameRows(view.entries, sorted) || !sameRows(view.linked, links);
+            const shared = projectInfo.shared.sort(byName);
+            const changed = !view.loaded || !sameRows(view.entries, sorted) || !sameRows(view.linked, links) ||
+                view.project?.id !== projectInfo.project?.id || view.project?.name !== projectInfo.project?.name ||
+                !sameRows(view.shared, shared);
             view.loaded = true;
             view.entries = sorted;
             view.linked = links;
+            view.project = projectInfo.project;
+            view.shared = shared;
             if (changed) renderPicker(view);
         } catch {
             if (request === view.refreshVersion) notice(view, 'ファイルの一覧を読み取れませんでした。');
@@ -237,7 +253,7 @@ window.DocumentLibraryUI = (() => {
     function openPicker() {
         if (picker || workspace || window.state.currentScreen !== 'chat') return;
         const view = picker = { kind: 'picker', chatId: window.state.currentChatId, messages: window.state.currentMessages,
-            entries: [], linked: [], refreshVersion: 0, selecting: false, loaded: false, mutating: false };
+            entries: [], linked: [], shared: [], refreshVersion: 0, selecting: false, loaded: false, mutating: false };
         controls.pickerNotice.textContent = '';
         controls.pickerQuery.value = '';
         renderPicker(view);
@@ -684,16 +700,20 @@ window.DocumentLibraryUI = (() => {
         void window.DocumentSearch.analyzeDocument(entry).catch(() => {});
     }
 
+    async function registerFile(file) {
+        verifyFile(file);
+        const entry = await window.dbUtils.addLibraryDocument(file);
+        analyzeInBackground(entry);
+        return entry;
+    }
+
     function addFiles(view, files) {
         return mutate(view, async () => {
             const errors = [];
             const saved = [];
             for (const file of files) {
                 try {
-                    verifyFile(file);
-                    const entry = await window.dbUtils.addLibraryDocument(file);
-                    saved.push(entry);
-                    analyzeInBackground(entry);
+                    saved.push(await registerFile(file));
                 } catch (error) { errors.push(file.name + ' — ' + (error.message || '保存に失敗しました。')); }
             }
             if (view.kind === 'picker' && saved.length) {
@@ -747,6 +767,7 @@ window.DocumentLibraryUI = (() => {
             return workspace;
         }
         closePicker();
+        window.ProjectUI?.close({ fromHistory: true });
         const chat = document.getElementById('chat-workspace');
         const scroller = chat.querySelector('.main-content');
         const activeElement = document.activeElement;
@@ -802,7 +823,7 @@ window.DocumentLibraryUI = (() => {
 
     function back() {
         if (!workspace) return;
-        if (history.state?.documentLibraryDetail) history.go(-2);
+        if (history.state?.documentLibraryDetail && !history.state?.projectPreview) history.go(-2);
         else if (history.state?.documentLibrary) history.back();
         else closeWorkspace({ restoreFocus: true });
     }
@@ -851,10 +872,18 @@ window.DocumentLibraryUI = (() => {
             version: reference.version, versionId: reference.versionId, format: reference.format }, { reference, chunkId: reference.chunkId });
     }
 
-    function close() {
+    function openProjectPreview(entry, projectId) {
+        install();
+        history.pushState({ screen: 'chat', documentLibrary: true, projectPreview: projectId,
+            documentLibraryDetail: { id: entry.id, versionId: entry.versionId } }, '', '#chat');
+        const view = openWorkspace({ fromHistory: true });
+        if (view) void preview(view, entry, { fromHistory: true });
+    }
+
+    function close(options) {
         if (!controls) return;
         closePicker();
-        closeWorkspace();
+        closeWorkspace(options);
     }
 
     function installFilePicker(input, trigger, currentView, direct = false) {
@@ -916,7 +945,7 @@ window.DocumentLibraryUI = (() => {
             'pdf-previous', 'pdf-next', 'pdf-number', 'pdf-zoom-in', 'pdf-zoom-out',
             'page-number', 'extracts', 'picker', 'picker-open', 'picker-title', 'picker-heading', 'picker-count', 'picker-back', 'picker-close',
             'picker-notice', 'picker-empty', 'picker-list', 'picker-actions', 'picker-search', 'picker-query',
-            'picker-select', 'picker-upload', 'picker-files', 'picker-menu'];
+            'picker-select', 'picker-upload', 'picker-files', 'picker-menu', 'picker-project', 'picker-project-list', 'picker-project-open'];
         controls = Object.fromEntries(ids.map(id => [
             id.replace(/-([a-z])/g, (_, char) => char.toUpperCase()), document.getElementById('document-library-' + id)
         ]));
@@ -926,6 +955,10 @@ window.DocumentLibraryUI = (() => {
         }
         controls.pickerOpen.addEventListener('click', openPicker);
         controls.pickerClose.addEventListener('click', closePicker);
+        controls.pickerProjectOpen.addEventListener('click', () => {
+            const id = picker?.project?.id;
+            if (id) window.ProjectUI?.open(id);
+        });
         controls.picker.addEventListener('close', () => { if (!controls.picker.open) closePicker(); });
         controls.pickerSelect.addEventListener('click', () => pickerSelection(true));
         controls.pickerBack.addEventListener('click', () => pickerSelection(false));
@@ -1024,5 +1057,6 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference };
+    return { install, close, handleHistory, openReference, openProjectPreview, registerFile, byName,
+        refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

@@ -34,6 +34,7 @@ parser.add_argument('--documents',action='store_true',help='Run the isolated doc
 parser.add_argument('--document-search',action='store_true',help='Run document extraction, index and ranking tests')
 parser.add_argument('--document-rag',action='store_true',help='Run RAG send, regeneration, persistence and security regressions')
 parser.add_argument('--document-ui',action='store_true',help='Exercise the real library dialog in mobile and wide mode')
+parser.add_argument('--project-ui',action='store_true',help='Exercise project navigation, membership, drafts and shared files')
 parser.add_argument('--sw-diagnostics',type=Path,help='Write SW server, Console, Network and registration diagnostics')
 parser.add_argument('--review',action='store_true',help='Run R01-R08 integration regressions')
 parser.add_argument('--j',action='store_true',help='Run J01-J04 storage, wire and responsiveness regressions')
@@ -170,6 +171,9 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
         client.call('Runtime.addBinding',{'name':'testFocusTab'})
         client.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
         startup_output=''
+        if args.project_ui:
+            from project_ui import run as run_project_ui
+            startup_output+=run_project_ui(client, f'http://localhost:{server.server_port}/')+'\n'
         if args.document_ui:
             from document_library_ui import run as run_document_library_ui
             startup_output+=run_document_library_ui(client, f'http://localhost:{server.server_port}/')+'\n'

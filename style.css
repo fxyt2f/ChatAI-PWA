@@ -5966,6 +5966,105 @@ body.dark-mode .execution-popover { color-scheme:dark; }
 #history-delete-status:empty { display: none; }
 #history-delete-confirm-btn:not(:disabled) { background: var(--bg-button-delete); }
 #chat-workspace.document-library-covered { opacity: 0; }
+#chat-workspace.project-covered { opacity: 0; }
+#chat-screen > #project-workspace {
+    grid-column: -2 / -1;
+    grid-row: 1;
+    z-index: 1;
+    color: var(--text-primary);
+}
+#chat-screen:not(.chat-sidebar-mode-permanent) > #project-workspace {
+    position: absolute;
+    inset: 0;
+}
+#project-workspace[hidden], #project-workspace [hidden], #project-sidebar[hidden],
+#project-sidebar [hidden], #project-menu[hidden], #project-all-history[hidden] { display: none; }
+.project-header { gap: 6px; }
+.project-header h1 {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 1.1rem;
+}
+#project-content {
+    width: min(100%, 880px);
+    margin-inline: auto;
+    padding: 12px clamp(12px, 4vw, 32px) max(24px, var(--safe-bottom));
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+#project-content > section { margin-block: 18px 26px; }
+#project-content h2 { font-size: 1rem; margin-block: 0 8px; }
+#project-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+#project-content .document-library-toolbar { margin-bottom: 8px; }
+#project-chats .chat-sidebar-item-menu { opacity: 1; }
+.project-document-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    border-bottom: 1px solid var(--border-primary);
+}
+.project-document-row > button:last-child { flex: none; }
+.chat-sidebar-item.project-folder-row { grid-template-columns: 36px minmax(0, 1fr) var(--sidebar-menu-size); }
+.project-folder-open { display: flex; align-items: center; gap: 5px; }
+.project-folder-open[aria-current="page"] { background: var(--sidebar-selected-bg); }
+.project-folder-open > .material-symbols-outlined { font-size: 18px; }
+.project-folder-row > .project-expand { flex: none; min-width: 32px; min-height: 40px; }
+.project-folder-chats { margin-inline-start: 16px; border-inline-start: 1px solid var(--border-primary); padding-inline-start: 4px; }
+.project-empty { padding: 7px 8px; color: var(--text-secondary); font-size: .85rem; }
+#project-sidebar { margin-bottom: 8px; }
+#project-all-history { margin-top: 6px; }
+#project-dialog { width: min(450px, calc(100% - 24px)); }
+#project-form { display: grid; gap: 12px; }
+#project-dialog-fields { display: grid; gap: 10px; min-width: 0; }
+.project-field { display: grid; gap: 4px; min-width: 0; }
+.project-field :is(input, select, textarea) {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    font: inherit;
+}
+.project-field textarea { resize: vertical; }
+#project-dialog.chat-workspace-dialog { max-height: min(600px, calc(100dvh - 24px)); }
+.project-picker-list { max-height: min(43vh, 340px); overflow: auto; }
+.project-picker-list label {
+    display: flex;
+    align-items: center;
+    min-height: 42px;
+    gap: 8px;
+    padding: 4px 2px;
+    border-bottom: 1px solid var(--border-primary);
+    overflow-wrap: anywhere;
+}
+#document-library-picker-project {
+    padding-block: 4px 8px;
+    border-bottom: 1px solid var(--border-primary);
+    font-size: .85rem;
+}
+#document-library-picker-project-list {
+    padding: 4px 2px;
+    max-height: min(19dvh, 130px);
+    overflow: auto;
+    list-style: none;
+    overflow-wrap: anywhere;
+}
+#document-library-picker-project h3 { font-size: .88rem; }
+#project-notice, #project-dialog-notice { white-space: pre-wrap; overflow-wrap: anywhere; }
+#project-draft-label {
+    margin: 0;
+    padding: 4px 12px;
+    color: var(--text-secondary);
+    font-size: .82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 #document-library-workspace[hidden],
 #document-library-workspace [hidden],
 #document-library-picker [hidden] { display: none !important; }

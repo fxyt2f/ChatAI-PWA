@@ -668,6 +668,7 @@ try {
         appHeader: document.querySelector('.app-header'),
         chatScreen: document.getElementById('chat-screen'),
         chatWorkspace: document.getElementById('chat-workspace'),
+        projectWorkspace: document.getElementById('project-workspace'),
         documentLibraryWorkspace: document.getElementById('document-library-workspace'),
         documentLibraryOpen: document.getElementById('document-library-open'),
         chatHistorySidebar: document.getElementById('chat-history-sidebar'),
@@ -681,6 +682,7 @@ try {
         chatSidebarSearchToggle: document.getElementById('chat-sidebar-search-toggle'),
         chatSidebarSearchField: document.getElementById('chat-sidebar-search-field'),
         chatSidebarHistoryMenuBtn: document.getElementById('chat-sidebar-history-menu-btn'),
+        chatSidebarHistoryTitle: document.getElementById('chat-sidebar-history-title'),
         settingsScreen: document.getElementById('settings-screen'),
         chatTitle: document.getElementById('chat-title'),
         messageContainer: document.getElementById('message-container'),
@@ -1872,6 +1874,7 @@ const dbUtils = {
         // save may still be finishing when navigation changes the active chat.
         const session = options.sendSession;
         const contextMessages = session?.messages ?? state.currentMessages;
+        const draftProjectId = chatObjectToSave ? null : this.projectDrafts?.get(contextMessages);
         let contextChatId = session ? session.chatId : state.currentChatId;
         let targetChatId = chatObjectToSave ? chatObjectToSave.id : contextChatId, savedChatId = null;
         let committedVersion, conflict = false;
@@ -1999,6 +2002,7 @@ const dbUtils = {
                 try {
                     const scopes = [CHATS_STORE, SETTINGS_STORE];
                     if (documentIds) scopes.push(DocumentLibrary.documents, DocumentLibrary.links);
+                    if (draftProjectId && !targetChatId) scopes.push(ProjectStore.projects, ProjectStore.chats);
                     const transaction = state.db.transaction(scopes, 'readwrite');
                     const store = transaction.objectStore(CHATS_STORE);
                     const settingsStore = transaction.objectStore(SETTINGS_STORE);
@@ -2088,13 +2092,18 @@ const dbUtils = {
                             const savedId = event.target.result;
                             savedChatId = savedId;
                             savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt };
-                            if (documentIds) {
-                                DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode)
-                                    .catch(error => {
-                                        linkError = error;
-                                        try { transaction.abort(); } catch { /* already aborted */ }
-                                    });
-                            }
+                            const relatedWrites = [];
+                            if (documentIds) relatedWrites.push(
+                                DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode));
+                            if (draftProjectId && isNewDraft) relatedWrites.push((async () => {
+                                await ProjectStore.requireProject(transaction, draftProjectId);
+                                transaction.objectStore(ProjectStore.chats).add({ chatId: savedId, projectId: draftProjectId });
+                                await ProjectStore.markChanged(settingsStore);
+                            })());
+                            Promise.all(relatedWrites).catch(error => {
+                                linkError = error;
+                                try { transaction.abort(); } catch { /* already aborted */ }
+                            });
                         };
                         putRequest.onerror = (event) => {
                             console.error("チャット保存(put)エラー:", event.target.error);
@@ -2136,8 +2145,11 @@ const dbUtils = {
                         try {
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) {
+                                    const projectDraftKey = draftProjectId && appLogic.getInputDraftContextKey();
                                     state.currentChatId = contextChatId = savedChatId;
-                                    if (documentIds) appLogic.flushInputDraft();
+                                    if (projectDraftKey) window.ProjectUI?.syncDraftLabel();
+                                    if (projectDraftKey && !session) appLogic.clearInputDraftAfterSend(projectDraftKey);
+                                    if (documentIds || (projectDraftKey && !session)) appLogic.flushInputDraft();
                                 }
                                 state.currentChatIsPinned = savedUiState.pinState.isPinned;
                                 state.currentChatPinnedAt = savedUiState.pinState.isPinned ? savedUiState.pinState.pinnedAt : null;
@@ -2184,6 +2196,7 @@ const dbUtils = {
         const db = await this.openDB();
         const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, null, file, options);
         appLogic.markAsDirtyAndSchedulePush(true);
+        void chatListChangeController.notify({ type: 'library' });
         return entry;
     },
 
@@ -2192,13 +2205,17 @@ const dbUtils = {
         const db = await this.openDB();
         const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, id, file, options);
         appLogic.markAsDirtyAndSchedulePush(true);
+        void chatListChangeController.notify({ type: 'library' });
         return entry;
     },
 
     async deleteLibraryDocument(id, options = {}) {
         const db = await this.openDB();
         const deleted = await DocumentLibrary.deleteDocument(db, SETTINGS_STORE, id, options);
-        if (deleted) appLogic.markAsDirtyAndSchedulePush(true);
+        if (deleted) {
+            appLogic.markAsDirtyAndSchedulePush(true);
+            void chatListChangeController.notify({ type: 'library' });
+        }
         return deleted;
     },
 
@@ -2268,7 +2285,15 @@ const dbUtils = {
             return result;
         });
         if (result) appLogic.markAsDirtyAndSchedulePush(true);
+        if (result) void chatListChangeController.notify({ type: 'project' });
         return result;
+    },
+
+    async getProjectSidebarSnapshot() {
+        const db = await this.openDB();
+        const stores = [CHATS_STORE, ProjectStore.projects, ProjectStore.chats];
+        return DocumentLibrary.transaction(db, stores, 'readonly', tx => Promise.all(stores.map(name =>
+            DocumentLibrary.request(tx.objectStore(name).getAll()))));
     },
 
     async listProjects() {
@@ -2326,25 +2351,44 @@ const dbUtils = {
     async _listProjectTargets(projectId, linkStore, targetStore, targetKey) {
         const range = IDBKeyRange.only(projectId);
         const db = await this.openDB();
-        return DocumentLibrary.transaction(db, [linkStore, targetStore], 'readonly', async tx => {
-            const links = await DocumentLibrary.request(tx.objectStore(linkStore).index('projectId').getAll(range));
-            const targets = tx.objectStore(targetStore);
-            return Promise.all(links.map(link => DocumentLibrary.request(targets.get(link[targetKey]))));
-        });
+        return DocumentLibrary.transaction(db, [linkStore, targetStore], 'readonly', tx =>
+            this._readProjectTargets(tx, range, linkStore, targetStore, targetKey));
+    },
+
+    async _readProjectTargets(tx, range, linkStore, targetStore, targetKey) {
+        const read = DocumentLibrary.request;
+        const links = await read(tx.objectStore(linkStore).index('projectId').getAll(range));
+        const targets = tx.objectStore(targetStore);
+        return Promise.all(links.map(link => read(targets.get(link[targetKey]))));
+    },
+
+    async getProjectWorkspaceSnapshot(projectId) {
+        const range = IDBKeyRange.only(projectId);
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [...ProjectStore.stores, CHATS_STORE, DocumentLibrary.documents], 'readonly', tx =>
+            Promise.all([
+                DocumentLibrary.request(tx.objectStore(ProjectStore.projects).get(projectId)),
+                this._readProjectTargets(tx, range, ProjectStore.chats, CHATS_STORE, 'chatId'),
+                this._readProjectTargets(tx, range, ProjectStore.documents, DocumentLibrary.documents, 'documentId')
+            ]));
     },
 
     listProjectChats(projectId) {
         return this._listProjectTargets(projectId, ProjectStore.chats, CHATS_STORE, 'chatId');
     },
 
-    setChatProject(chatId, projectId) {
+    setChatProject(chatId, projectId, { expectedRecord, expectedProjectId } = {}) {
         return this._writeProjectData([CHATS_STORE, ProjectStore.projects, ProjectStore.chats], async tx => {
             const read = DocumentLibrary.request;
-            if (await read(tx.objectStore(CHATS_STORE).getKey(chatId)) === undefined) throw new Error('チャットが見つかりません。');
+            const chat = await read(tx.objectStore(CHATS_STORE).get(chatId));
+            if (!chat) throw new Error('チャットが見つかりません。');
+            if (expectedRecord && !this.matchesHistoryDeleteRecord(chat, expectedRecord)) throw new Error('チャットが変更されました。');
+            const store = tx.objectStore(ProjectStore.chats);
+            const previous = (await read(store.get(chatId)))?.projectId ?? null;
+            if (previous === projectId) return false;
+            if (expectedProjectId !== undefined && previous !== expectedProjectId) throw new Error('チャットの所属が変更されました。');
             if (projectId === null) return ProjectStore.detachChat(tx, chatId);
             await ProjectStore.requireProject(tx, projectId);
-            const store = tx.objectStore(ProjectStore.chats);
-            if ((await read(store.get(chatId)))?.projectId === projectId) return false;
             store.put({ chatId, projectId });
             return true;
         });
@@ -3197,7 +3241,8 @@ const chatListChangeController = {
         if (broadcast && broadcastChannel) {
             try {
                 broadcastChannel.postMessage({
-                    type: 'CHAT_LIST_CHANGED', sourceTabId: state.tabId, database: state.db?.name
+                    type: 'CHAT_LIST_CHANGED', sourceTabId: state.tabId, database: state.db?.name,
+                    change: normalizedDetail.type
                 });
             } catch (error) {
                 console.warn('[ChatListChange] 別タブへの通知に失敗しました:', error);
@@ -3225,6 +3270,9 @@ const chatSidebarUiState = {
     mode: 'disabled',
     isOpen: false,
     query: '',
+    showAll: false,
+    projects: [],
+    memberships: new Map(),
     allChats: [],
     recordsById: new Map(),
     renderGeneration: 0,
@@ -5681,8 +5729,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     syncChatWorkspaceInteractivity() {
         const overlay = chatSidebarUiState.mode === 'overlay' && chatSidebarUiState.isOpen;
         const library = elements.documentLibraryWorkspace;
-        elements.chatWorkspace.inert = overlay || !library.hidden;
+        const project = elements.projectWorkspace;
+        elements.chatWorkspace.inert = overlay || !library.hidden || !project.hidden;
         library.inert = overlay;
+        project.inert = overlay;
+        elements.chatWorkspace.classList.toggle('project-covered', !project.hidden);
     },
 
     applyChatSidebarState({ restoreFocus = false } = {}) {
@@ -5702,7 +5753,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
         elements.gotoHistoryBtn.title = label;
         if (restoreFocus && !isOpen) {
-            const trigger = elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
+            const trigger = !elements.projectWorkspace.hidden ? document.getElementById('project-back') : elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
                 document.getElementById('document-library-back');
             trigger.focus({ preventScroll: true });
         }
@@ -5835,6 +5886,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     closeChatSidebar({ restoreFocus = false } = {}) {
+        window.ProjectUI?.closeMenu();
         if (appLogic.swipeGesture?.sidebarDrag) appLogic.resetSwipeState();
         if (!chatSidebarUiState.isOpen) {
             this.applyChatSidebarState();
@@ -5851,40 +5903,45 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     syncChatSidebarCurrentSelection() {
         const libraryVisible = !elements.documentLibraryWorkspace.hidden;
+        const projectVisible = !elements.projectWorkspace.hidden;
         if (libraryVisible) elements.documentLibraryOpen.setAttribute('aria-current', 'page');
         else elements.documentLibraryOpen.removeAttribute('aria-current');
-        elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item').forEach(item => {
-            const isCurrent = !libraryVisible && String(item.dataset.chatId) === String(state.currentChatId ?? '');
+        if (!libraryVisible && !projectVisible) window.ProjectUI?.revealCurrentChat(chatSidebarUiState.memberships);
+        elements.chatHistorySidebar?.querySelectorAll('.chat-sidebar-item[data-chat-id]').forEach(item => {
+            const isCurrent = !libraryVisible && !projectVisible && String(item.dataset.chatId) === String(state.currentChatId ?? '');
             if (isCurrent) item.setAttribute('aria-current', 'page');
             else item.removeAttribute('aria-current');
         });
     },
 
     focusChatSidebarItem(chatId, action = 'menu') {
-        const item = [...(elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item') || [])]
-            .find(candidate => String(candidate.dataset.chatId) === String(chatId));
+        const item = [...elements.chatHistorySidebar.querySelectorAll('.chat-sidebar-item[data-chat-id]')]
+            .find(candidate => String(candidate.dataset.chatId) === String(chatId) && candidate.getClientRects().length);
         item?.querySelector(`[data-sidebar-action="${action}"]`)?.focus();
     },
 
-    syncChatSidebarTitleGeneration(chatId, openButton = elements.chatSidebarList?.querySelector(
-        `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`
-    )) {
-        if (!openButton) return;
+    syncChatSidebarTitleGeneration(chatId, openButton) {
+        if (!openButton) {
+            const selector = `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`;
+            elements.chatScreen.querySelectorAll(selector).forEach(button => this.syncChatSidebarTitleGeneration(chatId, button));
+            return;
+        }
         const generatingTitle = state.chatTitleGenerations.has(String(chatId));
         const generatingAnswer = Boolean(appLogic.getSendJobV136(chatId));
         const dot = openButton.querySelector('.chat-sidebar-title-dot');
         const title = openButton.querySelector('.chat-sidebar-item-title').title;
         dot.hidden = !(generatingTitle || generatingAnswer);
         dot.title = generatingAnswer ? '応答生成中' : 'タイトル生成中';
-        openButton.setAttribute('aria-label', `「${title}」を開く${dot.hidden ? '' : `（${dot.title}）`}`);
+        const project = openButton.dataset.projectName;
+        openButton.setAttribute('aria-label', `「${title}」を開く${project ? `（${project}）` : ''}${dot.hidden ? '' : `（${dot.title}）`}`);
     },
 
-    createChatSidebarItem(model, { isSearch = false } = {}) {
+    createChatSidebarItem(model, { isSearch = false, projectName } = {}) {
         const item = document.createElement('div');
         item.className = 'chat-sidebar-item';
         item.dataset.chatId = model.id;
         item.setAttribute('role', 'listitem');
-        if (model.isCurrent && elements.documentLibraryWorkspace.hidden) item.setAttribute('aria-current', 'page');
+        if (model.isCurrent && elements.documentLibraryWorkspace.hidden && elements.projectWorkspace.hidden) item.setAttribute('aria-current', 'page');
 
         const openButton = document.createElement('button');
         openButton.type = 'button';
@@ -5911,6 +5968,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         titleLine.append(title, dot);
         openButton.appendChild(titleLine);
         this.syncChatSidebarTitleGeneration(model.id, openButton);
+        if (projectName) {
+            const project = document.createElement('span');
+            project.className = 'chat-sidebar-item-snippet';
+            project.textContent = projectName;
+            project.title = projectName;
+            openButton.dataset.projectName = projectName;
+            openButton.append(project);
+            this.syncChatSidebarTitleGeneration(model.id, openButton);
+        }
         if (isSearch) {
             if (model.snippet) {
                 const snippet = document.createElement('span');
@@ -5938,14 +6004,23 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
+        const { showAll, projects, memberships } = chatSidebarUiState;
+        const showProjects = !query && !showAll;
+        const projectNames = new Map(projects.map(project => [project.id, project.name]));
         const sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         const allModels = chatSidebarUiState.allChats
+            .filter(chat => !showProjects || !memberships.has(chat.id))
             .map(chat => this.createHistoryDisplayModel(chat, query, sortOrder))
             .filter(Boolean);
         const pinnedModels = this.sortPinnedHistoryDisplayModels(allModels.filter(model => model.isPinned), sortOrder);
         const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model => !model.isPinned), sortOrder);
         const models = [...pinnedModels, ...unpinnedModels];
         chatSidebarUiState.recordsById = new Map(chatSidebarUiState.allChats.map(chat => [String(chat.id), chat]));
+        window.ProjectUI?.renderSidebar(projects, memberships, chatSidebarUiState.allChats, showProjects);
+        elements.chatSidebarHistoryTitle.textContent = query ? '検索結果' : showAll ? '全履歴' : '最近のチャット';
+        const createItem = model => this.createChatSidebarItem(model, {
+            isSearch: Boolean(query), projectName: projectNames.get(memberships.get(model.id))
+        });
         elements.chatSidebarList.replaceChildren();
         elements.chatSidebarStatus.textContent = '';
 
@@ -5953,7 +6028,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : 'チャット履歴はありません';
         } else if (query || sortOrder === 'title') {
             const fragment = document.createDocumentFragment();
-            models.forEach(model => fragment.appendChild(this.createChatSidebarItem(model, { isSearch: Boolean(query) })));
+            models.forEach(model => fragment.appendChild(createItem(model)));
             elements.chatSidebarList.appendChild(fragment);
         } else {
             const labels = {
@@ -5969,7 +6044,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 heading.textContent = label;
                 group.setAttribute('aria-label', label);
                 group.appendChild(heading);
-                groupModels.forEach(model => group.appendChild(this.createChatSidebarItem(model)));
+                groupModels.forEach(model => group.appendChild(createItem(model)));
                 elements.chatSidebarList.appendChild(group);
             };
             appendGroup('ピン留め', pinnedModels);
@@ -5992,9 +6067,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.chatSidebarStatus.textContent = '読み込み中…';
         try {
             if (refreshRecent || invalidateSearch || !chatSidebarUiState.hasLoadedAll) {
-                const allChats = await dbUtils.getAllChats('updatedAt');
+                const [allChats, projects, memberships] = await dbUtils.getProjectSidebarSnapshot();
                 if (generation !== chatSidebarUiState.renderGeneration) return;
-                chatSidebarUiState.allChats = Array.isArray(allChats) ? allChats : [];
+                chatSidebarUiState.allChats = allChats;
+                chatSidebarUiState.projects = projects;
+                chatSidebarUiState.memberships = new Map(memberships.map(link => [link.chatId, link.projectId]));
                 chatSidebarUiState.hasLoadedAll = true;
             }
             if (generation !== chatSidebarUiState.renderGeneration) return;
@@ -6107,11 +6184,13 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    showSidebarMenu(anchor, record = null) {
-        if (!anchor.isConnected || !chatSidebarUiState.isOpen || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
+    showSidebarMenu(anchor, record = null, source = 'sidebar') {
+        if (!anchor.isConnected || (source === 'sidebar' && !chatSidebarUiState.isOpen) || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
+        window.ProjectUI?.closeMenu();
         const menu = elements.historyItemMenu;
         const importOnly = !record;
-        historyUiState.menuContext = { chatId: record?.id, source: 'sidebar', triggerElement: anchor, importOnly };
+        const identity = record && { createdAt: record.createdAt, recordGenerationId: record.recordGenerationId };
+        historyUiState.menuContext = { chatId: record?.id, source, triggerElement: anchor, importOnly, identity };
         for (const item of menu.querySelectorAll('[data-history-menu-action]')) {
             const hidden = (item.dataset.historyMenuAction === 'import') !== importOnly;
             item.hidden = hidden;
@@ -6133,10 +6212,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     focusHistoryActionTarget(context, { preferMenu = true } = {}) {
         if (!context) return;
-        const item = [...elements.chatSidebarList.querySelectorAll('.chat-sidebar-item')]
-            .find(candidate => String(candidate.dataset.chatId) === String(context.chatId));
+        const surface = context.source === 'project' ? elements.projectWorkspace : elements.chatHistorySidebar;
+        const item = [...surface.querySelectorAll('.chat-sidebar-item[data-chat-id]')]
+            .find(candidate => String(candidate.dataset.chatId) === String(context.chatId) && candidate.getClientRects().length);
         const target = item?.querySelector(preferMenu ? '[data-sidebar-action="menu"]' : '[data-sidebar-action="open"]') ||
-            (chatSidebarUiState.isOpen ? elements.chatSidebarSearchToggle : elements.gotoHistoryBtn);
+            (context.source === 'project' && !surface.hidden ? document.getElementById('project-title') :
+                chatSidebarUiState.isOpen ? elements.chatSidebarSearchToggle : elements.gotoHistoryBtn);
         target.focus({ preventScroll: true });
     },
 
@@ -6158,6 +6239,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!record) return { ok: false, notFound: true, reason: 'record-not-found' };
         const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
 
+        if (action === 'project') return window.ProjectUI?.moveChat(record);
         if (action === 'pin') {
             return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
         }
@@ -6967,6 +7049,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           if (screenName !== 'settings' && elements.historyDeleteDialog.open) elements.historyDeleteDialog.close();
 
           if (screenName !== 'chat') {
+            window.ProjectUI?.close({ fromHistory: true });
             window.DocumentLibraryUI?.close();
             appLogic.invalidateSystemPromptOpen();
             this.closeHistoryItemMenu();
@@ -9912,7 +9995,10 @@ function updateCurrentSystemPrompt() {
                 }
                 if (type === 'CHAT_LIST_CHANGED') {
                     if (state.db && event.data.database === state.db.name) {
-                        void chatListChangeController.notify({ type: 'external' }, { broadcast: false });
+                        const change = event.data.change;
+                        void chatListChangeController.notify({
+                            type: change === 'library' ? 'library' : 'external', replaced: change === 'restore'
+                        }, { broadcast: false });
                     }
                     return;
                 }
@@ -12732,7 +12818,9 @@ const appLogic = {
         if (chatId !== null && chatId !== undefined) {
             return `chat:${String(chatId)}`;
         }
-        return `new:${String(profileId || state.activeProfile?.id || 'default')}`;
+        const projectId = dbUtils.projectDrafts?.get(state.currentMessages);
+        const profile = String(profileId || state.activeProfile?.id || 'default');
+        return projectId ? `new:project:${projectId}:${profile}` : `new:${profile}`;
     },
 
     getInputDraftStorageKey(contextKey) {
@@ -15111,6 +15199,7 @@ const appLogic = {
         this._setupEventListenersCallCount++;
         uiUtils.installDialogDismissal();
         window.DocumentLibraryUI?.install();
+        window.ProjectUI?.install();
         this.setupSwipeNavigation();
     
         // --- 画面遷移 ---
@@ -15169,6 +15258,12 @@ const appLogic = {
                 try {
                     const record = await uiUtils.resolveHistoryActionChat(chatId, { action, source });
                     if (!record) return;
+                    if (action === 'project' && context.identity?.recordGenerationId &&
+                        !dbUtils.matchesHistoryDeleteRecord(record, context.identity)) {
+                        uiUtils.closeHistoryItemMenu();
+                        await uiUtils.showCustomAlert('チャットが変更されました。履歴を開き直してください。');
+                        return;
+                    }
                     uiUtils.closeHistoryItemMenu();
                     const result = await uiUtils.executeHistoryAction(action, actionContext, { record });
                     if (action === 'pin' && result?.ok) uiUtils.focusHistoryActionTarget(actionContext);
@@ -15247,6 +15342,7 @@ const appLogic = {
                 if (chatSidebarUiState.searchTimer) clearTimeout(chatSidebarUiState.searchTimer);
                 chatSidebarUiState.searchTimer = null;
                 chatSidebarUiState.query = '';
+                chatSidebarUiState.showAll = false;
                 elements.chatSidebarSearchInput.value = '';
                 elements.chatSidebarSearchClearBtn.classList.add('hidden');
                 void uiUtils.renderChatSidebar();
@@ -15295,9 +15391,13 @@ const appLogic = {
                 clearChatSidebarSearch();
                 elements.chatSidebarSearchInput.focus();
             });
-            elements.chatSidebarList.addEventListener('click', async event => {
+            document.getElementById('project-all-history').addEventListener('click', () => {
+                chatSidebarUiState.showAll = !chatSidebarUiState.showAll;
+                void uiUtils.renderChatSidebar();
+            });
+            elements.chatSidebarScroll.addEventListener('click', async event => {
                 const actionElement = event.target.closest('[data-sidebar-action]');
-                if (!actionElement || !elements.chatSidebarList.contains(actionElement)) return;
+                if (!actionElement || !elements.chatSidebarScroll.contains(actionElement)) return;
                 const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId);
                 if (chatId === null) return;
                 const action = actionElement.dataset.sidebarAction;
@@ -15327,6 +15427,8 @@ const appLogic = {
             });
             window.addEventListener('resize', () => uiUtils.updateChatSidebarResponsiveState(), { passive: true });
             chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(detail => {
+                window.ProjectUI?.dataChanged(detail);
+                if (detail.type === 'library') return;
                 if (detail.type === 'save') {
                     chatSidebarUiState.hasLoadedAll = false;
                     if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
@@ -16272,7 +16374,10 @@ const appLogic = {
       this.resetSwipeState();
       if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
       else window.settingsUiV136?.closePopover(false);
-      if (targetScreen === 'chat') window.DocumentLibraryUI?.handleHistory(entry);
+      if (targetScreen === 'chat') {
+          window.ProjectUI?.handleHistory(entry);
+          window.DocumentLibraryUI?.handleHistory(entry);
+      }
       if (legacyHistory) uiUtils.openChatSidebar();
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
       return;
@@ -16280,7 +16385,10 @@ const appLogic = {
     console.log(`popstate event fired: Navigating to screen '${targetScreen}' from history state.`);
     // showScreenを呼び出す (fromPopState = true を渡して履歴操作を抑制)
     void uiUtils.showScreen(targetScreen, true, entry).then(() => {
-        if (targetScreen === 'chat' && history.state?.documentLibrary) window.DocumentLibraryUI?.handleHistory(history.state);
+        if (targetScreen === 'chat' && state.currentScreen === 'chat') {
+            window.ProjectUI?.handleHistory(history.state);
+            window.DocumentLibraryUI?.handleHistory(history.state);
+        }
         if (legacyHistory && state.currentScreen === 'chat') uiUtils.openChatSidebar();
     });
     },
@@ -16360,12 +16468,12 @@ const appLogic = {
         if (!gesture || gesture.control?.contains(document.activeElement)) return false;
         const selection = window.getSelection();
         const surface = gesture.sidebarSurface ? elements.chatHistorySidebar
-            : gesture.librarySurface ? elements.documentLibraryWorkspace
-            : gesture.screen === elements.chatScreen ? elements.chatWorkspace : gesture.screen;
+            : gesture.workspace || (gesture.librarySurface ? elements.documentLibraryWorkspace
+            : gesture.screen === elements.chatScreen ? elements.chatWorkspace : gesture.screen);
         if (selection && !selection.isCollapsed &&
             (surface.contains(selection.anchorNode) || surface.contains(selection.focusNode))) return false;
         if (state.currentScreen === 'chat') {
-            const workspace = gesture.librarySurface ? elements.documentLibraryWorkspace : elements.chatWorkspace;
+            const workspace = gesture.workspace || (gesture.librarySurface ? elements.documentLibraryWorkspace : elements.chatWorkspace);
             const available = gesture.sidebarSurface ? chatSidebarUiState.isOpen : !workspace.hidden && !workspace.inert;
             if (!available) return false;
         }
@@ -16389,8 +16497,9 @@ const appLogic = {
         const { identifier, clientX, clientY } = event.touches[0];
         const control = target.closest(SWIPE_FOCUS_CONTROLS);
         const sidebarSurface = Boolean(target.closest('#chat-history-sidebar, #chat-sidebar-backdrop'));
-        const librarySurface = Boolean(target.closest('#document-library-workspace'));
-        const gesture = { identifier, clientX, clientY, screen, control, sidebarSurface, librarySurface, hash: location.hash };
+        const workspace = target.closest('#document-library-workspace, #project-workspace');
+        const librarySurface = Boolean(workspace);
+        const gesture = { identifier, clientX, clientY, screen, control, sidebarSurface, librarySurface, workspace, hash: location.hash };
         if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen, control, sidebarSurface) ||
             screen.getAnimations?.().some(animation => animation.transitionProperty === 'transform' && animation.playState === 'running')) return;
         gesture.width = screen.getBoundingClientRect().width;
@@ -16662,7 +16771,7 @@ const appLogic = {
 
 
     // 新規チャット開始の確認と実行
-    async confirmStartNewChat() {
+    async confirmStartNewChat({ projectId, ownsProjectView = () => true } = {}) {
         if (this.chatParameterOperation) return false;
         const navigation = this.chatNavigationV136 = {};
         const confirmed = await uiUtils.showCustomConfirm(this.hasComposerAttachments()
@@ -16673,7 +16782,7 @@ const appLogic = {
             return false;
         }
 
-        if (this.chatNavigationV136 !== navigation) return false;
+        if (this.chatNavigationV136 !== navigation || !ownsProjectView()) return false;
         // 編集中なら破棄
         if (state.editingMessageIndex !== null) {
             const msgEl = elements.messageContainer.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
@@ -16694,16 +16803,16 @@ const appLogic = {
             await uiUtils.showCustomAlert("現在のチャットの保存に失敗しました。");
         }
 
-        if (this.chatNavigationV136 !== navigation) return false;
+        if (this.chatNavigationV136 !== navigation || !ownsProjectView()) return false;
         const previousDraftContextKey = this.getInputDraftContextKey();
-        if (state.currentChatId) {
+        if (state.currentChatId || dbUtils.projectDrafts?.has(state.currentMessages)) {
             this.flushInputDraft();
         } else {
             this.clearInputDraftAfterSend(previousDraftContextKey);
         }
 
         // 新規チャットを開始
-        this.startNewChat();
+        this.startNewChat({ projectId });
         await uiUtils.showScreen('chat');
         return true;
     },
@@ -16724,6 +16833,7 @@ const appLogic = {
 
     startNewChat(options = {}) {
         if (this.chatParameterOperation) return;
+        window.ProjectUI?.close();
         window.DocumentLibraryUI?.close();
         this.chatNavigationV136 = {};
         this.invalidateSystemPromptOpen();
@@ -16739,6 +16849,11 @@ const appLogic = {
         state.currentChatPinnedAt = null;
         state.currentChatPinStateUpdatedAt = null;
         state.currentMessages = [];
+        if (options.projectId) {
+            dbUtils.projectDrafts ||= new WeakMap();
+            dbUtils.projectDrafts.set(state.currentMessages, options.projectId);
+        }
+        window.ProjectUI?.syncDraftLabel();
         this.projectSendJobV136();
         let draft = null;
         if (options.restoreDraft) {
@@ -16869,6 +16984,7 @@ const appLogic = {
             }
         });
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
+        window.ProjectUI?.close();
         window.DocumentLibraryUI?.close();
         uiUtils.closeChatSearch({ restoreFocus: false });
 
@@ -16876,6 +16992,7 @@ const appLogic = {
         this.clearComposerAttachments();
         state.currentChatId = chat.id;
         state.currentMessages = nextMessages;
+        window.ProjectUI?.syncDraftLabel();
         state.currentExecutionSettings = job?.execution ?? this.getChatExecutionSettingsV136(chat);
         this.projectSendJobV136();
         state.executionInitializingV136 = false;
@@ -18194,8 +18311,10 @@ const appLogic = {
             this.scrollToBottom();
         }
         
+        let firstSaveCommitted = false;
         try {
             await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
+            firstSaveCommitted = Boolean(preparation.chatId);
             if (this.showsSendExecutionV136(preparation) && this.ownsSendExecutionV136(preparation))
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
@@ -18243,6 +18362,23 @@ const appLogic = {
 
         } catch(error) {
             if (!this.ownsSendExecutionV136(preparation)) return;
+            if (!firstSaveCommitted && dbUtils.projectDrafts?.has(preparation.messages)) {
+                preparation.messages.splice(0, preparation.messages.length, ...preparation.originalMessages);
+                preparation.saveFailed = true;
+                if (this.showsSendExecutionV136(preparation)) {
+                    elements.userInput.value = preparation.input;
+                    state.currentPersistentMemory = preparation.originalMemory;
+                    state.pendingAttachments = preparation.attachments;
+                    preparation.attachments.forEach(attachment => uiUtils.appendComposerAttachment(attachment));
+                    uiUtils.updateComposerAttachmentControls();
+                    uiUtils.adjustTextareaHeight();
+                    uiUtils.renderChatMessages();
+                    this.flushInputDraft();
+                }
+                if (!preparation.controller.signal.aborted)
+                    await uiUtils.showCustomAlert(`チャットと所属を保存できませんでした。\n${error.message || error}`);
+                return;
+            }
             const partial = this.getIncompleteStreamMessageV136(preparation);
             const replacement = partial ? [partial] : [];
             if (error.name !== 'AbortError') {
@@ -18268,7 +18404,7 @@ const appLogic = {
         } finally {
             const stillOwner = this.ownsSendExecutionV136(preparation);
             this.finishSendExecutionV136(preparation);
-            if (stillOwner) {
+            if (stillOwner && (firstSaveCommitted || !dbUtils.projectDrafts?.has(preparation.messages))) {
                 this.markAsDirtyAndSchedulePush('message', { completedSend: true });
                 if (!preparation.streaming && preparation.settings.autoScroll) requestAnimationFrame(() => {
                     if (this.showsSendExecutionV136(preparation)) this.scrollToBottom();
@@ -23995,7 +24131,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 // 現行履歴画面と将来の履歴サイドバーが共有する、既存処理の薄い入口。
 const chatHistoryActions = {
-    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'delete']),
+    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'project', 'delete']),
 
     isSupportedMenuAction(action) {
         return this.supportedMenuActions.has(action);
