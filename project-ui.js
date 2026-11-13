@@ -627,7 +627,7 @@ window.ProjectUI = (() => {
 
     function chooseExisting(owner, kind) {
         const choosingChats = kind === 'chat';
-        return showDialog(choosingChats ? '既存チャットを追加' : 'ファイルライブラリから追加', '追加', (context, fields) => {
+        return showDialog(choosingChats ? '既存チャットを追加' : 'ライブラリから追加', '追加', (context, fields) => {
             const search = field(fields, choosingChats ? 'チャット名で絞り込み' : 'ファイル名で絞り込み', node('input'));
             search.type = 'search';
             const status = node('p', '読み込み中…', 'document-library-muted');

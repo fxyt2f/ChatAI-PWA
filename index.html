@@ -57,7 +57,7 @@
                 <div class="chat-sidebar-controls">
                     <nav class="chat-sidebar-navigation" aria-label="ワークスペース">
                         <button id="new-chat-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">edit_square</span>新規チャット</button>
-                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ファイルライブラリ</button>
+                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ライブラリ</button>
                     </nav>
                     <div class="chat-sidebar-history-header">
                         <h2 id="chat-sidebar-history-title">チャット</h2>
@@ -322,7 +322,7 @@
             <section id="document-library-workspace" class="chat-workspace" aria-labelledby="document-library-title" hidden>
                 <header class="app-header">
                     <button id="document-library-back" class="header-button" type="button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">arrow_back_ios</span></button>
-                    <h1 id="document-library-title" tabindex="-1"><span class="document-library-heading">ファイルライブラリ</span><span id="document-library-mobile-title"></span></h1>
+                    <h1 id="document-library-title" tabindex="-1"><span class="document-library-heading">ライブラリ</span><span id="document-library-mobile-title"></span></h1>
                     <button id="document-library-add" type="button"><span data-document-icon="add" aria-hidden="true"></span>ファイルを追加</button>
                     <button id="document-library-mobile-search" class="header-button" type="button" title="ファイル内を検索" aria-label="ファイル内を検索" aria-expanded="false" aria-controls="document-library-detail-search"><span data-document-icon="search" aria-hidden="true"></span></button>
                     <input id="document-library-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
@@ -1526,7 +1526,7 @@
     <div id="project-menu" class="history-item-menu" role="menu" aria-label="プロジェクトの操作" hidden>
         <button type="button" role="menuitem" data-project-action="edit"><span class="material-symbols-outlined" aria-hidden="true">edit</span>名前・説明を編集</button>
         <button type="button" role="menuitem" class="history-item-menu-delete" data-project-action="delete"><span class="material-symbols-outlined" aria-hidden="true">delete</span>プロジェクトを削除</button>
-        <button type="button" role="menuitem" id="project-add-document" data-project-action="add-file" hidden><span class="material-symbols-outlined" aria-hidden="true">folder_open</span>ファイルライブラリから追加</button>
+        <button type="button" role="menuitem" id="project-add-document" data-project-action="add-file" hidden><span class="material-symbols-outlined" aria-hidden="true">folder_open</span>ライブラリから追加</button>
         <button type="button" role="menuitem" id="project-upload-document" data-project-action="upload" hidden><span class="material-symbols-outlined" aria-hidden="true">upload</span>新しいファイルをアップロード</button>
         <button type="button" role="menuitem" data-project-action="unlink-file" hidden><span class="material-symbols-outlined" aria-hidden="true">link_off</span>共有を解除</button>
     </div>

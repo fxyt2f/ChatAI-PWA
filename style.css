@@ -792,7 +792,8 @@ body:not(.dark-mode) .app-container {
 
 .chat-sidebar-history-header .chat-sidebar-item-menu,
 .chat-sidebar-group-heading:is(:hover, :focus-within) > .chat-sidebar-item-menu,
-:is(.chat-sidebar-item, .document-library-collection-row):is(:hover, :focus-within, .menu-active) .chat-sidebar-item-menu {
+:is(.chat-sidebar-item, .document-library-collection-row):is(:hover, .menu-active, :focus-within:not(.project-folder-row)) .chat-sidebar-item-menu,
+.project-folder-row:has(> :focus-visible) > .chat-sidebar-item-menu {
     opacity: 1;
     pointer-events: auto;
 }

@@ -181,7 +181,7 @@ window.DocumentLibraryUI = (() => {
 
     function renderPicker(view) {
         const selecting = view.selecting;
-        controls.pickerHeading.textContent = selecting ? 'ファイルライブラリから追加' : view.project ? 'チャット固有ファイル' : 'このチャットのファイル';
+        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : view.project ? 'チャット固有ファイル' : 'このチャットのファイル';
         controls.pickerProject.hidden = selecting || !view.project;
         controls.pickerProjectOpen.textContent = view.project ? `「${view.project.name}」で管理` : 'プロジェクトで管理';
         controls.pickerProjectList.replaceChildren(...(view.shared ?? []).map(entry =>

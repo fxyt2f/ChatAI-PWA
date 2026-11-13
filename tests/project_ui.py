@@ -87,16 +87,22 @@ def run(client, url, screenshots=None):
 
     def key(name):
         for kind in ['keyDown', 'keyUp']:
-            client.call('Input.dispatchKeyEvent', {'type': kind, 'key': name, 'code': name,
-                        'windowsVirtualKeyCode': {'Tab': 9, 'Escape': 27}[name]})
+            params = {'type': kind, 'key': name, 'code': name,
+                      'windowsVirtualKeyCode': {'Tab': 9, 'Enter': 13, 'Escape': 27}[name]}
+            if kind == 'keyDown' and name == 'Enter':
+                params['text'] = '\r'
+            client.call('Input.dispatchKeyEvent', params)
 
-    def menu_in_bounds(selector, beside=False):
+    def menu_in_bounds(selector, crosses_sidebar=False):
         return ev(f"""(() => {{
             const menu=document.querySelector({json.dumps(selector)});
             const rect=menu.getBoundingClientRect();
+            const edge=elements.chatHistorySidebar.getBoundingClientRect().right;
             return !menu.closest('#chat-history-sidebar') && rect.width>0 && rect.left>=0 && rect.top>=0 &&
                 rect.right<=innerWidth && rect.bottom<=innerHeight &&
-                ({str(not beside).lower()} || rect.left>=elements.chatHistorySidebar.getBoundingClientRect().right-4) &&
+                ({str(not crosses_sidebar).lower()} || rect.left<edge && rect.right>edge) &&
+                elements.chatSidebarScroll.scrollWidth===elements.chatSidebarScroll.clientWidth &&
+                document.documentElement.scrollWidth===innerWidth &&
                 [...menu.querySelectorAll('[hidden]')].every(button=>!button.getClientRects().length) &&
                 [...menu.querySelectorAll('[role=menuitem]:not([hidden])')].every(button=>{{
                     const r=button.getBoundingClientRect();
@@ -326,8 +332,46 @@ def run(client, url, screenshots=None):
          .every(button=>Number(getComputedStyle(button).opacity)>.99)""", 'mouse hover reveals compose and management')
     capture('pc-folder-hover')
     capture('sidebar-pc-folder-hover')
-    click(folder(alpha, 'expand'))
-    assert ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).getAttribute('aria-expanded')==='false'")
+    def project_actions(project, visible):
+        toggle = json.dumps(folder(project, 'expand'))
+        return f"""[...document.querySelector({toggle}).parentElement.querySelectorAll('.chat-sidebar-item-menu')]
+            .every(button=>getComputedStyle(button).opacity==='{int(visible)}' &&
+                getComputedStyle(button).pointerEvents==='{ 'auto' if visible else 'none' }')"""
+
+    # Native mouse input retains focus on the replacement button after the folder redraw.
+    for expanded in ['false', 'true', 'false']:
+        toggle = json.dumps(folder(alpha, 'expand'))
+        mouse_click(folder(alpha, 'expand'))
+        wait(f"document.querySelector({toggle}).getAttribute('aria-expanded')==='{expanded}'", 'mouse toggles folder')
+        hover('.chat-sidebar-brand')
+        try:
+            wait(project_actions(alpha, False), 'moving away hides actions without a click')
+        except AssertionError as error:
+            raise AssertionError(ev(f"""(() => {{
+                const button=document.querySelector({toggle}), row=button.parentElement;
+                return {{expanded:button.getAttribute('aria-expanded'), hovered:row.matches(':hover'),
+                    focusWithin:row.matches(':focus-within'), focusVisible:button.matches(':focus-visible'),
+                    actions:[...row.querySelectorAll('.chat-sidebar-item-menu')].map(action=>getComputedStyle(action).opacity)}};
+            }})()""")) from error
+        capture('sidebar-pc-after-expand' if expanded == 'true' else 'sidebar-pc-after-collapse')
+        hover(folder(beta, 'expand'))
+        wait(f"({project_actions(alpha, False)}) && ({project_actions(beta, True)})", 'only the newly hovered row shows actions')
+
+    previous_menu = json.dumps(folder(alpha, 'menu'))
+    ev(f"document.querySelector({previous_menu}).focus()")
+    key('Tab')
+    wait(f"document.activeElement.matches({json.dumps(folder(beta, 'expand'))})", 'Tab reaches the next folder')
+    ev(f"document.querySelector({toggle}).focus()")
+    wait(f"document.querySelector({toggle}).matches(':focus-visible')", 'keyboard focus is visible before activation')
+    key('Enter')
+    wait(f"document.activeElement===document.querySelector({toggle}) && document.activeElement.matches(':focus-visible') && "
+         f"document.activeElement.getAttribute('aria-expanded')==='true' && ({project_actions(alpha, True)})",
+         'keyboard activation retains visible focus after redraw')
+    key('Tab')
+    wait(f"document.activeElement.matches({json.dumps(folder(alpha))})", 'Tab reaches the project home button after redraw')
+    mouse_click(folder(alpha, 'expand'))
+    wait(f"document.querySelector({toggle}).getAttribute('aria-expanded')==='false'", 'folder restored for later scenarios')
+    checks.append('mouse hover resets after folder redraw and keyboard focus is retained')
     wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-sidebar-item-snippet')?.textContent==='第一・編集済み'""",
          'project member is also in pinned shortcuts')
     click('#chat-sidebar-search-toggle')
@@ -348,9 +392,11 @@ def run(client, url, screenshots=None):
         (f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="menu"]', '#history-item-menu'),
         (folder(alpha, 'menu'), '#project-menu'),
     ]:
+        sidebar_width = ev('elements.chatHistorySidebar.getBoundingClientRect().width')
         mouse_click(anchor)
         wait(f"document.querySelector({json.dumps(menu)}).getClientRects().length", 'sidebar menu opens')
-        assert menu_in_bounds(menu, beside=True), ev(f"""(() => {{
+        assert ev(f'elements.chatHistorySidebar.getBoundingClientRect().width==={sidebar_width}')
+        assert menu_in_bounds(menu, crosses_sidebar=True), ev(f"""(() => {{
             const menu=document.querySelector({json.dumps(menu)});
             return {{viewport:[innerWidth,innerHeight], sidebar:elements.chatHistorySidebar.getBoundingClientRect().toJSON(),
                 anchor:document.querySelector({json.dumps(anchor)}).getBoundingClientRect().toJSON(),
@@ -361,7 +407,7 @@ def run(client, url, screenshots=None):
                 }})}};
         }})()""")
         hover(f'{menu} [role="menuitem"]:not([hidden])')
-        assert menu_in_bounds(menu, beside=True), 'pointer crossing the sidebar edge keeps the menu open'
+        assert menu_in_bounds(menu, crosses_sidebar=True), 'pointer crossing the sidebar edge keeps the menu open'
         assert ev("""(() => {
             const scroller=elements.chatSidebarScroll, before=scroller.scrollTop;
             scroller.scrollTop += before>8 ? -8 : 8;
@@ -372,10 +418,10 @@ def run(client, url, screenshots=None):
             const button=document.querySelector({json.dumps(anchor)}).getBoundingClientRect();
             return Math.abs(popup.top-Math.max(8,Math.min(button.top,innerHeight-8-popup.height)))<1;
         }})()""", 'menu follows sidebar scroll within viewport bounds')
-        assert menu_in_bounds(menu, beside=True)
+        assert menu_in_bounds(menu, crosses_sidebar=True)
         viewport(1220, False, short_height + 16)
         wait(f"innerWidth===1220 && innerHeight==={short_height + 16}", 'desktop resized while menu remains open')
-        assert menu_in_bounds(menu, beside=True)
+        assert menu_in_bounds(menu, crosses_sidebar=True)
         if menu == '#project-menu':
             capture('sidebar-pc-menu')
             mouse_click('#project-menu [data-project-action="edit"]')
@@ -387,7 +433,8 @@ def run(client, url, screenshots=None):
                 capture('sidebar-pc-chat-menu')
             key('Escape')
             wait("elements.historyItemMenu.classList.contains('hidden')", 'Escape hides history menu')
-        assert ev(f"!document.querySelector({json.dumps(menu)}).getClientRects().length")
+        assert ev(f"!document.querySelector({json.dumps(menu)}).getClientRects().length && "
+                  f"elements.chatHistorySidebar.getBoundingClientRect().width==={sidebar_width}")
         viewport(1280, False, short_height)
     viewport(390, True)
     wait("chatSidebarUiState.mode==='overlay' && !chatSidebarUiState.isOpen", 'phone sidebar ready')
@@ -401,6 +448,19 @@ def run(client, url, screenshots=None):
     key('Escape')
     assert ev("chatSidebarUiState.isOpen && document.querySelector('#project-menu').hidden")
     click(folder(alpha, 'expand'), True)
+    viewport(490, True, 480)
+    wait('innerWidth===490 && innerHeight===480', 'narrow viewport with limited space to the right and below')
+    click(f'#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="menu"]', True)
+    wait("!elements.historyItemMenu.classList.contains('hidden')", 'touch opens chat menu near the viewport bottom')
+    assert menu_in_bounds('#history-item-menu')
+    assert ev(f"""(() => {{
+        const anchor=document.querySelector('#chat-sidebar-list [data-chat-id="{loose}"] [data-sidebar-action="menu"]').getBoundingClientRect();
+        const menu=elements.historyItemMenu.getBoundingClientRect();
+        return anchor.right+4+menu.width>innerWidth-8 && anchor.bottom+4+menu.height>innerHeight-8 &&
+            menu.bottom<=anchor.top && menu.right<=innerWidth-8;
+    }})()""")
+    key('Escape')
+    wait("elements.historyItemMenu.classList.contains('hidden')", 'close narrow viewport menu')
     viewport(1280, False)
     open_sidebar()
     ev('elements.chatSidebarScroll.scrollTop=0')

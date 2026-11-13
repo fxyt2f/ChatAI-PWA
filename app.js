@@ -6127,12 +6127,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             const bounds = scroller.getBoundingClientRect();
             if (row.bottom <= bounds.top || row.top >= bounds.bottom) return false;
         }
-        const sidebarRight = elements.chatHistorySidebar.getBoundingClientRect().right;
-        this.positionRowMenu(menu, anchor, null, { rightOf: sidebarRight });
+        this.positionRowMenu(menu, anchor, null, { besideAnchor: true });
         return true;
     },
 
-    positionRowMenu(menu, anchor, container = null, { rightOf = null } = {}) {
+    positionRowMenu(menu, anchor, container = null, { besideAnchor = false } = {}) {
         const viewportMargin = 8;
         const gap = 4;
         const anchorRect = anchor.getBoundingClientRect();
@@ -6147,8 +6146,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.setProperty('--row-menu-width', `${Math.max(0, rightEdge - leftEdge)}px`);
         menu.style.setProperty('--row-menu-height', `${Math.max(0, bottomEdge - topEdge)}px`);
         const menuRect = menu.getBoundingClientRect();
-        const besideLeft = Math.max(anchorRect.right, rightOf ?? 0) + gap;
-        const beside = rightOf !== null && besideLeft + menuRect.width <= rightEdge;
+        const besideLeft = anchorRect.right + gap;
+        const beside = besideAnchor && besideLeft + menuRect.width <= rightEdge;
         const left = beside ? besideLeft : Math.min(
             Math.max(leftEdge, anchorRect.right - menuRect.width), Math.max(leftEdge, rightEdge - menuRect.width));
         const belowTop = anchorRect.bottom + gap;

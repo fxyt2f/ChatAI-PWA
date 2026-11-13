@@ -138,7 +138,7 @@ def run(client, url):
         assert ev("""(() => {
             const [newChat, library]=document.querySelector('.chat-sidebar-navigation').children;
             const heading=document.querySelector('.chat-sidebar-history-header');
-            return newChat.textContent.endsWith('新規チャット') && library.textContent.trim()==='ファイルライブラリ' &&
+            return newChat.textContent.endsWith('新規チャット') && library.textContent.trim()==='ライブラリ' &&
                 heading.querySelector('h2').textContent==='チャット' && !document.querySelector('#history-screen, #chat-sidebar-close-btn') &&
                 !document.querySelector('#chat-workspace #document-library-open, #chat-workspace #new-chat-btn') &&
                 newChat.getBoundingClientRect().bottom <= library.getBoundingClientRect().top &&
