@@ -29,9 +29,11 @@ def run(client, url, screenshots=None):
             project: document.querySelector('#project-title')?.textContent,
             notice: document.querySelector('#project-notice')?.textContent,
             error: document.querySelector('#project-dialog-notice')?.textContent,
-            dialogs: [...document.querySelectorAll('dialog[open]')].map(x=>x.id),
+            dialogs: [...document.querySelectorAll('dialog[open]')].map(x=>[x.id, x.textContent.trim().slice(0,200)]),
             sidebar: [chatSidebarUiState.mode, chatSidebarUiState.isOpen, chatSidebarUiState.showAll],
-            chat: state.currentChatId, draft: document.querySelector('#user-input').value, history: history.state
+            chat: state.currentChatId, history: history.state, url: location.href,
+            startupPaused: Boolean(window.resumeSidebarStartup), setup: appLogic._setupEventListenersCallCount,
+            cached: chatSidebarUiState.projects.length, loaded: chatSidebarUiState.hasLoadedAll
         })""")))
 
     def click(selector, touch=False):
@@ -477,4 +479,77 @@ def run(client, url, screenshots=None):
         return r.left>=sidebar.right-1 && r.right<=innerWidth+1;
     })()""")
     checks.append('mobile touch targets, swipe isolation and wide layout')
+
+    project, chat, first_profile, second_profile, saved_ids = ev("""(async()=>{
+        const project = await dbUtils.createProject({name:'起動時サイドバー検証'});
+        const chat = await dbUtils.saveChat(null, {title:'復帰先チャット', messages:[]}, {skipPush:true});
+        const firstProfile = state.activeProfileId;
+        const secondProfile = await dbUtils.addProfile({name:'切替検証', settings:state.activeProfile.settings});
+        await appLogic.updateLocalUiSetting('isPersistentChatSidebarOpen', true);
+        return [project.id, chat, firstProfile, secondProfile, (await dbUtils.listProjects()).map(item=>item.id).sort()];
+    })()""")
+    expected = json.dumps(saved_ids)
+    visible = f"""(() => {{
+        const section = document.querySelector('#project-sidebar');
+        const rendered = [...section.querySelectorAll('.project-folder')].map(row=>row.dataset.projectId).sort();
+        return chatSidebarUiState.isOpen && !section.hidden && section.getBoundingClientRect().width > 0 &&
+            JSON.stringify(rendered) === JSON.stringify({expected});
+    }})()"""
+    client.call('Page.enable')
+    injection = client.call('Page.addScriptToEvaluateOnNewDocument', {'source': """
+        Object.defineProperty(window, 'appLogic', {
+            configurable: true,
+            set(app) {
+                Object.defineProperty(window, 'appLogic', {configurable:true, writable:true, value:app});
+                const loadProfiles = app.loadProfiles;
+                app.loadProfiles = async function (...args) {
+                    app.loadProfiles = loadProfiles;
+                    await loadProfiles.apply(this, args);
+                    // Let any early sidebar read finish before startup binds UI events.
+                    await new Promise(resolve => { window.resumeSidebarStartup = resolve; });
+                };
+            }
+        });
+    """})['identifier']
+    try:
+        first_load = ev('performance.timeOrigin')
+        client.call('Page.navigate', {'url': url + '?projectSidebarStartup=delayed'})
+        wait(f"performance.timeOrigin>{first_load} && window.resumeSidebarStartup && "
+             "(chatSidebarUiState.mode==='disabled' || chatSidebarUiState.hasLoadedAll)", 'startup paused after loading profiles')
+        ev('window.resumeSidebarStartup()')
+        wait(ready, 'startup resumed')
+        assert ev(visible), ev("""(async()=>({
+            stored: (await dbUtils.listProjects()).length,
+            cached: chatSidebarUiState.projects.length,
+            loaded: chatSidebarUiState.hasLoadedAll,
+            hidden: document.querySelector('#project-sidebar').hidden
+        }))()""")
+    finally:
+        client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier': injection})
+    wait(visible, 'saved projects visible after delayed startup')
+    ev(f'dbUtils.setChatProject({chat},{json.dumps(project)})')
+    wait(f"chatSidebarUiState.memberships.get({chat})==={json.dumps(project)}", 'fixture membership loaded')
+
+    for attempt in range(12):
+        first_load = ev('performance.timeOrigin')
+        client.call('Page.reload')
+        wait(f"performance.timeOrigin>{first_load} && {ready} && {visible}", f'normal startup {attempt + 1}')
+        open_project(project, '起動時サイドバー検証')
+        click(f'#project-chats [data-chat-id="{chat}"] [data-sidebar-action="open"]')
+        wait(f'elements.projectWorkspace.hidden && state.currentChatId==={chat} && {visible}', 'return to chat with projects')
+        open_project(project, '起動時サイドバー検証')
+        click('#project-back')
+        wait(f'elements.projectWorkspace.hidden && {visible}', 'return from project home')
+        ev('uiUtilsV136.closeChatSidebar(); uiUtilsV136.openChatSidebar()')
+        wait(visible, 'reopened sidebar')
+        viewport(390, True)
+        wait("innerWidth===390 && chatSidebarUiState.mode==='overlay'", 'sidebar switches to overlay')
+        open_sidebar(True)
+        wait(visible, 'projects visible in overlay')
+        viewport(1280, False)
+        wait(f"innerWidth===1280 && chatSidebarUiState.mode==='permanent' && {visible}", 'projects visible after width restored')
+        for profile in [second_profile, first_profile]:
+            assert ev(f'appLogic.switchProfile({profile})')
+            wait(f'state.activeProfileId==={profile} && {visible}', 'projects visible after profile switch')
+    checks.append('saved projects survive delayed startup and 12 repeated reload, navigation, sidebar, width and profile cycles')
     return 'ALL PASSED ({} project UI scenarios: {})'.format(len(checks), '; '.join(checks))

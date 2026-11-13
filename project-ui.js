@@ -38,6 +38,7 @@ window.ProjectUI = (() => {
     }
 
     function revealCurrentChat(memberships) {
+        if (!installed) return;
         const chatId = window.state.currentChatId;
         const projectId = memberships.get(chatId);
         if (currentChat?.chatId === chatId && currentChat?.projectId === projectId) return;
@@ -57,7 +58,8 @@ window.ProjectUI = (() => {
     }
 
     function renderSidebar(projects, memberships, chats, visible) {
-        if (!installed) return;
+        // Applying profile settings can load the wide sidebar before startup binds its events.
+        install();
         const byProject = new Map();
         for (const chat of chats) {
             const id = memberships.get(chat.id);
