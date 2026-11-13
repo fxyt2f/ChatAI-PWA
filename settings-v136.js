@@ -309,14 +309,18 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         }
         return body;
     }
-    const READER_VERSION = 137;
+    const READER_VERSION = 138;
     function assertCompatible(envelope) {
         if (!envelope || envelope.version !== '2.0' || !envelope.data) throw new Error('同期データの形式が無効です。');
+        const reader = envelope.minimumReaderVersion;
+        const hasProjects = Object.hasOwn(envelope.data, 'projectData');
         if ((envelope.settingsSchemaVersion || 0) > 136 || (envelope.minimumReaderVersion || 0) > READER_VERSION ||
+            (hasProjects !== (reader === READER_VERSION)) ||
+            (hasProjects && envelope.data.projectData?.schemaVersion !== 1) ||
             (Object.hasOwn(envelope.data, 'documentLibrary') &&
-                (envelope.minimumReaderVersion !== READER_VERSION || envelope.data.documentLibrary?.schemaVersion !== 1)) ||
+                ((reader !== 137 && reader !== READER_VERSION) || envelope.data.documentLibrary?.schemaVersion !== 1)) ||
             (Object.hasOwn(envelope, 'backupSchemaVersion') &&
-                (envelope.minimumReaderVersion !== READER_VERSION || envelope.backupSchemaVersion !== 1)) ||
+                ((reader !== 137 && reader !== READER_VERSION) || envelope.backupSchemaVersion !== 1)) ||
             envelope.data.settings?.some(s => s.key === GLOBAL_KEY && s.value?.schemaVersion > 1) ||
             envelope.data.settings?.some(s => s.key === MIGRATION_KEY && s.value > 136) ||
             envelope.data.profiles?.some(p => p.profileSchemaVersion > 1) ||

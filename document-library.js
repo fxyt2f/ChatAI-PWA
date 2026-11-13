@@ -125,7 +125,7 @@ const DocumentLibrary = (() => {
     }
 
     async function deleteDocument(db, settingsName, id, options) {
-        return transaction(db, [...stores, settingsName, indexStore], 'readwrite', async tx => {
+        return transaction(db, [...stores, settingsName, indexStore, ProjectStore.documents], 'readwrite', async tx => {
             const metadata = tx.objectStore(documents);
             const previous = await request(metadata.get(id));
             if (!previous) return false;
@@ -140,7 +140,11 @@ const DocumentLibrary = (() => {
             for (const key of versionKeys) versions.delete(key);
             for (const key of linkKeys) relations.delete(key);
             discardIndex(tx, id);
-            await markChanged(tx.objectStore(settingsName));
+            const settings = tx.objectStore(settingsName);
+            if (await ProjectStore.deleteByIndex(tx.objectStore(ProjectStore.documents), 'documentId', id)) {
+                await ProjectStore.markChanged(settings);
+            }
+            await markChanged(settings);
             return true;
         });
     }
@@ -268,7 +272,7 @@ const DocumentLibrary = (() => {
         });
     }
 
-    return { documents, originals, links, indexStore, stores, syncKey, isHash, uniqueId, digest, upgrade, request, discardChangedIndexes,
+    return { documents, originals, links, indexStore, stores, syncKey, isId, isChatId, isHash, uniqueId, digest, upgrade, request, discardChangedIndexes,
         transaction, syncState, markChanged, writeDocument, deleteDocument, replaceLinks, normalizeIds,
         getChatDocuments, validateManifest, exportSnapshot, restoreOriginals };
 })();

@@ -11,7 +11,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         }
         throw new Error('Expected failure: ' + message);
     };
-    const withDatabase = async run => {
+    const withDatabase = async (run, seed) => {
         const name = 'library-test-' + crypto.randomUUID();
         const open = indexedDB.open;
         const old = { ...st };
@@ -20,6 +20,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         st.currentChatId = null;
         st.currentMessages = [];
         try {
+            if (seed) await seed(name);
             indexedDB.open = (_, version) => open.call(indexedDB, name, version);
             await db.openDB();
             indexedDB.open = open;
@@ -35,6 +36,153 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         id, title: content, messages: [{ role: 'user', content }], ...extra
     }, { skipPush: true });
     const ids = async chatId => (await db.getChatDocuments(chatId)).map(document => document.id);
+
+    await test('IndexedDB v16 upgrades in place with chats, document versions and links intact', async () => {
+        const blob = file('v16 original');
+        const entry = { id: DocumentLibrary.uniqueId(), version: 1, versionId: DocumentLibrary.uniqueId(), name: blob.name,
+            fileName: blob.name, format: 'md', mimeType: blob.type, size: blob.size, hash: await DocumentLibrary.digest(blob),
+            createdAt: 1, updatedAt: 1 };
+        await withDatabase(async () => {
+            eq(st.db.version, 17);
+            eq((await db.getChat(42)).title, 'v16 chat');
+            eq(await db.getLibraryDocument(entry.id), entry);
+            eq(await (await db.getLibraryOriginal(entry.id, 1)).blob.text(), 'v16 original');
+            eq(await ids(42), [entry.id]);
+            for (const store of ProjectStore.stores) {
+                eq(await DocumentLibrary.request(db._getStore(store).count()), 0);
+                eq(await DocumentLibrary.request(db._getStore(store + '_temp').count()), 0);
+            }
+        }, async name => {
+            const connection = await new Promise((resolve, reject) => {
+                const open = indexedDB.open(name, 16);
+                open.onerror = () => reject(open.error);
+                open.onupgradeneeded = () => {
+                    const legacy = open.result;
+                    legacy.createObjectStore('chats', { keyPath: 'id', autoIncrement: true }).add({ id: 42, title: 'v16 chat' });
+                    legacy.createObjectStore('settings', { keyPath: 'key' });
+                    legacy.createObjectStore('profiles', { keyPath: 'id' });
+                    legacy.createObjectStore('image_store', { keyPath: 'id' });
+                    legacy.createObjectStore('image_assets', { keyPath: 'name' });
+                    legacy.createObjectStore('memory_store', { keyPath: 'profileId' });
+                    for (const [store, keyPath] of [['chats', 'id'], ['settings', 'key'], ['profiles', 'id'],
+                        ['image_store', 'id'], ['image_assets', 'name'], ['memory_store', 'profileId']]) {
+                        legacy.createObjectStore(store + '_temp', { keyPath });
+                    }
+                    DocumentLibrary.upgrade(legacy);
+                    legacy.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
+                    open.transaction.objectStore(DocumentLibrary.documents).add(entry);
+                    open.transaction.objectStore(DocumentLibrary.originals).add({ ...entry, documentId: entry.id, blob });
+                    open.transaction.objectStore(DocumentLibrary.links).add({ chatId: 42, documentId: entry.id });
+                };
+                open.onsuccess = () => resolve(open.result);
+            });
+            connection.close();
+        });
+    });
+
+    await test('Project CRUD, membership moves, and shared documents keep original records intact', () => withDatabase(async () => {
+        const doc = await db.addLibraryDocument(file('version 1'));
+        await db.replaceLibraryDocument(doc.id, file('version 2'));
+        const chatId = await saveChat(15, 'chat contents', { systemPrompt: 'private prompt' });
+        await db.setChatDocuments(chatId, [doc.id]);
+        const chat = await db.getChat(chatId);
+        const profileId = await db.addProfile({ name: 'other profile' });
+        await db.saveMemory(profileId, { note: 'memory survives' });
+        const sync = () => db.getProjectSyncContext();
+        const untouched = await sync();
+        await fails(() => db.createProject({ name: '  ' }), /プロジェクト名/);
+        eq(await sync(), untouched);
+        const first = await db.createProject({ name: ' 同名 ' });
+        const second = await db.createProject({ name: '同名', description: 'second' });
+        assert(first.id !== second.id);
+        eq((await db.listProjects()).map(project => project.name), ['同名', '同名']);
+        eq(await db.getProject(first.id), first);
+        eq(await db.listProjectChats(first.id), []);
+        eq(await db.listProjectDocuments(first.id), []);
+        eq(await db.updateProject(first.id, { description: 'edited' }), true);
+        eq((await db.getProject(first.id)).description, 'edited');
+        const edited = await sync();
+        eq(await db.updateProject(first.id, { description: 'edited' }), false);
+        eq(await db.setChatProject(chatId, null), false);
+        eq(await db.clearProjectDocuments(first.id), false);
+        eq(await sync(), edited);
+        await fails(() => db.setChatProject(404, first.id), /チャットが見つかりません/);
+        await fails(() => db.setChatProject(chatId, 'missing'), /プロジェクトが見つかりません/);
+        await fails(() => db.addProjectDocument(first.id, 'missing'), /ファイルが見つかりません/);
+        eq(await sync(), edited);
+
+        eq(await db.setChatProject(chatId, first.id), true);
+        const assigned = await sync();
+        eq(await db.setChatProject(chatId, first.id), false);
+        eq(await sync(), assigned);
+        eq((await db.getChatProject(chatId)).id, first.id);
+        await db.setChatProject(chatId, second.id);
+        eq(await db.listProjectChats(first.id), []);
+        eq(await db.listProjectChats(second.id), [chat]);
+        await db.setChatProject(chatId, null);
+        eq(await db.getChatProject(chatId), undefined);
+        await db.setChatProject(chatId, first.id);
+        await db.addProjectDocument(first.id, doc.id);
+        await db.addProjectDocument(second.id, doc.id);
+        const shared = await sync();
+        eq(await db.addProjectDocument(first.id, doc.id), false);
+        await fails(() => db.clearProjectDocuments(undefined), /DataError/);
+        await fails(() => db.listProjectDocuments(undefined), /DataError/);
+        eq(await sync(), shared);
+        eq((await db.listProjectDocuments(first.id)).map(item => item.id), [doc.id]);
+        eq(await db.removeProjectDocument(first.id, doc.id), true);
+        eq(await db.removeProjectDocument(first.id, doc.id), false);
+        await db.addProjectDocument(first.id, doc.id);
+        eq(await db.clearProjectDocuments(second.id), true);
+        await db.addProjectDocument(second.id, doc.id);
+        await db.deleteProject(first.id);
+        eq(await db.getProject(first.id), undefined);
+        eq(await db.getChatProject(chatId), undefined);
+        eq(await db.listProjectDocuments(first.id), []);
+        eq((await db.listProjectDocuments(second.id)).map(item => item.id), [doc.id]);
+        eq(await db.getChat(chatId), chat);
+        eq(await ids(chatId), [doc.id]);
+        eq((await db.getMemory(profileId)).note, 'memory survives');
+        eq(await (await db.getLibraryOriginal(doc.id, 1)).blob.text(), 'version 1');
+        eq(await (await db.getLibraryOriginal(doc.id, 2)).blob.text(), 'version 2');
+        await db.setChatProject(chatId, second.id);
+        await db.deleteChat(chatId);
+        eq(await db.getChatProject(chatId), undefined);
+        eq(await db.listProjectChats(second.id), []);
+        eq((await db.listProjectDocuments(second.id)).length, 1);
+        await db.deleteLibraryDocument(doc.id);
+        eq(await db.listProjectDocuments(second.id), []);
+        eq(await db.getLibraryOriginal(doc.id, 1), undefined);
+    }));
+
+    await test('Project, chat and library deletions roll back their links and sync revisions on failure', () => withDatabase(async () => {
+        const project = await db.createProject({ name: 'rollback' });
+        const doc = await db.addLibraryDocument(file('rollback original'));
+        const chatId = await saveChat(11, 'rollback chat');
+        await db.setChatProject(chatId, project.id);
+        await db.setChatDocuments(chatId, [doc.id]);
+        await db.addProjectDocument(project.id, doc.id);
+        const revision = await db.getProjectSyncContext();
+        const library = await db.getDocumentLibrarySyncState();
+        const put = IDBObjectStore.prototype.put;
+        try {
+            IDBObjectStore.prototype.put = function(record, ...args) {
+                if (record.key === ProjectStore.syncKey) throw new DOMException('project revision write failed', 'QuotaExceededError');
+                return put.call(this, record, ...args);
+            };
+            for (const operation of [() => db.deleteProject(project.id), () => db.deleteChat(chatId), () => db.deleteLibraryDocument(doc.id)]) {
+                await fails(operation, /project revision write failed/);
+                eq(await db.getProject(project.id), project);
+                eq(await db.getChatProject(chatId), project);
+                eq((await db.getChat(chatId)).title, 'rollback chat');
+                eq(await ids(chatId), [doc.id]);
+                eq(await db.listProjectDocuments(project.id), [doc]);
+                eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'rollback original');
+                eq(await db.getProjectSyncContext(), revision);
+                eq(await db.getDocumentLibrarySyncState(), library);
+            }
+        } finally { IDBObjectStore.prototype.put = put; }
+    }));
 
     await test('Library supports ten formats, draft IDs and shared chat links', () => withDatabase(async () => {
         for (const format of ['pdf', 'docx', 'txt', 'md', 'csv', 'tsv', 'json', 'yaml', 'xml', 'html']) {
@@ -161,12 +309,18 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
             messages: [{ role: 'user', content: 'backup chat', imageIds: ['image'] }]
         });
         await db.setChatDocuments(chatId, [doc.id]);
+        const project = await db.createProject({ name: 'backup project', description: 'shared across profiles' });
+        const empty = await db.createProject({ name: 'empty project' });
+        await db.setChatProject(chatId, project.id);
+        await db.addProjectDocument(project.id, doc.id);
         await put('image_store', { id: 'image', blob: new Blob(['image data'], { type: 'image/webp' }) });
         const backup = await app.createFullBackup();
         const json = await backup.text();
         const parsed = JSON.parse(json);
-        eq(parsed.minimumReaderVersion, 137);
+        eq(parsed.minimumReaderVersion, 138);
         eq(parsed.backupOriginals.length, 2);
+        eq(parsed.data.projectData.chats, [{ chatId, projectId: project.id }]);
+        eq(parsed.data.projectData.documents, [{ projectId: project.id, documentId: doc.id }]);
         assert(!JSON.stringify(parsed.data.chats).includes(parsed.backupOriginals[0].base64));
 
         await db.clearAllData();
@@ -179,9 +333,13 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         eq(await (await read('image_store', 'image')).blob.text(), 'image data');
         eq((await db.getChat(chatId)).messages[0].content, 'backup chat');
         eq(await ids(chatId), [doc.id]);
+        eq(await db.getChatProject(chatId), project);
+        eq(await db.getProject(empty.id), empty);
+        eq((await db.listProjectDocuments(project.id)).map(document => document.id), [doc.id]);
         eq(Array.from(new Uint8Array(await (await db.getLibraryOriginal(doc.id, 1)).blob.arrayBuffer())), originalBytes);
         eq(await (await db.getLibraryOriginal(doc.id, 2)).blob.text(), 'next version');
         const before = await db.getDocumentLibrarySyncState();
+        const projectsBefore = await db.getProjectSyncContext();
 
         const corrupted = structuredClone(parsed);
         corrupted.backupOriginals[0].base64 = btoa('corrupt');
@@ -189,10 +347,29 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         const badLink = structuredClone(parsed);
         badLink.data.documentLibrary.links[0].chatId = 991;
         await fails(() => app.importDataFromString(JSON.stringify(badLink), { source: 'file' }), /形式が無効/);
-        await fails(() => app.importDataFromString('{"version":"2.0","data":{}}', { source: 'file' }), /一覧が不足/);
+        const invalidSnapshots = [
+            snapshot => { snapshot.schemaVersion++; },
+            snapshot => { snapshot.projects[0].id = 'invalid'; },
+            snapshot => { snapshot.projects[0].description = 5; },
+            snapshot => { snapshot.projects.push(snapshot.projects[0]); },
+            snapshot => { snapshot.chats[0].projectId = DocumentLibrary.uniqueId(); },
+            snapshot => { snapshot.chats[0].chatId = 404; },
+            snapshot => { snapshot.chats.push({ chatId, projectId: empty.id }); },
+            snapshot => { snapshot.documents[0].documentId = DocumentLibrary.uniqueId(); },
+            snapshot => { snapshot.documents.push(snapshot.documents[0]); }
+        ];
+        for (const corrupt of invalidSnapshots) {
+            const invalid = structuredClone(parsed);
+            corrupt(invalid.data.projectData);
+            await fails(() => app.importDataFromString(JSON.stringify(invalid), { source: 'file' }), /プロジェクト情報|新しいバージョン/);
+        }
+        eq(await db.getProjectSyncContext(), projectsBefore);
+        eq(await db.getChatProject(chatId), project);
+        await fails(() => app.importDataFromString('{"version":"2.0","data":{}}', { source: 'file', allowLegacyProjectClear: true }), /一覧が不足/);
         eq(await db.getDocumentLibrarySyncState(), before);
 
         const newer = await db.addLibraryDocument(file('created after the backup'));
+        const newerProject = await db.createProject({ name: 'created after the backup' });
         const putOriginal = IDBObjectStore.prototype.put;
         try {
             IDBObjectStore.prototype.put = function (value, ...args) {
@@ -200,11 +377,20 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 return putOriginal.call(this, value, ...args);
             };
             await fails(() => app.importDataFromString(json, { source: 'file' }), /simulated quota/);
+            IDBObjectStore.prototype.put = function (value, ...args) {
+                if (this.name === ProjectStore.documents) throw new DOMException('simulated project quota', 'QuotaExceededError');
+                return putOriginal.call(this, value, ...args);
+            };
+            await fails(() => app.importDataFromString(json, { source: 'file' }), /simulated project quota/);
         } finally { IDBObjectStore.prototype.put = putOriginal; }
         eq(await (await db.getLibraryOriginal(newer.id)).blob.text(), 'created after the backup');
         eq(await (await read('image_store', 'image')).blob.text(), 'image data');
         eq(await ids(chatId), [doc.id]);
-        for (const store of DocumentLibrary.stores) eq(await DocumentLibrary.request(db._getStore(store + '_temp').count()), 0);
+        eq(await db.getProject(newerProject.id), newerProject);
+        eq(await db.getChatProject(chatId), project);
+        for (const store of [...DocumentLibrary.stores, ...ProjectStore.stores]) {
+            eq(await DocumentLibrary.request(db._getStore(store + '_temp').count()), 0);
+        }
         await fails(() => app.importDataFromString(json, { source: 'file', libraryBefore: before }), /準備中にファイルが変更/);
     }));
 
@@ -228,10 +414,52 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         } finally { Object.assign(ui, { showCustomConfirm: confirm, hideProgressDialog: progress }); }
         assert(warning.includes('ファイル原本と版は保持') && warning.includes('紐づけは解除'));
         eq(await ids(chatId), [doc.id]);
-        await app.importDataFromString(json, { source: 'file' });
+        await app.importDataFromString(json, { source: 'file', allowLegacyProjectClear: true });
         eq((await db.getChat(chatId)).title, 'legacy replacement');
         eq(await ids(chatId), []);
         eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'legacy-safe');
+    }));
+
+    await test('v1.37.0 portable backup warns and only clears projects after confirmation', () => withDatabase(async () => {
+        const doc = await db.addLibraryDocument(file('v1.37.0 original'));
+        const chatId = await saveChat(29, 'v1.37.0 chat');
+        await db.setChatDocuments(chatId, [doc.id]);
+        const legacy = JSON.parse(await (await app.createFullBackup()).text());
+        delete legacy.data.projectData;
+        legacy.minimumReaderVersion = 137;
+        const json = JSON.stringify(legacy);
+        const project = await db.createProject({ name: 'current project' });
+        await db.setChatProject(chatId, project.id);
+        await db.addProjectDocument(project.id, doc.id);
+        await fails(() => app.importDataFromString(json, { source: 'file' }), /確認してください/);
+        const confirm = ui.showCustomConfirm;
+        const alert = ui.showCustomAlert;
+        const alerts = [];
+        let warning;
+        try {
+            ui.showCustomAlert = async message => { alerts.push(message); throw new Error('stop test reload'); };
+            ui.showCustomConfirm = async message => { warning = message; return false; };
+            await app.handleFullBackupImport(file(json, 'v1.37.0.json'));
+            assert(warning.includes('プロジェクト、チャットの所属、共有資料の関連付けが失われます'));
+            eq(await db.getChatProject(chatId), project);
+            const revision = await db.getProjectSyncContext();
+            ui.showCustomConfirm = async () => {
+                await db.updateProject(project.id, { name: 'edited while confirming' });
+                return true;
+            };
+            await fails(() => app.handleFullBackupImport(file(json, 'v1.37.0.json')), /stop test reload/);
+            assert(alerts.at(-1).includes('準備中にプロジェクト情報'));
+            eq((await db.getChatProject(chatId)).name, 'edited while confirming');
+            ui.showCustomConfirm = async () => true;
+            await fails(() => app.handleFullBackupImport(file(json, 'v1.37.0.json')), /stop test reload/);
+            assert(alerts.some(message => message.includes('バックアップを復元しました')));
+            assert((await db.getProjectSyncContext()).revision !== revision.revision);
+            eq(await db.listProjects(), []);
+            eq(await db.getChatProject(chatId), undefined);
+            eq(await db.listProjectDocuments(project.id), []);
+            eq(await ids(chatId), [doc.id]);
+            eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'v1.37.0 original');
+        } finally { Object.assign(ui, { showCustomConfirm: confirm, showCustomAlert: alert }); }
     }));
 
     await test('Dropbox stages originals, uses revision checks and keeps conflicting libraries intact', async () => {
@@ -247,6 +475,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         const folders = new Set();
         const commits = [];
         const statuses = [];
+        const originalUploads = [];
         let counter = 0, failOriginal = false, beforeCommit;
         const conflict = () => Response.json({ error_summary: 'path/conflict/file/' }, { status: 409 });
         const notFound = () => Response.json({ error_summary: 'path/not_found/' }, { status: 409 });
@@ -269,6 +498,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     return entry ? new Response(entry.blob, { headers: { 'Dropbox-API-Result': JSON.stringify({ rev: entry.rev }) } }) : notFound();
                 }
                 if (request.pathname.endsWith('/upload')) {
+                    if (path.startsWith(api.DOCUMENTS_DIR_PATH + '/')) originalUploads.push(path);
                     if (path.startsWith(api.DOCUMENTS_DIR_PATH + '/') && failOriginal) return new Response('', { status: 503 });
                     if (path === api.METADATA_PATH) {
                         if (beforeCommit) await beforeCommit();
@@ -365,11 +595,12 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 assert(search.results[0].text.includes('cloud v2'));
                 const legacy = JSON.parse(second);
                 delete legacy.data.documentLibrary;
+                delete legacy.data.projectData;
                 legacy.minimumReaderVersion = 136;
                 await fails(() => app.importDataFromString(JSON.stringify(legacy), { source: 'dropbox' }), /ファイル/);
                 await db.deleteLibraryDocument(doc.id);
                 await app._doPush();
-                eq(commits.at(-1).minimumReaderVersion, 137);
+                eq(commits.at(-1).minimumReaderVersion, 138);
                 eq(commits.at(-1).data.documentLibrary.documents, []);
                 assert(files.has(newestPath), 'an older remote revision can still read its originals');
             });
@@ -384,6 +615,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 await connect();
                 const legacy = JSON.parse(first);
                 delete legacy.data.documentLibrary;
+                delete legacy.data.projectData;
                 legacy.minimumReaderVersion = 136;
                 files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(legacy)]), rev: String(++counter) });
                 const document = await db.addLibraryDocument(file('locally linked document'));
@@ -395,6 +627,121 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 assert(warnings[0].includes('ファイルや紐づけ'));
                 eq(JSON.parse(await metadata()).data.documentLibrary.links, [{ chatId: linked, documentId: document.id }]);
                 eq(await ids(linked), [document.id]);
+            });
+            await test('Dropbox round-trips projects and empty deletions, retains concurrent changes and blocks old data', async () => {
+                const uploadsBefore = originalUploads.length;
+                files.delete(api.METADATA_PATH);
+                let project, document, member, snapshot, emptySnapshot, revision;
+                await withDatabase(async () => {
+                    await connect();
+                    document = await db.addLibraryDocument(file('project-shared original'));
+                    member = await saveChat(40, 'project member');
+                    project = await db.createProject({ name: 'shared' });
+                    const other = await db.createProject({ name: 'also shared' });
+                    await db.setChatProject(member, project.id);
+                    await db.addProjectDocument(project.id, document.id);
+                    await db.addProjectDocument(other.id, document.id);
+                    const before = await db.getProjectSyncContext();
+                    const peer = await DocumentLibrary.request(indexedDB.open(st.db.name));
+                    beforeCommit = async () => {
+                        await DocumentLibrary.transaction(peer, [ProjectStore.projects, 'settings'], 'readwrite', async tx => {
+                            tx.objectStore(ProjectStore.projects).put({ ...project, name: 'edited during push' });
+                            await ProjectStore.markChanged(tx.objectStore('settings'));
+                        });
+                    };
+                    try { await app._doPush(); }
+                    finally { beforeCommit = undefined; peer.close(); }
+                    const sent = JSON.parse(await metadata());
+                    eq(sent.minimumReaderVersion, 138);
+                    eq(sent.data.projectData.revision, before.revision);
+                    eq(sent.data.projectData.projects.find(row => row.id === project.id).name, 'shared');
+                    const pending = await db.getProjectSyncContext();
+                    eq(pending.syncedRevision, before.revision);
+                    assert(pending.revision !== pending.syncedRevision && st.sync.isDirty);
+                    eq((await db.getSetting('syncIsDirty')).value, true);
+                    await app._doPush();
+                    snapshot = await metadata();
+                    revision = JSON.parse(snapshot).data.projectData.revision;
+                    eq(revision, pending.revision);
+                    eq(originalUploads.length - uploadsBefore, 1);
+                    eq((await db.getProjectSyncContext()).syncedRevision, revision);
+                    const badRemote = JSON.parse(snapshot);
+                    badRemote.data.projectData.chats[0].projectId = 'invalid';
+                    await fails(() => app.importDataFromString(JSON.stringify(badRemote), { source: 'dropbox' }), /プロジェクト情報/);
+                    eq((await db.getChatProject(member)).name, 'edited during push');
+
+                    const oldRemote = JSON.parse(snapshot);
+                    delete oldRemote.data.projectData;
+                    oldRemote.minimumReaderVersion = 137;
+                    const saved = remote();
+                    files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(oldRemote)]), rev: String(++counter) });
+                    await app.handlePull();
+                    assert(statuses.at(-1).message.includes('プロジェクト情報がありません'));
+                    eq((await db.getChatProject(member)).name, 'edited during push');
+                    files.set(api.METADATA_PATH, saved);
+                    await db.deleteProject(project.id);
+                    await db.deleteProject(other.id);
+                    await app._doPush();
+                    emptySnapshot = await metadata();
+                    const empty = JSON.parse(emptySnapshot);
+                    eq(empty.minimumReaderVersion, 138);
+                    eq(empty.data.projectData.projects, []);
+                    eq(empty.data.projectData.chats, []);
+                    eq(empty.data.projectData.documents, []);
+                    assert(empty.data.projectData.revision !== revision);
+                    eq(originalUploads.length - uploadsBefore, 1);
+                    const newest = remote();
+                    files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(oldRemote)]), rev: String(++counter) });
+                    await app.handlePull();
+                    assert(statuses.at(-1).message.includes('プロジェクト情報がありません'));
+                    eq((await db.getProjectSyncContext()).syncedRevision, empty.data.projectData.revision);
+                    files.set(api.METADATA_PATH, newest);
+                });
+                await withDatabase(async () => {
+                    await connect();
+                    const legacy = JSON.parse(snapshot);
+                    delete legacy.data.projectData;
+                    legacy.minimumReaderVersion = 137;
+                    await app.importDataFromString(JSON.stringify(legacy), { source: 'dropbox' });
+                    eq(await db.listProjects(), []);
+                    eq(await (await db.getLibraryOriginal(document.id)).blob.text(), 'project-shared original');
+                    await app.importDataFromString(snapshot, { source: 'dropbox' });
+                    await app.initializeSyncState();
+                    eq((await db.getChatProject(member)).name, 'edited during push');
+                    eq((await db.listProjectDocuments(project.id)).map(item => item.id), [document.id]);
+                    eq((await db.getProjectSyncContext()).syncedRevision, revision);
+                    await db.updateProject(project.id, { name: 'second device edit' });
+                    await app._doPush();
+                    assert(statuses.at(-1).message.includes('Dropboxに新しいプロジェクト情報'));
+                    eq(await metadata(), emptySnapshot);
+                    await app.handlePull();
+                    assert(statuses.at(-1).message.includes('未同期のプロジェクト'));
+                    eq((await db.getChatProject(member)).name, 'second device edit');
+                    ui.showCustomConfirm = async message => {
+                        assert(message.includes('未同期のプロジェクト'));
+                        return false;
+                    };
+                    await app.handlePull(true);
+                    eq((await db.getChatProject(member)).name, 'second device edit');
+                    const projectsBefore = await db.getProjectSyncContext();
+                    const peer = await DocumentLibrary.request(indexedDB.open(st.db.name));
+                    try {
+                        await DocumentLibrary.transaction(peer, [ProjectStore.chats, 'settings'], 'readwrite', async tx => {
+                            tx.objectStore(ProjectStore.chats).delete(member);
+                            await ProjectStore.markChanged(tx.objectStore('settings'));
+                        });
+                    } finally { peer.close(); }
+                    await fails(() => app.importDataFromString(emptySnapshot, {
+                        source: 'dropbox', allowProjectReplace: true, projectsBefore
+                    }), /準備中にプロジェクト情報/);
+                    eq(await db.getChatProject(member), undefined);
+                    eq((await db.getProject(project.id)).name, 'second device edit');
+                    await app.importDataFromString(emptySnapshot, { source: 'dropbox', allowProjectReplace: true });
+                    eq(await db.listProjects(), []);
+                    eq(await db.getChatProject(member), undefined);
+                    eq((await db.getChat(member)).title, 'project member');
+                    eq(await (await db.getLibraryOriginal(document.id)).blob.text(), 'project-shared original');
+                });
             });
         } finally {
             Object.assign(app, { updateSyncStatusUI: previousStatus, updateDropboxUIState: previousUpdate });

@@ -9,7 +9,7 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-const DB_VERSION = 16;
+const DB_VERSION = 17;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -1766,6 +1766,7 @@ const dbUtils = {
                 }
                 if (event.oldVersion < 15) DocumentLibrary.upgrade(db);
                 if (event.oldVersion < 16) db.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
+                if (event.oldVersion < 17) ProjectStore.upgrade(db);
                 if (event.oldVersion === 0) {
                     transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
                 }
@@ -2247,6 +2248,141 @@ const dbUtils = {
         return DocumentLibrary.syncState(await this.getSetting(DocumentLibrary.syncKey));
     },
 
+    async getProjectSyncContext() {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readonly', async tx => {
+            const settings = tx.objectStore(SETTINGS_STORE);
+            const [record, lastSyncId] = await Promise.all([
+                DocumentLibrary.request(settings.get(ProjectStore.syncKey)),
+                DocumentLibrary.request(settings.get('lastSyncId'))
+            ]);
+            return { ...DocumentLibrary.syncState(record), lastSyncId: lastSyncId?.value ?? null };
+        });
+    },
+
+    async _writeProjectData(stores, change) {
+        const db = await this.openDB();
+        const result = await DocumentLibrary.transaction(db, [SETTINGS_STORE, ...stores], 'readwrite', async tx => {
+            const result = await change(tx);
+            if (result) await ProjectStore.markChanged(tx.objectStore(SETTINGS_STORE));
+            return result;
+        });
+        if (result) appLogic.markAsDirtyAndSchedulePush(true);
+        return result;
+    },
+
+    async listProjects() {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(ProjectStore.projects).getAll());
+    },
+
+    async getProject(projectId) {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(ProjectStore.projects).get(projectId));
+    },
+
+    createProject({ name, description }) {
+        return this._writeProjectData([ProjectStore.projects], async tx => {
+            const fields = ProjectStore.projectFields(name, description);
+            const now = Date.now();
+            const project = { id: DocumentLibrary.uniqueId(), ...fields, createdAt: now, updatedAt: now };
+            await DocumentLibrary.request(tx.objectStore(ProjectStore.projects).add(project));
+            return project;
+        });
+    },
+
+    updateProject(projectId, fields) {
+        return this._writeProjectData([ProjectStore.projects], async tx => {
+            const store = tx.objectStore(ProjectStore.projects);
+            const previous = await ProjectStore.requireProject(tx, projectId);
+            const next = ProjectStore.projectFields(
+                Object.hasOwn(fields, 'name') ? fields.name : previous.name,
+                Object.hasOwn(fields, 'description') ? fields.description : previous.description);
+            if (previous.name === next.name && (previous.description ?? '') === next.description) return false;
+            store.put({ ...previous, ...next, updatedAt: Date.now() });
+            return true;
+        });
+    },
+
+    deleteProject(projectId) {
+        return this._writeProjectData(ProjectStore.stores, async tx => {
+            const store = tx.objectStore(ProjectStore.projects);
+            if (await DocumentLibrary.request(store.getKey(projectId)) === undefined) return false;
+            store.delete(projectId);
+            await Promise.all([ProjectStore.chats, ProjectStore.documents].map(name =>
+                ProjectStore.deleteByIndex(tx.objectStore(name), 'projectId', projectId)));
+            return true;
+        });
+    },
+
+    async getChatProject(chatId) {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [ProjectStore.chats, ProjectStore.projects], 'readonly', async tx => {
+            const link = await DocumentLibrary.request(tx.objectStore(ProjectStore.chats).get(chatId));
+            if (link) return DocumentLibrary.request(tx.objectStore(ProjectStore.projects).get(link.projectId));
+        });
+    },
+
+    async _listProjectTargets(projectId, linkStore, targetStore, targetKey) {
+        const range = IDBKeyRange.only(projectId);
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [linkStore, targetStore], 'readonly', async tx => {
+            const links = await DocumentLibrary.request(tx.objectStore(linkStore).index('projectId').getAll(range));
+            const targets = tx.objectStore(targetStore);
+            return Promise.all(links.map(link => DocumentLibrary.request(targets.get(link[targetKey]))));
+        });
+    },
+
+    listProjectChats(projectId) {
+        return this._listProjectTargets(projectId, ProjectStore.chats, CHATS_STORE, 'chatId');
+    },
+
+    setChatProject(chatId, projectId) {
+        return this._writeProjectData([CHATS_STORE, ProjectStore.projects, ProjectStore.chats], async tx => {
+            const read = DocumentLibrary.request;
+            if (await read(tx.objectStore(CHATS_STORE).getKey(chatId)) === undefined) throw new Error('チャットが見つかりません。');
+            if (projectId === null) return ProjectStore.detachChat(tx, chatId);
+            await ProjectStore.requireProject(tx, projectId);
+            const store = tx.objectStore(ProjectStore.chats);
+            if ((await read(store.get(chatId)))?.projectId === projectId) return false;
+            store.put({ chatId, projectId });
+            return true;
+        });
+    },
+
+    listProjectDocuments(projectId) {
+        return this._listProjectTargets(projectId, ProjectStore.documents, DocumentLibrary.documents, 'documentId');
+    },
+
+    addProjectDocument(projectId, documentId) {
+        return this._writeProjectData([ProjectStore.projects, ProjectStore.documents, DocumentLibrary.documents], async tx => {
+            await ProjectStore.requireProject(tx, projectId);
+            const read = DocumentLibrary.request;
+            if (await read(tx.objectStore(DocumentLibrary.documents).getKey(documentId)) === undefined) {
+                throw new Error('指定したファイルが見つかりません。');
+            }
+            const store = tx.objectStore(ProjectStore.documents);
+            if (await read(store.getKey([projectId, documentId])) !== undefined) return false;
+            store.add({ projectId, documentId });
+            return true;
+        });
+    },
+
+    removeProjectDocument(projectId, documentId) {
+        return this._writeProjectData([ProjectStore.documents], async tx => {
+            const store = tx.objectStore(ProjectStore.documents);
+            const key = [projectId, documentId];
+            if (await DocumentLibrary.request(store.getKey(key)) === undefined) return false;
+            store.delete(key);
+            return true;
+        });
+    },
+
+    clearProjectDocuments(projectId) {
+        return this._writeProjectData([ProjectStore.documents], tx =>
+            ProjectStore.deleteByIndex(tx.objectStore(ProjectStore.documents), 'projectId', projectId));
+    },
+
     async hasChatDocumentLinks() {
         await this.openDB();
         return (await DocumentLibrary.request(this._getStore(DocumentLibrary.links).count())) > 0;
@@ -2534,7 +2670,7 @@ const dbUtils = {
         const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !String(id).startsWith('background_') && !activeImageIdsInOtherChats.has(id));
 
         // Step 3: トランザクション内でチャットと画像の削除を実行
-        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links];
+        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links, ProjectStore.chats];
         if (finalImageIdsToDelete.length > 0) storeNames.push(IMAGE_STORE);
         const linksChanged = await DocumentLibrary.transaction(state.db, storeNames, 'readwrite', async transaction => {
             const chatStore = transaction.objectStore(CHATS_STORE);
@@ -2552,7 +2688,10 @@ const dbUtils = {
                 finalImageIdsToDelete.forEach(imgId => imageStore.delete(imgId));
             }
 
-            return DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, id, []);
+            const documentLinksChanged = await DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, id, []);
+            const membershipChanged = await ProjectStore.detachChat(transaction, id);
+            if (membershipChanged) await ProjectStore.markChanged(transaction.objectStore(SETTINGS_STORE));
+            return documentLinksChanged || membershipChanged;
         });
         state.chatTitleGenerations.get(String(id))?.abort();
         if (markDirty || linksChanged) appLogic.markAsDirtyAndSchedulePush(true);
@@ -2842,7 +2981,8 @@ const dbUtils = {
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
         uiUtils.showProgressDialog('データベースを準備中...');
 
-        const { profiles, chats, memories, assets, settings, documentLibrary } = data;
+        const { profiles, chats, memories, assets, settings, documentLibrary, projectData } = data;
+        if (projectData) ProjectStore.validateSnapshot(projectData, data);
         if (documentLibrary && !options.originals) throw new Error('ファイル原本の検証が必要です。');
         const linkedChatIds = new Set(documentLibrary?.links.map(link => link.chatId));
         const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => {
@@ -2924,7 +3064,7 @@ const dbUtils = {
             [SETTINGS_STORE, settings || []]
         ]);
         const localKeys = new Set(['dropboxTokens', 'localUiSettings', SettingsV136.BACKUP_KEY,
-            DocumentLibrary.syncKey, 'lastSyncId', 'lastSyncTimestamp', 'syncIsDirty', 'syncLastError']);
+            DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId', 'lastSyncTimestamp', 'syncIsDirty', 'syncLastError']);
         const excludedKeys = new Set([...localKeys, ...LOCAL_UI_SETTING_KEYS]);
         records.set(SETTINGS_STORE, records.get(SETTINGS_STORE).filter(setting => !excludedKeys.has(setting.key)));
         if (documentLibrary) {
@@ -2932,18 +3072,24 @@ const dbUtils = {
             records.set(DocumentLibrary.originals, options.originals);
             records.set(DocumentLibrary.links, documentLibrary.links);
         }
+        for (const [index, key] of ['projects', 'chats', 'documents'].entries()) {
+            records.set(ProjectStore.stores[index], projectData?.[key] ?? []);
+        }
 
         const names = new Set([...records.keys(), ...DocumentLibrary.stores]);
         const db = await this.openDB();
-        const libraryPending = await DocumentLibrary.transaction(db,
+        const { libraryPending, projectPending } = await DocumentLibrary.transaction(db,
             [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore], 'readwrite', async tx => {
                 const read = DocumentLibrary.request;
                 const localSettings = tx.objectStore(SETTINGS_STORE);
-                const [preserved, linkCount] = await Promise.all([
+                const [preserved, linkCount, projectCount] = await Promise.all([
                     Promise.all([...localKeys].map(key => read(localSettings.get(key)))),
-                    read(tx.objectStore(DocumentLibrary.links).count())
+                    read(tx.objectStore(DocumentLibrary.links).count()),
+                    read(tx.objectStore(ProjectStore.projects).count())
                 ]);
-                const current = DocumentLibrary.syncState(preserved.find(setting => setting?.key === DocumentLibrary.syncKey));
+                const getPreserved = key => preserved.find(setting => setting?.key === key);
+                const current = DocumentLibrary.syncState(getPreserved(DocumentLibrary.syncKey));
+                const currentProjects = DocumentLibrary.syncState(getPreserved(ProjectStore.syncKey));
                 const expected = options.libraryBefore;
                 if (expected && (current.revision !== expected.revision || current.syncedRevision !== expected.syncedRevision)) {
                     throw new Error('復元の準備中にファイルが変更されました。再度お試しください。');
@@ -2958,7 +3104,31 @@ const dbUtils = {
                     current.revision !== current.syncedRevision && current.revision !== documentLibrary.revision) {
                     throw new Error('未同期のファイル変更があります。バックアップを作成してから手動で同期してください。');
                 }
+                const expectedProjects = options.projectsBefore;
+                if (expectedProjects && (!ProjectStore.sameSyncState(currentProjects, expectedProjects) ||
+                    (getPreserved('lastSyncId')?.value ?? null) !== expectedProjects.lastSyncId)) {
+                    throw new Error('復元の準備中にプロジェクト情報または同期状態が変更されました。再度お試しください。');
+                }
+                if (!projectData && options.source === 'file' && !options.allowLegacyProjectClear) {
+                    throw new Error('旧バックアップを復元するには、プロジェクト情報が失われることを確認してください。');
+                }
+                if (!projectData && options.source !== 'file' && (projectCount || currentProjects.revision || currentProjects.syncedRevision)) {
+                    throw new Error(ProjectStore.legacyConflict);
+                }
+                if (options.source === 'dropbox' && ProjectStore.isRollback(currentProjects, projectData)) {
+                    throw new Error(ProjectStore.legacyConflict);
+                }
+                if (options.source === 'dropbox' && ProjectStore.hasLocalConflict(currentProjects, projectData) &&
+                    !options.allowProjectReplace) {
+                    throw new Error(ProjectStore.localConflict);
+                }
                 if (documentLibrary) await DocumentLibrary.discardChangedIndexes(tx, documentLibrary.documents);
+                const nextProjects = { ...currentProjects };
+                if (options.source === 'dropbox' && projectData) {
+                    nextProjects.revision = nextProjects.syncedRevision = projectData.revision;
+                } else if (await ProjectStore.hasChanged(tx, projectData)) {
+                    nextProjects.revision = DocumentLibrary.uniqueId();
+                }
 
                 uiUtils.updateProgressMessage('データを一時領域にインポート中...');
                 // Stage and promote in the same transaction so another tab cannot replace the staged snapshot.
@@ -2987,7 +3157,10 @@ const dbUtils = {
                     next.revision = DocumentLibrary.uniqueId();
                 }
                 if (next.revision) localSettings.put({ key: DocumentLibrary.syncKey, value: next });
-                const pending = next.revision !== next.syncedRevision;
+                if (nextProjects.revision) localSettings.put({ key: ProjectStore.syncKey, value: nextProjects });
+                const libraryPending = next.revision !== next.syncedRevision;
+                const projectPending = nextProjects.revision !== nextProjects.syncedRevision;
+                const pending = libraryPending || projectPending;
                 if (options.source === 'dropbox') {
                     localSettings.put({ key: 'lastSyncId', value: options.syncId });
                     localSettings.put({ key: 'lastSyncTimestamp', value: options.syncTimestamp });
@@ -2996,12 +3169,12 @@ const dbUtils = {
                 } else if (options.source === 'file' || pending) {
                     localSettings.put({ key: 'syncIsDirty', value: true });
                 }
-                return pending;
+                return { libraryPending, projectPending };
             });
 
         for (const controller of state.chatTitleGenerations.values()) controller.abort();
         void chatListChangeController.notify({ type: 'restore' });
-        return { removedAssetInfo: missingAssetInfo, libraryPending };
+        return { removedAssetInfo: missingAssetInfo, libraryPending, projectPending };
     },
 };
 
@@ -14269,15 +14442,16 @@ const appLogic = {
      * 同期関連の初期化処理
      */
     async initializeSyncState() {
-        const [lastSyncIdSetting, isDirtySetting, lastErrorSetting, library] = await Promise.all([
-            dbUtils.getSetting('lastSyncId'),
+        const [projects, isDirtySetting, lastErrorSetting, library] = await Promise.all([
+            dbUtils.getProjectSyncContext(),
             dbUtils.getSetting('syncIsDirty'),
             dbUtils.getSetting('syncLastError'),
             dbUtils.getDocumentLibrarySyncState()
         ]);
 
-        state.sync.lastSyncId = lastSyncIdSetting ? lastSyncIdSetting.value : null;
-        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision);
+        state.sync.lastSyncId = projects.lastSyncId;
+        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision ||
+            projects.revision !== projects.syncedRevision);
         state.sync.lastError = lastErrorSetting ? lastErrorSetting.value : null;
         
         console.log(`[Sync] 同期状態を初期化しました。lastSyncId: ${state.sync.lastSyncId}, isDirty: ${state.sync.isDirty}, lastError:`, state.sync.lastError);
@@ -14373,18 +14547,29 @@ const appLogic = {
 
 
 
-    async recordDropboxPush(metadata, librarySync) {
+    async recordDropboxPush(metadata, librarySync, projectSync) {
         const db = await dbUtils.openDB();
         return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readwrite', async tx => {
             const settings = tx.objectStore(SETTINGS_STORE);
-            const current = DocumentLibrary.syncState(await DocumentLibrary.request(settings.get(DocumentLibrary.syncKey)));
-            if (current.syncedRevision !== librarySync.syncedRevision) {
-                // Another tab has already recorded a later library state.
+            const [library, projects, lastSyncId] = await Promise.all(
+                [DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId'].map(key => DocumentLibrary.request(settings.get(key))));
+            const current = DocumentLibrary.syncState(library);
+            const currentProjects = DocumentLibrary.syncState(projects);
+            if (current.syncedRevision !== librarySync.syncedRevision ||
+                currentProjects.syncedRevision !== projectSync.syncedRevision ||
+                (lastSyncId?.value ?? null) !== projectSync.lastSyncId) {
+                // Another tab has already recorded a later sync state.
                 return { acknowledged: false, dirty: true };
             }
             const next = { ...current, syncedRevision: librarySync.revision };
-            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision;
+            const nextProjects = {
+                revision: currentProjects.revision ?? ProjectStore.initialRevision,
+                syncedRevision: metadata.data.projectData.revision
+            };
+            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision ||
+                nextProjects.revision !== nextProjects.syncedRevision;
             if (next.revision || next.syncedRevision) settings.put({ key: DocumentLibrary.syncKey, value: next });
+            settings.put({ key: ProjectStore.syncKey, value: nextProjects });
             settings.put({ key: 'lastSyncId', value: metadata.syncId });
             settings.put({ key: 'lastSyncTimestamp', value: new Date(metadata.exportedAt).getTime() });
             settings.put({ key: 'syncLastError', value: null });
@@ -14426,8 +14611,12 @@ const appLogic = {
             updateProgress('クラウドの状態を確認中...');
             const remote = await window.dropboxApi.downloadMetadata({ withRevision: true });
             const cloudData = remote ? JSON.parse(remote.content) : null;
+            const projectsBefore = await dbUtils.getProjectSyncContext();
+            const cloudProjects = cloudData?.data.projectData;
             if (cloudData) {
                 SettingsV136.assertCompatible(cloudData);
+                if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
+                ProjectStore.assertPushBase(projectsBefore, cloudProjects);
                 const remoteLibrary = cloudData.data.documentLibrary;
                 const local = await dbUtils.getDocumentLibrarySyncState();
                 if (remoteLibrary) {
@@ -14438,12 +14627,17 @@ const appLogic = {
                 }
                 const recoveringLibrary = !remoteLibrary && local.revision &&
                     (local.syncedRevision || await dbUtils.hasChatDocumentLinks());
-                if (recoveringLibrary || cloudData.syncId !== state.sync.lastSyncId) {
+                const recoveringProjects = ProjectStore.isRollback(projectsBefore, cloudProjects) ||
+                    (!cloudProjects && projectsBefore.revision && cloudData.syncId !== projectsBefore.lastSyncId);
+                if (recoveringProjects && !isManual) throw new Error(ProjectStore.legacyConflict);
+                if (recoveringLibrary || recoveringProjects || cloudData.syncId !== projectsBefore.lastSyncId) {
                     console.warn(`[Sync Push] 競合を検出！ Local: ${state.sync.lastSyncId}, Cloud: ${cloudData.syncId}`);
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：同期の競合】\n\n" +
-                        (recoveringLibrary
+                        (recoveringProjects
+                            ? "Dropboxの同期データに、この端末で同期または編集したプロジェクト情報がありません。\n\n"
+                            : recoveringLibrary
                             ? "Dropboxの同期データに、この端末のファイルや紐づけの情報がありません。\n\n"
                             : "クラウド上のデータが、このデバイスが最後に同期した状態から変更されています。（他のデバイスが先に同期した可能性があります）\n\n") +
                         "このまま同期を実行すると、クラウド上のデータがこのデバイスのデータで完全に上書きされます。\n\n" +
@@ -14474,13 +14668,29 @@ const appLogic = {
                     console.log(`[Sync Push] クラウド側が新しいピン状態を ${mergedPinChats.length}件反映しました。`);
                 }
             }
+            if (!cloudData && projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
+            if (!cloudData && projectsBefore.syncedRevision) {
+                uiUtils.hideProgressDialog();
+                const confirmed = await uiUtils.showCustomConfirm(
+                    '以前同期したプロジェクト情報がDropboxに見つかりません。この端末のデータをDropboxに保存しますか？');
+                if (!confirmed) {
+                    this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
+                    return;
+                }
+                uiUtils.showProgressDialog('同期を再開しています...');
+            }
 
             // --- Step 2: データ準備 ---
             await window.dropboxApi.ensureAssetsFolderExists();
             
             updateProgress('ローカルデータを準備中...');
-            const { metadataJson, localAssets, documentBlobs, librarySync } = await this._prepareExportData();
+            const { metadataJson, localAssets, documentBlobs, librarySync, projectSync } = await this._prepareExportData();
             const parsedMetadata = JSON.parse(metadataJson);
+            if (projectsBefore.lastSyncId !== projectSync.lastSyncId || projectsBefore.syncedRevision !== projectSync.syncedRevision ||
+                (!cloudProjects && !ProjectStore.sameSyncState(projectsBefore, projectSync))) {
+                throw new Error('プロジェクトの同期状態が変わったため、上書きを中止しました。');
+            }
+            ProjectStore.assertPushBase(projectSync, cloudProjects);
             const remoteLibraryRevision = cloudData?.data.documentLibrary?.revision;
             if (remoteLibraryRevision && remoteLibraryRevision !== librarySync.revision &&
                 remoteLibraryRevision !== librarySync.syncedRevision) {
@@ -14528,7 +14738,7 @@ const appLogic = {
             await window.dropboxApi.uploadMetadata(metadataJson, remote?.rev ?? null);
 
             // --- Step 6: 状態の更新 ---
-            const result = await this.recordDropboxPush(parsedMetadata, librarySync);
+            const result = await this.recordDropboxPush(parsedMetadata, librarySync, projectSync);
             if (result.acknowledged) {
                 state.sync.lastSyncId = parsedMetadata.syncId;
                 state.sync.lastError = null;
@@ -14636,11 +14846,13 @@ const appLogic = {
             const cloudData = JSON.parse(cloudMetadataString);
             SettingsV136.assertCompatible(cloudData);
             const cloudSyncId = cloudData.syncId;
-            const localSyncId = state.sync.lastSyncId;
-            const library = await dbUtils.getDocumentLibrarySyncState();
+            const [library, projects] = await Promise.all([dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()]);
+            const localSyncId = projects.lastSyncId;
+            const cloudProjects = cloudData.data.projectData;
+            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
             const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
-            if (!cloudLibraryRevision && library.revision &&
-                (library.syncedRevision || await dbUtils.hasChatDocumentLinks())) {
+            if ((!cloudProjects && projects.revision) || ProjectStore.isRollback(projects, cloudProjects) ||
+                (!cloudLibraryRevision && library.revision && (library.syncedRevision || await dbUtils.hasChatDocumentLinks()))) {
                 state.sync.isSyncing = false;
                 await this._doPush(true);
                 return;
@@ -14648,7 +14860,8 @@ const appLogic = {
 
             console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
 
-            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision) {
+            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision ||
+                (cloudProjects?.revision ?? null) !== projects.syncedRevision) {
                 console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
                 uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
                 state.sync.isSyncing = false;
@@ -14666,7 +14879,8 @@ const appLogic = {
             const cloudOriginals = documentBlobs.size ? new Map((await window.dropboxApi.listAssets(window.dropboxApi.DOCUMENTS_DIR_PATH))
                 .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size])) : new Map();
             const missingOriginals = [...documentBlobs].some(([hash, blob]) => cloudOriginals.get(hash) !== blob.size);
-            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision;
+            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision ||
+                projects.revision !== projects.syncedRevision;
             if (missingImages || missingOriginals || dirty) {
                 if (dirty) {
                     console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
@@ -14725,13 +14939,16 @@ const appLogic = {
         try {
             await window.dropboxApi.uploadLockFile('pull');
 
-            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
+            const [libraryBefore, projectsBefore] = await Promise.all([
+                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
+            ]);
             const cloudMetadataString = await window.dropboxApi.downloadMetadata();
 
             if (cloudMetadataString === null) {
+                if (projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
                 console.log("[Sync Pull V2] クラウドにファイルが見つかりません。");
                 const localChats = await dbUtils.getAllChats();
-                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision) {
+                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision || projectsBefore.revision) {
                     console.log("[Sync Pull V2] ローカルにデータが存在するため、初回Pushを実行します。");
                     if (isManual) {
                         console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、updateProgressMessageを呼び出します。");
@@ -14753,6 +14970,12 @@ const appLogic = {
 
             const cloudData = JSON.parse(cloudMetadataString);
             SettingsV136.assertCompatible(cloudData);
+            const cloudProjects = cloudData.data.projectData;
+            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
+            if (ProjectStore.isRollback(projectsBefore, cloudProjects) || (!cloudProjects && projectsBefore.revision)) {
+                throw new Error(ProjectStore.legacyConflict);
+            }
+            const projectConflict = ProjectStore.hasLocalConflict(projectsBefore, cloudProjects);
 
             const cloudSyncId = cloudData.syncId;
             const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
@@ -14767,14 +14990,17 @@ const appLogic = {
 
             console.log(`[Sync Pull V2] Cloud syncId: ${cloudSyncId}, Local lastSyncId: ${state.sync.lastSyncId}`);
 
-            if (cloudSyncId !== state.sync.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision) {
-                if (state.sync.isDirty || libraryConflict) {
+            if (cloudSyncId !== projectsBefore.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision ||
+                (cloudProjects?.revision ?? null) !== projectsBefore.syncedRevision) {
+                if (projectConflict && !isManual) throw new Error(ProjectStore.localConflict);
+                if (state.sync.isDirty || libraryConflict || projectConflict) {
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：データの同期に関する重要な確認】\n\n" +
                         "クラウド上に、このデバイスとは異なるデータが見つかりました。\n\n" +
                         "同期を実行すると、このデバイスのチャット、画像、設定などがDropboxのデータで置き換わります。\n" +
                         (libraryConflict ? "未同期のファイル・原本の版・チャットとの紐づけもDropboxのデータで置き換わります。\n" : "") +
+                        (projectConflict ? "未同期のプロジェクト・チャットの所属・共有資料の関連付けもDropboxのデータで置き換わります。\n" : "") +
                         "現在のデータを残すには、キャンセルして設定画面から全データのバックアップを作成してください。\n\n" +
                         "クラウドのデータで同期を開始してもよろしいですか？"
                     );
@@ -14790,7 +15016,8 @@ const appLogic = {
                 }
 
                 const importResult = await this.importDataFromString(cloudMetadataString, {
-                    automatic: !isManual, source: 'dropbox', libraryBefore, allowLibraryReplace: Boolean(libraryConflict && isManual)
+                    automatic: !isManual, source: 'dropbox', libraryBefore, projectsBefore,
+                    allowLibraryReplace: Boolean(libraryConflict && isManual), allowProjectReplace: Boolean(projectConflict && isManual)
                 });
                 if (!importResult) {
                     this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
@@ -14804,7 +15031,7 @@ const appLogic = {
                 }
 
                 state.sync.lastSyncId = importResult.syncId;
-                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending;
+                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending || importResult.projectPending;
                 state.sync.isDirty = hasQueuedChanges;
                 state.sync.lastError = null;
                 
@@ -14837,11 +15064,10 @@ const appLogic = {
 
             } else {
                 console.log("[Sync Pull V2] ローカルは既に最新です。同期は不要です。");
-                const currentLibrary = await dbUtils.getDocumentLibrarySyncState();
-                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty || currentLibrary.revision !== currentLibrary.syncedRevision;
+                await this.initializeSyncState();
+                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty;
                 state.sync.isDirty = hasQueuedChanges;
                 await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
-                await dbUtils.saveSetting('syncIsDirty', hasQueuedChanges);
                 this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
                 await this.updateDropboxUIState();
                 pullCompleted = true;
@@ -22842,21 +23068,26 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         try {
             const db = await dbUtils.openDB();
             const names = [PROFILES_STORE, CHATS_STORE, 'memory_store', SETTINGS_STORE, 'image_assets',
-                IMAGE_STORE, ...DocumentLibrary.stores];
-            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...libraryRecords] =
+                IMAGE_STORE, ...DocumentLibrary.stores, ...ProjectStore.stores];
+            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...records] =
                 await DocumentLibrary.transaction(db, names, 'readonly', tx => Promise.all(names.map(name => {
                     const store = tx.objectStore(name);
                     return DocumentLibrary.request(store.getAll());
                 })));
             chats.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) || indexedDB.cmp(b.id, a.id));
-            const librarySync = DocumentLibrary.syncState(allSettings.find(setting => setting.key === DocumentLibrary.syncKey));
-            const library = DocumentLibrary.exportSnapshot(librarySync.revision, libraryRecords, chats);
+            const getSetting = key => allSettings.find(setting => setting.key === key);
+            const librarySync = DocumentLibrary.syncState(getSetting(DocumentLibrary.syncKey));
+            const library = DocumentLibrary.exportSnapshot(librarySync.revision, records.slice(0, DocumentLibrary.stores.length), chats);
+            const projectSync = { ...DocumentLibrary.syncState(getSetting(ProjectStore.syncKey)), lastSyncId: getSetting('lastSyncId')?.value ?? null };
+            const projectData = ProjectStore.exportSnapshot(projectSync.revision, records.slice(DocumentLibrary.stores.length), {
+                chats, documentLibrary: library.manifest
+            });
 
             const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
             const settingsForExport = allSettings
                 .filter(setting =>
                     !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY,
-                        DocumentLibrary.syncKey, 'backgroundImageBlob'].includes(setting.key)
+                        DocumentLibrary.syncKey, ProjectStore.syncKey, 'backgroundImageBlob'].includes(setting.key)
                     && !localUiSettingKeysForExport.has(setting.key)
                 )
                 .map(setting => {
@@ -23017,7 +23248,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             const metadata = {
                 version: "2.0",
                 settingsSchemaVersion: 136,
-                minimumReaderVersion: library.manifest || backup ? SettingsV136.READER_VERSION : 136,
+                minimumReaderVersion: SettingsV136.READER_VERSION,
                 exportedAt: new Date().toISOString(),
                 syncId: syncId,
                 data: {
@@ -23026,7 +23257,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                     memories,
                     assets: imageAssets.map(a => ({ name: a.name, assetId: a.assetId, createdAt: a.createdAt })),
                     settings: settingsForExport,
-                    ...(library.manifest && { documentLibrary: library.manifest })
+                    ...(library.manifest && { documentLibrary: library.manifest }),
+                    projectData
                 }
             };
 
@@ -23037,7 +23269,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 metadataJson: JSON.stringify(metadata),
                 localAssets,
                 documentBlobs: library.blobs,
-                librarySync
+                librarySync,
+                projectSync
             };
 
         } catch (error) {
@@ -23134,15 +23367,21 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         }
         state.sync.isSyncing = true;
         try {
-            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
+            const [libraryBefore, projectsBefore] = await Promise.all([
+                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
+            ]);
             const json = await file.text();
             const envelope = JSON.parse(json);
             SettingsV136.assertCompatible(envelope);
             const message = envelope.data.documentLibrary
-                ? 'チャット、設定、画像、メモリ、共通ファイル（原本・旧版・紐づけ）をバックアップの内容で置き換えます。必要なデータは先にバックアップしてください。復元しますか？'
-                : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。復元しますか？';
-            if (!await uiUtils.showCustomConfirm(message)) return;
-            await this.importDataFromString(json, { source: 'file', libraryBefore });
+                ? 'チャット、設定、画像、メモリ、共通ファイル（原本・旧版・紐づけ）をバックアップの内容で置き換えます。'
+                : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。';
+            const legacy = !Object.hasOwn(envelope.data, 'projectData');
+            const projectWarning = legacy
+                ? 'このバックアップにはプロジェクト情報がありません。復元すると現在のプロジェクト、チャットの所属、共有資料の関連付けが失われます。'
+                : 'プロジェクト、チャットの所属、共有資料の関連付けもバックアップの内容で置き換えます。';
+            if (!await uiUtils.showCustomConfirm(`${message}\n\n${projectWarning}\n\n必要なデータは先にバックアップしてください。復元しますか？`)) return;
+            await this.importDataFromString(json, { source: 'file', libraryBefore, projectsBefore, allowLegacyProjectClear: legacy });
             uiUtils.hideProgressDialog();
             state.sync.isDirty = true;
             await uiUtils.showCustomAlert('バックアップを復元しました。アプリを再起動します。');
@@ -23161,11 +23400,15 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
     
         try {
             const libraryBefore = options.libraryBefore ?? await dbUtils.getDocumentLibrarySyncState();
+            const projectsBefore = options.projectsBefore ?? await dbUtils.getProjectSyncContext();
             const parsedData = JSON.parse(jsonString);
             SettingsV136.assertCompatible(parsedData);
             const portableBackup = parsedData.backupSchemaVersion === 1;
             if (portableBackup && options.source !== 'file') throw new Error('ファイルから復元してください。');
             const cloudData = parsedData.data;
+            if (options.source === 'file' && !cloudData.projectData && !options.allowLegacyProjectClear) {
+                throw new Error('旧バックアップを復元するには、プロジェクト情報が失われることを確認してください。');
+            }
             if (options.source && (!Array.isArray(cloudData.chats) || !Array.isArray(cloudData.profiles) ||
                 ['settings', 'memories', 'assets'].some(key =>
                     (portableBackup || cloudData.documentLibrary || Object.hasOwn(cloudData, key)) && !Array.isArray(cloudData[key])))) {
@@ -23178,6 +23421,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             if (Array.isArray(cloudData.profiles) && cloudData.profiles.length > MAX_PROFILES) {
                 throw new Error(PROFILE_LIMIT_MESSAGE);
             }
+            if (cloudData.projectData) ProjectStore.validateSnapshot(cloudData.projectData, cloudData);
             const localChatsForPinMerge = options.source === 'file' ? [] : await dbUtils.getAllChats('updatedAt');
             const localChatsById = new Map(localChatsForPinMerge.map(chat => [String(chat.id), chat]));
             let localPinStateWon = false;
@@ -23252,11 +23496,11 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
             // clearAndImportDataからの戻り値を受け取る
             const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, {
-                ...options, libraryBefore, originals, syncId: parsedData.syncId,
+                ...options, libraryBefore, projectsBefore, originals, syncId: parsedData.syncId,
                 syncTimestamp: new Date(parsedData.exportedAt).getTime()
             });
             if (!result) return null;
-            const { removedAssetInfo, libraryPending } = result;
+            const { removedAssetInfo, libraryPending, projectPending } = result;
             try {
                 await this.loadGlobalSettings();
                 await this.loadProfiles();
@@ -23270,7 +23514,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             // 戻り値にクレンジング情報とメタデータを両方含める
             return {
                 syncId: parsedData.syncId, exportedAt: parsedData.exportedAt,
-                removedAssetInfo, localPinStateWon, libraryPending
+                removedAssetInfo, localPinStateWon, libraryPending, projectPending
             };
     
         } catch (error) {
