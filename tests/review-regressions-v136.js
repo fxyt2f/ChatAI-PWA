@@ -143,11 +143,11 @@ window.runReviewRegressionsV136 = async ({app,db,st,ui,el,assert,eq}) => {
             const value=(await db.getSetting('globalSettingsV136')).value;
             eq(value.maxRetries,71);eq(value.apiTimeoutSeconds,72);eq(value.theme.accentColor,'#112233');eq(value.theme.headerColor,'#445566');eq(value.appearance.overlayOpacity,0.31);eq(value.appearance.messageOpacity,0.42);
             st.activeProfile={...st.activeProfile,settings:{...st.activeProfile.settings,useCustomTheme:false,useCustomAppearance:false}};
-            await Promise.all([app.saveAppearanceValues('theme',{newChatButtonColor:'#778899'}),peer.peerSettings.saveGlobalSettingsV136({theme:{sendButtonColor:'#aabbcc'}})]);
+            await Promise.all([app.saveAppearanceValues('theme',{otherButtonColor:'#778899'}),peer.peerSettings.saveGlobalSettingsV136({theme:{sendButtonColor:'#aabbcc'}})]);
             // Function calling uses the same appearance patch method as the settings UI.
             await app.updateOpacitySettings({overlay:0.61,message_bubble:0.62});
             const appearance=(await db.getSetting('globalSettingsV136')).value;
-            eq(appearance.theme.newChatButtonColor,'#778899');eq(appearance.theme.sendButtonColor,'#aabbcc');
+            eq(appearance.theme.otherButtonColor,'#778899');eq(appearance.theme.sendButtonColor,'#aabbcc');
             eq(appearance.appearance.overlayOpacity,0.61);eq(appearance.appearance.messageOpacity,0.62);
             await app.saveGlobalSettingsV136({maxRetries:73});await peer.peerSettings.saveGlobalSettingsV136({maxRetries:74});
             eq((await db.getSetting('globalSettingsV136')).value.maxRetries,74);

@@ -9,7 +9,7 @@ window.prepareSettingsLayoutReviewV136 = async (category, dark, expanded = true)
     await app.setProfileOverride('theme', expanded);
     await app.setProfileOverride('appearance', expanded);
     const theme = { darkMode: dark, themeColorMode: 'individual', accentColor: '#1976d2',
-        headerColor: '#1976d2', headerTextColorMode: 'auto', newChatButtonColor: '#1976d2',
+        headerColor: '#1976d2', headerTextColorMode: 'auto',
         sendButtonColor: '#1976d2', otherButtonColor: '#1976d2', userMessageColor: '#1976d2' };
     await app.saveAppearanceValues('theme', theme, { global: true });
     if (expanded) await app.saveAppearanceValues('theme', theme, { global: false });

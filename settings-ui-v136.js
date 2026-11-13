@@ -5,15 +5,27 @@
     const themeFields = {
         'dark-mode-toggle': 'darkMode', 'theme-color-mode-select': 'themeColorMode', 'accent-color-input': 'accentColor',
         'header-color-input': 'headerColor', 'header-text-color-mode-select': 'headerTextColorMode',
-        'header-text-color-input': 'headerTextColor', 'new-chat-button-color-input': 'newChatButtonColor',
+        'header-text-color-input': 'headerTextColor',
         'send-button-color-input': 'sendButtonColor', 'other-button-color-input': 'otherButtonColor', 'user-message-color-input': 'userMessageColor'
     };
     const appearanceFields = { 'overlay-opacity-slider': 'overlayOpacity', 'message-opacity-slider': 'messageOpacity' };
     const resetFields = { 'reset-accent-color-btn': 'accentColor', 'reset-header-color-btn': 'headerColor',
-        'reset-header-text-color-btn': 'headerTextColor', 'reset-new-chat-button-color-btn': 'newChatButtonColor',
+        'reset-header-text-color-btn': 'headerTextColor',
         'reset-send-button-color-btn': 'sendButtonColor', 'reset-other-button-color-btn': 'otherButtonColor', 'reset-user-message-color-btn': 'userMessageColor' };
     const $ = id => document.getElementById(id);
-    const levelName = value => value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
+    const modelDefault = SettingsV136.MODEL_DEFAULT_EFFORT;
+    const levelName = (value, capability) => value === modelDefault ? 'モデル既定'
+        : value === 'xhigh' && capability?.source === 'inferred' ? 'Extra High'
+        : value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
+    function displayedThinkingEffort(app, capability) {
+        const selected = app.getCurrentChatThinkingEffort();
+        if (capability.rejectedLevels?.includes(selected)) return selected;
+        if (capability.initialEffort && (selected == null || (selected === modelDefault && !capability.modelDefault))) {
+            return capability.initialEffort;
+        }
+        return capability.modelDefault ? SettingsV136.normalizeEffort(selected, capability)
+            : selected || capability.defaultEffort;
+    }
     const levelOrder = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className || ''; if (text) node.textContent = text; return node; };
     class SettingsUI {
@@ -115,7 +127,11 @@
             });
             window.addEventListener('execution-settings-changed', event => {
                 const type = event.detail?.type;
-                if (type === 'capabilities' && event.detail.apiConfigId !== this.app.getCurrentChatModelRef()?.apiConfigId) return;
+                if (type === 'capabilities') {
+                    const ref = this.app.getCurrentChatModelRef();
+                    if (event.detail.apiConfigId !== ref?.apiConfigId ||
+                        (event.detail.modelName && event.detail.modelName !== ref?.modelName)) return;
+                }
                 if (type === 'chat' || type === 'capabilities') {
                     this.renderExecution();
                     if (this.popover?.refreshThinking) this.popover.refreshThinking();
@@ -415,23 +431,32 @@
             $('chat-model-button').classList.toggle('invalid-model', !validation.valid && !pending);
             $('chat-model-button').disabled = this.state.isSending || pending;
             $('model-name').disabled = this.state.isSending || pending;
-            const c = this.app.getModelThinkingCapability(ref), effort = this.app.getCurrentChatThinkingEffort() || c.defaultEffort;
-            const canThink = validation.valid && c.levels.length > 0;
-            $('chat-thinking-label').hidden = !canThink; $('chat-thinking-label').textContent = canThink ? levelName(effort) : '';
-            $('chat-model-button').setAttribute('aria-label', `${canThink ? 'モデルとThinkingを選択' : 'モデルを選択'}: ${$('chat-model-button').title}${canThink ? ` / Thinking: ${levelName(effort)}` : ''}`);
+            const c = this.app.getModelThinkingCapability(ref), effort = displayedThinkingEffort(this.app, c);
+            const canThink = validation.valid && (c.levels.length > 0 || c.modelDefault);
+            $('chat-thinking-label').hidden = !canThink; $('chat-thinking-label').textContent = canThink ? levelName(effort, c) : '';
+            $('chat-model-button').setAttribute('aria-label', `${canThink ? 'モデルとThinkingを選択' : 'モデルを選択'}: ${$('chat-model-button').title}${canThink ? ` / Thinking: ${levelName(effort, c)}` : ''}`);
             const select = $('settings-thinking-button'); select.hidden = !canThink; select.disabled = this.state.isSending || pending;
             const field = select.closest('.settings-field'); if (field) field.hidden = !canThink;
             const levels = c.levels.slice().sort((a,b) => levelOrder.indexOf(a) - levelOrder.indexOf(b));
-            if (Array.from(select.options).map(option => option.value).join(',') !== levels.join(',')) {
-                select.replaceChildren(...levels.map(value => { const option = make('option', '', levelName(value)); option.value = value; return option; }));
+            if (c.modelDefault) levels.unshift(modelDefault);
+            if (c.rejectedLevels?.includes(effort)) levels.unshift(effort);
+            const options = levels.map(value => ({ value, label: levelName(value, c), disabled: c.rejectedLevels?.includes(value) === true }));
+            if (select.options.length !== options.length || options.some(({value, label, disabled}, index) =>
+                select.options[index].value !== value || select.options[index].textContent !== label || select.options[index].disabled !== disabled)) {
+                select.replaceChildren(...options.map(({value, label, disabled}) => {
+                    const option = make('option', '', label);
+                    option.value = value; option.disabled = disabled;
+                    return option;
+                }));
             }
-            select.value = effort || ''; select.title = `Thinkingレベル: ${levelName(effort)}`;
+            select.value = effort || ''; select.title = `Thinkingレベル: ${levelName(effort, c)}`;
             if (this.state.isSending) this.closePopover(false);
         }
         openExecution(anchor) {
             if (this.state.isSending || anchor.disabled) return;
             const ref = this.app.getCurrentChatModelRef();
-            if (ref && this.app.validateModelRefForUsage(ref).valid && this.app.getModelThinkingCapability(ref).levels.length) this.openThinking(anchor);
+            const capability = this.app.getModelThinkingCapability(ref);
+            if (ref && this.app.validateModelRefForUsage(ref).valid && (capability.levels.length || capability.modelDefault)) this.openThinking(anchor);
             else this.openModels(anchor);
         }
         setInputMode(mode) {
@@ -666,13 +691,13 @@
         }
         openThinking(anchor) {
             if (this.state.isSending) return;
-            const capability = this.app.getModelThinkingCapability(); if (!capability.levels.length) return;
+            const capability = this.app.getModelThinkingCapability(); if (!capability.levels.length && !capability.modelDefault) return;
             // Provider metadata may list strongest first. Only presentation order changes.
             const levels = [...capability.levels].sort((a, b) => levelOrder.indexOf(a) - levelOrder.indexOf(b));
             const panel = this.newPopover(anchor, 'Thinkingレベル'); if (!panel) return;
             panel.classList.add('thinking-popover');
             const row = make('div', 'thinking-popover-row'); panel.append(row);
-            let current = this.app.getCurrentChatThinkingEffort() || capability.defaultEffort;
+            let current = displayedThinkingEffort(this.app, capability);
             const chatId = this.state.currentChatId, generation = this.state.executionInitGeneration;
             const ref = this.app.getCurrentChatModelRef();
             const contextMatches = () => {
@@ -684,12 +709,16 @@
             const heading = make('button', 'thinking-heading thinking-model-switch'); heading.type = 'button';
             heading.setAttribute('aria-label', 'モデルを選択'); heading.setAttribute('aria-haspopup', 'dialog');
             heading.addEventListener('click', () => { this.closePopover(false); this.openModels(anchor); }); row.append(heading);
-            const name = make('span', 'thinking-level-name', levelName(current)); name.setAttribute('aria-live', 'polite'); heading.append(name);
+            const name = make('span', 'thinking-level-name', levelName(current, capability)); name.setAttribute('aria-live', 'polite'); heading.append(name);
             const context = make('span', 'thinking-model-name', this.app.getCurrentChatModelRef()?.modelName || ''); context.title = context.textContent; heading.append(context);
             const dots = make('div', 'thinking-dots'); dots.setAttribute('role', 'radiogroup'); dots.setAttribute('aria-label', 'Thinkingレベル');
             // Keep 40px hit areas; extend the visible markers toward the rounded track ends.
-            const progress = levels.length > 1 ? levels.indexOf(current) / (levels.length - 1) : .5;
-            dots.style.setProperty('--thinking-progress', `calc(12px + (100% - 24px) * ${progress})`);
+            const setProgress = level => {
+                const index = levels.indexOf(level);
+                const progress = levels.length > 1 ? index / (levels.length - 1) : .5;
+                dots.style.setProperty('--thinking-progress', index < 0 ? '0px' : `calc(12px + (100% - 24px) * ${progress})`);
+            };
+            setProgress(current);
             let pending = 0, drag = null, suppressClick = false;
             const canChoose = () => !this.state.isSending && !this.state.currentExecutionApiConfig && contextMatches();
             const update = (level, preview = false) => {
@@ -699,18 +728,21 @@
                     if (drag?.level) return;
                 }
                 const focusedRadio = !preview && dots.contains(document.activeElement);
-                name.textContent = levelName(level);
-                const progress = levels.length > 1 ? levels.indexOf(level) / (levels.length - 1) : .5;
-                dots.style.setProperty('--thinking-progress', `calc(12px + (100% - 24px) * ${progress})`);
+                const c = this.app.getModelThinkingCapability();
+                name.textContent = levelName(level, c);
+                setProgress(level);
                 for (const button of dots.children) {
                     const selected = button.dataset.level === level;
-                    button.setAttribute('aria-checked', String(selected)); button.tabIndex = selected ? 0 : -1;
+                    button.title = levelName(button.dataset.level, c);
+                    button.setAttribute('aria-label', button.title);
+                    button.setAttribute('aria-checked', String(selected));
+                    button.tabIndex = selected || (!levels.includes(level) && button === dots.firstElementChild) ? 0 : -1;
                     if (selected && focusedRadio) button.focus({ preventScroll: true });
                 }
             };
             panel.refreshThinking = () => {
                 if (!contextMatches()) { this.closePopover(false); return; }
-                if (!pending) update(this.app.getCurrentChatThinkingEffort() || capability.defaultEffort);
+                if (!pending) update(displayedThinkingEffort(this.app, this.app.getModelThinkingCapability()));
             };
             const cancelDrag = () => {
                 const previewing = Boolean(drag?.level);
@@ -726,13 +758,14 @@
                         if (canChoose() && (dragGeneration === null || dragGeneration === (this.state.executionSelectionGenerationV136 ?? 0)))
                             await this.app.setCurrentChatThinkingEffort(level);
                     }
-                    finally { pending--; if (!pending && contextMatches()) update(this.app.getCurrentChatThinkingEffort() || capability.defaultEffort); }
+                    finally { pending--; if (!pending && contextMatches()) update(displayedThinkingEffort(this.app, this.app.getModelThinkingCapability())); }
                 });
             };
             levels.forEach((level, index) => {
                 const button = make('button', 'thinking-dot'); button.type = 'button'; button.setAttribute('role', 'radio');
-                button.setAttribute('aria-label', levelName(level)); button.setAttribute('aria-checked', String(level === current));
-                button.tabIndex = level === current ? 0 : -1; button.title = levelName(level);
+                button.title = levelName(level, capability);
+                button.setAttribute('aria-label', button.title); button.setAttribute('aria-checked', String(level === current));
+                button.tabIndex = level === current || (!levels.includes(current) && index === 0) ? 0 : -1;
                 button.dataset.level = level;
                 const position = levels.length > 1 ? index / (levels.length - 1) : .5;
                 button.style.setProperty('--thinking-dot-shift', `${(position * 2 - 1) * 8}px`);
@@ -789,13 +822,18 @@
             dots.addEventListener('keydown', event => {
                 if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
                 event.preventDefault(); const index = levels.indexOf(current);
-                const next = event.key === 'Home' ? 0 : event.key === 'End' ? levels.length - 1 : (index + (['ArrowLeft','ArrowUp'].includes(event.key) ? -1 : 1) + levels.length) % levels.length;
+                const backward = ['ArrowLeft', 'ArrowUp'].includes(event.key);
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? levels.length - 1
+                    : index < 0 ? (backward ? levels.length - 1 : 0)
+                    : (index + (backward ? -1 : 1) + levels.length) % levels.length;
                 choose(levels[next]);
             });
             const reset = make('button', 'thinking-reset'); reset.type = 'button'; reset.title = '既定レベルに戻す'; reset.setAttribute('aria-label', 'Thinkingレベルを既定に戻す');
             reset.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9a8 8 0 1 1 .5 7M4 4v5h5"/></svg>';
-            reset.addEventListener('click', () => choose(capability.defaultEffort)); row.append(reset); panel.append(dots);
-            this.positionPopover(); dots.querySelector('[aria-checked=true]')?.focus();
+            if (capability.defaultEffort === modelDefault) reset.title = 'モデル既定に戻す';
+            reset.addEventListener('click', () => choose(capability.defaultEffort)); row.append(reset);
+            if (levels.length) panel.append(dots);
+            this.positionPopover(); (dots.querySelector('[tabindex="0"]') || reset).focus();
         }
         positionPopover() {
             if (!this.popover || !this.anchor?.isConnected) return;

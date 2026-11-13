@@ -356,6 +356,7 @@ def run(client, url, screenshots=None):
 
             select(image)
             ev("attachmentFixture.input('未送信の本文')")
+            click('#goto-history-btn')
             click('#new-chat-btn')
             wait("document.querySelector('#confirmDialog[open]') && document.querySelector('#confirmDialog').textContent.includes('添付')",
                  'New chat asks before discarding pending attachments')
@@ -365,6 +366,7 @@ def run(client, url, screenshots=None):
             ev('attachmentFixture.dialogClosed.then(() => true)')
             assert_names(image.name)
             assert ev(f"state.currentChatId === {sent_id} && document.querySelector('{input_box}').value === '未送信の本文'")
+            click('#goto-history-btn')
             click('#new-chat-btn')
             wait("document.querySelector('#confirmDialog[open]')", 'New chat confirms again')
             click('#confirmDialog .dialog-ok-btn')

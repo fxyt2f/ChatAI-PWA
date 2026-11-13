@@ -2,6 +2,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <script src="../settings-v136.js"></script>
 <script src="../streaming-v136.js"></script>
+<script src="../document-library.js"></script>
+<script src="../document-search.js"></script>
+<script src="../document-rag.js"></script>
+<script src="../document-library-ui.js"></script>
+<script src="../dropbox.js"></script>
 <script src="./v136-ui-tests.js"></script>
 <script src="./review-regressions-v136.js"></script>
 <script src="./review-n-regressions-v136.js"></script>
@@ -11,6 +16,9 @@
 <script src="./chat-title-generation-v136.js"></script>
 <script src="./streaming-browser-v136.js"></script>
 <script src="./review-fixes-v136.js"></script>
+<script src="./document-library-v137.js"></script>
+<script src="./document-search-v137.js"></script>
+<script src="./document-rag-v137.js"></script>
 <script>
 window.addEventListener('load', async () => {
     const output = [];
@@ -32,6 +40,9 @@ window.addEventListener('load', async () => {
         source = source.slice(source.indexOf('// --- 定数 ---'));
         (0,eval)(source + '\nwindow.testApi=apiUtils;window.testUi=uiUtils;window.testElements=elements;window.testDebug=DebugLogger;window.testSidebarUiState=chatSidebarUiState;');
         const app=window.appLogic, db=window.dbUtils, st=window.state, api=window.testApi, ui=window.testUi, el=window.testElements;
+        const fetchOutsideFixture=window.fetch;
+        window.fetch=(url,options)=>!options?.body && options?.headers?.['x-goog-api-key']
+            ? Promise.resolve(new Response(null,{status:404})) : fetchOutsideFixture(url,options);
         const realUi={...ui};
         window.testRealUi=realUi;
         const realAppFunctions={renderApiConfigList:app.renderApiConfigList,scrollToBottom:app.scrollToBottom};
@@ -49,11 +60,32 @@ window.addEventListener('load', async () => {
         app.clearInputDraftAfterSend=()=>{};
         app.scrollToBottom=()=>{};
         window.testDebug.init=()=>{};
-        for (const version of [13, 14]) await test(`existing IndexedDB v${version} opens and preserves local data`, async () => {
+        if (new URLSearchParams(location.search).has('documents')) {
+            await runDocumentLibraryTests({app,db,st,ui,el,test,assert,eq});
+            output.push('ALL PASSED ('+output.length+' document library browser tests)');
+            return;
+        }
+        if (new URLSearchParams(location.search).has('document-search')) {
+            await db.openDB();
+            await runDocumentSearchTests({app,db,st,test,assert,eq});
+            output.push('ALL PASSED ('+output.length+' document extraction and search tests)');
+            return;
+        }
+        if (new URLSearchParams(location.search).has('document-rag')) {
+            await runDocumentRagTests({app,db,st,ui,el,test,assert,eq,realUi});
+            output.push('ALL PASSED ('+output.length+' document RAG browser tests)');
+            return;
+        }
+        for (const version of [13, 14, 15]) await test(`existing IndexedDB v${version} opens and preserves local data`, async () => {
             const name = 'v1366-compat-' + crypto.randomUUID();
             const legacyStore = 'background_jobs';
             const open = indexedDB.open;
             const originalMessages = st.currentMessages, originalChatId = st.currentChatId;
+            const originalBlob = new Blob(['existing document']);
+            const originalHash = await DocumentLibrary.digest(originalBlob);
+            const document = { id: DocumentLibrary.uniqueId(), versionId: DocumentLibrary.uniqueId(), version: 1,
+                name: 'existing document', fileName: 'document.txt', format: 'txt', size: originalBlob.size,
+                hash: originalHash, mimeType: '', createdAt: 1, updatedAt: 1 };
             try {
                 const seeded = await new Promise((resolve, reject) => {
                     const request = open.call(indexedDB, name, version);
@@ -66,10 +98,20 @@ window.addEventListener('load', async () => {
                         });
                         fixture.createObjectStore('settings', { keyPath: 'key' }).put({ key: 'compat', value: 'existing setting' });
                         fixture.createObjectStore('memory_store', { keyPath: 'profileId' }).put({ profileId: 1, items: ['existing memory'] });
-                        if (version === 14) {
+                        fixture.createObjectStore('profiles', { keyPath: 'id' }).put({ id: 1, name: 'existing profile' });
+                        fixture.createObjectStore('image_store', { keyPath: 'id' }).put({ id: 'compat-image', blob: new Blob(['original image']) });
+                        if (version >= 14) {
                             const retired = fixture.createObjectStore(legacyStore, { keyPath: 'id' });
                             retired.createIndex('chatId', 'chatId', { unique: true });
                             retired.put({ id: 'retired-receipt', chatId: 1 });
+                        }
+                        if (version === 15) {
+                            DocumentLibrary.upgrade(fixture);
+                            request.transaction.objectStore(DocumentLibrary.documents).put(document);
+                            request.transaction.objectStore(DocumentLibrary.originals).put({
+                                ...document, documentId: document.id, blob: originalBlob
+                            });
+                            request.transaction.objectStore(DocumentLibrary.links).put({ chatId: 1, documentId: document.id });
                         }
                     };
                     request.onsuccess = () => resolve(request.result);
@@ -77,8 +119,13 @@ window.addEventListener('load', async () => {
                 seeded.close();
                 indexedDB.open = (_, requestedVersion) => open.call(indexedDB, name, requestedVersion);
                 const connection = await db.openDB();
-                eq(connection.version, 14);
-                eq(connection.objectStoreNames.contains(legacyStore), version === 14);
+                eq(connection.version, 16);
+                assert(connection.objectStoreNames.contains(DocumentLibrary.indexStore));
+                for (const store of DocumentLibrary.stores) {
+                    assert(connection.objectStoreNames.contains(store));
+                    assert(connection.objectStoreNames.contains(store + '_temp'));
+                }
+                eq(connection.objectStoreNames.contains(legacyStore), version >= 14);
                 const original = await db.getChat(1);
                 eq(original.messages.map(message => message.content), ['existing turn']);
                 st.currentChatId = original.id;
@@ -91,6 +138,15 @@ window.addEventListener('load', async () => {
                 eq(saved.recordGenerationId, original.recordGenerationId);
                 eq((await db.getMemory(1)).items, ['existing memory']);
                 eq((await db.getSetting('compat')).value, 'existing setting');
+                eq((await db.getProfile(1)).name, 'existing profile');
+                const image = await DocumentLibrary.request(db._getStore('image_store').get('compat-image'));
+                eq(await image.blob.text(), 'original image');
+                if (version === 15) {
+                    eq(await db.getChatDocuments(1), [document]);
+                    const original = await db.getLibraryOriginal(document.id, document.version, document.versionId);
+                    eq(await original.blob.text(), 'existing document');
+                    eq((await DocumentSearch.getStatus(document)).status, 'pending');
+                }
             } finally {
                 indexedDB.open = open;
                 st.db?.close();
@@ -221,11 +277,13 @@ window.addEventListener('load', async () => {
                 let rejected=false;try{await app.setCurrentChatThinkingEffort('minimal');}catch{rejected=true;}assert(rejected);
                 let sentUrl;
                 window.fetch=async(url,opts)=>{sentUrl=url;request=JSON.parse(opts.body);return {ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:'answer'}]},finishReason:'STOP'}]})}};
-                for(const level of ['medium','low','high']) {
-                    await app.setCurrentChatThinkingEffort(level);app.freezeExecutionSettings();
+                for(const level of [null,'medium','low','high']) {
+                    if (level === null) await app.setCurrentChatExecution({thinkingEffort:null});
+                    else await app.setCurrentChatThinkingEffort(level);
+                    eq(app.freezeExecutionSettings().thinkingEffort,level);
                     await api.callGeminiApi([{role:'user',parts:[{text:'test'}]}],{temperature:0.4,thinkingConfig:{thinkingBudget:8000}},'');
                     assert(sentUrl.includes('/gemini-3.8-flash:generateContent?'));
-                    eq(request.generationConfig.thinkingConfig,{thinkingLevel:level,includeThoughts:true});
+                    eq(request.generationConfig.thinkingConfig,level === null ? {includeThoughts:true} : {thinkingLevel:level,includeThoughts:true});
                     eq(request.generationConfig.temperature,0.4);assert(!JSON.stringify(request).includes('thinkingBudget'));
                     st.currentExecutionApiConfig=null;st.abortController=null;
                 }
@@ -296,8 +354,10 @@ window.addEventListener('load', async () => {
             eq(payload.settingsSchemaVersion,136);assert(!payload.data.settings.some(s=>s.key==='localUiSettings'||s.key==='settingsMigrationBackupV136'));
             assert(payload.data.settings.some(s=>s.key==='lastSuccessfulExecution'));assert(exported.localAssets.has(st.globalSettingsV136.appearance.backgroundAssetId));
             const historical=JSON.stringify(payload.data.chats.map(c=>c.messages.map(m=>m.usageMetadata)));
+            const dropbox = window.dropboxApi;
             window.dropboxApi={downloadAsset:async id=>exported.localAssets.get(id)?.blob};
-            await app.importDataFromString(exported.metadataJson);
+            try { await app.importDataFromString(exported.metadataJson); }
+            finally { window.dropboxApi = dropbox; }
             await app.loadGlobalSettings();await app.loadProfiles();
             eq((await db.getSetting('localUiSettings')).value.chatFontSize,22);
             eq(JSON.stringify((await db.getAllChats()).map(c=>c.messages.map(m=>m.usageMetadata))),historical);
@@ -407,9 +467,12 @@ window.addEventListener('load', async () => {
         const stage = Number(new URLSearchParams(location.search).get('fixes-stage'));
         await window.runReviewFixesV136({app,db,st,ui,el,test,assert,eq,stage});
         if(!output.some(line=>line.startsWith('FAIL')))output.push('ALL PASSED ('+output.length+' browser tests)');
-    } catch(error) {output.push('FAIL '+(document.documentElement.dataset.testStatus || '')+' '+(error.stack || String(error)));}
-    const preview=new URLSearchParams(location.search).has('ui');
-    if(!preview)document.body.innerHTML='';
-    const pre=document.createElement('pre');pre.id='test-results';pre.hidden=preview;pre.textContent=output.join('\n');document.body.append(pre);
+    } catch(error) {
+        output.push('FAIL '+(document.documentElement.dataset.testStatus || '')+' '+(error.stack || String(error)));
+    } finally {
+        const preview=new URLSearchParams(location.search).has('ui');
+        if(!preview)document.body.innerHTML='';
+        const pre=document.createElement('pre');pre.id='test-results';pre.hidden=preview;pre.textContent=output.join('\n');document.body.append(pre);
+    }
 });
 </script>

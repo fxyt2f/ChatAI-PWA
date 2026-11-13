@@ -5,7 +5,6 @@ import time
 
 def run(client, url):
     chat = '#chat-screen .main-content'
-    history_list = '#history-screen .history-main-content'
     settings_top = '#settings-screen .settings-layout'
     settings_detail = '#settings-detail'
     touch_id = 0
@@ -21,8 +20,13 @@ def run(client, url):
     def wait(expression, label):
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
-            if ev(expression):
-                return
+            try:
+                if ev(expression):
+                    return
+            except RuntimeError as error:
+                detail = error.args[0]
+                if not isinstance(detail, dict) or detail.get('message') != 'Inspected target navigated or closed':
+                    raise
             time.sleep(0.05)
         details = ev("[state.currentScreen, location.hash, settingsUiV136.category, swipeFixtureTrace.slice(-10)]")
         raise AssertionError(f'{label}: {details}')
@@ -50,7 +54,7 @@ def run(client, url):
             'type': event, 'touchPoints': points, 'timestamp': time.time(),
         })
 
-    def tap(selector):
+    def tap(selector, *, dwell=0):
         nonlocal touch_id
         touch_id += 1
         point = ev(f"""(() => {{
@@ -58,9 +62,40 @@ def run(client, url):
             return {{x: r.left + r.width / 2, y: r.top + r.height / 2, id: {touch_id}}};
         }})()""")
         touch('touchStart', [point])
+        if dwell:
+            time.sleep(dwell)
         touch('touchEnd', [])
 
-    def drag(selector, dx, dy=0, *, padding=False, cancel=False, measure=False):
+    def manual_gesture(steps):
+        nonlocal touch_id
+        touch_id += len(steps[0])
+        for i, points in enumerate(steps):
+            if i:
+                time.sleep(0.035)
+            touch('touchMove' if i else 'touchStart', [
+                {'x': x, 'y': y, 'id': touch_id + j} for j, (x, y) in enumerate(points)
+            ])
+        touch('touchEnd', [])
+        touch_id += len(steps[0])
+        ev('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+
+    def pinch(enlarge):
+        if enlarge:
+            manual_gesture([[(115-i*5, 270-i*8), (145+i*5, 330+i*8)] for i in range(10)])
+        else:
+            manual_gesture([[(75+i*4, 215+i*7), (175-i*4, 355-i*7)] for i in range(10)])
+
+    def pan_viewport(axis):
+        prop = 'offsetLeft' if axis == 'x' else 'offsetTop'
+        start = ev(f'visualViewport.{prop}')
+        for direction in (-1, 1):
+            dx, dy = (direction * 80, 0) if axis == 'x' else (0, direction * 110)
+            manual_gesture([[(170+dx*i/8, 300+dy*i/8)] for i in range(9)])
+            if abs(ev(f'visualViewport.{prop}') - start) > 2:
+                return
+        raise AssertionError(f'Zoomed visual viewport did not pan on {axis}: {start}, {ev(f"visualViewport.{prop}")}')
+
+    def drag(selector, dx, dy=0, *, padding=False, cancel=False, measure=False, initial_drift=False):
         nonlocal touch_id
         touch_id += 1
         origin = ev(f"""(() => {{
@@ -74,7 +109,14 @@ def run(client, url):
         position = "document.querySelector('.screen.active').getBoundingClientRect().left"
         before = ev(position) if measure else None
         touch('touchStart', [point(0)])
-        for step in range(1, 9):
+        if initial_drift:
+            # Force Chrome to deliver this first sample before any stronger horizontal move.
+            first = {'x': origin['x'] + (14 if dx > 0 else -14), 'y': origin['y'] + 10, 'id': touch_id}
+            touch('touchMove', [first])
+            wait(f"""swipeFixtureTrace.some(event => event.type === 'touchmove' && event.id === {touch_id}
+                && Math.abs(event.x - {first['x']}) < 1 && Math.abs(event.y - {first['y']}) < 1)""",
+                 'Initial drift was delivered')
+        for step in range(2 if initial_drift else 1, 9):
             time.sleep(0.018)
             touch('touchMove', [point(step)])
             if measure and step in (4, 8):
@@ -87,14 +129,23 @@ def run(client, url):
                 }})()""", f'Native drag reached step {step}')
         touch('touchCancel' if cancel else 'touchEnd', [])
 
-    def synthetic(selector, moves, end, start=(100, 300)):
+    def synthetic(selector, moves, end, start=(100, 300), *, captured=False):
         points = [[0, *start], *[[0, *position] for position in moves], [0, *end]]
         assert ev(f"""(() => {{
             const points = {json.dumps(points)}, target = {json.dumps(selector)};
             const allowed = swipeFixtureEvent(target, 'touchstart', [points[0]]) &&
                 points.slice(1, -1).every(point => swipeFixtureEvent(target, 'touchmove', [point]));
-            return swipeFixtureEvent(target, 'touchend', [], [points.at(-1)]) && allowed;
-        }})()"""), 'Swipe events must remain uncanceled'
+            return swipeFixtureEvent(target, 'touchend', [], [points.at(-1)]) === {str(not captured).lower()} && allowed;
+        }})()"""), 'Only the release of a captured drawer drag may cancel its tap'
+
+    def settled_sidebar(opened):
+        wait(f"""(() => {{
+            const panel = elements.chatHistorySidebar.getBoundingClientRect();
+            const x = panel.left - elements.chatScreen.getBoundingClientRect().left;
+            return chatSidebarUiState.isOpen === {str(opened).lower()} &&
+                Math.abs(x - ({'0' if opened else '-panel.width'})) < 0.5 &&
+                !elements.chatScreen.classList.contains('chat-sidebar-dragging');
+        }})()""", 'Drawer animation reached its endpoint')
 
     def unchanged(action):
         before = ev('[state.currentScreen, location.hash, history.length, settingsUiV136.category]')
@@ -112,7 +163,7 @@ def run(client, url):
             const target = {json.dumps(selector)}, element = document.querySelector({json.dumps(element)});
             const detail = element.id === 'settings-detail';
             const neighbor = document.querySelector(detail ? '.settings-category-nav' : element.id === 'chat-screen'
-                ? ({dx} > 0 ? '#history-screen' : '#settings-screen') : '#chat-screen');
+                ? '#settings-screen' : '#chat-screen');
             const before = element.getBoundingClientRect().left;
             const neighborBefore = neighbor.getBoundingClientRect().left;
             swipeFixtureEvent(target, 'touchstart', [[0, 180, 300]]);
@@ -168,13 +219,15 @@ def run(client, url):
             worker.addEventListener = (type, ...args) => {
                 if (type !== 'controllerchange') listen(type, ...args);
             };
-            window.swipeFixtureEvent = (selector, type, points, changed = points) => {
+            window.swipeFixtureEvent = (selector, type, points, changed = points, time) => {
                 const target = document.querySelector(selector);
                 const touches = values => values.map(([identifier, clientX, clientY]) =>
                     new Touch({identifier, clientX, clientY, target}));
-                return target.dispatchEvent(new TouchEvent(type, {
+                const event = new TouchEvent(type, {
                     bubbles: true, cancelable: true, touches: touches(points), changedTouches: touches(changed)
-                }));
+                });
+                if (time !== undefined) Object.defineProperty(event, 'timeStamp', {value: time});
+                return target.dispatchEvent(event);
             };
             window.swipeFixtureMoves = [];
             window.swipeFixtureTrace = [];
@@ -201,7 +254,7 @@ def run(client, url):
         screen('chat')
         assert ev("!state.settings.enableSwipeNavigation && !document.documentElement.classList.contains('swipe-navigation-enabled')")
         unchanged(lambda: drag(chat, -104))
-        unchanged(lambda: drag(chat, 104))
+        unchanged(lambda: synthetic(chat, [(205, 300)], (245, 300), start=(140, 300)))
         click('#goto-settings-btn')
         screen('settings')
         unchanged(lambda: drag(settings_top, 104))
@@ -326,54 +379,147 @@ def run(client, url):
             });
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = reject; });
         })()""")
-        drag(chat, 104, measure=True)
-        screen('history')
-        feedback_clear()
+        drag(chat, 104, 12, padding=True, initial_drift=True)
+        wait("chatSidebarUiState.isOpen && document.querySelectorAll('.chat-sidebar-item').length>=35",
+             'A left-edge swipe with initial drift opens the complete sidebar')
+        # Chrome can suppress a compatibility click when CDP starts another
+        # contact immediately after a drag. Leave time for a distinct tap.
+        time.sleep(0.22)
+        tap('.chat-sidebar-item .chat-sidebar-item-menu')
+        wait("!elements.historyItemMenu.classList.contains('hidden')", 'Tapping a row menu works')
+        ev("uiUtilsV136.closeHistoryItemMenu()")
+        tap('#chat-sidebar-search-toggle')
+        wait("document.activeElement.id === 'chat-sidebar-search-input'", 'Search opens and focuses')
+        client.call('Input.insertText', {'text': 'fixture 34'})
+        wait("document.querySelectorAll('.chat-sidebar-item').length === 1", 'Sidebar can search message text')
+        click('#chat-sidebar-search-toggle')
+        wait("document.querySelectorAll('.chat-sidebar-item').length>=35", 'Closing search restores all rows')
+        drag('#chat-sidebar-scroll', 0, -180)
+        wait("elements.chatSidebarScroll.scrollTop > 0", 'Sidebar vertical scroll works')
+        # Reset CDP's contact bookkeeping after the opening swipe changes
+        # which element is under the original contact.
         boot(reload=True)
         screen('chat')
         click('#goto-history-btn')
-        screen('history')
-        wait("document.querySelectorAll('#history-list .history-item').length >= 20", 'Real history rows are rendered')
-        tap('#history-list .history-item-menu-button')
-        wait("!document.querySelector('#history-item-menu').classList.contains('hidden')", 'Tapping a card menu still works')
-        ev("uiUtilsV136.closeHistoryItemMenu()")
-        tap('#history-search-input')
-        wait("document.activeElement.id === 'history-search-input'", 'Tapping the search field focuses it')
-        unchanged(lambda: drag('#history-search-input', -104))
-        client.call('Input.insertText', {'text': 'Swipe fixture'})
-        wait("document.querySelector('#history-search-input').value === 'Swipe fixture'", 'History search accepts text')
-        ev("document.querySelector('#history-search-input').blur()")
-        wait("!historyUiState.searchTimer && !document.querySelector('#history-list').classList.contains('hidden')",
-             'Search is applied before testing native scrolling')
-        ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', false)")
-        unchanged(lambda: drag(history_list, -104, padding=True))
-        ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', true)")
-        unchanged(lambda: drag(history_list, 104, padding=True))
-        unchanged(lambda: release_with_feedback(history_list, '#history-screen', 104, follows=False))
-        drag(history_list, 0, -180, padding=True)
-        wait("document.querySelector('.history-main-content').scrollTop > 0", 'History vertical scroll works')
-        saved_scroll = ev("document.querySelector('.history-main-content').scrollTop")
-        ev("""(() => {
-            const card = [...document.querySelectorAll('#history-list .history-item-open')].find(button => {
-                const rect = button.getBoundingClientRect();
-                return rect.top > 150 && rect.bottom < innerHeight - 24;
-            });
-            card.dataset.swipeTestTarget = '';
-            window.historySwipeClicks = 0;
-            card.addEventListener('click', () => historySwipeClicks++);
-        })()""")
-        drag('[data-swipe-test-target]', -104)
-        screen('chat')
-        assert ev('historySwipeClicks === 0'), 'The horizontal swipe did not click the card'
-        feedback_clear()
-        ev('history.back()')
-        screen('history')
-        wait(f"document.querySelector('.history-main-content').scrollTop >= {saved_scroll - 2}", 'History restores its scroll')
-        click('#back-to-chat-from-history')
-        screen('chat')
+        wait("chatSidebarUiState.isOpen && document.querySelectorAll('.chat-sidebar-item').length>=35", 'Sidebar ready for the closing swipe')
+        settled_sidebar(True)
+        ev("""const row = [...document.querySelectorAll('.chat-sidebar-item-open')].find(button=>{
+            const rect=button.getBoundingClientRect();
+            return rect.top>220 && rect.bottom<450;
+        });
+        row.dataset.swipeTestTarget = '';
+        window.historySwipeClicks = 0;
+        row.addEventListener('click', () => historySwipeClicks++);""")
+        drag('[data-swipe-test-target]', -104, 12, initial_drift=True)
+        wait("!chatSidebarUiState.isOpen", 'A reverse swipe from a history row with initial drift closes the sidebar')
+        assert ev("historySwipeClicks === 0 && state.currentChatId === null"), 'Reverse swipe does not select the row'
         boot(reload=True)
         screen('chat')
+        drag(chat, 104, padding=True)
+        row = '.chat-sidebar-item-open'
+        wait(f"chatSidebarUiState.isOpen && Boolean(document.querySelector('{row}'))", 'Sidebar is ready after the opening swipe')
+        chosen = ev(f"document.querySelector('{row}').dataset.chatId")
+        # A distinct contact after a CDP drag avoids Chrome suppressing its click.
+        time.sleep(0.20)
+        tap(row, dwell=0.06)
+        wait(f"!chatSidebarUiState.isOpen && String(state.currentChatId) === {json.dumps(chosen)}",
+             'A native tap after opening selects the intended chat')
+        boot(reload=True)
+        screen('chat')
+        assert ev(f"getComputedStyle(document.querySelector({json.dumps(chat)})).touchAction === 'pan-y pinch-zoom'")
+        for target, start, end, expected in [(chat, 187, 292, True), ('#chat-sidebar-scroll', 185, 80, False)]:
+            ev(f"""(() => {{
+                const target = {json.dumps(target)};
+                swipeFixtureEvent(target, 'touchstart', [[0, {start}, 300]]);
+                swipeFixtureEvent(target, 'touchmove', [[0, {end}, 300]]);
+                window.dispatchEvent(new Event('resize'));
+                swipeFixtureEvent(target, 'touchend', [], [[0, {end}, 300]]);
+            }})()""")
+            wait(f'chatSidebarUiState.isOpen === {str(expected).lower()}',
+                 'A height-only browser resize keeps the sidebar swipe active')
+        for cancellation in ('pointercancel', 'touchcancel'):
+            assert ev(f"""(() => {{
+                const selector = {json.dumps(chat)};
+                const target = document.querySelector(selector);
+                swipeFixtureEvent(selector, 'touchstart', [[0, 10, 300]]);
+                swipeFixtureEvent(selector, 'touchmove', [[0, 84, 310]]);
+                if (!appLogic.swipeGesture) return false;
+                if ({json.dumps(cancellation)} === 'pointercancel') {{
+                    target.dispatchEvent(new PointerEvent('pointercancel', {{bubbles:true, pointerType:'touch', isPrimary:true}}));
+                }} else {{
+                    swipeFixtureEvent(selector, 'touchcancel', []);
+                }}
+                swipeFixtureEvent(selector, 'touchend', [], [[0, 115, 312]]);
+                return !appLogic.swipeGesture && !chatSidebarUiState.isOpen;
+            }})()"""), f'{cancellation} must prevent a late touchend from opening the sidebar'
+        click('#goto-history-btn')
+        wait('chatSidebarUiState.isOpen', 'Header opens the sidebar at normal zoom')
+        manual_gesture([[(ev('innerWidth') - 20, 300)]])
+        wait('!chatSidebarUiState.isOpen', 'Native tap outside closes the sidebar')
+        settled_sidebar(False)
+        width = ev('elements.chatHistorySidebar.getBoundingClientRect().width')
+        drawer_x = '(elements.chatHistorySidebar.getBoundingClientRect().left - elements.chatScreen.getBoundingClientRect().left)'
+        for opened, origin, direction, positions, finish, expected in [
+            (False, 48, 1, (36, 72, 32), 'touchEnd', False),
+            (False, 48, 1, (36, 118), 'touchEnd', True),
+            (True, 205, -1, (34, 73, 31), 'touchEnd', True),
+            (True, 205, -1, (34, 116), 'touchEnd', False),
+            (False, 187, 1, (36, 72, 48, 110), 'touchEnd', True),
+            (True, 205, -1, (34, 116), 'touchEnd', False),
+            (False, 258, 1, (36, 72, 48, 110), 'touchEnd', True),
+            (True, 205, -1, (34, 116), 'touchEnd', False),
+            (False, 258, 1, (36, 64), 'touchCancel', False),
+        ]:
+            settled_sidebar(opened)
+            touch_id += 1
+            point = lambda delta: {'x': origin + direction * delta, 'y': 390, 'id': touch_id}
+            touch('touchStart', [point(0)])
+            for delta in positions:
+                touch('touchMove', [point(delta)])
+                offset = (0 if opened else -width) + direction * delta
+                progress = 1 + offset / width
+                wait(f"""Math.abs({drawer_x} - ({offset})) < 1 &&
+                    Math.abs(Number(getComputedStyle(elements.chatSidebarBackdrop).opacity) - {progress}) < .02 &&
+                    elements.chatScreen.classList.contains('chat-sidebar-dragging') &&
+                    chatSidebarUiState.isOpen === {str(opened).lower()}""",
+                     f'Native drawer and backdrop follow the touch from x={origin}')
+            # The distance tests must not inherit velocity from the last move.
+            time.sleep(0.12)
+            touch(finish, [])
+            wait("""Boolean(getComputedStyle(elements.chatHistorySidebar).transform) &&
+                elements.chatHistorySidebar.getAnimations().some(animation => animation.transitionProperty === 'transform')""",
+                 'Release or cancel animates from the drag position')
+            settled_sidebar(expected)
+            assert ev("!elements.chatScreen.style.getPropertyValue('--sidebar-offset') && "
+                      "!elements.chatScreen.style.getPropertyValue('--sidebar-progress')")
 
+        for opened, origin, direction, duration, expected in [
+            (False, 330, 1, 260, False),
+            (False, 330, 1, 40, True),
+            (True, 205, -1, 40, False),
+        ]:
+            settled_sidebar(opened)
+            target = '#chat-sidebar-scroll' if opened else chat
+            ev(f"""(() => {{
+                const target = {json.dumps(target)}, start = [0, {origin}, 390], end = [0, {origin + direction * 36}, 390];
+                swipeFixtureEvent(target, 'touchstart', [start], [start], 1000);
+                swipeFixtureEvent(target, 'touchmove', [end], [end], {1000 + duration - 5});
+                swipeFixtureEvent(target, 'touchend', [], [end], {1000 + duration});
+            }})()""")
+            settled_sidebar(expected)
+
+        ev(f"""(() => {{
+            const target = {json.dumps(chat)};
+            swipeFixtureEvent(target, 'touchstart', [[0, 48, 390]]);
+            swipeFixtureEvent(target, 'touchmove', [[0, 90, 390]]);
+        }})()""")
+        wait("elements.chatScreen.classList.contains('chat-sidebar-dragging')", 'A drawer drag is in progress')
+        click('#goto-history-btn')
+        settled_sidebar(True)
+        ev(f"swipeFixtureEvent({json.dumps(chat)}, 'touchend', [], [[0, 100, 390]])")
+        assert ev('chatSidebarUiState.isOpen && !appLogic.swipeGesture')
+        click('#chat-sidebar-backdrop')
+        settled_sidebar(False)
         ev("""(() => {
             state.currentMessages = [{role: 'model',
                 content: 'Horizontal code below\\n\\n\\x60\\x60\\x60\\n' + '0123456789'.repeat(70)
@@ -391,16 +537,26 @@ def run(client, url):
         wait("document.querySelector('.message.model pre').scrollLeft > 0", 'Native code scrolling works')
         assert ev("""swipeFixtureMoves.some(event => event.trusted && !event.cancelable)
             && swipeFixtureMoves.every(event => !event.prevented)"""), 'Native scrolling commits without prevented touch events'
+        code_offset = ev("document.querySelector('.message.model pre').scrollLeft")
+        drag('.message.model pre', 104)
+        wait(f"document.querySelector('.message.model pre').scrollLeft < {code_offset}",
+             'A right drag scrolls the code without opening the drawer')
+        settled_sidebar(False)
         screen('chat')
         ev("document.querySelector('#chat-screen .main-content').scrollTop = 0")
 
-        for moves, end in [
-            ([(104, 335), (205, 336)], (210, 336)),   # Vertical first, then horizontal.
-            ([(140, 335)], (190, 380)),             # Diagonal.
-            ([(130, 300)], (149, 300)),             # Less than 50px.
-            ([(190, 300)], (130, 300)),             # Returned below the threshold before release.
+        for moves, end, captured in [
+            ([(104, 335), (205, 336)], (210, 336), False),   # Vertical first, then horizontal.
+            ([(140, 335)], (190, 380), False),              # Diagonal.
+            ([(130, 300)], (127, 300), True),               # Below both commit distances.
+            ([(190, 300)], (125, 300), True),               # Returned below the threshold before release.
         ]:
-            unchanged(lambda: synthetic(chat, moves, end))
+            unchanged(lambda: synthetic(chat, moves, end, captured=captured))
+            settled_sidebar(False)
+        ev("getSelection().selectAllChildren(document.querySelector('.message.model .message-content p'))")
+        synthetic(chat, [(225, 300)], (300, 300), start=(185, 300))
+        assert ev("!getSelection().isCollapsed && !chatSidebarUiState.isOpen")
+        ev("getSelection().removeAllRanges()")
         for selector in ('#chat-search-dialog', '#chat-replace-preview-list', '.message.model pre'):
             if selector == '#chat-search-dialog':
                 click('#chat-search-open-btn')
@@ -425,37 +581,37 @@ def run(client, url):
             const target = {json.dumps(chat)}, element = document.querySelector('#chat-screen');
             const base = element.getBoundingClientRect().left;
             const position = () => element.getBoundingClientRect().left - base;
-            const start = () => swipeFixtureEvent(target, 'touchstart', [[0, 140, 300]]);
+            const start = () => swipeFixtureEvent(target, 'touchstart', [[0, 240, 300]]);
             const move = async dx => {{
-                swipeFixtureEvent(target, 'touchmove', [[0, 140 + dx, 300]]);
+                swipeFixtureEvent(target, 'touchmove', [[0, 240 + dx, 300]]);
                 await new Promise(requestAnimationFrame);
             }};
-            start(); await move(5);
+            start(); await move(-5);
             if (Math.abs(position()) > 0.1) throw new Error('Moved before horizontal direction was determined');
-            await move(30); const small = position();
-            await move(100); const larger = position();
-            await move(200); const farther = position();
+            await move(-30); const small = position();
+            await move(-100); const larger = position();
+            await move(-200); const farther = position();
             await new Promise(requestAnimationFrame);
-            if (small !== 20 || larger !== 90 || farther !== 190 || position() !== farther || appLogic.swipeSnap)
+            if (small !== -20 || larger !== -90 || farther !== -190 || position() !== farther || appLogic.swipeSnap)
                 throw new Error('Drag did not track the finger directly: ' + [small,larger,farther,position()]);
             await move(-30);
-            if (Math.abs(position()+small) > 0.1) throw new Error('Unexpected reversal offset');
-            swipeFixtureEvent(target, 'touchend', [], [[0, 110, 300]]);
+            if (Math.abs(position()-small) > 0.1) throw new Error('Unexpected reversal offset');
+            swipeFixtureEvent(target, 'touchend', [], [[0, 210, 300]]);
             const rollback = appLogic.swipeSnap?.animations[0];
             const duration = rollback?.effect.getTiming().duration;
-            if (!(duration >= 180 && duration <= 260) || Math.abs(position()+small) > 1)
+            if (!(duration >= 180 && duration <= 260) || Math.abs(position()-small) > 1)
                 throw new Error('Rollback did not start from the release position');
             rollback.pause(); rollback.currentTime = 90;
-            if (!(position() > -small && position() < 0)) throw new Error('Rollback is not interpolated');
+            if (!(position() > small && position() < 0)) throw new Error('Rollback is not interpolated');
             const midway = position();
-            start(); await move(35);
+            start(); await move(-35);
             if (rollback.playState !== 'idle' || Math.abs(position() - midway) > 0.5)
                 throw new Error('Re-grabbing the rollback jumped');
-            await move(60);
-            if (Math.abs(position() - midway - 25) > 0.5) throw new Error('Re-grab did not follow the finger');
+            await move(-60);
+            if (Math.abs(position() - midway + 25) > 0.5) throw new Error('Re-grab did not follow the finger');
             swipeFixtureEvent(target, 'touchcancel', []);
             const canceled = appLogic.swipeSnap?.animations[0];
-            if (!canceled || position() <= 0) throw new Error('Cancel did not roll back');
+            if (!canceled || position() >= 0) throw new Error('Cancel did not roll back');
             await canceled.finished;
             return Math.abs(position()) < 0.1 && location.hash === '#chat';
         }})()""")
@@ -468,11 +624,64 @@ def run(client, url):
             swipeFixtureEvent(target, 'touchend', [], [[0, 205, 300]]);
             return appLogic.swipeGesture === null && location.hash === '#chat';
         }})()"""), 'Lifting one finger after multitouch cannot revive the swipe'
-        client.call('Emulation.setPageScaleFactor', {'pageScaleFactor': 1.5})
-        wait('state.isZoomed', 'Pinch zoom state is active')
-        unchanged(lambda: synthetic(chat, [(160, 300)], (205, 300)))
-        client.call('Emulation.setPageScaleFactor', {'pageScaleFactor': 1})
+        boot(reload=True)
+        screen('chat')
+        client.call('Emulation.setEmitTouchEventsForMouse', {'enabled': True, 'configuration': 'mobile'})
+        for surface, scroll in (('chat', chat), ('sidebar', '#chat-sidebar-scroll'),
+                                ('library', '#document-library-collection-scroll'), ('settings', settings_top)):
+            if surface == 'sidebar':
+                click('#goto-history-btn')
+                wait('chatSidebarUiState.isOpen', 'Sidebar opens from the header')
+            if surface == 'library':
+                click('#goto-history-btn')
+                click('#document-library-open')
+                wait('!elements.documentLibraryWorkspace.hidden', 'Library opens from sidebar')
+            if surface == 'settings':
+                click('#goto-settings-btn')
+                screen('settings')
+            pinch(True)
+            wait('visualViewport.scale > 1.2 && state.isZoomed', f'Two-finger pinch zooms {surface}')
+            before = ev('[location.hash,chatSidebarUiState.isOpen,elements.documentLibraryWorkspace.hidden]')
+            pan_viewport('x')
+            ev(f"(() => {{ const pane=document.querySelector({json.dumps(scroll)}); if(pane) pane.scrollTop=pane.scrollHeight; }})()")
+            pan_viewport('y')
+            assert ev('[location.hash,chatSidebarUiState.isOpen,elements.documentLibraryWorkspace.hidden]') == before
+            pinch(False)
+            wait('!state.isZoomed && visualViewport.scale < 1.01', f'Pinch restores {surface} to normal')
+            if surface == 'sidebar':
+                click('#chat-sidebar-backdrop')
+            if surface == 'library':
+                click('#document-library-back')
+                wait('elements.documentLibraryWorkspace.hidden', 'Return from zoomed library')
+            if surface == 'settings':
+                click('#back-to-chat-from-settings')
+                screen('chat')
+        ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', false)")
+        pinch(True)
+        wait('state.isZoomed', 'Zoom works with swipes disabled')
+        # Pan the enlarged viewport to the header, then hit the actual control.
+        for _ in range(3):
+            if ev('visualViewport.offsetLeft < 2 && visualViewport.offsetTop < 2'):
+                break
+            manual_gesture([[(80+i*24, 120+i*55)] for i in range(10)])
+        point = ev("""(() => {
+            const button=elements.gotoHistoryBtn, rect=button.getBoundingClientRect(), view=visualViewport;
+            const x=rect.left+rect.width/2, y=rect.top+rect.height/2;
+            return [x, y, button.contains(document.elementFromPoint(x,y)) &&
+                x>=view.offsetLeft && x<view.offsetLeft+view.width && y>=view.offsetTop && y<view.offsetTop+view.height];
+        })()""")
+        assert point[2] and 0<point[0]<375 and 0<point[1]<740, point
+        manual_gesture([[(point[0], point[1])]])
+        wait('chatSidebarUiState.isOpen', 'Header opens sidebar at enlarged scale')
+        click('#chat-sidebar-backdrop')
+        pinch(False)
         wait('!state.isZoomed', 'Normal zoom restored')
+        assert ev("dbUtils.getSetting('localUiSettings').then(record=>!record.value.enableSwipeNavigation)")
+        drag(chat, 104)
+        assert ev('!chatSidebarUiState.isOpen && !state.settings.enableSwipeNavigation')
+        client.call('Emulation.setEmitTouchEventsForMouse', {'enabled': False})
+        client.call('Emulation.setTouchEmulationEnabled', {'enabled': True, 'maxTouchPoints': 2})
+        ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', true)")
         assert ev(f"""(async () => {{
             const target = {json.dumps(chat)};
             swipeFixtureEvent(target, 'touchstart', [[0, 100, 300]]);
@@ -481,8 +690,8 @@ def run(client, url):
             swipeFixtureEvent(target, 'touchend', [], [[0, 205, 300]]);
             return location.hash === '#chat' && appLogic.swipeGesture === null;
         }})()"""), 'Turning the setting off invalidates an in-flight gesture'
-        ev(f"""swipeFixtureEvent({json.dumps(chat)}, 'touchstart', [[0, 100, 300]]);
-            swipeFixtureEvent({json.dumps(chat)}, 'touchmove', [[0, 150, 300]])""")
+        ev(f"""swipeFixtureEvent({json.dumps(chat)}, 'touchstart', [[0, 180, 300]]);
+            swipeFixtureEvent({json.dumps(chat)}, 'touchmove', [[0, 130, 300]])""")
         wait("document.getElementById('chat-screen').style.translate !== ''", 'Chat is following the finger')
         click('#goto-settings-btn')
         screen('settings')
@@ -490,9 +699,9 @@ def run(client, url):
         unchanged(lambda: ev(f"swipeFixtureEvent({json.dumps(chat)}, 'touchend', [], [[0, 205, 300]])"))
         synthetic(settings_top, [(160, 300)], (205, 300))
         screen('chat')
-        synthetic(chat, [(25, 300)], (70, 300), start=(0, 300))
-        screen('history')
-        click('#back-to-chat-from-history')
+        synthetic(chat, [(25, 300)], (105, 300), start=(0, 300), captured=True)
+        wait('chatSidebarUiState.isOpen', 'Left edge swipe opens sidebar')
+        click('#chat-sidebar-backdrop')
         screen('chat')
         depth = ev('history.length')
         assert ev(f"""(() => {{
@@ -505,13 +714,6 @@ def run(client, url):
         screen('settings')
         synthetic(settings_top, [(160, 300)], (205, 300))
         screen('chat')
-
-        release_with_feedback(chat, '#chat-screen', 104)
-        screen('history')
-        feedback_clear()
-        release_with_feedback(history_list, '#history-screen', -104)
-        screen('chat')
-        feedback_clear()
 
         for width in (320, 375, 430, 768, 799, 800, 801, 1280):
             viewport(width)
@@ -570,15 +772,15 @@ def run(client, url):
             wait(f"document.querySelector('#chat-screen').classList.contains('chat-sidebar-mode-{mode}')", 'Sidebar mode is ready')
             ev("uiUtilsV136.closeChatSidebar()")
             depth = ev('history.length')
-            release_with_feedback(chat, '#chat-screen', 104, follows=False)
+            synthetic(chat, [(75, 300)], (110, 300), start=(6, 300), captured=mode == 'overlay')
             wait("document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Swipe opens the history sidebar')
             assert ev("location.hash === '#chat'") and ev('history.length') == depth
-            unchanged(lambda: synthetic('#chat-history-sidebar', [(20, 300)], (0, 300)))
+            unchanged(lambda: synthetic('#chat-history-sidebar', [(160, 300)], (205, 300)))
             unchanged(lambda: synthetic(chat, [(160, 300)], (205, 300)))
-            click('#chat-sidebar-close-btn')
-            wait("!document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Existing sidebar close button works')
+            click('#goto-history-btn' if mode == 'permanent' else '#chat-sidebar-backdrop')
+            wait("!chatSidebarUiState.isOpen", 'Existing sidebar close operations work')
 
-        for width, wide, mode in ((375, True, 'disabled'), (1024, False, 'disabled'),
+        for width, wide, mode in ((375, True, 'overlay'), (1024, False, 'overlay'),
                                   (1024, True, 'overlay'), (1280, True, 'permanent')):
             viewport(width)
             ev(f"appLogic.updateLocalUiSetting('enableWideMode', {str(wide).lower()}).then(() => appLogic.applyWideMode())")
@@ -586,28 +788,18 @@ def run(client, url):
                 theme = str(dark).lower()
                 ev(f"appLogic.saveAppearanceValues('theme', {{darkMode: {theme}}}, {{global: true}})")
                 ev('uiUtilsV136.closeChatSidebar()')
-                label = '履歴一覧へ' if mode == 'disabled' else 'サイドバーを開く'
                 assert ev(f"""(() => {{
-                    const header = document.querySelector('#goto-history-btn'), close = document.querySelector('#chat-sidebar-close-btn');
+                    const header = document.querySelector('#goto-history-btn');
                     return uiUtilsV136.getChatSidebarMode() === '{mode}' && document.body.classList.contains('dark-mode') === {theme} &&
-                        [header, close].every(button => button.querySelector('.material-symbols-outlined').textContent === 'menu') &&
-                        header.title === '{label}' && header.getAttribute('aria-label') === '{label}' &&
+                        header.querySelector('.material-symbols-outlined').textContent === 'menu' && !document.querySelector('#chat-sidebar-close-btn') &&
+                        header.title === 'サイドバーを開く' && header.getAttribute('aria-label') === 'サイドバーを開く' &&
                         header.getBoundingClientRect().width > 0;
                 }})()"""), (width, mode, dark)
                 click('#goto-history-btn')
-                if mode == 'disabled':
-                    screen('history')
-                    ev('history.back()')
-                    screen('chat')
-                else:
-                    wait("document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu opens the sidebar')
-                    assert ev("""(() => {
-                        const close = document.querySelector('#chat-sidebar-close-btn');
-                        return close.getBoundingClientRect().width > 0 && close.title === 'サイドバーを閉じる' &&
-                            close.getAttribute('aria-label') === 'サイドバーを閉じる' && close.getAttribute('aria-expanded') === 'true';
-                    })()""")
-                    click('#chat-sidebar-close-btn')
-                    wait("!document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu closes the sidebar')
+                wait("document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu opens the sidebar')
+                assert ev("elements.gotoHistoryBtn.getAttribute('aria-expanded') === 'true' && elements.gotoHistoryBtn.title === 'サイドバーを閉じる'")
+                click('#goto-history-btn' if mode == 'permanent' else '#chat-sidebar-backdrop')
+                wait("!document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu closes the sidebar')
         viewport(375)
         ev("appLogic.updateLocalUiSetting('enableWideMode', false).then(() => appLogic.applyWideMode())")
         check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear)
@@ -615,7 +807,8 @@ def run(client, url):
         boot(reload=True)
         check_thinking_drag(ev, wait, screen, tap, touch)
         check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport)
-        check_history_reuse(ev, wait, screen, click, boot)
+        viewport(375)
+        check_sidebar_button_feedback(client, ev, wait, screen, click, tap, drag, manual_gesture, settled_sidebar, boot)
     finally:
         client.sock.settimeout(socket_timeout)
         client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier': injection})
@@ -625,9 +818,103 @@ def run(client, url):
         client.call('Emulation.setDeviceMetricsOverride', {
             'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False,
         })
-    return ('ALL PASSED (swipe navigation, native scroll/touch, feedback and handoff, rollback and cancel, '
-            'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and history reuse)\n'
+    return ('ALL PASSED (native pinch and X/Y pan across chat, sidebar, library and settings, swipe navigation, rollback and cancel, '
+            'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and sidebar navigation)\n'
+            'ALL PASSED (native drawer position from left, center and right, reversal, backdrop, snap/cancel, timed fling and button interruption)\n'
+            'ALL PASSED (sidebar button appearance, outside touch in both modes, Tab focus and desktop hover/press)\n'
             'ALL PASSED (chat action swipes and taps, wrapped action geometry, floating panel focus/hit-testing, and local formatting settings)')
+
+
+def check_sidebar_button_feedback(client, ev, wait, screen, click, tap, drag, manual_gesture, settled_sidebar, boot):
+    menu = '#goto-history-btn'
+    new = '#new-chat-btn'
+
+    def key(key, code, number, modifiers=0):
+        for event in ('keyDown', 'keyUp'):
+            client.call('Input.dispatchKeyEvent', {'type': event, 'key': key, 'code': code,
+                'windowsVirtualKeyCode': number, 'modifiers': modifiers})
+
+    def idle(selector):
+        return f"""(() => {{
+            const style = getComputedStyle(document.querySelector({json.dumps(selector)}));
+            return style.backgroundColor === 'rgba(0, 0, 0, 0)' && style.outlineStyle === 'none' && style.boxShadow === 'none';
+        }})()"""
+
+    def keyboard_focus(selector):
+        wait(f"""(() => {{
+            const button = document.querySelector({json.dumps(selector)}), style = getComputedStyle(button);
+            return document.activeElement === button && button.matches(':focus-visible') &&
+                style.outlineStyle === 'solid' && style.outlineWidth === '2px' && style.outlineColor === style.color;
+        }})()""", f'Visible keyboard focus for {selector}')
+
+    boot(reload=True)
+    screen('chat')
+    ev("appLogic.updateLocalUiSetting('enableSwipeNavigation', true)")
+    ev("appLogic.updateLocalUiSetting('enableWideMode', false).then(() => appLogic.applyWideMode())")
+    tap(menu, dwell=0.08)
+    settled_sidebar(True)
+    wait(f'{idle(menu)} && {idle(new)}', 'Opening by touch leaves both buttons visually idle')
+    manual_gesture([[(350, 320)]])
+    settled_sidebar(False)
+    assert ev(f'document.activeElement === elements.gotoHistoryBtn && {idle(menu)}')
+
+    tap(menu, dwell=0.08)
+    settled_sidebar(True)
+    key('Tab', 'Tab', 9)
+    key('Tab', 'Tab', 9, modifiers=8)
+    keyboard_focus(new)
+    drag('#chat-sidebar-scroll', -112)
+    settled_sidebar(False)
+    wait(f'document.activeElement === elements.gotoHistoryBtn && {idle(menu)} && {idle(new)}',
+         'Closing by touch after Tab restores focus without highlighting either button')
+    key('Tab', 'Tab', 9)
+    key('Tab', 'Tab', 9, modifiers=8)
+    keyboard_focus(menu)
+    click(menu)
+    settled_sidebar(True)
+    keyboard_focus(new)
+    key('Escape', 'Escape', 27)
+    settled_sidebar(False)
+    keyboard_focus(menu)
+
+    boot(reload=True)
+    screen('chat')
+    tap(menu, dwell=0.08)
+    settled_sidebar(True)
+    tap(new, dwell=0.08)
+    wait("document.querySelector('#confirmDialog').open", 'Touching New Chat opens its normal confirmation')
+    wait(idle(new), 'New Chat has no sticky hover behind the confirmation')
+    tap('#confirmDialog .dialog-ok-btn', dwell=0.08)
+    settled_sidebar(False)
+    wait(f'{idle(menu)} && {idle(new)}', 'Both buttons are visually idle after touch confirmation')
+
+    client.call('Emulation.setDeviceMetricsOverride', {'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
+    ev("appLogic.updateLocalUiSetting('enableWideMode', true).then(() => appLogic.applyWideMode())")
+    wait("chatSidebarUiState.mode === 'permanent'", 'Wide touch viewport uses the permanent sidebar')
+    ev("uiUtilsV136.openChatSidebar()")
+    tap('.chat-sidebar-brand', dwell=0.08)
+    assert ev('chatSidebarUiState.isOpen'), 'Tapping inside the sidebar does not close it'
+    tap('#chat-workspace .main-content', dwell=0.08)
+    wait('!chatSidebarUiState.isOpen', 'A touch outside closes the permanent sidebar')
+    wait("dbUtils.getSetting('localUiSettings').then(record => record.value.isPersistentChatSidebarOpen === false)",
+         'The usual permanent sidebar preference records the close')
+    ev("appLogic.updateLocalUiSetting('enableWideMode', false).then(() => appLogic.applyWideMode())")
+    client.call('Emulation.setTouchEmulationEnabled', {'enabled': False})
+    for selector in (menu, new):
+        point = ev(f"""(() => {{
+            const rect = document.querySelector({json.dumps(selector)}).getBoundingClientRect();
+            return {{x: rect.left + rect.width / 2, y: rect.top + rect.height / 2}};
+        }})()""")
+        client.call('Input.dispatchMouseEvent', {**point, 'type': 'mouseMoved'})
+        wait(f"document.querySelector('{selector}').matches(':hover') && !({idle(selector)})", f'Mouse hover for {selector}')
+        client.call('Input.dispatchMouseEvent', {**point, 'type': 'mousePressed', 'button': 'left', 'clickCount': 1})
+        assert ev(f"document.querySelector('{selector}').matches(':active')")
+        client.call('Input.dispatchMouseEvent', {**point, 'type': 'mouseReleased', 'button': 'left', 'clickCount': 1})
+        if selector == menu:
+            settled_sidebar(True)
+        else:
+            wait("document.querySelector('#confirmDialog').open", 'Mouse still activates New Chat')
+            click('#confirmDialog .dialog-cancel-btn')
 
 
 def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport):
@@ -769,7 +1056,7 @@ def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, 
         (thought, -104, 'settings', "document.querySelector('.thought-summary-details').open",
          "document.querySelector('.thought-summary-details').open = false"),
         (message_action, -104, 'settings', "uiUtilsV136.isChatSearchOpen()", "uiUtilsV136.closeChatSearch()"),
-        (floating, 104, 'history', "document.querySelector('#system-prompt-dialog').open", "appLogic.closeSystemPromptDialog()"),
+        (floating, -104, 'settings', "document.querySelector('#system-prompt-dialog').open", "appLogic.closeSystemPromptDialog()"),
         (scroll, -104, 'settings', "elements.scrollToBottomBtn.hidden", None),
     ):
         boot(reload=True)
@@ -863,14 +1150,14 @@ def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clea
             event.id === {pointer_id} && Math.abs(event.x - {x}) < 1)""", 'Chrome delivered the native move')
         ev('new Promise(requestAnimationFrame)')
 
-    def begin(origin):
+    def begin():
         ev("uiUtilsV136.showScreen('chat')")
         boot(reload=True)
         screen('chat')
-        click('#goto-history-btn' if origin == 'history' else '#goto-settings-btn')
-        screen(origin)
+        click('#goto-settings-btn')
+        screen('settings')
         ev("""(() => {
-            const ids = ['history', 'chat', 'settings'];
+            const ids = ['chat', 'settings'];
             window.swipeChain = {
                 pushes: 0,
                 lefts: () => ids.map(id => document.getElementById(id + '-screen').getBoundingClientRect().left),
@@ -883,8 +1170,8 @@ def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clea
             const push = history.pushState.bind(history);
             history.pushState = (...args) => { push(...args); swipeChain.pushes++; };
         })()""")
-        direction = -1 if origin == 'history' else 1
-        start = 321 if direction < 0 else 54
+        direction = 1
+        start = 54
         touch('touchStart', [contact(start, 700)])
         for distance in (30, 100, 175, 230):
             move(start + direction * distance, 700)
@@ -894,27 +1181,13 @@ def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clea
         assert ev("Boolean(appLogic.swipeSnap?.committing) && appLogic.swipeSnap.animations[0].playState === 'running'")
         return direction
 
-    for origin, reverse, cancel, settle_on_touch in (
-        ('history', False, False, False),
-        ('settings', False, False, False),
-        ('history', True, False, False),
-        ('settings', False, True, False),
-        ('history', False, False, True),
-    ):
-        first_direction = begin(origin)
-        direction = -first_direction if reverse else first_direction
-        # The first case uses normal elapsed time. Pausing the others at an actual
-        # interpolated frame makes pixel comparisons independent of CDP timing.
-        measured = origin == 'settings' or reverse
-        if measured:
-            ev('swipeChain.pauseAt(65)')
-        if settle_on_touch:
-            ev('swipeChain.pauseAt(100)')
-        chat_left = positions()[1]
-        if direction < 0:
-            start = min(345, chat_left + 345)
-        else:
-            start = max(30, chat_left + 24)
+    for cancel, settle_on_touch in ((False, False), (True, False), (False, True)):
+        begin()
+        direction = -1
+        measured = not settle_on_touch
+        ev(f'swipeChain.pauseAt({100 if settle_on_touch else 65})')
+        chat_left = positions()[0]
+        start = min(345, chat_left + 345)
         ev('swipeChain.firstSnap = appLogic.swipeSnap')
         touch('touchStart', [contact(start, 701)])
         assert ev("""appLogic.swipeGesture?.identifier === 701 &&
@@ -933,35 +1206,26 @@ def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clea
         released = positions()
         if measured:
             close_positions([left + direction * 65 for left in after_handoff], released)
-        assert (released[1] - after_handoff[1]) * direction > 0, (after_handoff, released)
+        assert (released[0] - after_handoff[0]) * direction > 0, (after_handoff, released)
         touch('touchCancel' if cancel else 'touchEnd', [])
 
-        destination = 'chat' if cancel else 'settings' if direction < 0 else 'history'
+        destination = 'chat' if cancel else 'settings'
         route(destination, 1 if cancel else 2)
         if measured:
             ev('swipeChain.pauseAt(0)')
             close_positions(released, positions())
-            index = {'history': 0, 'chat': 1, 'settings': 2}[destination]
+            index = {'chat': 0, 'settings': 1}[destination]
             ev('swipeChain.pauseAt(70)')
             during_snap = positions()
             assert abs(during_snap[index]) < abs(released[index]), (released, during_snap)
             ev('appLogic.swipeSnap.animations.forEach(animation => animation.finish())')
-        if origin == 'history' and not reverse and not settle_on_touch:
-            # Back can supersede the second snap without introducing another history entry.
+
+        feedback_clear()
+        screen(destination)
+        if not cancel:
             ev('history.back()')
             screen('chat')
             route('chat', 2)
-            ev('history.back()')
-            screen('history')
-            route('history', 2)
-            ev('history.forward()')
-            screen('chat')
-            ev('history.forward()')
-            screen('settings')
-            route('settings', 2)
-        feedback_clear()
-        screen(destination)
-        assert abs(positions()[{'history': 0, 'chat': 1, 'settings': 2}[destination]]) < 1
 
 
 def check_thinking_drag(ev, wait, screen, tap, touch):
@@ -1062,196 +1326,3 @@ def check_thinking_drag(ev, wait, screen, tap, touch):
             settingsUiV136.closePopover(false);
             await appLogic.updateLocalUiSetting('enableSwipeNavigation', true);
         })()""")
-
-
-def check_history_reuse(ev, wait, screen, click, boot):
-    rows = '#history-list .history-item'
-    count = f"document.querySelectorAll('{rows}').length"
-    panel = "document.getElementById('history-state-panel')"
-    loading = f"(!{panel}.classList.contains('hidden') && {panel}.dataset.state === 'loading')"
-
-    def open_history():
-        click('#goto-history-btn')
-        screen('history')
-
-    def leave_history():
-        click('#back-to-chat-from-history')
-        screen('chat')
-
-    def search(query):
-        ev(f"""(() => {{
-            const input = document.getElementById('history-search-input');
-            input.value = {json.dumps(query)};
-            input.dispatchEvent(new Event('input', {{bubbles: true}}));
-        }})()""")
-        wait('!historyUiState.searchTimer', 'History search settled')
-
-    ev("""(async () => {
-        const tx = state.db.transaction(CHATS_STORE, 'readwrite');
-        const store = tx.objectStore(CHATS_STORE);
-        for (let i = 0; i < 520; i++) store.add({
-            id: 10000 + i, title: 'Cache fixture ' + i,
-            createdAt: i + 1, updatedAt: i + 1,
-            isPinned: i % 2 === 0, pinnedAt: i + 1,
-            messages: [{role: 'user', content: 'Cache fixture body ' + i}]
-        });
-        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = reject; });
-    })()""")
-    boot(reload=True)
-    screen('chat')
-    ev("""(() => {
-        const probe = window.historyProbe = {scans: 0, rows: 0, fail: true, hold: false};
-        const getAll = dbUtils.getAllChats;
-        dbUtils.getAllChats = async function(...args) {
-            probe.scans++;
-            if (probe.fail) { probe.fail = false; throw new Error('Controlled history read failure'); }
-            const chats = await getAll.apply(this, args);
-            if (probe.hold) {
-                probe.hold = false;
-                await new Promise(resolve => {
-                    probe.release = () => { probe.release = null; resolve(); };
-                });
-            }
-            return chats;
-        };
-        const createRow = uiUtilsV136.createHistoryItemElement;
-        uiUtilsV136.createHistoryItemElement = function(...args) {
-            probe.rows++;
-            return createRow.apply(this, args);
-        };
-    })()""")
-    open_history()
-    wait(f"{panel}.dataset.state === 'error'", 'Initial read failure offers retry')
-    click('#history-state-action')
-    wait(f'{count} >= 520', 'Initial read retry draws the complete large history')
-    assert ev('historyProbe.scans === 2')
-    click('[data-history-pin-filter="pinned"]')
-    ev("""(() => {
-        const sort = document.getElementById('history-sort-order-toolbar');
-        sort.value = 'title';
-        sort.dispatchEvent(new Event('change', {bubbles:true}));
-    })()""")
-    search('Cache fixture')
-    wait(f"{count} === 260 && document.querySelector('#history-status').textContent === '検索結果 260件'",
-         'History search, title sort and pinned filter render')
-    assert ev(f"document.querySelector('{rows} .history-item-title').title === 'Cache fixture 0'")
-    click('#history-delete-mode-btn')
-    assert ev("!document.getElementById('history-delete-toolbar').classList.contains('hidden')")
-    click('#history-delete-cancel-btn')
-    assert ev("document.getElementById('history-delete-toolbar').classList.contains('hidden')")
-    ev(f"""(() => {{
-        const probe = historyProbe;
-        probe.first = document.querySelector('{rows}');
-        probe.metrics = [probe.scans, probe.rows];
-        uiUtilsV136.getHistoryScrollContainer().scrollTop = 1200;
-        probe.scroll = uiUtilsV136.captureHistoryScrollPosition();
-    }})()""")
-    for _ in range(3):
-        leave_history()
-        open_history()
-        checks = ev(f"""({{
-            sameRows: historyProbe.first === document.querySelector('{rows}'),
-            noLoadingPanel: !({loading}),
-            noRescan: historyProbe.scans === historyProbe.metrics[0],
-            noNewRows: historyProbe.rows === historyProbe.metrics[1],
-            sameScroll: Math.abs(uiUtilsV136.getHistoryScrollContainer().scrollTop - historyProbe.scroll) <= 2,
-            sameQuery: document.getElementById('history-search-input').value === 'Cache fixture',
-            sameSort: document.getElementById('history-sort-order-toolbar').value === 'title',
-            sameFilter: document.querySelector('[data-history-pin-filter="pinned"]').getAttribute('aria-pressed') === 'true'
-        }})""")
-        assert all(checks.values()), checks
-
-    leave_history()
-    ev("""(async () => {
-        await chatHistoryActions.rename(10000, 'Cache fixture renamed');
-        await chatHistoryActions.setPinned(10002, false);
-    })()""")
-    open_history()
-    wait(f"{count} === 259 && document.querySelector('[data-chat-id=\"10000\"] .history-item-title')?.title === 'Cache fixture renamed'",
-         'Hidden rename and unpin update cached rows')
-    assert ev('historyProbe.scans === historyProbe.metrics[0]'), 'Local metadata changes avoid a full scan'
-
-    leave_history()
-    saved_id = ev("""(async () => {
-        appLogic.startNewChat();
-        await state.executionSettingsReady;
-        state.currentMessages = [{role: 'user', content: 'Cache fixture new body'}];
-        const id = await dbUtils.saveChat('Cache fixture new');
-        await chatHistoryActions.setPinned(id, true);
-        return id;
-    })()""")
-    ev(f"""historyProbe.hold = true;
-        historyProbe.previous = document.querySelector('{rows}');""")
-    open_history()
-    wait('Boolean(historyProbe.release)', 'A pre-update history snapshot is pending')
-    assert ev(f"historyProbe.previous.isConnected && !({loading}) && {count} === 259")
-    ev("""(async () => {
-        state.currentMessages[0].content = 'Unique edited message';
-        await dbUtils.saveChat('Cache fixture latest');
-    })()""")
-    leave_history()
-    open_history()
-    assert ev(f"historyProbe.previous.isConnected && !({loading})")
-    ev("historyProbe.release()")
-    wait(f"document.querySelector('.history-item[data-chat-id=\"{saved_id}\"] .history-item-title')?.title === 'Cache fixture latest'",
-         'A stale read cannot win after a newer save and re-entry')
-    assert ev('historyProbe.scans === historyProbe.metrics[0] + 2'), 'Overlapping views share the pending read'
-    search('Unique edited message')
-    wait(f"{count} === 1 && document.querySelector('{rows}')?.dataset.chatId === '{saved_id}'",
-         'Search uses newly saved message contents')
-
-    leave_history()
-    ev("""(async () => {
-        uiUtilsV136.showCustomAlert = async () => {};
-        uiUtilsV136.showCustomConfirm = async () => true;
-        historyProbe.duplicate = (await chatHistoryActions.duplicate(10000)).chatId;
-        await chatHistoryActions.delete(10004);
-        await appLogic.handleHistoryImport(new File(
-            ['<|#|user|#|>Imported fixture body<|#|/user|#|>'], 'Imported fixture.txt', {type:'text/plain'}));
-    })()""")
-    wait("!document.querySelector('#progressDialog[open]')", 'Single history import committed')
-    ev("appLogic.updateHistoryPinFilter('all')")
-    ev("historyProbe.previous = document.querySelector('#history-list .history-item'); historyProbe.fail = true;")
-    open_history()
-    wait(f"{panel}.dataset.state === 'error' && !{panel}.classList.contains('hidden')", 'Failed refresh offers retry')
-    assert ev("historyProbe.previous.isConnected && !document.getElementById('history-list').classList.contains('hidden')")
-    click('#history-state-action')
-    search('')
-    wait(f"""Boolean(document.querySelector('.history-item[data-chat-id="' + historyProbe.duplicate + '"]')) &&
-        !document.querySelector('.history-item[data-chat-id="10004"]') &&
-        [...document.querySelectorAll('{rows} .history-item-title')].some(el => el.title.includes('Imported fixture'))""",
-         'Retry applies hidden duplicate, delete and import')
-
-    leave_history()
-    ev("""(async () => {
-        await appLogic.importDataFromString(JSON.stringify({version: '2.0', data: {
-            profiles: await dbUtils.getAllProfiles(),
-            chats: [{id: 99999, title:'Restored cache fixture', createdAt:1, updatedAt:1, messages:[]}]
-        }}));
-        uiUtilsV136.hideProgressDialog();
-    })()""")
-    open_history()
-    wait(f"{count} === 1 && document.querySelector('{rows}')?.dataset.chatId === '99999'",
-         'Restoring a backup replaces the cached history')
-
-    leave_history()
-    ev("""(() => {
-        historyProbe.revision = historyUiState.dataRevision;
-        const peer = historyProbe.peer = document.createElement('iframe');
-        peer.hidden = true;
-        peer.src = location.pathname + location.search + '#chat';
-        document.body.appendChild(peer);
-    })()""")
-    wait('Boolean(historyProbe.peer.contentWindow.appLogic?._setupEventListenersCallCount)',
-         'Second page is connected to the same database')
-    peer_id = ev("""historyProbe.peer.contentWindow.eval(`(async () => {
-        appLogic.startNewChat();
-        await state.executionSettingsReady;
-        state.currentMessages = [{role: 'user', content: 'Saved in the second page'}];
-        return dbUtils.saveChat('Cache fixture from another page');
-    })()`)""")
-    wait('historyUiState.dataRevision > historyProbe.revision', 'History receives the cross-page invalidation')
-    open_history()
-    wait(f"{count} === 2 && Boolean(document.querySelector('.history-item[data-chat-id=\"{peer_id}\"]'))",
-         'A hidden history includes the second page’s saved chat on re-entry')
-    ev('historyProbe.peer.remove()')

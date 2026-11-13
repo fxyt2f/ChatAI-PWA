@@ -101,7 +101,7 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
             view.popover.querySelector('.thinking-dot:last-child').click();await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'max');
             view.popover.querySelector('.thinking-dots').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'xhigh');
             view.popover.querySelector('.thinking-reset').click();await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'high');
-        } finally {view.closePopover(false);st.modelMetadataV136.or=original;await app.setCurrentChatModelRef(ref);await app.setCurrentChatThinkingEffort(effort);}
+        } finally {view.closePopover(false);st.modelMetadataV136.or=original;await app.setCurrentChatExecution({modelRef:ref,thinkingEffort:effort});}
     });
     await test('Thinking stays mounted through rapid delayed saves, reset, keys and chat reload',async()=>{
         const ref=app.getCurrentChatModelRef(),effort=app.getCurrentChatThinkingEffort(),setter=app.setCurrentChatThinkingEffort;
@@ -126,12 +126,14 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
             app.startNewChat();await st.executionSettingsReady;assert(!view.popover);
             await app.loadChat(id);eq(app.getCurrentChatThinkingEffort(),'medium');
             $('chat-model-button').click();assert(view.popover);$('chat-model-button').click();assert(!view.popover);
-        } finally {release?.();await view.saveQueue;app.setCurrentChatThinkingEffort=setter;view.closePopover(false);await app.setCurrentChatModelRef(ref);await app.setCurrentChatThinkingEffort(effort);}
+        } finally {release?.();await view.saveQueue;app.setCurrentChatThinkingEffort=setter;view.closePopover(false);await app.setCurrentChatExecution({modelRef:ref,thinkingEffort:effort});}
     });
     await test('Gemini 3.8 chat picker and general settings expose exactly three Thinking levels and reset to medium',async()=>{
         openModelPicker();
         const choice=[...view.popover.querySelectorAll('.model-picker-choice')].find(b=>b.textContent==='gemini-3.8-flash');assert(choice);choice.click();await view.saveQueue;
         eq(app.decodeModelRefValue($('model-name').value),{apiConfigId:'gem',modelName:'gemini-3.8-flash'});
+        await app.setCurrentChatExecution({thinkingEffort:null});
+        eq($('settings-thinking-button').value,'medium');eq($('chat-thinking-label').textContent,'Medium');
         for(const [screen,trigger] of [['chat','chat-model-button'],['settings','settings-thinking-button']]) {
             await ui.showScreen(screen,true);if(screen==='settings')view.selectCategory('general',false);
             assert(!$(trigger).hidden);assert($(trigger).getBoundingClientRect().width>0);
@@ -234,12 +236,12 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         const old=app.setCurrentChatModelRef({apiConfigId:'or',modelName:'test/reasoner'}).then(()=>false,()=>true);await wait(()=>started);
         await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-flash-preview'});release();assert(await old);eq(app.getCurrentChatModelRef().modelName,'gemini-3-flash-preview');window.fetch=fetchOriginal;
     });
-    await test('history pinning, title search and detail controls still operate',async()=>{
+    await test('sidebar keeps history pinning and title search',async()=>{
         const original=await db.getChat(100);await db.updateChatPinState(100,true);assert((await db.getChat(100)).isPinned);
-        await ui.showScreen('history',true);await ui.renderHistoryList();
-        $('history-search-input').value='legacy';$('history-search-input').dispatchEvent(new Event('input',{bubbles:true}));
-        await wait(()=>document.querySelector('#history-list [data-chat-id="100"]') || document.querySelector('[data-history-chat-id="100"]'));
-        await db.updateChatPinState(100,false);eq((await db.getChat(100)).messages,original.messages);$('history-search-input').value='';
+        await ui.showScreen('chat',true);ui.openChatSidebar();await ui.renderChatSidebar({refreshRecent:true});$('chat-sidebar-search-toggle').click();
+        $('chat-sidebar-search-input').value='legacy';$('chat-sidebar-search-input').dispatchEvent(new Event('input',{bubbles:true}));
+        await wait(()=>document.querySelector('#chat-sidebar-list [data-chat-id="100"]'));
+        await db.updateChatPinState(100,false);eq((await db.getChat(100)).messages,original.messages);$('chat-sidebar-search-toggle').click();ui.closeChatSidebar();
     });
     window.runSettingsKeyboardV136=async()=>{
         await ui.showScreen('chat',true);await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-flash-preview'});$('user-input').focus();
