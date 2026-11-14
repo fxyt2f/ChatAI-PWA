@@ -94,7 +94,7 @@ def run(client, url):
             }};
         }})()""")
         assert result['headings'] == [
-            'v1.37.0 (2099/01/02)', 'v1.36.5', 'v1.36.4', 'v1.36.3',
+            'v1.37.1 (2099/01/02)', 'v1.36.5', 'v1.36.4', 'v1.36.3',
         ][:count], result
         assert result['viewport'] == width and result['width'] == (width if width < 800 else 720), result
         assert result['height'] == (760 if width < 800 else 720), result
@@ -198,13 +198,13 @@ def run(client, url):
                 if (type !== 'controllerchange') return listen(type, ...args);
             };
             sessionStorage.setItem('pendingVersionNotice', JSON.stringify({
-                version: mode === 'stale' ? '1.36.5' : '1.37.0',
+                version: mode === 'stale' ? '1.36.5' : '1.37.1',
                 message: 'STALE pending notice', shouldPersist: true
             }));
             const history = ['1.36.5', '1.36.4', '1.36.3', '1.36.2'].map(
                 version => '## v' + version + '\r\n\r\n- STALE ' + version + '\r\n'
             ).join('\r\n');
-            const notes = '## v1.37.0 (2099/01/02)\r\n\r\n### Details\r\n\r\nFirst line\r\nSecond line\r\n\r\n'
+            const notes = '## v1.37.1 (2099/01/02)\r\n\r\n### Details\r\n\r\nFirst line\r\nSecond line\r\n\r\n'
                 + Array.from({length: 70}, (_, i) => '- Release note ' + (i + 1) + '\r\n').join('') + '\r\n' + history;
             window.releaseNotesFixture = mode;
             const fetchOriginal = window.fetch;
@@ -221,7 +221,7 @@ def run(client, url):
         boot('stale')
         check_fallback()
         ev("window.releaseNotesFixture = 'current'")
-        assert ev("appLogic.formatReleaseNotes().then(notes => notes?.startsWith('## v1.37.0 (2099/01/02)'))")
+        assert ev("appLogic.formatReleaseNotes().then(notes => notes?.startsWith('## v1.37.1 (2099/01/02)'))")
         assert ev("appLogic.formatReleaseNotes('1.36.50').then(notes => notes === null)")
         assert ev("appLogic.formatReleaseNotes('1.36.5').then(notes => notes?.startsWith('## v1.36.5\\n'))")
 
