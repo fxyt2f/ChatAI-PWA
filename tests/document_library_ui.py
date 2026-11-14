@@ -1201,7 +1201,7 @@ def run(client, url, screenshots=None):
             {{role:'model', content:'通常の回答', executedFunctions:[]}},
             {{role:'model', content:'資料を使った回答', rag, executedFunctions:['fixture_tool', 'fixture_tool', ' '],
                 groundingMetadata:{{groundingChunks:[{{web:{{uri:'https://example.test/source', title:'検索の出典'}}}}], webSearchQueries:['検索語']}},
-                usageMetadata:{{candidatesTokenCount:12,totalTokenCount:48,tmExecution:{{modelName:'fixture-model'}}}},
+                usageMetadata:{{candidatesTokenCount:1234,totalTokenCount:5048,thoughtsTokenCount:48,tmExecution:{{modelName:'fixture-model'}}}},
                 retryCount:1, proofreadingModelInfo:{{label:'Fixture / proofreader'}}, thoughtSummary:'保存された思考の要約'}},
             {{role:'model', content:'ツールのみの履歴', executedFunctions:['other_tool']}},
             {{role:'model', content:'無効な参照', rag:{{...rag,sources:[{{}}],unavailable:[]}},
@@ -1209,7 +1209,12 @@ def run(client, url, screenshots=None):
                 executedFunctions:[null,' ']}},
             {{role:'model', content:'ツール結果を伴う回答', rag:{{...rag,status:'failed',sources:[],unavailable:[]}},
                 search_web_results:[{{title:'表示する検索結果',link:'https://example.test/result'}}]}},
-            {{role:'error', content:'エラー: 検証用のエラー'}}
+            {{role:'error', content:'エラー: 検証用のエラー'}},
+            {{role:'model', content:'フッターのみ', retryCount:2}},
+            {{role:'model', content:'思考のみ', thoughtSummary:'独立した思考の要約'}},
+            {{role:'model', content:'参照のみ', rag}},
+            {{role:'model', content:'参照とフッター', rag, usageMetadata:{{candidatesTokenCount:12,totalTokenCount:48}}}},
+            {{role:'model', content:'参照と思考', rag, thoughtSummary:'資料を使った思考の要約'}}
         );
         await dbUtils.saveChat('メッセージ情報の検証');
         uiUtilsV136.renderChatMessages();
@@ -1220,17 +1225,23 @@ def run(client, url, screenshots=None):
     panel = row + ' > .message-info'
     body = row + ' > .message-content'
     remove = row + ' .js-delete-btn'
+    thought = row + ' > .thought-summary-details'
     assert ev("""(() => {
         const rows = [...elements.messageContainer.querySelectorAll('.message')];
         const withInfo = rows.filter(row=>row.querySelector('.tm-message-info-btn')).map(row=>row.dataset.index).join(',');
         const button = rows[2].querySelector('.tm-message-info-btn'), panel = rows[2].querySelector('.message-info');
-        return withInfo === '2,3' && button.previousElementSibling.matches('.js-delete-btn') &&
+        return withInfo === '2,3,9,10,11' && button.previousElementSibling.matches('.js-delete-btn') &&
             button.parentElement.lastElementChild === button && panel.hidden && button.getAttribute('aria-expanded') === 'false' &&
             button.getAttribute('aria-controls') === panel.id && panel.nextElementSibling.matches('.message-actions') &&
             panel.previousElementSibling.matches('.message-edit-area.hidden') &&
             rows[5].querySelector('.rag-status').getClientRects().length &&
             rows[5].querySelector('.search-results-details summary').getClientRects().length &&
-            rows[6].textContent.includes('検証用のエラー');
+            rows[6].textContent.includes('検証用のエラー') &&
+            rows[7].querySelector('.message-actions > .message-action-meta').textContent==='(リトライ: 2回)' &&
+            rows[8].firstElementChild.matches('.thought-summary-details:not([open])') &&
+            [9,10,11].every(i => rows[i].querySelector('.message-info').children.length===1) &&
+            rows[10].querySelector('.message-actions > .message-action-meta').textContent==='12 / 48' &&
+            rows[11].firstElementChild.matches('.thought-summary-details:not([open])');
     })()""")
     pointer('.message[data-index="5"] .search-results-details summary', False)
     assert ev("document.querySelector('.search-results-details a').getClientRects().length > 0")
@@ -1255,27 +1266,36 @@ def run(client, url, screenshots=None):
         pointer(info, False)
         assert ev(f"""(() => {{
             const panel=document.querySelector({json.dumps(panel)}), style=getComputedStyle(panel);
-            const thought = uiUtilsV136.createThoughtProcessDetails({{thoughtSummary:'色の比較'}}, true);
-            thought.hidden = true;
-            panel.parentElement.prepend(thought);
+            const thought=document.querySelector({json.dumps(thought)});
             const thoughtBackground = getComputedStyle(thought).backgroundColor;
-            thought.remove();
+            const meta=panel.nextElementSibling.querySelector('.message-action-meta');
+            const entries=[...meta.children];
+            const expected=['1,234 / 5,000','(リトライ: 1回)','fixture-model','校正: Fixture / proofreader'];
+            const visualOrder=[...entries].sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);
             const canvas=document.createElement('canvas').getContext('2d');
             const red=value=>{{canvas.fillStyle=value;canvas.fillRect(0,0,1,1);return canvas.getImageData(0,0,1,1).data[0];}};
             const delta=red(style.backgroundColor)-red(style.getPropertyValue('--bg-primary'));
             return !panel.hidden && panel.getBoundingClientRect().bottom <= panel.nextElementSibling.getBoundingClientRect().top &&
                 style.backgroundColor===thoughtBackground && ({str(dark).lower()} ? delta > 0 : delta < 0) &&
                 style.borderWidth==='0px' && style.boxShadow==='none' && panel.querySelector('.rag-references button').getClientRects().length &&
-                ['fixture_tool','検索の出典','検索語','12 / 48','リトライ','fixture-model','proofreader'].every(text=>panel.textContent.includes(text)) &&
+                ['fixture_tool','検索の出典','検索語'].every(text=>panel.textContent.includes(text)) &&
+                expected.every((text,i)=>entries[i].textContent===text && !panel.textContent.includes(text)) &&
+                visualOrder.map(node=>node.textContent).join('|')===[expected[2],expected[0],expected[1],expected[3]].join('|') &&
+                entries[0].title==='Candidate Tokens / Total Tokens' && entries[1].style.marginLeft==='8px' &&
+                thought.nextElementSibling.matches('.message-content') && !thought.open &&
                 !panel.textContent.includes('検索してモデルへ渡した') &&
                 document.querySelector('.message[data-index="3"] .message-info').hidden;
         }})()""")
-        assert ev(f"document.querySelector({json.dumps(panel)}).querySelector('.thought-summary-content').textContent.includes('保存された思考の要約')")
         capture('pc-message-info-' + ('dark' if dark else 'light'))
+        pointer(thought + ' > summary', False)
+        assert ev(f"document.querySelector({json.dumps(thought)}).open && document.querySelector({json.dumps(thought)}).textContent.includes('保存された思考の要約')")
         pointer(info, False)
-        assert ev(f"document.querySelector({json.dumps(panel)}).hidden")
+        assert ev(f"document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(thought)}).open")
+        pointer(thought + ' > summary', False)
 
     viewport(390, 760, True)
+    pointer(thought + ' > summary', True)
+    wait(f"document.querySelector({json.dumps(thought)}).open", 'Touch expands the independent thought summary')
     pointer(info, True)
     assert ev(f"""(() => {{
         const panel=document.querySelector({json.dumps(panel)}), box=panel.getBoundingClientRect();
@@ -1288,9 +1308,11 @@ def run(client, url, screenshots=None):
     }})()"""), 'Expanding on mobile keeps the delete action clear of the scroll-to-bottom button'
     ev('uiUtilsV136.renderChatMessages()')
     assert ev(f"!document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(body)}).textContent==={json.dumps(body_text)}")
+    assert ev(f"!document.querySelector({json.dumps(thought)}).open")
     assert ev(f"""dbUtils.getChat({chat}).then(record=>JSON.stringify(record.messages)==={json.dumps(snapshot)})""")
     assert ev(f"appLogic.loadChat({chat}, {{scrollAfterLoad:false}}).then(result=>result.ok)")
     assert ev(f"document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(panel)}).textContent.includes('fixture_tool')")
+    assert ev(f"!document.querySelector({json.dumps(thought)}).open && document.querySelector({json.dumps(thought)}).textContent.includes('保存された思考の要約')")
     pointer(info, True)
     wait(f"!document.querySelector({json.dumps(panel)}).hidden", 'Touch opens the saved information')
     ev(f"document.querySelector({json.dumps(remove)}).scrollIntoView({{block:'center'}})")

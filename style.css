@@ -2413,6 +2413,13 @@ body.dark-mode .message-cascade-controls .cascade-delete-btn {
     display: none !important;
 }
 
+.thought-summary-details {
+    margin-bottom: 10px;
+    font-size: 13px;
+    border: 1px solid var(--border-tertiary);
+    border-radius: 5px;
+    background-color: var(--bg-tertiary);
+}
 .thought-summary-details summary {
     cursor: pointer;
     font-weight: 500;
@@ -2438,9 +2445,6 @@ body.dark-mode .message-cascade-controls .cascade-delete-btn {
     font-size: 13px;
     border: 1px solid var(--border-tertiary);
     border-radius: 5px;
-}
-.thought-summary-details,
-#chat-screen .message-info {
     background-color: var(--bg-secondary);
 }
 
@@ -5005,12 +5009,16 @@ body.dark-mode #sd-test-connection-btn {
     width: 100%;
     max-width: none;
     min-width: 0;
-    margin: 22px 0 8px;
+    margin: 22px 0 6px;
     padding: 0;
     background: transparent;
     border: none;
     border-radius: 0;
     box-shadow: none;
+}
+
+#chat-screen .message.model:not(:where(:has(.message-action-meta))) {
+    margin-bottom: 8px;
 }
 
 #chat-screen .message.user {
@@ -5380,6 +5388,11 @@ body.mobile-message-editor-open {
     width: max-content;
 }
 
+#chat-screen .message.model .message-actions:has(.message-action-meta) {
+    margin-top: 6px;
+    min-height: 66px;
+}
+
 #chat-screen .message-actions button,
 #chat-screen .message-cascade-controls button {
     display: inline-flex;
@@ -5448,11 +5461,20 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
     color: var(--text-error);
 }
 
+#chat-screen .message-action-meta,
 #chat-screen .message-action-buttons {
     display: flex;
     align-items: center;
     max-width: 100%;
     min-width: 0;
+}
+
+#chat-screen .message-action-meta {
+    width: 100%;
+    min-height: 28px;
+    gap: 8px;
+    justify-content: flex-start;
+    overflow: hidden;
 }
 
 #chat-screen .message-action-buttons {
@@ -5464,6 +5486,68 @@ body.dark-mode #chat-screen .message-cascade-controls button:disabled {
 
 #chat-screen .message.user .message-action-buttons {
     justify-content: flex-end;
+}
+
+#chat-screen .message-actions .token-count-display {
+    order: 1;
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 6px;
+    color: var(--text-secondary);
+}
+
+#chat-screen .message-actions .tm-execution-meta {
+    order: 0;
+}
+
+#chat-screen .message-actions .tm-proofreading-meta {
+    order: 2;
+}
+
+#chat-screen .message.model .message-actions .token-count-display {
+    order: 1;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: min(24%, 160px);
+    min-height: 28px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.72rem;
+    line-height: 28px;
+}
+
+#chat-screen .message.model .message-actions .tm-execution-meta {
+    order: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(46%, 360px);
+    min-height: 28px;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    line-height: 28px;
+}
+
+#chat-screen .message.model .message-actions .tm-proofreading-meta {
+    order: 2;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(42%, 340px);
+    min-height: 28px;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    line-height: 28px;
 }
 
 #chat-screen .message.model .message-actions button {
@@ -5579,7 +5663,11 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
         max-width: 100%;
     }
 
-    #chat-screen .message.model,
+    #chat-screen .message.model {
+        margin-bottom: 10px;
+    }
+
+    #chat-screen .message.model:not(:where(:has(.message-action-meta))),
     #chat-screen .message.user {
         margin-bottom: 6px;
     }
@@ -5611,6 +5699,16 @@ body.dark-mode #chat-screen .message-cascade-controls .cascade-delete-btn {
         column-gap: 1px;
     }
 
+    #chat-screen .message.model .message-actions .token-count-display {
+        max-width: min(48%, 160px);
+        margin-right: 6px;
+        font-size: 0.66rem;
+    }
+
+    #chat-screen .message.model .message-actions .tm-execution-meta,
+    #chat-screen .message.model .message-actions .tm-proofreading-meta {
+        font-size: 0.66rem;
+    }
 }
 
 /* v1.36 settings: shared controls, independent scroll pane, mobile category navigation. */
@@ -6434,6 +6532,7 @@ button.document-library-file { cursor: pointer; }
 
 #chat-screen .message-info {
     display: grid;
+    background-color: var(--bg-secondary);
     gap: 8px;
     margin-top: 6px;
     padding: 6px 10px;
@@ -6453,10 +6552,6 @@ button.document-library-file { cursor: pointer; }
     border: 0;
     background: transparent;
 }
-#chat-screen .message-info .thought-summary-details summary {
-    padding-inline: 0;
-    border: 0;
-}
 #chat-screen .message-info summary { cursor: pointer; }
 #chat-screen .message-info summary:focus-visible { outline: 2px solid currentColor; }
 .message-info .citation-list { margin-block: 4px; padding-inline-start: 1.5em; }
@@ -6468,10 +6563,4 @@ button.document-library-file { cursor: pointer; }
 .message-info .rag-references button:hover:not(:disabled) {
     background-color: var(--bg-tertiary);
     color: var(--text-primary);
-}
-.message-info .message-action-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px 12px;
-    font-size: .75rem;
 }

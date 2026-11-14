@@ -4923,9 +4923,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     
     const messageInfo = document.createElement('div');
     messageInfo.className = 'message-info';
-    if (role === 'model' && messageData?.thoughtSummary?.trim?.() && appLogic.getShowThoughtProcess()) {
-        const thoughts = this.createThoughtProcessDetails(messageData, isStreamingPlaceholder);
-        (isStreamingPlaceholder ? messageDiv : messageInfo).appendChild(thoughts);
+    if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
+        messageDiv.appendChild(this.createThoughtProcessDetails(messageData, isStreamingPlaceholder));
     }
 
     const contentDiv = document.createElement('div');
@@ -5391,15 +5390,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             }
         }
 
-        if (role === 'model' && !isStreamingPlaceholder && messageData.usageMetadata &&
-            Number.isFinite(messageData.usageMetadata.candidatesTokenCount) &&
-            Number.isFinite(messageData.usageMetadata.totalTokenCount))
+        if (role === 'model' && messageData?.usageMetadata &&
+            typeof messageData.usageMetadata.candidatesTokenCount === 'number' &&
+            typeof messageData.usageMetadata.totalTokenCount === 'number')
         {
             const usage = messageData.usageMetadata;
             const tokenSpan = document.createElement('span');
             tokenSpan.classList.add('token-count-display');
             let finalTotalTokenCount = usage.totalTokenCount;
-            if (Number.isFinite(usage.thoughtsTokenCount)) {
+            if (typeof messageData.usageMetadata.thoughtsTokenCount === 'number') {
                 finalTotalTokenCount -= messageData.usageMetadata.thoughtsTokenCount;
             }
             const formattedCandidates = usage.candidatesTokenCount.toLocaleString('en-US');
@@ -5408,11 +5407,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             tokenSpan.title = `Candidate Tokens / Total Tokens`;
             actionMetaDiv.appendChild(tokenSpan);
         }
-        if (role === 'model' && !isStreamingPlaceholder && Number.isFinite(messageData.retryCount) && messageData.retryCount > 0) {
+        if (role === 'model' && typeof messageData?.retryCount === 'number' && messageData.retryCount > 0) {
             const retrySpan = document.createElement('span');
             retrySpan.classList.add('token-count-display');
             retrySpan.textContent = `(リトライ: ${messageData.retryCount}回)`;
             retrySpan.title = `APIリクエストを${messageData.retryCount}回再試行した結果です`;
+            if (actionMetaDiv.querySelector('.token-count-display')) {
+                retrySpan.style.marginLeft = '8px';
+            }
             actionMetaDiv.appendChild(retrySpan);
         }
 
@@ -5443,7 +5445,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         
         if (actionMetaDiv.hasChildNodes()) {
-            messageInfo.appendChild(actionMetaDiv);
+            actionsDiv.appendChild(actionMetaDiv);
         }
         if (messageInfo.hasChildNodes()) {
             messageInfo.id = 'message-info-' + index;
