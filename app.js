@@ -3302,7 +3302,8 @@ const chatListChangeController = {
 const historyUiState = {
     menuContext: null,
     menuActionPending: false,
-    menuPointerActive: false
+    menuPointerActive: false,
+    projectMenuRequest: null
 };
 
 // 一覧データは一度の全件走査を共有する。
@@ -6194,6 +6195,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     closeHistoryProjectMenu({ restoreFocus = false } = {}) {
+        historyUiState.projectMenuRequest = null;
         const menu = elements.historyProjectMenu;
         if (!menu || menu.classList.contains('hidden')) return;
         const anchor = document.getElementById('history-project-move');
@@ -6216,13 +6218,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    async openHistoryProjectMenu(context) {
+    async openHistoryProjectMenu(context, { hover = false } = {}) {
         const menu = elements.historyProjectMenu;
-        if (!menu.classList.contains('hidden')) return;
+        if (!context || historyUiState.menuActionPending || !menu.classList.contains('hidden') ||
+            (hover && historyUiState.projectMenuRequest)) return;
         const anchor = document.getElementById('history-project-move');
+        const request = historyUiState.projectMenuRequest = { hover };
         try {
             const projects = await dbUtils.listProjects();
-            if (historyUiState.menuContext !== context || !menu.classList.contains('hidden')) return;
+            if (historyUiState.menuContext !== context || historyUiState.projectMenuRequest !== request) return;
             const available = projects.filter(project => project.id !== context.projectId);
             const labels = window.ProjectUI.projectLabels(available);
             const choices = [['new', '新しいプロジェクト'], ...available.map(project => [project.id, labels.get(project.id)])];
@@ -6245,9 +6249,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             menu.classList.remove('hidden');
             this.positionHistoryProjectMenu();
             menu.scrollTop = 0;
-            menu.firstElementChild.focus({ preventScroll: true });
+            if (!hover) menu.firstElementChild?.focus({ preventScroll: true });
         } catch {
-            if (historyUiState.menuContext !== context) return;
+            if (historyUiState.menuContext !== context || historyUiState.projectMenuRequest !== request) return;
             this.closeHistoryItemMenu({ restoreFocus: true });
             await this.showCustomAlert('プロジェクトの一覧を読み込めませんでした。');
         }
@@ -15402,6 +15406,10 @@ const appLogic = {
             });
             const historyMenus = [elements.historyItemMenu, elements.historyProjectMenu];
             const inHistoryMenus = target => historyMenus.some(menu => menu.contains(target));
+            const focusProjectMenu = () => {
+                historyUiState.projectMenuRequest.hover = false;
+                elements.historyProjectMenu.firstElementChild?.focus({ preventScroll: true });
+            };
             const onMenuClick = async event => {
                 const menuItem = event.target.closest('[role="menuitem"]');
                 if (!menuItem || menuItem.hidden || menuItem.disabled) return;
@@ -15409,7 +15417,8 @@ const appLogic = {
                 const context = historyUiState.menuContext;
                 if (menuItem.id === 'history-project-move') {
                     if (!elements.historyProjectMenu.classList.contains('hidden')) {
-                        uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
+                        if (historyUiState.projectMenuRequest?.hover && !['touch', 'pen'].includes(event.pointerType)) focusProjectMenu();
+                        else uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
                     } else if (context) await uiUtils.openHistoryProjectMenu(context);
                     return;
                 }
@@ -15466,7 +15475,7 @@ const appLogic = {
                 if (event.key === 'ArrowRight' && event.target.id === 'history-project-move') {
                     event.preventDefault();
                     if (elements.historyProjectMenu.classList.contains('hidden')) event.target.click();
-                    else elements.historyProjectMenu.firstElementChild?.focus({ preventScroll: true });
+                    else focusProjectMenu();
                     return;
                 }
                 if (event.currentTarget === elements.historyProjectMenu && ['Escape', 'ArrowLeft'].includes(event.key)) {
@@ -15504,6 +15513,21 @@ const appLogic = {
                     }
                 });
             };
+            elements.historyItemMenu.addEventListener('pointerover', event => {
+                if (event.pointerType !== 'mouse' || historyUiState.menuActionPending) return;
+                const item = event.target.closest('[role="menuitem"]');
+                if (item?.id === 'history-project-move' && !item.disabled) {
+                    void uiUtils.openHistoryProjectMenu(historyUiState.menuContext, { hover: true });
+                } else if (item && historyUiState.projectMenuRequest?.hover) {
+                    uiUtils.closeHistoryProjectMenu();
+                }
+            });
+            const onMenuPointerLeave = event => {
+                if (event.pointerType === 'mouse' && historyUiState.projectMenuRequest?.hover &&
+                    !historyUiState.menuActionPending && !inHistoryMenus(event.relatedTarget)) {
+                    uiUtils.closeHistoryItemMenu({ restoreFocus: true });
+                }
+            };
             for (const menu of historyMenus) {
                 menu.addEventListener('pointerdown', event => {
                     if (event.target.closest('[role="menuitem"]')) historyUiState.menuPointerActive = true;
@@ -15511,6 +15535,7 @@ const appLogic = {
                 menu.addEventListener('click', onMenuClick);
                 menu.addEventListener('keydown', onMenuKey);
                 menu.addEventListener('focusout', onMenuFocusOut);
+                menu.addEventListener('pointerleave', onMenuPointerLeave);
             }
             document.addEventListener('pointerup', () => {
                 setTimeout(() => {

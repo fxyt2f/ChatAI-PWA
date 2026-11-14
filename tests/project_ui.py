@@ -132,11 +132,52 @@ def run(client, url, screenshots=None):
                 await document.fonts.ready;
                 await Promise.all(document.getAnimations().filter(animation=>
                     animation.effect?.getTiming().iterations!==Infinity &&
-                    animation.effect?.target?.closest('#project-workspace, #chat-history-sidebar'))
+                    animation.effect?.target?.closest('.screen, dialog, #history-item-menu, #history-project-menu'))
                     .map(animation=>animation.finished.catch(()=>{})));
             })()""")
             shot = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
             (screenshots / f'{name}.png').write_bytes(base64.b64decode(shot['data']))
+
+    def flat_surfaces(*selectors):
+        assert ev(f"""({json.dumps(selectors)}).every(selector => {{
+            const node = document.querySelector(selector);
+            return node?.getClientRects().length && getComputedStyle(node).boxShadow === 'none';
+        }})"""), selectors
+
+    def check_flat_sidebar():
+        ev("""(async () => {
+            const overlay = document.querySelector('#chat-overlay');
+            getComputedStyle(overlay).opacity;
+            await Promise.all(overlay.getAnimations().map(animation=>animation.finished.catch(()=>{})));
+        })()""")
+        colors = ev("""(() => {
+            const sidebar = getComputedStyle(elements.chatHistorySidebar);
+            const chat = getComputedStyle(elements.chatScreen);
+            const overlay = getComputedStyle(document.querySelector('#chat-overlay'));
+            const canvas = document.createElement('canvas').getContext('2d');
+            canvas.fillStyle = chat.backgroundColor;
+            canvas.fillRect(0, 0, 1, 1);
+            canvas.globalAlpha = Number(overlay.opacity);
+            canvas.fillStyle = overlay.backgroundColor;
+            canvas.fillRect(0, 0, 1, 1);
+            const chatPixel = [...canvas.getImageData(0, 0, 1, 1).data];
+            canvas.globalAlpha = 1;
+            canvas.fillStyle = sidebar.backgroundColor;
+            canvas.fillRect(0, 0, 1, 1);
+            return [chatPixel, [...canvas.getImageData(0, 0, 1, 1).data], sidebar.backgroundImage];
+        })()""")
+        assert all(abs(a-b)<=1 for a,b in zip(colors[0], colors[1])) and colors[2]=='none', colors
+
+    def check_straight_menu_rule():
+        assert ev("""(() => {
+            const button = elements.historyProjectMenu.firstElementChild;
+            const row = getComputedStyle(button), rule = getComputedStyle(elements.historyProjectMenu, '::after');
+            const menu = getComputedStyle(elements.historyProjectMenu);
+            return row.borderBottomWidth==='1px' && row.height==='44px' && row.borderBottomLeftRadius==='7px' &&
+                rule.borderBottomStyle==='solid' && rule.borderBottomWidth==='1px' &&
+                rule.borderBottomLeftRadius==='0px' && rule.borderBottomRightRadius==='0px' &&
+                rule.borderBottomColor===menu.borderBottomColor;
+        })()""")
 
     def folder(project, action='open'):
         return f'#project-sidebar-list [data-project-id="{project}"] [data-project-focus="{action}"]'
@@ -234,6 +275,7 @@ def run(client, url, screenshots=None):
     wait("elements.documentLibraryWorkspace.hidden && document.querySelector('#chat-workspace #goto-history-btn')===sharedSidebarToggle",
          'mobile Back restores chat with the same hamburger')
     viewport(1280, False)
+    wait("chatSidebarUiState.mode==='permanent'", 'desktop sidebar mode restored')
     open_sidebar()
     checks.append('library reuses hamburger and sidebar navigation on wide and mobile, including Back and Forward')
     ev("""window.originalProjectControls = ['#chat-workspace > .app-header', '#user-input', '#send-button',
@@ -245,6 +287,29 @@ def run(client, url, screenshots=None):
             elements.chatWorkspace.querySelector('footer').getBoundingClientRect().bottom
     })""")
     capture('pc-normal-chat')
+    flat_surfaces('#chat-history-sidebar', '#chat-workspace > .app-header', '#chat-workspace > footer')
+    check_flat_sidebar()
+    ev("""document.documentElement.style.setProperty('--overlay-opacity-value', '.4');
+        document.documentElement.style.setProperty('--chat-background-image', 'linear-gradient(red, blue)');
+        elements.chatScreen.classList.add('background-visible');""")
+    assert ev("getComputedStyle(elements.chatScreen, '::before').backgroundImage.includes('linear-gradient')")
+    check_flat_sidebar()
+    ev("""document.documentElement.style.removeProperty('--overlay-opacity-value');
+        document.documentElement.style.removeProperty('--chat-background-image');
+        elements.chatScreen.classList.remove('background-visible');""")
+    ev("appLogic.saveAppearanceValues('theme', {darkMode:true}, {global:true})")
+    wait("document.body.classList.contains('dark-mode')", 'dark theme applied')
+    check_flat_sidebar()
+    capture('pc-normal-chat-dark')
+    ev("appLogic.saveAppearanceValues('theme', {darkMode:false}, {global:true})")
+    wait("!document.body.classList.contains('dark-mode')", 'light theme restored')
+    click('#goto-settings-btn')
+    wait("state.currentScreen==='settings'", 'settings opened')
+    flat_surfaces('#settings-screen > .app-header', '#settings-screen .settings-category-nav button')
+    capture('pc-flat-settings')
+    click('#back-to-chat-from-settings')
+    wait("state.currentScreen==='chat'", 'returned to chat')
+    open_sidebar()
     assert ev("document.querySelectorAll('.project-folder').length===0")
     click('#project-create')
     change('#project-dialog-fields input', '  ')
@@ -647,21 +712,53 @@ def run(client, url, screenshots=None):
     assert menu_in_bounds('#history-project-menu')
     assert ev(f"""!document.querySelector('#history-project-menu [data-project-destination="{beta}"]')""")
     capture('pc-project-move')
+    check_straight_menu_rule()
+    flat_surfaces('#history-item-menu', '#history-project-menu', '#project-workspace > footer')
+    ev("appLogic.saveAppearanceValues('theme', {darkMode:true}, {global:true})")
+    wait("document.body.classList.contains('dark-mode')", 'dark menu theme applied')
+    check_straight_menu_rule()
+    capture('pc-project-move-dark')
+    ev("appLogic.saveAppearanceValues('theme', {darkMode:false}, {global:true})")
+    wait("!document.body.classList.contains('dark-mode')", 'light menu theme restored')
     key('ArrowLeft')
     wait("document.activeElement.id==='history-project-move' && elements.historyProjectMenu.classList.contains('hidden')",
          'keyboard returns to parent menu')
     key('Escape')
     wait("elements.historyItemMenu.classList.contains('hidden')", 'close parent menu')
+    mouse_click(member_menu)
+    ev("""(() => {
+        const listProjects = dbUtils.listProjects.bind(dbUtils);
+        dbUtils.listProjects = () => {
+            dbUtils.listProjects = listProjects;
+            return new Promise(resolve => window.finishHoverProjects = () => resolve(listProjects()));
+        };
+    })()""")
+    hover('#history-project-move')
+    wait("window.finishHoverProjects", 'hover requests project choices')
+    hover('#history-item-menu [data-history-menu-action=pin]')
+    ev('window.finishHoverProjects()')
+    assert ev("elements.historyProjectMenu.classList.contains('hidden') && !elements.historyItemMenu.classList.contains('hidden')")
+    hover('#history-project-move')
+    wait("!elements.historyProjectMenu.classList.contains('hidden')", 'mouse hover opens the move submenu')
+    assert ev(f"dbUtils.getChatProject({member}).then(project=>project?.id==={json.dumps(beta)})")
+    assert ev("elements.historyItemMenu.contains(document.activeElement)")
+    hover('#history-project-menu button:last-child')
+    assert ev("!elements.historyProjectMenu.classList.contains('hidden')")
+    client.call('Input.dispatchMouseEvent', {'type':'mouseMoved','x':10,'y':14})
+    wait("elements.historyItemMenu.classList.contains('hidden') && elements.historyProjectMenu.classList.contains('hidden')",
+         'leaving the hover-open menu closes it')
     move(member, None, '#project-chats')
     wait(f"""document.querySelector('#chat-sidebar-pinned-list [data-chat-id="{member}"] .chat-pin-icon')""", 'detached chat stays pinned')
     pinned_menu = f'#chat-sidebar-pinned-list [data-chat-id="{member}"] [data-sidebar-action="menu"]'
     mouse_click(pinned_menu)
     assert ev("document.querySelector('[data-history-menu-action=project-remove]').hidden")
-    mouse_click('#history-project-move')
+    hover('#history-project-move')
     wait("document.querySelector('#history-project-menu [data-project-destination=new]')", 'same submenu opens from sidebar')
     capture('sidebar-project-move')
     mouse_click('#history-project-menu [data-project-destination=new]')
     wait("document.querySelector('#project-dialog').open", 'reuse project creation dialog')
+    flat_surfaces('#project-dialog')
+    capture('pc-project-create-dialog')
     change('#project-dialog-fields input', '移動で作成したプロジェクト')
     click('#project-dialog-submit')
     wait(f"dbUtils.getChatProject({member}).then(project=>project?.name==='移動で作成したプロジェクト')", 'create and assign atomically')
@@ -672,7 +769,7 @@ def run(client, url, screenshots=None):
         'sidebar membership and project creation dialog settled')
     mouse_click(pinned_menu)
     wait(f"historyUiState.menuContext?.chatId==={member}", 'pinned shortcut menu reopens after creation')
-    mouse_click('#history-project-move')
+    hover('#history-project-move')
     wait(f"""document.querySelector('#history-project-menu [data-project-destination="{beta}"]')""", 'destination submenu loaded')
     mouse_click(f'#history-project-menu [data-project-destination="{beta}"]')
     wait(f"dbUtils.getChatProject({member}).then(project=>project?.id==={json.dumps(beta)})", 'pinned shortcut can move')
@@ -724,6 +821,9 @@ def run(client, url, screenshots=None):
         document.querySelector('#document-library-picker-count').textContent==='1件' &&
         document.querySelector('#document-library-picker-project').nextElementSibling.id==='document-library-picker-chat'""")
     capture('pc-chat-project-files')
+    flat_surfaces('#document-library-picker')
+    assert ev("""getComputedStyle(document.querySelector('#document-library-picker-chat')).borderTopWidth==='1px' &&
+        getComputedStyle(document.querySelector('#document-library-picker-chat')).borderTopLeftRadius==='0px'""")
     click('#document-library-picker-close')
     for width, touch in ((768, False), (390, True)):
         viewport(width, touch)
@@ -967,11 +1067,21 @@ def run(client, url, screenshots=None):
     click('#history-project-move', True)
     wait("document.querySelector('#history-project-menu [data-project-destination=new]')", 'touch opens the project submenu')
     assert menu_in_bounds('#history-project-menu')
+    capture('mobile-project-move')
+    flat_surfaces('#history-item-menu', '#history-project-menu', '#project-workspace > footer')
     key('Escape')
     wait("elements.historyProjectMenu.classList.contains('hidden') && !elements.historyItemMenu.classList.contains('hidden')",
          'Escape closes only the submenu')
     key('Escape')
     wait("elements.historyItemMenu.classList.contains('hidden')", 'Escape closes the chat menu')
+    click(mobile_row_menu, True)
+    click('#history-project-move', True)
+    destination = f'#history-project-menu [data-project-destination="{alpha}"]'
+    wait(f"document.querySelector({json.dumps(destination)})", 'touch destination available')
+    click(destination, True)
+    wait(f"dbUtils.getChatProject({member}).then(project=>project?.id==={json.dumps(alpha)})", 'touch selection moves the chat')
+    ev(f"dbUtils.setChatProject({member},{json.dumps(beta)})")
+    wait(f"document.querySelector({json.dumps(mobile_row_menu)})", 'restored chat for later project checks')
     ev("appLogic.handleFileSelection([new File(['keep'], 'mobile-tabs.txt', {type:'text/plain'})])")
     wait("document.querySelector('.composer-attachment-remove')", 'project attachment is visible')
     click('#project-tab-files', True)

@@ -31,13 +31,6 @@
     --transition-duration: 0.2s;
     --transition-timing: ease-in-out;
 
-    /* Shadows (Elevation) */
-    --shadow-1: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
-    --shadow-2: 0 3px 6px rgba(0,0,0,0.16), 0 3px 6px rgba(0,0,0,0.23);
-    --shadow-3: 0 10px 20px rgba(0,0,0,0.19), 0 6px 6px rgba(0,0,0,0.23);
-    --shadow-4: 0 14px 28px rgba(0,0,0,0.25), 0 10px 10px rgba(0,0,0,0.22);
-    --shadow-5: 0 19px 38px rgba(0,0,0,0.30), 0 15px 12px rgba(0,0,0,0.22);
-
     /* Light Mode Palette */
     --bg-primary: #ffffff;
     --bg-secondary: #f5f5f5;
@@ -210,7 +203,6 @@ a.app-info-action {
     background-color: var(--bg-button);
     color: var(--other-button-fg, var(--text-light));
     transition: background-color var(--transition-duration) var(--transition-timing), box-shadow var(--transition-duration) var(--transition-timing);
-    box-shadow: var(--shadow-1);
     display: inline-flex;
     justify-content: center;
     align-items: center;
@@ -223,7 +215,6 @@ button:hover:not(:disabled),
 a.app-info-action:hover {
     background-color: var(--bg-button-hover);
     color: var(--other-button-hover-fg, var(--other-button-fg, var(--text-light)));
-    box-shadow: var(--shadow-2);
 }
 
 /* --- History Workspace v1.35.0-beta3 --- */
@@ -282,7 +273,6 @@ a.app-info-action:hover {
     border: 1px solid var(--border-primary);
     border-radius: 10px;
     background: var(--bg-primary);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 .history-item-menu button {
@@ -333,7 +323,16 @@ a.app-info-action:hover {
     white-space: nowrap;
 }
 #history-project-menu [data-project-destination="new"]:not(:last-child) {
+    grid-area: 1 / 1;
+    border-bottom: 1px solid transparent;
+}
+#history-project-menu:has(> [data-project-destination="new"]:not(:last-child))::after {
+    content: '';
+    grid-area: 1 / 1;
+    align-self: end;
+    z-index: 1;
     border-bottom: 1px solid var(--border-primary);
+    pointer-events: none;
 }
 
 .history-item-menu-delete {
@@ -392,10 +391,6 @@ label {
     background-color: var(--bg-primary);
     overflow: hidden;
 }
-body:not(.dark-mode) .app-container {
-    box-shadow: var(--shadow-4);
-}
-
 /* --- Header --- */
 .app-header {
     display: flex;
@@ -410,7 +405,6 @@ body:not(.dark-mode) .app-container {
     z-index: 10;
     transition: background-color var(--transition-duration) var(--transition-timing);
     gap: 8px; /* 要素間のスペースを再設定 */
-    box-shadow: var(--shadow-2);
 }
 
 .app-header h1 {
@@ -493,7 +487,9 @@ body:not(.dark-mode) .app-container {
     min-width: 0;
     min-height: 0;
     color: var(--text-primary);
-    background: var(--bg-primary);
+    /* The chat overlay applies the setting to both its color alpha and its layer opacity. */
+    background-color: color-mix(in srgb, var(--bg-secondary),
+        rgb(from var(--chat-overlay-color) r g b) calc(var(--overlay-opacity-value) * var(--overlay-opacity-value) * 100%));
     border-right: 1px solid var(--border-primary);
     text-align: left;
 }
@@ -512,7 +508,6 @@ body:not(.dark-mode) .app-container {
     padding-inline-start: calc(var(--sidebar-leading-gutter) + var(--sidebar-row-inset));
     color: var(--app-header-fg);
     background-color: var(--app-header-bg);
-    box-shadow: var(--shadow-2);
     text-align: left;
 }
 
@@ -982,7 +977,6 @@ body:not(.dark-mode) .app-container {
     flex-direction: column;
     width: min(288px, calc(100% - 40px));
     height: 100%;
-    box-shadow: var(--shadow-4);
     transform: translateX(var(--sidebar-offset, -100%));
     visibility: hidden;
     pointer-events: none;
@@ -1053,6 +1047,9 @@ body:not(.dark-mode) .app-container {
     opacity: 1;
 }
 
+#chat-screen { --chat-overlay-color: var(--bg-overlay-light); }
+body.dark-mode #chat-screen { --chat-overlay-color: var(--bg-overlay-dark); }
+
 #chat-screen .chat-workspace-overlay,
 #settings-screen::after {
     content: '';
@@ -1065,7 +1062,7 @@ body:not(.dark-mode) .app-container {
     z-index: 0;
 }
 
-body.dark-mode #chat-screen .chat-workspace-overlay,
+#chat-screen .chat-workspace-overlay { background-color: var(--chat-overlay-color); }
 body.dark-mode #settings-screen::after {
     background-color: var(--bg-overlay-dark);
 }
@@ -1276,7 +1273,6 @@ html.swipe-navigation-enabled:not(.viewport-zoomed) #chat-workspace .main-conten
     word-wrap: break-word;
     color: var(--text-primary);
     transition: background-color var(--transition-duration) var(--transition-timing), color var(--transition-duration) var(--transition-timing);
-    box-shadow: var(--shadow-1);
     margin-top: calc(var(--spacing-unit) * 3);
     margin-bottom: calc(var(--spacing-unit) * 3);
 }
@@ -1319,7 +1315,6 @@ html.swipe-navigation-enabled:not(.viewport-zoomed) #chat-workspace .main-conten
     background-color: var(--bg-primary);
     border: 1px solid var(--border-primary);
     border-radius: 24px;
-    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.18), 0 3px 10px rgba(0, 0, 0, 0.08);
     overflow: visible;
     flex-shrink: 0;
 }
@@ -1419,7 +1414,6 @@ body.dark-mode #attach-file-btn {
         column-gap: 6px;
         row-gap: 2px;
         border-radius: 22px;
-        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.20), 0 2px 8px rgba(0, 0, 0, 0.10);
     }
 
     #chat-screen #user-input {
@@ -1435,7 +1429,6 @@ body.dark-mode #attach-file-btn {
     padding: calc(var(--spacing-unit) * 2);
     border-radius: var(--border-radius-md);
     background-color: var(--bg-primary);
-    box-shadow: var(--shadow-1);
 }
 .settings-group h3 {
     margin-bottom: calc(var(--spacing-unit) * 2);
@@ -1713,7 +1706,6 @@ body.dark-mode #settings-screen a:where(:not(.app-info-action)):hover {
     padding: calc(var(--spacing-unit) * 3);
     background-color: var(--bg-primary);
     color: var(--text-primary);
-    box-shadow: var(--shadow-5);
     min-width: 300px;
     max-width: calc(100vw - 32px);
     width: auto;
@@ -2135,7 +2127,7 @@ body.dark-mode #settings-screen a:where(:not(.app-info-action)):hover {
 .message-edit-actions .cancel-edit-btn { background-color: var(--bg-button-cancel); }
 .message-edit-actions .cancel-edit-btn:hover { background-color: var(--bg-button-cancel-hover); }
 .chat-input-area button#attach-file-btn.has-attachments .attachment-badge { display: block; }
-#loading-indicator { position: fixed; bottom: 70px; right: 20px; background-color: var(--bg-tertiary); color: var(--text-secondary); padding: 6px 12px; border-radius: 15px; font-size: 11px; z-index: 3; box-shadow: var(--shadow-2); transition: opacity 0.3s ease, transform 0.3s ease, visibility 0.3s ease; opacity: 0; visibility: hidden; transform: translateY(10px); pointer-events: none; }
+#loading-indicator { position: fixed; bottom: 70px; right: 20px; background-color: var(--bg-tertiary); color: var(--text-secondary); padding: 6px 12px; border-radius: 15px; font-size: 11px; z-index: 3; transition: opacity 0.3s ease, transform 0.3s ease, visibility 0.3s ease; opacity: 0; visibility: hidden; transform: translateY(10px); pointer-events: none; }
 #loading-indicator:not(.hidden) { opacity: 1; visibility: visible; transform: translateY(0); }
 .checkbox-label { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; cursor: pointer; color: var(--text-primary); }
 .checkbox-label input[type="checkbox"] { width: auto; margin-bottom: 0; cursor: pointer; }
@@ -2285,6 +2277,9 @@ input[type="color"]::-moz-color-swatch { border: 1px solid var(--border-primary)
 .message-content th, .message-content td { border: 1px solid var(--border-secondary); padding: 6px 10px; text-align: left; }
 .message-content th { background-color: var(--bg-tertiary); font-weight: bold; }
 .message-content hr { border: none; border-top: 1px solid var(--border-secondary); margin: 1.5em 0; }
+.message-content .code-toolbar > .toolbar > .toolbar-item > button {
+    box-shadow: none;
+}
 .message.editing.show-actions .message-actions, .message.editing.show-actions .message-cascade-controls { display: none !important; }
 .message-actions .token-count-display { font-size: 0.8rem; color: var(--text-secondary); vertical-align: middle; line-height: 1.5; white-space: nowrap; }
 .thought-summary-details { margin-bottom: 10px; font-size: 13px; border: 1px solid var(--border-tertiary); border-radius: 5px; background-color: var(--bg-tertiary); }
@@ -2348,7 +2343,6 @@ body.dark-mode .ripple {
     background: var(--bg-message-actions);
     padding: var(--spacing-unit);
     border-radius: var(--border-radius-md);
-    box-shadow: var(--shadow-2);
     z-index: 2;
     transition: opacity var(--transition-duration) var(--transition-timing), transform var(--transition-duration) var(--transition-timing);
     width: max-content;
@@ -2600,7 +2594,6 @@ body.dark-mode #chat-screen.drag-over::after {
     max-height: 100%;
     object-fit: contain;
     border-radius: var(--border-radius-md);
-    box-shadow: var(--shadow-5);
 }
 
 #image-modal-close {
@@ -2790,7 +2783,6 @@ body.dark-mode #chat-screen.drag-over::after {
     border-radius: var(--border-radius-lg);
     margin-bottom: 16px;
     border: 1px solid var(--border-primary);
-    box-shadow: var(--shadow-1);
 }
 .profile-display-icon-wrapper {
     position: relative;
@@ -3050,7 +3042,6 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
     color: var(--text-primary);
     padding: 12px 20px;
     border-radius: var(--border-radius-lg);
-    box-shadow: var(--shadow-3);
     display: flex;
     align-items: center;
     gap: 15px;
@@ -3409,7 +3400,6 @@ body.header-auto-hide.header-force-show #chat-workspace > .app-header {
     border-radius: 50%;
     background-color: rgba(231, 231, 231, 0.88);
     color: #181818;
-    box-shadow: var(--shadow-2);
 }
 .scroll-to-bottom-button[hidden] {
     display: none;
@@ -3420,7 +3410,6 @@ body.header-auto-hide.header-force-show #chat-workspace > .app-header {
 .scroll-to-bottom-button:hover:not(:disabled) {
     background-color: #cfcfcf;
     color: #181818;
-    box-shadow: var(--shadow-3);
 }
 .scroll-to-bottom-button:focus-visible {
     outline: 2px solid var(--bg-button);
@@ -3478,7 +3467,6 @@ body.header-auto-hide.header-force-show .floating-action-panel {
     background-color: rgba(255, 255, 255, 0.8);
     color: var(--text-primary);
     border: 1px solid var(--border-primary);
-    box-shadow: var(--shadow-2);
     display: flex;
     justify-content: center;
     align-items: center;
@@ -3499,7 +3487,6 @@ html:not(.text-formatting-enabled) #chat-screen .tm-format-message-btn {
 .floating-action-panel .floating-action-button:hover:not(:disabled) {
     background-color: var(--bg-button-action);
     color: #ffffff;
-    box-shadow: var(--shadow-3);
     transform: scale(1.1);
 }
 
@@ -3639,7 +3626,6 @@ body.header-auto-hide:not(.header-force-show) #chat-screen .chat-search-dialog {
     background: var(--bg-primary);
     border: 1px solid var(--border-primary);
     border-radius: 20px;
-    box-shadow: var(--shadow-2, 0 2px 8px rgba(0, 0, 0, 0.16));
 }
 
 #chat-screen .chat-search-input {
@@ -3785,7 +3771,6 @@ body.header-auto-hide:not(.header-force-show) #chat-screen .chat-search-dialog {
     background-color: rgba(255, 255, 255, 0.8);
     border: 1px solid var(--border-primary);
     border-radius: 50%;
-    box-shadow: var(--chat-search-tool-shadow, var(--shadow-2));
     font: inherit;
     font-size: 12px;
     font-weight: 700;
@@ -3802,11 +3787,15 @@ body.header-auto-hide:not(.header-force-show) #chat-screen .chat-search-dialog {
     color: #fff;
     background-color: var(--bg-button-action);
     border-color: transparent;
-    box-shadow: var(--chat-search-tool-hover-shadow, var(--shadow-3));
     transform: scale(1.1);
     outline: 0;
 }
 
+#chat-screen .chat-search-tool-icon:focus-visible,
+#chat-screen .chat-search-toggle input:focus-visible + .chat-search-toggle-label {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+}
 #chat-screen .chat-search-toggle input:checked + .chat-search-toggle-label,
 #chat-screen .chat-search-tool-icon.active {
     color: #fff;
@@ -3885,7 +3874,6 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
     background: var(--bg-primary);
     border: 1px solid rgba(180, 35, 24, 0.35);
     border-radius: 7px;
-    box-shadow: var(--shadow-2, 0 2px 8px rgba(0, 0, 0, 0.14));
 }
 
 #chat-screen .chat-search-status.is-error {
@@ -3906,7 +3894,6 @@ body.dark-mode #chat-screen .chat-search-tool-icon.active {
     background: var(--bg-primary);
     border: 1px solid var(--border-primary);
     border-radius: 14px;
-    box-shadow: var(--shadow-2, 0 2px 8px rgba(0, 0, 0, 0.16));
 }
 
 #chat-screen .chat-replace-preview-panel[hidden] {
@@ -3989,7 +3976,6 @@ body.dark-mode #chat-screen .chat-replace-target {
 @media (hover: hover) and (pointer: fine) {
     #chat-screen .chat-replace-target:hover:not(:disabled) {
         background-color: var(--chat-replace-target-highlight);
-        box-shadow: var(--shadow-1);
         transform: translateY(-1px);
     }
 }
@@ -4150,8 +4136,6 @@ body.dark-mode #chat-screen .chat-replace-match-after {
 
     /* Keep the first button's shadow inside the narrow left gutter. */
     #chat-screen .chat-search-toolbar-bottom > .chat-search-toggle:first-child {
-        --chat-search-tool-shadow: 2px 3px 6px -1px rgba(0, 0, 0, 0.32);
-        --chat-search-tool-hover-shadow: 4px 6px 10px -3px rgba(0, 0, 0, 0.35);
     }
 
     #chat-screen .chat-replace-preview-panel {
@@ -4187,7 +4171,6 @@ body.dark-mode #chat-screen .chat-replace-match-after {
     border-radius: var(--border-radius-sm);
     background-color: var(--bg-primary);
     margin-bottom: 8px;
-    box-shadow: var(--shadow-1);
 }
 .asset-item:last-child {
     margin-bottom: 0;
@@ -4719,7 +4702,6 @@ body.dark-mode .clear-sync-error-btn {
     color: var(--text-primary);
     padding: 12px 20px;
     border-radius: var(--border-radius-lg);
-    box-shadow: var(--shadow-3);
     display: flex;
     align-items: center;
     gap: 12px;
@@ -4894,8 +4876,7 @@ body.dark-mode #sd-test-connection-btn {
     /* 新しいグラデーション背景を適用 */
     background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.2), rgba(0, 0, 0, 0.1));
 
-    /* 立体感とグラスエフェクトを追加 */
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    /* グラスエフェクト */
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px); /* Safari向け */
 
@@ -4910,14 +4891,11 @@ body.dark-mode #sd-test-connection-btn {
     background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(0, 0, 0, 0.15));
     border-color: rgba(255, 255, 255, 0.5);
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
-/* テキストの可読性を向上 */
 #settings-screen .app-header .profile-card .profile-card-name,
 #settings-screen .app-header .profile-card .profile-card-arrow {
     color: var(--app-header-fg);
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 /* アイコンコンテナの背景を調整してコントラストを改善 */
@@ -5044,7 +5022,6 @@ body.dark-mode #sd-test-connection-btn {
     background-color: color-mix(in srgb, var(--user-message-bg, var(--bg-user-message)) calc(var(--message-bubble-opacity, 1) * 100%), transparent);
     border-radius: var(--border-radius-lg);
     border-bottom-right-radius: var(--border-radius-sm);
-    box-shadow: var(--shadow-1);
 }
 
 #chat-screen .message.user > .message-content {
@@ -5309,7 +5286,6 @@ body.mobile-message-editor-open {
     box-sizing: border-box;
     background-color: var(--bg-primary);
     border-bottom: 1px solid var(--border-primary);
-    box-shadow: var(--shadow-1);
 }
 
 .mobile-message-editor-body {
@@ -5896,7 +5872,7 @@ body.dark-mode #settings-screen .settings-category-nav button[aria-current] { co
 .execution-trigger .ripple, .execution-popover .ripple { display:none; }
 .model-trigger.invalid-model { color:var(--text-error,#c62828); }
 .model-trigger:disabled, .thinking-trigger:disabled { opacity:.55; cursor:default; }
-.execution-popover { position:fixed; z-index:2200; box-sizing:border-box; padding:12px; border:1px solid var(--border-primary); border-radius:16px; box-shadow:0 12px 36px rgba(0,0,0,.25),0 2px 6px rgba(0,0,0,.1); background:var(--bg-secondary); color:var(--text-primary); overflow:auto; overscroll-behavior:contain; }
+.execution-popover { position:fixed; z-index:2200; box-sizing:border-box; padding:12px; border:1px solid var(--border-primary); border-radius:16px; background:var(--bg-secondary); color:var(--text-primary); overflow:auto; overscroll-behavior:contain; }
 body.dark-mode .execution-popover { color-scheme:dark; }
 .execution-popover .popover-title { font-size:14px; font-weight:600; margin:2px 6px 12px; }
 .model-picker-search { width:100%; box-sizing:border-box; padding:9px 12px; margin-bottom:8px; border:1px solid var(--border-primary); border-radius:10px; color:var(--text-primary); background:var(--bg-input); font:inherit; font-size:13px; }
@@ -5949,7 +5925,7 @@ body.dark-mode .execution-popover { color-scheme:dark; }
 .profile-picker-status:empty { display: none; }
 .profile-card:focus-visible { outline: 2px solid var(--text-link); outline-offset: 2px; }
 
-.thinking-popover { padding:8px 12px 6px; box-shadow:0 6px 20px rgba(0,0,0,.16); }
+.thinking-popover { padding:8px 12px 6px; }
 .thinking-popover-row { position:relative; min-width:0; }
 .thinking-reset svg { width:17px; height:17px; }
 .thinking-heading { display:flex; flex-direction:column; align-items:center; gap:3px; min-width:0; margin:0 36px; padding:4px 0; }
@@ -5963,7 +5939,7 @@ body.dark-mode .execution-popover { color-scheme:dark; }
 .execution-popover .thinking-dot { display:flex; align-items:center; justify-content:center; position:relative; flex:0 0 40px; width:40px; min-width:40px; height:44px; min-height:44px; margin:0; border:0; border-radius:999px; padding:0; background:transparent; overflow:visible; cursor:pointer; }
 .execution-popover .thinking-dot:only-child { margin-inline:auto; }
 .thinking-mark { display:block; width:4px; height:4px; background:color-mix(in srgb,var(--text-primary) 45%,transparent); border-radius:50%; transform:translateX(var(--thinking-dot-shift,0px)); }
-.thinking-dot[aria-checked=true] .thinking-mark { width:22px; height:22px; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.25); }
+.thinking-dot[aria-checked=true] .thinking-mark { width:22px; height:22px; background:#fff; }
 .execution-popover .thinking-dot:hover:not(:disabled) { background:transparent; box-shadow:none; }
 .execution-popover .thinking-dot:hover:not([aria-checked=true]) .thinking-mark { width:8px; height:8px; background:var(--text-primary); }
 .execution-popover .thinking-reset { position:absolute; top:0; right:0; display:flex; align-items:center; justify-content:center; border:0; border-radius:10px; width:36px; min-width:36px; height:36px; min-height:36px; margin:0; padding:0; background:transparent; color:var(--text-secondary); cursor:pointer; }
