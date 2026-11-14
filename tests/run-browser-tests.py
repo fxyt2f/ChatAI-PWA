@@ -34,6 +34,7 @@ parser.add_argument('--documents',action='store_true',help='Run the isolated doc
 parser.add_argument('--document-search',action='store_true',help='Run document extraction, index and ranking tests')
 parser.add_argument('--document-rag',action='store_true',help='Run RAG send, regeneration, persistence and security regressions')
 parser.add_argument('--document-ui',action='store_true',help='Exercise the real library dialog in mobile and wide mode')
+parser.add_argument('--document-ui-screenshots',type=Path,help='Capture the chat files and message information during --document-ui')
 parser.add_argument('--project-ui',action='store_true',help='Exercise project navigation, membership, drafts and shared files')
 parser.add_argument('--project-screenshots',type=Path,help='Capture the project home at the requested responsive widths')
 parser.add_argument('--sw-diagnostics',type=Path,help='Write SW server, Console, Network and registration diagnostics')
@@ -177,7 +178,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             startup_output+=run_project_ui(client, f'http://localhost:{server.server_port}/', args.project_screenshots)+'\n'
         if args.document_ui:
             from document_library_ui import run as run_document_library_ui
-            startup_output+=run_document_library_ui(client, f'http://localhost:{server.server_port}/')+'\n'
+            startup_output+=run_document_library_ui(client, f'http://localhost:{server.server_port}/', args.document_ui_screenshots)+'\n'
         if args.memory_extraction:
             from memory_extraction import run as run_memory_extraction
             startup_output+=run_memory_extraction(client, f'http://localhost:{server.server_port}/')+'\n'

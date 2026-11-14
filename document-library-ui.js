@@ -11,6 +11,7 @@ window.DocumentLibraryUI = (() => {
         code: fileOutline + ' M10.5 12l-2 2 2 2 M13.5 12l2 2-2 2',
         more: 'M12 5v.1 M12 12v.1 M12 19v.1',
         folder: 'M3 7V5h7l2 2h9v3 M3 7v12h16l3-9H6l-3 9',
+        next: 'M9 6l6 6-6 6',
         back: 'M19 12H5 M12 5l-7 7 7 7',
         add: 'M12 5v14 M5 12h14',
         search: 'M20 20l-4.5-4.5 M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z',
@@ -129,10 +130,12 @@ window.DocumentLibraryUI = (() => {
                 ? button(null, () => openEntry(entry), 'document-library-file')
                 : node('div', null, 'document-library-file');
             main.dataset.kind = ['csv', 'tsv'].includes(entry.format) ? 'table' : entry.format;
-            main.title = entry.fileName;
+            const linked = view.kind === 'picker' && !view.selecting;
+            main.title = linked ? `${entry.fileName} · 版 ${entry.version}` : entry.fileName;
+            const size = fileSize(entry.size);
             main.append(icon(fileIcons[entry.format] || 'text'),
                 node('span', entry.fileName, 'document-library-file-name'),
-                node('span', fileSize(entry.size), 'document-library-file-size'));
+                node('span', linked ? `版 ${entry.version} · ${size}` : size, 'document-library-file-size'));
             const match = view.matches?.get(entry.id);
             if (match) main.append(node('span', window.DocumentSearch.formatLocation(match.location) +
                 ' · ' + match.excerpt, 'document-library-file-excerpt'));
@@ -143,7 +146,8 @@ window.DocumentLibraryUI = (() => {
                 main.setAttribute('aria-pressed', String(selected));
             } else if (openEntry) {
                 main.disabled = view.mutating;
-                main.setAttribute('aria-label', entry.fileName + ' をこのチャットに追加');
+                const target = view.projectTarget ? 'このプロジェクト' : 'このチャット';
+                main.setAttribute('aria-label', linked ? main.title + ' をプレビュー' : entry.fileName + ' を' + target + 'に追加');
             }
             row.append(main);
             if (menuId) {
@@ -182,13 +186,14 @@ window.DocumentLibraryUI = (() => {
 
     function renderPicker(view) {
         const selecting = view.selecting;
-        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : view.project ? 'チャット固有ファイル' : 'このチャットのファイル';
+        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : 'ファイル';
         controls.pickerProject.hidden = selecting || !view.project;
-        controls.pickerProjectOpen.textContent = view.project ? `「${view.project.name}」で管理` : 'プロジェクトで管理';
-        controls.pickerProjectList.replaceChildren(...(view.shared ?? []).map(entry =>
-            node('li', `${entry.fileName} · 版 ${entry.version}`)));
-        if (view.project && !view.shared.length) controls.pickerProjectList.append(node('li', '共有ファイルはありません。'));
-        controls.pickerCount.hidden = selecting;
+        controls.pickerProjectCount.textContent = view.shared.length + '件';
+        controls.pickerProjectEmpty.hidden = !view.loaded || view.shared.length > 0;
+        renderRows(view, controls.pickerProjectList, selecting ? [] : view.shared,
+            entry => openPickerPreview(view, entry));
+        controls.pickerChatIntro.hidden = selecting;
+        controls.pickerChat.setAttribute('aria-labelledby', selecting ? controls.pickerTitle.id : 'document-library-picker-chat-title');
         controls.pickerCount.textContent = view.linked.length + '件';
         controls.pickerBack.hidden = !selecting || Boolean(view.projectTarget);
         controls.pickerActions.hidden = selecting;
@@ -204,11 +209,11 @@ window.DocumentLibraryUI = (() => {
         const linked = new Set(view.linked.map(entry => entry.id));
         const entries = selecting ? view.entries.filter(entry =>
             !linked.has(entry.id) && (!query || normalizedName(entry.fileName).includes(query))) : view.linked;
-        controls.pickerEmpty.hidden = !selecting || !view.loaded || entries.length > 0;
-        controls.pickerEmpty.textContent = !selecting ? '' :
+        controls.pickerEmpty.hidden = !view.loaded || entries.length > 0;
+        controls.pickerEmpty.textContent = !selecting ? 'ファイルはありません' :
             (query ? '該当するファイルがありません。' : '追加できるファイルはありません。');
         renderRows(view, controls.pickerList, entries,
-            selecting ? entry => void setLinked(view, entry, true) : null,
+            selecting ? entry => void setLinked(view, entry, true) : entry => openPickerPreview(view, entry),
             selecting ? null : controls.pickerMenu.id);
     }
 
@@ -783,7 +788,7 @@ window.DocumentLibraryUI = (() => {
         });
     }
 
-    function openWorkspace({ fromHistory = false } = {}) {
+    function openWorkspace({ fromHistory = false, returnFocus } = {}) {
         if (window.state.currentScreen !== 'chat') return null;
         const sidebarOverlay = !document.getElementById('chat-sidebar-backdrop').hidden;
         if (workspace) {
@@ -798,11 +803,11 @@ window.DocumentLibraryUI = (() => {
         const chat = document.getElementById('chat-workspace');
         const scroller = chat.querySelector('.main-content');
         const activeElement = document.activeElement;
-        const returnFocus = chat.contains(activeElement) ? activeElement
-            : sidebarOverlay ? document.getElementById('goto-history-btn') : controls.open;
+        const focusTarget = returnFocus ?? (chat.contains(activeElement) ? activeElement
+            : sidebarOverlay ? document.getElementById('goto-history-btn') : controls.open);
         const view = workspace = { kind: 'workspace', entries: [], refreshVersion: 0, loaded: false, mutating: false,
             chat, scroller, scrollTop: scroller.scrollTop, messages: window.state.currentMessages,
-            returnFocus };
+            returnFocus: focusTarget };
         window.appLogic.resetSwipeState();
         window.uiUtilsV136.closeHistoryItemMenu();
         window.settingsUiV136?.closePopover(false);
@@ -898,9 +903,18 @@ window.DocumentLibraryUI = (() => {
 
     function openProjectPreview(entry, projectId) {
         install();
-        history.pushState({ screen: 'chat', documentLibrary: true, projectPreview: projectId,
+        openLinkedPreview(entry, { projectPreview: projectId });
+    }
+
+    function openPickerPreview(view, entry) {
+        if (!ownsPicker(view) || view.mutating) return;
+        openLinkedPreview(entry, {}, controls.pickerOpen);
+    }
+
+    function openLinkedPreview(entry, origin = {}, returnFocus) {
+        history.pushState({ screen: 'chat', documentLibrary: true, ...origin,
             documentLibraryDetail: { id: entry.id, versionId: entry.versionId } }, '', '#chat');
-        const view = openWorkspace({ fromHistory: true });
+        const view = openWorkspace({ fromHistory: true, returnFocus });
         if (view) void preview(view, entry, { fromHistory: true });
     }
 
@@ -939,6 +953,7 @@ window.DocumentLibraryUI = (() => {
             event.stopPropagation();
             const surface = picker ? controls.picker : controls.workspace;
             const canDrop = owns(view) && !view.mutating && !view.projectTarget && !surface.inert &&
+                !event.target.closest?.('#document-library-picker-project') &&
                 !(workspace?.selected && isNarrow()) && surface.contains(event.target);
             if (event.type === 'drop') {
                 clear();
@@ -969,7 +984,8 @@ window.DocumentLibraryUI = (() => {
             'pdf-previous', 'pdf-next', 'pdf-number', 'pdf-zoom-in', 'pdf-zoom-out',
             'page-number', 'extracts', 'picker', 'picker-open', 'picker-title', 'picker-heading', 'picker-count', 'picker-back', 'picker-close',
             'picker-notice', 'picker-empty', 'picker-list', 'picker-actions', 'picker-search', 'picker-query',
-            'picker-select', 'picker-upload', 'picker-files', 'picker-menu', 'picker-project', 'picker-project-list', 'picker-project-open'];
+            'picker-select', 'picker-upload', 'picker-files', 'picker-menu', 'picker-chat', 'picker-chat-intro',
+            'picker-project', 'picker-project-list', 'picker-project-count', 'picker-project-empty', 'picker-project-open'];
         controls = Object.fromEntries(ids.map(id => [
             id.replace(/-([a-z])/g, (_, char) => char.toUpperCase()), document.getElementById('document-library-' + id)
         ]));
@@ -980,8 +996,9 @@ window.DocumentLibraryUI = (() => {
         controls.pickerOpen.addEventListener('click', openPicker);
         controls.pickerClose.addEventListener('click', closePicker);
         controls.pickerProjectOpen.addEventListener('click', () => {
-            const id = picker?.project?.id;
-            if (id) window.ProjectUI?.open(id);
+            if (picker?.project && ownsPicker(picker) && !picker.mutating) {
+                window.ProjectUI?.open(picker.project.id, { tab: 'files' });
+            }
         });
         controls.picker.addEventListener('close', () => { if (!controls.picker.open) closePicker(); });
         controls.pickerSelect.addEventListener('click', () => pickerSelection(true));

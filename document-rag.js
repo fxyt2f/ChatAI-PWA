@@ -165,23 +165,36 @@ window.DocumentRag = (() => {
     }
 
     function render(message) {
-        const metadata = normalize(message?.rag);
+        const record = message?.rag;
+        const metadata = normalize(record);
         if (!metadata) return null;
+        const hasReferences = metadata.sources.length > 0;
+        const noMatch = ['no-match', 'partial-no-match'].includes(metadata.status);
+        const status = document.createElement('p');
+        status.className = 'rag-status';
+        if (metadata.unavailable.length) {
+            status.textContent = '参照できなかったファイル · ' + metadata.unavailable.map(source => source.documentName).join('、');
+        }
+        if (!hasReferences) {
+            const label = noMatch ? 'ファイル検索 · 関連箇所なし' + (metadata.status === 'partial-no-match' ? '（一部未確認）' : '')
+                : metadata.status === 'history-unavailable' ? '会話履歴を維持するためファイル参照を省略しました'
+                : metadata.status === 'unsupported' ? 'このモデルへのファイル送信は利用できません' : 'ファイル検索を利用できませんでした';
+            if (metadata.status === 'no-match' && !status.textContent) {
+                status.textContent = label;
+                return { references: status };
+            }
+            if (!['used', 'partial'].includes(record.status) || status.textContent) {
+                status.textContent = [label, status.textContent].filter(Boolean).join('。');
+            }
+            return status.textContent ? { warning: status } : null;
+        }
+
         const details = document.createElement('details');
         details.className = 'rag-references';
+        details.open = true;
         const summary = document.createElement('summary');
-        const noMatch = ['no-match', 'partial-no-match'].includes(metadata.status);
-        summary.textContent = metadata.sources.length ? '参照ファイル · ' + metadata.sources.length + ' 箇所'
-            : noMatch ? 'ファイル検索 · 関連箇所なし' + (metadata.status === 'partial-no-match' ? '（一部未確認）' : '')
-            : metadata.status === 'history-unavailable' ? '会話履歴を維持するためファイル参照を省略しました'
-            : metadata.status === 'unsupported' ? 'このモデルへのファイル送信は利用できません' : 'ファイル検索を利用できませんでした';
+        summary.textContent = '参照ファイル · ' + metadata.sources.length + ' 箇所';
         details.append(summary);
-        const note = document.createElement('p');
-        note.textContent = metadata.sources.length
-            ? '検索してモデルへ渡した参考箇所です。回答の各部分との対応は未検証です。'
-            : noMatch ? '今回の質問に関連する箇所を取得できませんでした。'
-            : 'ファイルを確認できない状態で応答を生成しました。';
-        details.append(note);
         const groups = new Map();
         for (const source of metadata.sources) {
             const key = source.documentId + ':' + source.versionId;
@@ -201,12 +214,7 @@ window.DocumentRag = (() => {
             item.append(button);
             groups.get(key).append(item);
         }
-        if (metadata.unavailable.length) {
-            const warning = document.createElement('p');
-            warning.textContent = '参照できなかったファイル · ' + metadata.unavailable.map(source => source.documentName).join('、');
-            details.append(warning);
-        }
-        return details;
+        return { references: details, warning: status.textContent ? status : null };
     }
 
     // Used only after the existing history fingerprints establish that the

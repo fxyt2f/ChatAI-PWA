@@ -189,19 +189,20 @@ window.ProjectUI = (() => {
         ui().scheduleComposerTextareaResize(true);
     }
 
-    function open(id, { fromHistory = false } = {}) {
+    function open(id, { fromHistory = false, tab } = {}) {
         if (!installed || handoff || app().chatParameterOperation || window.state.isEditingSystemPrompt ||
             window.state.isEditingChatTitle || window.state.editingMessageIndex !== null ||
             window.state.currentScreen !== 'chat' || !DocumentLibrary.isId(id)) return;
         if (app().attachmentOperation) {
             const navigation = app().chatNavigationV136 = {};
             void app().attachmentOperation.finished.then(() => {
-                if (app().chatNavigationV136 === navigation) open(id, { fromHistory });
+                if (app().chatNavigationV136 === navigation) open(id, { fromHistory, tab });
             });
             return;
         }
         if (view?.id === id) {
             if (!document.getElementById('chat-sidebar-backdrop').hidden) ui().closeChatSidebar();
+            if (tab) activateTab(tab);
             byId('title').focus({ preventScroll: true });
             return;
         }
@@ -213,7 +214,9 @@ window.ProjectUI = (() => {
         const chat = document.getElementById('chat-workspace');
         const scroller = chat.querySelector('.main-content');
         const fromOverlay = !document.getElementById('chat-sidebar-backdrop').hidden;
-        const returnFocus = previous?.returnFocus ?? (fromOverlay ? document.getElementById('goto-history-btn') : document.activeElement);
+        const returnFocus = previous?.returnFocus ?? (fromOverlay ? document.getElementById('goto-history-btn') :
+            tab === 'files' && document.activeElement.closest('#document-library-picker')
+                ? document.getElementById('document-library-picker-open') : document.activeElement);
         app().chatNavigationV136 = {};
         app().resetSwipeState();
         window.settingsUiV136?.closePopover(false);
@@ -231,7 +234,7 @@ window.ProjectUI = (() => {
         byId('workspace').hidden = false;
         moveChatControls(true);
         byId('content').scrollTop = 0;
-        activateTab(tabs.get(id) || 'chats');
+        activateTab(tab || tabs.get(id) || 'chats');
         attachDraft(view);
         byId('title').textContent = 'プロジェクト';
         byId('description').hidden = true;

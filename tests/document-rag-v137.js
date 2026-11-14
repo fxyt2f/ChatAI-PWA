@@ -98,7 +98,9 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             eq(pdfReference.documentId, pdf.id);
             eq(pdfReference.location.page, 2);
             assert(!JSON.stringify(saved.rag).includes('３０日以内') && !JSON.stringify(saved.rag).includes('"text"'));
-            assert(el.messageContainer.querySelector('.rag-references').textContent.includes('検索してモデルへ渡した'));
+            const references = el.messageContainer.querySelector('.rag-references');
+            assert(references.closest('.message-info').hidden);
+            assert(!references.textContent.includes('検索してモデルへ渡した'));
             eq(el.messageContainer.querySelector('.rag-references button').textContent, 'ページ 2');
         });
 

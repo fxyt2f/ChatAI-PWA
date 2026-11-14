@@ -138,7 +138,7 @@
                 <button id="chat-search-open-btn" class="floating-action-button" title="チャット内を検索" aria-label="チャット内を検索">
                     <span class="material-symbols-outlined">search</span>
                 </button>
-                <button id="document-library-picker-open" class="floating-action-button" type="button" title="このチャットのファイル" aria-label="このチャットのファイル" aria-haspopup="dialog" aria-controls="document-library-picker">
+                <button id="document-library-picker-open" class="floating-action-button" type="button" title="ファイル" aria-label="ファイル" aria-haspopup="dialog" aria-controls="document-library-picker">
                     <span data-document-icon="text" aria-hidden="true"></span>
                 </button>
                 <button id="text-formatting-btn" class="floating-action-button" title="文章整形" aria-label="文章整形">
@@ -1411,26 +1411,40 @@
         <dialog id="document-library-picker" class="custom-dialog" aria-labelledby="document-library-picker-title">
             <header class="system-prompt-dialog-header">
                 <button id="document-library-picker-back" class="chat-dialog-icon-button" type="button" aria-label="紐づけ一覧へ戻る" hidden><span data-document-icon="back" aria-hidden="true"></span></button>
-                <h2 id="document-library-picker-title" class="dialog-title system-prompt-dialog-title" tabindex="-1"><span id="document-library-picker-heading">このチャットのファイル</span> <span id="document-library-picker-count" aria-live="polite">0件</span></h2>
+                <h2 id="document-library-picker-title" class="dialog-title system-prompt-dialog-title" tabindex="-1"><span id="document-library-picker-heading">ファイル</span></h2>
                 <button id="document-library-picker-close" class="chat-dialog-icon-button" type="button" aria-label="閉じる" autofocus><span data-document-icon="close" aria-hidden="true"></span></button>
             </header>
             <p id="document-library-picker-notice" class="document-library-notice" role="status"></p>
-            <section id="document-library-picker-project" aria-labelledby="document-library-picker-project-title" hidden>
-                <h3 id="document-library-picker-project-title">プロジェクト共有ファイル</h3>
-                <ul id="document-library-picker-project-list"></ul>
-                <button id="document-library-picker-project-open" type="button" class="document-library-action">プロジェクトで管理</button>
-            </section>
             <div id="document-library-picker-search" class="document-library-search" role="search" hidden>
                 <span data-document-icon="search" aria-hidden="true"></span>
                 <input id="document-library-picker-query" type="search" placeholder="ファイルを検索" aria-label="ファイルを検索" maxlength="512" autocomplete="off">
             </div>
             <div class="document-library-picker-scroll">
-                <p id="document-library-picker-empty" class="document-library-muted" role="status" hidden></p>
-                <ul id="document-library-picker-list" class="document-library-list"></ul>
-            </div>
-            <div id="document-library-picker-actions" class="document-library-toolbar document-library-picker-actions">
-                <button id="document-library-picker-select" class="document-library-action" type="button"><span data-document-icon="folder" aria-hidden="true"></span><span>ライブラリから<wbr>追加</span></button>
-                <button id="document-library-picker-upload" class="document-library-action" type="button"><span data-document-icon="add" aria-hidden="true"></span><span>ファイルを<wbr>アップロード</span></button>
+                <section id="document-library-picker-project" class="document-library-picker-section" aria-labelledby="document-library-picker-project-title" hidden>
+                    <div class="document-library-picker-section-heading">
+                        <h3 id="document-library-picker-project-title">プロジェクトのファイル</h3>
+                        <span id="document-library-picker-project-count" aria-live="polite">0件</span>
+                    </div>
+                    <p class="document-library-muted">このプロジェクトのすべてのチャットで利用できます。</p>
+                    <p id="document-library-picker-project-empty" class="document-library-muted document-library-picker-empty" hidden>ファイルはありません</p>
+                    <ul id="document-library-picker-project-list" class="document-library-list"></ul>
+                    <button id="document-library-picker-project-open" type="button" class="document-library-action"><span data-document-icon="folder" aria-hidden="true"></span>プロジェクトでファイルを管理<span data-document-icon="next" aria-hidden="true"></span></button>
+                </section>
+                <div id="document-library-picker-chat" class="document-library-picker-section" role="region" aria-labelledby="document-library-picker-chat-title">
+                    <div id="document-library-picker-chat-intro">
+                        <div class="document-library-picker-section-heading">
+                            <h3 id="document-library-picker-chat-title">このチャットのファイル</h3>
+                            <span id="document-library-picker-count" aria-live="polite">0件</span>
+                        </div>
+                        <p class="document-library-muted">このチャットだけで利用するファイルです。</p>
+                    </div>
+                    <p id="document-library-picker-empty" class="document-library-muted document-library-picker-empty" role="status" hidden></p>
+                    <ul id="document-library-picker-list" class="document-library-list"></ul>
+                    <div id="document-library-picker-actions" class="document-library-toolbar document-library-picker-actions">
+                        <button id="document-library-picker-select" class="document-library-action" type="button"><span data-document-icon="folder" aria-hidden="true"></span><span>ライブラリから<wbr>追加</span></button>
+                        <button id="document-library-picker-upload" class="document-library-action" type="button"><span data-document-icon="add" aria-hidden="true"></span><span>ファイルを<wbr>アップロード</span></button>
+                    </div>
+                </div>
             </div>
             <div id="document-library-picker-menu" class="history-item-menu document-library-menu" role="menu" hidden></div>
         </dialog>

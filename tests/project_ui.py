@@ -718,14 +718,65 @@ def run(client, url, screenshots=None):
     click('#document-library-picker-open')
     wait("!document.querySelector('#document-library-picker-project').hidden && "
          "document.querySelector('#document-library-picker-list').textContent.includes('共有資料.md')", 'shared and chat files are both shown')
-    assert ev("document.querySelector('#document-library-picker-heading').textContent==='チャット固有ファイル' && "
-              "document.querySelector('#document-library-picker-project-list').textContent.includes('共有資料.md')")
+    assert ev("""document.querySelector('#document-library-picker-heading').textContent==='ファイル' &&
+        document.querySelector('#document-library-picker-project-list').textContent.includes('共有資料.md') &&
+        document.querySelector('#document-library-picker-project-count').textContent==='2件' &&
+        document.querySelector('#document-library-picker-count').textContent==='1件' &&
+        document.querySelector('#document-library-picker-project').nextElementSibling.id==='document-library-picker-chat'""")
+    capture('pc-chat-project-files')
+    click('#document-library-picker-close')
+    for width, touch in ((768, False), (390, True)):
+        viewport(width, touch)
+        ev("clearTimeout(state.panelFadeOutTimer); appLogic.setFloatingPanelVisible(true)")
+        wait("Number(getComputedStyle(elements.floatingActionPanel).opacity)>0.95", 'Action panel is visible')
+        click('#document-library-picker-open', touch)
+        wait("!document.querySelector('#document-library-picker-project').hidden", 'Responsive project files load')
+        assert ev("""(() => {
+            const dialog = document.querySelector('#document-library-picker');
+            const scroll = dialog.querySelector('.document-library-picker-scroll');
+            const upper = document.querySelector('#document-library-picker-project').getBoundingClientRect();
+            const lower = document.querySelector('#document-library-picker-chat').getBoundingClientRect();
+            return upper.bottom < lower.top && scroll.scrollWidth <= scroll.clientWidth &&
+                dialog.scrollWidth <= dialog.clientWidth && dialog.getBoundingClientRect().right <= innerWidth;
+        })()""")
+        capture(('mobile' if touch else 'tablet') + '-chat-project-files')
+        click('#document-library-picker-close', touch)
+        wait("!document.querySelector('#document-library-picker').open", 'Responsive picker closes')
+    viewport(1280, False)
+    for scope in ('picker-project-list', 'picker-list'):
+        click('#document-library-picker-open')
+        row = f'#document-library-{scope} [data-document-id="{doc}"] .document-library-file'
+        wait(f"document.querySelector({json.dumps(row)})", 'Linked file row loaded')
+        click(row)
+        wait("document.querySelector('#document-library-extracts').textContent.includes('共有ファイル本文')", 'Linked file previews')
+        ev('history.back()')
+        wait(f'elements.documentLibraryWorkspace.hidden && state.currentChatId==={member}', 'Returns to the original chat')
+        ev('history.forward()')
+        wait("!elements.documentLibraryWorkspace.hidden && document.querySelector('#document-library-extracts').textContent.includes('共有ファイル本文')",
+             'Forward restores the linked preview')
+        click('#document-library-detail-close')
+        wait(f'elements.documentLibraryWorkspace.hidden && state.currentChatId==={member}', 'Close uses the same history entry')
+    open_project(beta, '第二プロジェクト')
+    click('#project-tab-chats')
+    click(f'#project-chats [data-chat-id="{member}"] [data-sidebar-action="open"]')
+    wait(f'state.currentChatId==={member} && elements.projectWorkspace.hidden', 'Chat returns with Chats as last project tab')
+    click('#document-library-picker-open')
+    wait("!document.querySelector('#document-library-picker-project').hidden", 'Project files section loads')
     click('#document-library-picker-project-open')
-    wait("document.querySelector('#project-documents .document-library-row')", 'manage shared documents')
+    wait("document.querySelector('#project-tab-files').getAttribute('aria-selected')==='true' && "
+         "document.querySelector('#project-documents .document-library-row')", 'Manage opens directly on Files')
+    ev(f"""(async () => {{
+        const entry = await dbUtils.getLibraryDocument({json.dumps(doc)});
+        await dbUtils.replaceLibraryDocument(entry.id, new File(['差し替えた共有資料'], '共有資料.md'), {{expectedVersionId:entry.versionId}});
+    }})()""")
     click(f'#project-documents [data-document-id="{doc}"] .document-library-more')
     click('#project-menu [data-project-action=unlink-file]')
     wait("!document.querySelector('#project-documents').textContent.includes('共有資料.md')", 'share removed')
-    assert ev(f"dbUtils.getChatDocuments({member}).then(items=>items[0].id==={json.dumps(doc)})")
+    assert ev(f"""(async () => {{
+        const [linked, first, second] = await Promise.all([dbUtils.getChatDocuments({member}),
+            dbUtils.getLibraryOriginal({json.dumps(doc)}, 1), dbUtils.getLibraryOriginal({json.dumps(doc)}, 2)]);
+        return linked[0].id==={json.dumps(doc)} && !!first?.blob.size && !!second?.blob.size;
+    }})()""")
     ev("""(() => {
         const input = document.querySelector('#project-files');
         input.click=()=>{};

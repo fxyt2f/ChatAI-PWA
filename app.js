@@ -4903,6 +4903,8 @@ renderStreamingResult() {
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
 },
 
+openMessageInfo: new WeakSet(),
+
 createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
     const messageData = state.currentMessages[index];
     if (!messageData) return null;
@@ -4919,8 +4921,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     messageDiv.dataset.messageIndex = String(index);
     messageDiv.dataset.role = role;
     
-    if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
-        messageDiv.appendChild(this.createThoughtProcessDetails(messageData, isStreamingPlaceholder));
+    const messageInfo = document.createElement('div');
+    messageInfo.className = 'message-info';
+    if (role === 'model' && messageData?.thoughtSummary?.trim?.() && appLogic.getShowThoughtProcess()) {
+        const thoughts = this.createThoughtProcessDetails(messageData, isStreamingPlaceholder);
+        (isStreamingPlaceholder ? messageDiv : messageInfo).appendChild(thoughts);
     }
 
     const contentDiv = document.createElement('div');
@@ -5067,32 +5072,32 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     }
     
-    if (role === 'model' && messageData && messageData.groundingMetadata &&
-        ( (messageData.groundingMetadata.groundingChunks && messageData.groundingMetadata.groundingChunks.length > 0) ||
-          (messageData.groundingMetadata.webSearchQueries && messageData.groundingMetadata.webSearchQueries.length > 0) )
-       )
+    if (role === 'model' && !isStreamingPlaceholder && messageData.groundingMetadata)
     {
         try {
             const details = document.createElement('details');
             details.classList.add('citation-details');
+            details.open = true;
             const summary = document.createElement('summary');
             summary.textContent = '引用元/検索クエリ';
             details.appendChild(summary);
             let detailsHasContent = false;
-            if (messageData.groundingMetadata.groundingChunks && messageData.groundingMetadata.groundingChunks.length > 0) {
+            const chunks = messageData.groundingMetadata.groundingChunks;
+            if (Array.isArray(chunks) && chunks.length) {
                 const citationList = document.createElement('ul');
                 citationList.classList.add('citation-list');
                 const citationMap = new Map();
                 let displayIndexCounter = 1;
-                if (messageData.groundingMetadata.groundingSupports) {
+                if (Array.isArray(messageData.groundingMetadata.groundingSupports)) {
                     messageData.groundingMetadata.groundingSupports.forEach(support => {
-                        if (support.groundingChunkIndices) {
+                        if (Array.isArray(support?.groundingChunkIndices)) {
                             support.groundingChunkIndices.forEach(chunkIndex => {
-                                if (!citationMap.has(chunkIndex) && chunkIndex >= 0 && chunkIndex < messageData.groundingMetadata.groundingChunks.length) {
-                                    const chunk = messageData.groundingMetadata.groundingChunks[chunkIndex];
-                                    if (chunk?.web?.uri) {
+                                if (!citationMap.has(chunkIndex) && Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < chunks.length) {
+                                    const chunk = chunks[chunkIndex];
+                                    const uri = typeof chunk?.web?.uri === 'string' && chunk.web.uri.trim() && htmlUtils.safeUrl(chunk.web.uri);
+                                    if (uri) {
                                         citationMap.set(chunkIndex, {
-                                            uri: chunk.web.uri,
+                                            uri,
                                             title: chunk.web.title || 'タイトル不明',
                                             displayIndex: displayIndexCounter++
                                         });
@@ -5104,10 +5109,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 }
                 const sortedCitations = Array.from(citationMap.entries())
                                             .sort(([, a], [, b]) => a.displayIndex - b.displayIndex);
-                sortedCitations.forEach(([chunkIndex, citationInfo]) => {
+                sortedCitations.forEach(([, citationInfo]) => {
                     const listItem = document.createElement('li');
                     const link = document.createElement('a');
-                    link.href = htmlUtils.safeUrl(citationInfo.uri);
+                    link.href = citationInfo.uri;
                     link.textContent = `[${citationInfo.displayIndex}] ${citationInfo.title}`;
                     link.title = citationInfo.title;
                     link.target = '_blank';
@@ -5116,11 +5121,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     citationList.appendChild(listItem);
                 });
                 if (sortedCitations.length === 0) {
-                     messageData.groundingMetadata.groundingChunks.forEach((chunk, idx) => {
-                         if (chunk?.web?.uri) {
+                     chunks.forEach((chunk, idx) => {
+                         const uri = typeof chunk?.web?.uri === 'string' && chunk.web.uri.trim() && htmlUtils.safeUrl(chunk.web.uri);
+                         if (uri) {
                              const listItem = document.createElement('li');
                              const link = document.createElement('a');
-                             link.href = htmlUtils.safeUrl(chunk.web.uri);
+                             link.href = uri;
                              link.textContent = chunk.web.title || `ソース ${idx + 1}`;
                              link.title = chunk.web.title || 'タイトル不明';
                              link.target = '_blank';
@@ -5135,15 +5141,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     detailsHasContent = true;
                 }
             }
-            if (messageData.groundingMetadata.webSearchQueries && messageData.groundingMetadata.webSearchQueries.length > 0) {
-                if (detailsHasContent) {
-                    const separator = document.createElement('hr');
-                    separator.style.marginTop = '10px';
-                    separator.style.marginBottom = '8px';
-                    separator.style.border = 'none';
-                    separator.style.borderTop = '1px dashed var(--border-tertiary)'; 
-                    details.appendChild(separator);
-                }
+            const rawQueries = messageData.groundingMetadata.webSearchQueries;
+            const queries = Array.isArray(rawQueries) ? rawQueries.filter(query => typeof query === 'string' && query.trim()) : [];
+            if (queries.length) {
                 const queryHeader = document.createElement('div');
                 queryHeader.textContent = '検索に使用されたクエリ:';
                 queryHeader.style.fontWeight = '500';
@@ -5159,7 +5159,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 queryList.style.margin = '0';
                 queryList.style.fontSize = '11px';
                 queryList.style.color = 'var(--text-secondary)';
-                messageData.groundingMetadata.webSearchQueries.forEach(query => {
+                queries.forEach(query => {
                     const queryItem = document.createElement('li');
                     queryItem.textContent = `• ${query}`;
                     queryItem.style.marginBottom = '3px';
@@ -5169,38 +5169,36 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 detailsHasContent = true;
             }
             if (detailsHasContent) {
-                contentDiv.appendChild(details);
+                messageInfo.appendChild(details);
             }
         } catch (e) {
             console.error(`引用元/検索クエリ表示の生成中にエラーが発生しました (index: ${index}):`, e);
         }
     }
     
-    if (role === 'model' && messageData && messageData.executedFunctions && messageData.executedFunctions.length > 0) {
+    const executedFunctions = role === 'model' && !isStreamingPlaceholder && Array.isArray(messageData.executedFunctions)
+        ? [...new Set(messageData.executedFunctions.filter(name => typeof name === 'string' && name.trim()))] : [];
+    if (executedFunctions.length) {
         const details = document.createElement('details');
         details.classList.add('function-call-details');
-        const uniqueFunctions = [...new Set(messageData.executedFunctions)];
+        details.open = true;
         const summary = document.createElement('summary');
-        summary.innerHTML = `⚙️ ツール使用 (${uniqueFunctions.length}件)`;
+        summary.textContent = `ツール使用 (${executedFunctions.length}件)`;
         details.appendChild(summary);
         const list = document.createElement('ul');
         list.classList.add('function-call-list');
-        uniqueFunctions.forEach(funcName => {
+        executedFunctions.forEach(funcName => {
             const listItem = document.createElement('li');
             listItem.textContent = funcName;
             list.appendChild(listItem);
         });
         details.appendChild(list);
-        if (contentDiv.innerHTML.trim() !== '') {
-            contentDiv.appendChild(details);
-        } else {
-            messageDiv.appendChild(details);
-        }
+        messageInfo.appendChild(details);
     }
 
-    if (role === 'model' && messageData && messageData.search_web_results && messageData.search_web_results.length > 0) {
+    if (role === 'model' && Array.isArray(messageData.search_web_results) && messageData.search_web_results.length > 0) {
         const details = document.createElement('details');
-        details.classList.add('function-call-details');
+        details.classList.add('function-call-details', 'search-results-details');
         const summary = document.createElement('summary');
         summary.innerHTML = `🌐 Web検索結果 (${messageData.search_web_results.length}件)`;
         details.appendChild(summary);
@@ -5218,11 +5216,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             list.appendChild(listItem);
         });
         details.appendChild(list);
-        if (contentDiv.innerHTML.trim() !== '') {
-            contentDiv.appendChild(details);
-        } else {
-            messageDiv.appendChild(details);
-        }
+        messageDiv.appendChild(details);
     }
 
     if (role === 'model' && messageData && messageData.generated_videos && messageData.generated_videos.length > 0) {
@@ -5262,8 +5256,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     const editArea = document.createElement('div');
     if (role === 'model' && !isStreamingPlaceholder) {
-        const references = window.DocumentRag?.render(messageData);
-        if (references) messageDiv.appendChild(references);
+        const rag = window.DocumentRag?.render(messageData);
+        if (rag?.references) messageInfo.prepend(rag.references);
+        if (rag?.warning) messageDiv.appendChild(rag.warning);
     }
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
@@ -5396,15 +5391,15 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             }
         }
 
-        if (role === 'model' && messageData?.usageMetadata &&
-            typeof messageData.usageMetadata.candidatesTokenCount === 'number' &&
-            typeof messageData.usageMetadata.totalTokenCount === 'number')
+        if (role === 'model' && !isStreamingPlaceholder && messageData.usageMetadata &&
+            Number.isFinite(messageData.usageMetadata.candidatesTokenCount) &&
+            Number.isFinite(messageData.usageMetadata.totalTokenCount))
         {
             const usage = messageData.usageMetadata;
             const tokenSpan = document.createElement('span');
             tokenSpan.classList.add('token-count-display');
             let finalTotalTokenCount = usage.totalTokenCount;
-            if (typeof messageData.usageMetadata.thoughtsTokenCount === 'number') {
+            if (Number.isFinite(usage.thoughtsTokenCount)) {
                 finalTotalTokenCount -= messageData.usageMetadata.thoughtsTokenCount;
             }
             const formattedCandidates = usage.candidatesTokenCount.toLocaleString('en-US');
@@ -5413,14 +5408,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             tokenSpan.title = `Candidate Tokens / Total Tokens`;
             actionMetaDiv.appendChild(tokenSpan);
         }
-        if (role === 'model' && typeof messageData?.retryCount === 'number' && messageData.retryCount > 0) {
+        if (role === 'model' && !isStreamingPlaceholder && Number.isFinite(messageData.retryCount) && messageData.retryCount > 0) {
             const retrySpan = document.createElement('span');
             retrySpan.classList.add('token-count-display');
             retrySpan.textContent = `(リトライ: ${messageData.retryCount}回)`;
             retrySpan.title = `APIリクエストを${messageData.retryCount}回再試行した結果です`;
-            if (actionMetaDiv.querySelector('.token-count-display')) {
-                retrySpan.style.marginLeft = '8px';
-            }
             actionMetaDiv.appendChild(retrySpan);
         }
 
@@ -5451,7 +5443,40 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         
         if (actionMetaDiv.hasChildNodes()) {
-            actionsDiv.appendChild(actionMetaDiv);
+            messageInfo.appendChild(actionMetaDiv);
+        }
+        if (messageInfo.hasChildNodes()) {
+            messageInfo.id = 'message-info-' + index;
+            messageInfo.hidden = !this.openMessageInfo.has(messageData);
+            const infoButton = document.createElement('button');
+            infoButton.type = 'button';
+            infoButton.classList.add('tm-message-info-btn');
+            infoButton.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">info</span>';
+            infoButton.title = 'メッセージ情報';
+            infoButton.setAttribute('aria-label', 'メッセージ情報');
+            infoButton.setAttribute('aria-controls', messageInfo.id);
+            infoButton.setAttribute('aria-expanded', String(!messageInfo.hidden));
+            infoButton.onclick = () => {
+                const anchor = this.captureElementScrollAnchor(infoButton);
+                messageInfo.hidden = !messageInfo.hidden;
+                infoButton.setAttribute('aria-expanded', String(!messageInfo.hidden));
+                const owner = state.currentMessages[messageDiv.dataset.index];
+                if (messageInfo.hidden) {
+                    this.openMessageInfo.delete(owner);
+                    this.restoreElementScrollAnchor(anchor);
+                } else {
+                    if (owner) this.openMessageInfo.add(owner);
+                    const scroller = this.getChatScrollContainer();
+                    if (scroller && messageInfo.offsetHeight > scroller.clientHeight / 2) {
+                        messageInfo.scrollIntoView({ block: 'start' });
+                    } else {
+                        this.keepMessageAboveComposer(messageDiv, 56);
+                    }
+                }
+                appLogic.scheduleScrollToBottomButtonUpdate();
+            };
+            actionButtonsDiv.appendChild(infoButton);
+            messageDiv.appendChild(messageInfo);
         }
         if (actionButtonsDiv.hasChildNodes()) {
             actionsDiv.appendChild(actionButtonsDiv);
@@ -7864,7 +7889,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
-    keepMessageAboveComposer(messageElement) {
+    keepMessageAboveComposer(messageElement, bottomClearance = 14) {
         if (!messageElement?.isConnected) return;
 
         const main = document.querySelector('#chat-screen .main-content');
@@ -7882,7 +7907,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const safeBottom = Math.min(
             mainRect?.bottom || viewportHeight,
             composerRect?.top || viewportHeight
-        ) - 14;
+        ) - bottomClearance;
         const delta = visualBottom - safeBottom;
 
         if (delta <= 1) return;
@@ -19990,10 +20015,12 @@ const appLogic = {
         delete updatedMessage.error;
         state.currentMessages[index] = updatedMessage;
 
-        // 2. 既存のメタ情報表示を一旦削除
-        messageElement.querySelectorAll('.function-call-details, .citation-details').forEach(el => el.remove());
+        if (uiUtils.openMessageInfo.has(originalMessage)) {
+            uiUtils.openMessageInfo.delete(originalMessage);
+            uiUtils.openMessageInfo.add(updatedMessage);
+        }
 
-        // 3. テキスト部分をDOMに反映
+        // 2. テキスト部分をDOMに反映
         const contentDiv = messageElement.querySelector('.message-content');
         if (contentDiv) {
             if (updatedMessage.role === 'model' && typeof marked !== 'undefined') {
@@ -20008,7 +20035,7 @@ const appLogic = {
             }
         }
 
-        // 4. 画像が存在する場合、画像を再注入
+        // 3. 画像が存在する場合、画像を再注入
             if (updatedMessage.role === 'model' && updatedMessage.imageIds && updatedMessage.imageIds.length > 0) {
             htmlUtils.insertGeneratedImages(contentDiv, updatedMessage.imageIds);
             requestAnimationFrame(() => {
@@ -20017,71 +20044,18 @@ const appLogic = {
             });
         }
 
-        // 5. メタ情報（ツール使用履歴など）を再生成して追加
-        if (updatedMessage.role === 'model') {
-            const detailsFragment = document.createDocumentFragment();
-            // ツール使用履歴
-            if (updatedMessage.executedFunctions && updatedMessage.executedFunctions.length > 0) {
-                const details = document.createElement('details');
-                details.classList.add('function-call-details');
-                const uniqueFunctions = [...new Set(updatedMessage.executedFunctions)];
-                const summary = document.createElement('summary');
-                summary.innerHTML = `⚙️ ツール使用 (${uniqueFunctions.length}件)`;
-                details.appendChild(summary);
-                const list = document.createElement('ul');
-                list.classList.add('function-call-list');
-                uniqueFunctions.forEach(funcName => {
-                    const listItem = document.createElement('li');
-                    listItem.textContent = funcName;
-                    list.appendChild(listItem);
-                });
-                details.appendChild(list);
-                detailsFragment.appendChild(details);
-            }
-            // Web検索結果
-            if (updatedMessage.search_web_results && updatedMessage.search_web_results.length > 0) {
-                const details = document.createElement('details');
-                details.classList.add('function-call-details');
-                const summary = document.createElement('summary');
-                summary.innerHTML = `🌐 Web検索結果 (${updatedMessage.search_web_results.length}件)`;
-                details.appendChild(summary);
-                const list = document.createElement('ul');
-                list.classList.add('function-call-list');
-                updatedMessage.search_web_results.forEach(result => {
-                    const listItem = document.createElement('li');
-                    const link = document.createElement('a');
-                    link.href = htmlUtils.safeUrl(result.link);
-                    link.textContent = result.title;
-                    link.title = result.snippet;
-                    link.target = '_blank';
-                    link.rel = 'noopener noreferrer';
-                    listItem.appendChild(link);
-                    list.appendChild(listItem);
-                });
-                details.appendChild(list);
-                detailsFragment.appendChild(details);
-            }
-            
-            // 生成したメタ情報を適切な場所に追加
-            if (contentDiv.innerHTML.trim() !== '') {
-                contentDiv.appendChild(detailsFragment);
-            } else {
-                messageElement.appendChild(detailsFragment);
-            }
-        }
-
-        // 6. Prism.jsでハイライトを再適用
+        // 4. Prism.jsでハイライトを再適用
         if (window.Prism) {
             contentDiv.querySelectorAll('pre code').forEach((block) => {
                 Prism.highlightElement(block);
             });
         }
 
-        // 7. 編集UIを閉じる
+        // 5. 編集UIを閉じる
         this.finishEditing(messageElement);
         uiUtils.scheduleApplyMessageCollapse(messageElement);
 
-        // 8. DBへの保存処理
+        // 6. DBへの保存処理
         try {
             const requiresTitleUpdate = (index === state.currentMessages.findIndex(m => m.role === 'user'));
             let newTitleForSave = null;
