@@ -476,6 +476,7 @@ def run(client, url, screenshots=None):
     idle_title = bounds(title)
     row_height = bounds(recent_row)['height']
     capture('pc-chat-idle')
+    wait('!dbUtils.pendingChatSaves && !chatSidebarUiState.refreshTimer', 'sidebar redraw settles after chat switch')
     hover(long_open)
     wait(f"getComputedStyle(document.querySelector({json.dumps(dots)})).opacity==='1'", 'long title yields space to three dots')
     assert 38 < idle_title['width'] - bounds(title)['width'] < 42
@@ -765,6 +766,11 @@ def run(client, url, screenshots=None):
     click('#project-dialog-cancel')
 
     open_project(alpha, '第一・編集済み')
+    rag_file = ev(f"""(async()=>{{
+        const file = await dbUtils.addLibraryDocument(new File(['第一の未送信下書き の参照識別子 甲だけに共有'], '初回共有.txt'));
+        await dbUtils.addProjectDocument({json.dumps(alpha)}, file.id);
+        return file.id;
+    }})()""")
     count = ev('dbUtils.getAllChats().then(chats=>chats.length)')
     assert ev(f'dbUtils.getAllChats().then(chats=>chats.length==={count})')
     change('#user-input', '第一の未送信下書き')
@@ -813,6 +819,12 @@ def run(client, url, screenshots=None):
          "state.pendingAttachments[0]?.name==='送信ファイル.pdf' && state.currentExecutionSettings.modelRef?.modelName==='gemini-3-flash-preview'",
          'returning to first profile restores draft, model and attachment')
     ev("""(() => {
+        const readScope = dbUtils.getChatRagDocuments;
+        window.initialRagReads = [];
+        dbUtils.getChatRagDocuments = function(id, owner) {
+            initialRagReads.push(Promise.all([this.getChatProject(id), readScope.call(this, id, owner)]));
+            return initialRagReads.at(-1).then(([,scope])=>scope);
+        };
         const original = window.fetch;
         window.fetch = (url, options) => {
             if (!String(url).includes('generativelanguage.googleapis.com') || !options?.body) return original(url, options);
@@ -836,7 +848,7 @@ def run(client, url, screenshots=None):
          'existing alert shows initial save failure')
     click('#alertDialog .dialog-ok-btn')
     wait("!document.querySelector('#send-button').disabled && !state.isSending", 'send becomes available after failure')
-    assert ev(f"""(async()=>state.currentChatId===null && !window.firstWireMembership &&
+    assert ev(f"""(async()=>state.currentChatId===null && !window.firstWireMembership && !initialRagReads.length &&
         (await dbUtils.getAllChats()).length==={count} && document.querySelector('#user-input').value==='第一の未送信下書き' &&
         state.pendingAttachments[0].name==='送信ファイル.pdf')()""")
     ev("""document.querySelector('#user-input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}))""")
@@ -846,8 +858,12 @@ def run(client, url, screenshots=None):
     wait(f"document.querySelector({json.dumps(generating_dot)})?.title==='応答生成中' && "
          f"!document.querySelector({json.dumps(generating_dot)}).hidden", 'actual send marks the owning sidebar row')
     assert ev(f'window.firstWireMembership.then(project=>project.id==={json.dumps(alpha)})')
+    assert ev(f"""initialRagReads.length===1 && initialRagReads[0].then(([project,scope])=>
+        project.id==={json.dumps(alpha)} && scope.projectId===project.id &&
+        scope.documents.some(file=>file.id==={json.dumps(rag_file)}))""")
     assert ev("projectRequest.url.includes('gemini-3-flash-preview:generateContent') && "
-              "JSON.stringify(projectRequest.body).includes('application/pdf')")
+              "JSON.stringify(projectRequest.body).includes('application/pdf') && "
+              "projectRequest.body.systemInstruction.parts[0].text.includes('甲だけに共有')")
     ev('history.back()')
     wait("!elements.projectWorkspace.hidden && state.currentChatId===null", 'back restores project draft during generation')
     assert ev(f"Boolean(appLogic.getSendJobV136({project_chat}))")
@@ -860,6 +876,7 @@ def run(client, url, screenshots=None):
     wait(f"!appLogic.getSendJobV136({project_chat})", 'send completes under project home')
     wait(f"document.querySelector({json.dumps(generating_dot)})?.hidden", 'completed response clears sidebar status')
     assert ev(f"dbUtils.getChat({project_chat}).then(chat=>chat.messages.at(-1).content==='検証用回答')")
+    assert ev(f"dbUtils.getChat({project_chat}).then(chat=>chat.messages.at(-1).rag.sources[0].documentId==={json.dumps(rag_file)})")
     ev('history.forward()')
     wait("!elements.projectWorkspace.hidden", 'forward restores project home')
     ev('history.forward()')

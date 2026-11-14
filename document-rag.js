@@ -100,7 +100,7 @@ window.DocumentRag = (() => {
         if (session.documentSnapshot && session.documentSnapshot.chatId == null) return baseInstruction;
         let result;
         try {
-            if (session.documentSnapshotError) throw new Error('資料の紐づけを取得できません。');
+            if (session.documentSnapshotError || !session.documentSnapshot) throw new Error('資料の紐づけを取得できません。');
             result = await search(session, question);
             session.controller.signal.throwIfAborted();
             if (!result || !Array.isArray(result.results) || !Array.isArray(result.unavailable)) throw new Error('資料検索の応答が無効です。');

@@ -430,6 +430,187 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             window.DocumentLibraryUI.close();
             eq((await answer(firstChat)).rag.sources[0].versionId, pdf.versionId);
         });
+
+        const projectFile = (name, marker) => file(name + '.txt', '受付期限：' + marker);
+        const query = '受付期限';
+        const projectAnswer = async (id, expected, excluded = []) => {
+            const before = calls.length;
+            await send(query);
+            eq(calls.length, before + 1);
+            const saved = await answer(id);
+            const prompt = system(calls.at(-1));
+            const sources = saved.rag?.sources ?? [];
+            eq(sources.map(source => source.documentId).sort(), expected.map(entry => entry.id).sort());
+            for (const entry of expected) assert(prompt.includes(entry.fileName), prompt);
+            for (const marker of excluded) assert(!prompt.includes(marker), prompt);
+            return { prompt, saved };
+        };
+        let projectA, projectB, chatA, chatB, personal, sharedA, sharedB, common, added, chatWithoutFiles;
+        await test('Project RAG merges private and shared files without duplicate versions or cross-project context', async () => {
+            [projectA, projectB] = await Promise.all([
+                db.createProject({ name: '検索範囲A' }), db.createProject({ name: '検索範囲B' })
+            ]);
+            [personal, sharedA, sharedB, common] = await Promise.all([
+                projectFile('固有', '固有資料の印'),
+                projectFile('共有A', '甲プロジェクトの印'),
+                projectFile('共有B', '乙プロジェクトの印'),
+                projectFile('共通', '両方で共有する印')
+            ]);
+            await db.addProjectDocument(projectA.id, sharedA.id);
+            await db.addProjectDocument(projectB.id, sharedB.id);
+            for (const project of [projectA, projectB]) await db.addProjectDocument(project.id, common.id);
+            chatA = await start({ documents: [personal, sharedA] });
+            await projectAnswer(chatA, [personal, sharedA], ['乙プロジェクトの印', '両方で共有する印']);
+            await db.setChatProject(chatA, projectA.id);
+            const expected = [personal, sharedA, common];
+            const snapshot = DocumentSearch.captureChat(chatA, db.chatSaveOwners.get(st.currentMessages));
+            const result = await DocumentSearch.searchChat(chatA, query, { snapshot });
+            eq(result.documentCount, expected.length);
+            eq(result.results.map(entry => entry.documentId).sort(), expected.map(entry => entry.id).sort());
+            const { prompt, saved } = await projectAnswer(chatA, expected, ['乙プロジェクトの印']);
+            for (const marker of ['固有資料の印', '甲プロジェクトの印', '両方で共有する印']) assert(prompt.includes(marker), prompt);
+            const source = saved.rag.sources.find(item => item.documentId === common.id);
+            eq(source.versionId, common.versionId);
+            const preview = await DocumentSearch.previewReference(source);
+            eq(preview.status, 'ready');
+            assert(preview.chunks.some(chunk => chunk.text.includes('両方で共有する印')));
+            eq((await db.getChatDocuments(chatA)).length, 2);
+            await start({ ref: router });
+            await send('プロジェクトBの初期会話');
+            chatB = st.currentChatId;
+            await db.setChatProject(chatB, projectB.id);
+            await projectAnswer(chatB, [sharedB, common], ['固有資料の印', '甲プロジェクトの印']);
+            await start();
+            await send('ファイルなしの初期会話');
+            chatWithoutFiles = st.currentChatId;
+            const empty = await db.createProject({ name: '共有なし' });
+            await db.setChatProject(chatWithoutFiles, empty.id);
+            eq((await projectAnswer(chatWithoutFiles, [])).saved.rag, undefined);
+        });
+
+        await test('Project send snapshots isolate concurrent requests across membership, share and version changes', async () => {
+            added = await projectFile('追加B', '後から共有した印');
+            await db.setChatDocuments(chatA, [personal.id]);
+            assert((await app.loadChat(chatA)).ok);
+            const release = gate();
+            let entered = false;
+            DocumentSearch.searchChat = async (...args) => {
+                if (args[0] === chatA) { entered = true; await release.promise; }
+                return originalSearch(...args);
+            };
+            const pending = send(query);
+            try {
+                await wait(() => entered, 'project search entered');
+                await db.removeProjectDocument(projectA.id, sharedA.id);
+                await db.addProjectDocument(projectA.id, added.id);
+                const replacement = await db.replaceLibraryDocument(sharedA.id, new File(['受付期限：新版の印'], sharedA.fileName));
+                await db.setChatProject(chatA, projectB.id);
+                await db.addProjectDocument(projectB.id, added.id);
+                assert((await app.loadChat(chatB)).ok);
+                await projectAnswer(chatB, [sharedB, common, added], ['甲プロジェクトの印', '固有資料の印', '新版の印']);
+                release.resolve();
+                await pending;
+                const saved = await answer(chatA);
+                const source = saved.rag.sources.find(item => item.documentId === sharedA.id);
+                eq(source?.versionId, sharedA.versionId);
+                assert(source.versionId !== replacement.versionId);
+                const prompt = system(calls.at(-1));
+                assert(prompt.includes('甲プロジェクトの印') && prompt.includes('固有資料の印') &&
+                    !['乙プロジェクトの印', '後から共有した印', '新版の印'].some(marker => prompt.includes(marker)), prompt);
+            } finally {
+                release.resolve();
+                await pending;
+                DocumentSearch.searchChat = originalSearch;
+            }
+            assert((await app.loadChat(chatA)).ok);
+            await projectAnswer(chatA, [personal, sharedB, common, added], ['甲プロジェクトの印', '新版の印']);
+        });
+
+        await test('Project RAG applies unlink, detach, delete and current version on the next send', async () => {
+            await db.addProjectDocument(projectB.id, personal.id);
+            await db.removeProjectDocument(projectB.id, personal.id);
+            await db.removeProjectDocument(projectB.id, added.id);
+            await projectAnswer(chatA, [personal, sharedB, common], ['後から共有した印']);
+            await db.setChatProject(chatA, null);
+            await projectAnswer(chatA, [personal], ['乙プロジェクトの印', '両方で共有する印']);
+            await db.setChatProject(chatA, projectB.id);
+            await db.deleteProject(projectB.id);
+            await projectAnswer(chatA, [personal], ['乙プロジェクトの印', '両方で共有する印']);
+            await db.addProjectDocument(projectA.id, sharedA.id);
+            await db.setChatProject(chatA, projectA.id);
+            const current = await db.getLibraryDocument(sharedA.id);
+            const { prompt, saved } = await projectAnswer(chatA, [personal, current, common, added], ['甲プロジェクトの印', '乙プロジェクトの印']);
+            assert(prompt.includes('新版の印'));
+            eq(saved.rag.sources.find(source => source.documentId === sharedA.id).versionId, current.versionId);
+            await db.deleteLibraryDocument(sharedA.id);
+            await projectAnswer(chatA, [personal, common, added], ['新版の印', '甲プロジェクトの印']);
+        });
+
+        await test('A failed scope read never falls back, and the existing no-RAG path still sends normally', async () => {
+            const capture = db.getChatRagDocuments;
+            let scopeReads = 0;
+            db.getChatRagDocuments = async () => { scopeReads++; throw new Error('scope fixture'); };
+            try {
+                const { prompt, saved } = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印']);
+                eq(saved.rag.status, 'failed');
+                assert(prompt.includes('資料は未確認'));
+                const rag = window.DocumentRag;
+                try {
+                    window.DocumentRag = undefined;
+                    const result = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印']);
+                    eq(result.saved.rag, undefined);
+                    eq(scopeReads, 1);
+                } finally { window.DocumentRag = rag; }
+            } finally { db.getChatRagDocuments = capture; }
+        });
+
+        await test('A cancelled shared-file search cannot send or publish late references', async () => {
+            const entered = gate(), release = gate();
+            DocumentSearch.searchChat = async (...args) => {
+                const result = await originalSearch(...args);
+                entered.resolve(result);
+                await release.promise;
+                return result;
+            };
+            const before = calls.length;
+            const pending = send(query);
+            try {
+                const result = await entered.promise;
+                assert(result.results.some(source => source.documentId === common.id));
+                app.abortRequest();
+                await pending;
+                eq(calls.length, before);
+                DocumentSearch.searchChat = originalSearch;
+                await projectAnswer(chatA, [personal, common, added], ['乙プロジェクトの印']);
+                const saved = await answer(chatA);
+                release.resolve();
+                await new Promise(resolve => setTimeout(resolve, 25));
+                eq(await answer(chatA), saved);
+            } finally {
+                release.resolve();
+                await pending;
+                DocumentSearch.searchChat = originalSearch;
+            }
+        });
+
+        await test('Portable and Dropbox restores retain shared scope and versioned references', async () => {
+            const shared = (await answer(chatA)).rag.sources.find(source => source.documentId === common.id);
+            const backup = await (await app.createFullBackup()).text();
+            await db.clearAllData();
+            await app.importDataFromString(backup, { source: 'file' });
+            eq((await answer(chatA)).rag.sources.find(source => source.documentId === common.id), shared);
+            assert((await app.loadChat(chatA)).ok);
+            await projectAnswer(chatA, [personal, common, added], ['乙プロジェクトの印']);
+            const snapshot = await app._prepareExportData({ backup: true });
+            const oldApi = window.dropboxApi;
+            window.dropboxApi = { downloadLibraryOriginal: async hash => snapshot.documentBlobs.get(hash),
+                downloadAsset: async id => snapshot.localAssets.get(id)?.blob };
+            try { await app.importDataFromString(snapshot.metadataJson, { source: 'dropbox', allowLibraryReplace: true, allowProjectReplace: true }); }
+            finally { window.dropboxApi = oldApi; }
+            assert((await app.loadChat(chatA)).ok);
+            await projectAnswer(chatA, [personal, common, added], ['乙プロジェクトの印']);
+            eq((await DocumentSearch.previewReference(shared)).status, 'ready');
+        });
     } finally {
         DocumentSearch.searchChat = originalSearch;
         window.fetch = originalFetch;

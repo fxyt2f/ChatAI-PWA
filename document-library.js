@@ -185,9 +185,14 @@ const DocumentLibrary = (() => {
                     throw new DOMException('チャットが別のデータに置き換わりました。', 'ChatContentConflict');
                 }
             }
-            const relations = await request(tx.objectStore(links).index('chatId').getAll(chatId));
-            return Promise.all(relations.map(link => request(tx.objectStore(documents).get(link.documentId))));
+            const ids = await readChatDocumentIds(tx, chatId);
+            return Promise.all(ids.map(id => request(tx.objectStore(documents).get(id))));
         });
+    }
+
+    async function readChatDocumentIds(tx, chatId) {
+        const relations = await request(tx.objectStore(links).index('chatId').getAll(chatId));
+        return relations.map(link => link.documentId);
     }
 
     function checkFileInfo(entry) {
@@ -274,5 +279,5 @@ const DocumentLibrary = (() => {
 
     return { documents, originals, links, indexStore, stores, syncKey, isId, isChatId, isHash, uniqueId, digest, upgrade, request, discardChangedIndexes,
         transaction, syncState, markChanged, writeDocument, deleteDocument, replaceLinks, normalizeIds,
-        getChatDocuments, validateManifest, exportSnapshot, restoreOriginals };
+        getChatDocuments, readChatDocumentIds, validateManifest, exportSnapshot, restoreOriginals };
 })();

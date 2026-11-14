@@ -2245,6 +2245,38 @@ const dbUtils = {
         return state.db ? read(state.db) : this.openDB().then(read);
     },
 
+    getChatRagDocuments(chatId, owner) {
+        const stores = [CHATS_STORE, DocumentLibrary.links, DocumentLibrary.documents, ...ProjectStore.stores];
+        const read = DocumentLibrary.request;
+        const snapshot = db => DocumentLibrary.transaction(db, stores, 'readonly', async tx => {
+            const [chat, chatDocuments, membership] = await Promise.all([
+                read(tx.objectStore(CHATS_STORE).get(chatId)),
+                DocumentLibrary.readChatDocumentIds(tx, chatId),
+                read(tx.objectStore(ProjectStore.chats).get(chatId))
+            ]);
+            if (!chat || (owner && (chat.recordGenerationId ?? null) !== owner.recordGenerationId)) {
+                throw new DOMException('チャットが別のデータに置き換わりました。', 'ChatContentConflict');
+            }
+            const projectId = membership?.projectId ?? null;
+            let sharedDocuments = [];
+            if (projectId !== null) {
+                await ProjectStore.requireProject(tx, projectId);
+                const shares = await read(tx.objectStore(ProjectStore.documents).index('projectId').getAll(projectId));
+                sharedDocuments = shares.map(share => share.documentId);
+            }
+            // Both relationships resolve to the current immutable version of each library entry in this transaction.
+            const ids = new Set([...chatDocuments, ...sharedDocuments]);
+            const library = tx.objectStore(DocumentLibrary.documents);
+            const documents = await Promise.all([...ids].map(id => read(library.get(id))));
+            if (documents.some(entry => !entry || !DocumentLibrary.isId(entry.versionId) ||
+                !Number.isSafeInteger(entry.version) || entry.version < 1)) {
+                throw new Error('資料の紐づけまたは版を取得できません。');
+            }
+            return { projectId, documents };
+        });
+        return state.db ? snapshot(state.db) : this.openDB().then(snapshot);
+    },
+
     async setChatDocuments(chatId, documentIds, expectedChat, mode) {
         const ids = DocumentLibrary.normalizeIds(documentIds);
         if (state.chatDataChangesV136.has(undefined)) throw new Error('会話データを更新中です。');
@@ -18332,7 +18364,7 @@ const appLogic = {
             throw new DOMException('送信準備の対象が変更されました。', 'AbortError');
         preparation.controller.signal.throwIfAborted();
     },
-    startSendExecutionV136(session) {
+    startSendExecutionV136(session, { captureDocumentsAfterSave = false } = {}) {
         session.id = crypto.getRandomValues(new Uint32Array(4)).join('-');
         session.originalMessages = session.messages.slice();
         session.imageIds = new Set();
@@ -18347,7 +18379,7 @@ const appLogic = {
         session.memoryEnabled = state.isMemoryEnabledForChat;
         session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
             pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
-        window.DocumentRag?.capture(session);
+        if (!captureDocumentsAfterSave) window.DocumentRag?.capture(session);
         session.streaming = session.settings.enableStreamingOutput === true
             && StreamingV136.canStream(session.apiConfig.provider, session.apiConfig.modelName);
         session.auxiliary = {};
@@ -18555,7 +18587,8 @@ const appLogic = {
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
-        this.startSendExecutionV136(preparation);
+        const captureDocumentsAfterSave = preparation.chatId == null && dbUtils.projectDrafts?.has(preparation.messages);
+        this.startSendExecutionV136(preparation, { captureDocumentsAfterSave });
         const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
@@ -18588,6 +18621,7 @@ const appLogic = {
             if (this.showsSendExecutionV136(preparation) && this.ownsSendExecutionV136(preparation))
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
+            if (captureDocumentsAfterSave) window.DocumentRag?.capture(preparation);
             onInitialSave?.(preparation);
 
             const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
