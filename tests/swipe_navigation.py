@@ -651,7 +651,7 @@ def run(client, url):
             if surface == 'sidebar':
                 click('#chat-sidebar-backdrop')
             if surface == 'library':
-                click('#document-library-back')
+                ev('history.back()')
                 wait('elements.documentLibraryWorkspace.hidden', 'Return from zoomed library')
             if surface == 'settings':
                 click('#back-to-chat-from-settings')

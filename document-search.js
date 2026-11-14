@@ -230,6 +230,27 @@ window.DocumentSearch = (() => {
         return waitFor(job.promise, signal);
     }
 
+    async function analyzeHistorical(db, entry, signal) {
+        const controller = new AbortController();
+        const abort = () => controller.abort(signal.reason);
+        signal?.throwIfAborted();
+        signal?.addEventListener('abort', abort, { once: true });
+        try {
+            const run = pendingAnalysis.then(() => analyze(db, entry, controller, { historical: true }));
+            pendingAnalysis = run.then(() => undefined, () => undefined);
+            return await waitFor(run, signal);
+        } finally {
+            signal?.removeEventListener('abort', abort);
+        }
+    }
+
+    async function ensureSnapshotIndex(entry, signal) {
+        const result = await ensureIndex(entry, { signal });
+        if (result.code !== 'version-changed' && result.code !== 'cancelled') return result;
+        // Replacement can invalidate the cache and cancel its in-flight analysis.
+        return analyzeHistorical(await window.dbUtils.openDB(), entry, signal);
+    }
+
     async function getStatus(entry) {
         return (await getStatuses([entry])).get(entry.id);
     }
@@ -264,9 +285,10 @@ window.DocumentSearch = (() => {
 
     function captureChat(chatId, expectedChat) {
         const token = Object.freeze({ chatId });
-        const documents = chatId == null ? Promise.resolve([]) : window.dbUtils.getChatDocuments(chatId, expectedChat);
-        documents.catch(() => {});
-        snapshots.set(token, documents);
+        const scope = chatId == null ? Promise.resolve({ projectId: null, documents: [] }) :
+            window.dbUtils.getChatRagDocuments(chatId, expectedChat);
+        scope.catch(() => {});
+        snapshots.set(token, scope);
         return token;
     }
 
@@ -277,11 +299,12 @@ window.DocumentSearch = (() => {
         const query = question.trim().slice(0, 512);
         if (!query || chatId == null) return { chatId, documentCount: 0, results: [], unavailable: [] };
         if (snapshot && (!snapshots.has(snapshot) || snapshot.chatId !== chatId)) throw new TypeError('ファイルの検索対象が無効です。');
-        const documents = await (snapshot ? snapshots.get(snapshot) : window.dbUtils.getChatDocuments(chatId));
-        return { chatId, ...await searchDocuments(documents, query, { limit, signal }) };
+        const scope = snapshot ? await snapshots.get(snapshot) : null;
+        const documents = snapshot ? scope.documents : await window.dbUtils.getChatDocuments(chatId);
+        return { chatId, ...await searchDocuments(documents, query, { limit, signal, useCapturedVersions: scope?.projectId != null }) };
     }
 
-    async function searchDocuments(documents, question, { limit = 6, signal } = {}) {
+    async function searchDocuments(documents, question, { limit = 6, signal, useCapturedVersions = false } = {}) {
         signal?.throwIfAborted();
         const query = question.trim().slice(0, 512);
         if (!query || !documents.length) return { documentCount: documents.length, results: [], unavailable: [] };
@@ -292,7 +315,9 @@ window.DocumentSearch = (() => {
         for (const entry of documents) {
             signal?.throwIfAborted();
             let result;
-            try { result = await ensureIndex(entry, { signal }); }
+            try {
+                result = useCapturedVersions ? await ensureSnapshotIndex(entry, signal) : await ensureIndex(entry, { signal });
+            }
             catch (error) {
                 signal?.throwIfAborted();
                 result = { code: 'index-storage', message: '索引を読み取れませんでした。' };
@@ -359,33 +384,23 @@ window.DocumentSearch = (() => {
             return { status: 'failed', code: 'source-unavailable', message: '参照元の版を利用できません。', chunks: [] };
         }
         const entry = { ...original, id: reference.documentId, name: reference.documentName };
-        const controller = new AbortController();
-        const abort = () => controller.abort(signal.reason);
-        signal?.addEventListener('abort', abort, { once: true });
-        if (signal?.aborted) abort();
-        try {
-            const status = await getRecord(db, entry, 'state');
-            let index = currentCache(status, entry) && status.status === 'ready' ? await getRecord(db, entry, 'index') : null;
-            signal?.throwIfAborted();
-            if (!index || !validIndex(index, entry, status)) {
-                const run = pendingAnalysis.then(() => analyze(db, entry, controller, { historical: true }));
-                pendingAnalysis = run.then(() => undefined, () => undefined);
-                index = (await waitFor(run, signal)).index;
-            }
-            const chunk = index?.chunks.find(chunk => chunk.id === reference.chunkId);
-            const keys = new Set([...Object.keys(chunk?.location || {}), ...Object.keys(reference.location)]);
-            if (!chunk || await DocumentLibrary.digest(new Blob([chunk.text])) !== reference.chunkHash ||
-                [...keys].some(key => chunk.location[key] !== reference.location[key])) {
-                return { status: 'failed', code: 'source-unavailable',
-                    message: '記録された参考箇所を確認できません。', chunks: [] };
-            }
-            const available = await window.dbUtils.getLibraryOriginal(reference.documentId, reference.version, reference.versionId);
-            signal?.throwIfAborted();
-            if (available?.hash !== reference.hash) {
-                return { status: 'failed', code: 'source-unavailable', message: '参照元の版を利用できません。', chunks: [] };
-            }
-            return { status: 'ready', chunkCount: index.chunks.length, chunks: index.chunks };
-        } finally { signal?.removeEventListener('abort', abort); }
+        const status = await getRecord(db, entry, 'state');
+        let index = currentCache(status, entry) && status.status === 'ready' ? await getRecord(db, entry, 'index') : null;
+        signal?.throwIfAborted();
+        if (!index || !validIndex(index, entry, status)) index = (await analyzeHistorical(db, entry, signal)).index;
+        const chunk = index?.chunks.find(chunk => chunk.id === reference.chunkId);
+        const keys = new Set([...Object.keys(chunk?.location || {}), ...Object.keys(reference.location)]);
+        if (!chunk || await DocumentLibrary.digest(new Blob([chunk.text])) !== reference.chunkHash ||
+            [...keys].some(key => chunk.location[key] !== reference.location[key])) {
+            return { status: 'failed', code: 'source-unavailable',
+                message: '記録された参考箇所を確認できません。', chunks: [] };
+        }
+        const available = await window.dbUtils.getLibraryOriginal(reference.documentId, reference.version, reference.versionId);
+        signal?.throwIfAborted();
+        if (available?.hash !== reference.hash) {
+            return { status: 'failed', code: 'source-unavailable', message: '参照元の版を利用できません。', chunks: [] };
+        }
+        return { status: 'ready', chunkCount: index.chunks.length, chunks: index.chunks };
     }
 
     function formatLocation(location) {

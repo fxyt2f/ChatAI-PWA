@@ -29,19 +29,22 @@ const profile=html.slice(html.indexOf('id="settings-panel-profile"'),html.indexO
 assert(profile.includes('id="profile-card-header-wrapper-settings"'));
 assert(!html.slice(html.indexOf('id="settings-screen"'),html.indexOf('id="settings-panel-profile"')).includes('id="profile-card-header-wrapper-settings"'));
 console.log('PASS settings profile switcher belongs only to the profile category');
-assert(read('app.js').includes('const APP_VERSION = "1.37.0";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.37.0";'));
-assert(read('app.js').includes('const DB_VERSION = 16;'));
+assert(read('app.js').includes('const APP_VERSION = "1.37.1";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.37.1";'));
+assert(read('app.js').includes('const DB_VERSION = 17;'));
 const worker=read('sw.js');
-assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.37.0';"));
+assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.37.1';"));
 const shell=[...worker.split('const urlsToCache = [')[1].split('];')[0].matchAll(/'([^']+)'/g)].map(m=>m[1]);
-assert.equal(shell.length,26);assert.equal(new Set(shell).size,26);
-for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js','streaming-v136.js','dropbox.js','function-calling.js','document-library.js','document-search.js','document-library-ui.js']){
-    assert(html.includes(`./${asset}?v=1.37.0`),asset);
-    assert(shell.includes(`./${asset}?v=1.37.0`),asset);
+assert.equal(shell.length,28);assert.equal(new Set(shell).size,28);
+for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js','streaming-v136.js','dropbox.js','function-calling.js','document-library.js','project-store.js','project-ui.js','document-search.js','document-library-ui.js']){
+    assert(html.includes(`./${asset}?v=1.37.1`),asset);
+    assert(shell.includes(`./${asset}?v=1.37.1`),asset);
 }
 assert(html.indexOf('./settings-v136.js?v=')<html.indexOf('./streaming-v136.js?v='));
 assert(html.indexOf('./streaming-v136.js?v=')<html.indexOf('./app.js?v='));
 assert(html.indexOf('./document-library.js?v=')<html.indexOf('./app.js?v='));
-assert(read('CHANGELOG.md').includes('## v1.37.0'));
-console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.37.0');
+assert(html.indexOf('./document-library.js?v=')<html.indexOf('./project-store.js?v='));
+assert(html.indexOf('./project-store.js?v=')<html.indexOf('./app.js?v='));
+assert(html.indexOf('./project-ui.js?v=')<html.indexOf('./app.js?v='));
+assert(read('CHANGELOG.md').includes('## v1.37.1'));
+console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.37.1');
 console.log('4 UI/static tests passed');

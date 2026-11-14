@@ -1,10 +1,11 @@
 """Real Chrome coverage for the chat picker and the library workspace."""
+import base64
 import json
 from pathlib import Path
 import time
 
 
-def run(client, url):
+def run(client, url, screenshots=None):
     prefix = '#document-library-'
     checks = []
 
@@ -83,6 +84,17 @@ def run(client, url):
         if verify:
             wait(f'innerWidth === {width} && innerHeight === {height}', 'Viewport ready')
 
+    def capture(name):
+        if screenshots:
+            screenshots.mkdir(parents=True, exist_ok=True)
+            ev("""(async () => {
+                await document.fonts.ready;
+                await Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity)
+                    .map(animation=>animation.finished.catch(()=>{})));
+            })()""")
+            shot = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
+            (screenshots / f'{name}.png').write_bytes(base64.b64decode(shot['data']))
+
     def selector(scope, doc_id, control=''):
         return f'{prefix}{scope} [data-document-id="{doc_id}"]{control}'
 
@@ -97,14 +109,14 @@ def run(client, url):
             const left = element => element.getBoundingClientRect().left;
             const contentLeft = element => left(element) + parseFloat(getComputedStyle(element).paddingLeft);
             const history = get('.chat-sidebar-history-header');
-            const group = get('.chat-sidebar-group-title');
-            const title = get('.chat-sidebar-item:not(:has(.chat-pin-icon)) .chat-sidebar-item-title');
+            const group = get('#chat-sidebar-pinned:not([hidden]) .chat-sidebar-group-title');
+            const title = get('#chat-sidebar-list .chat-sidebar-item:not(:has(.chat-pin-icon)) .chat-sidebar-item-title');
             const leading = group ? contentLeft(group) : contentLeft(history);
             const aligned = [get('.chat-sidebar-brand'), get('#new-chat-btn .material-symbols-outlined'),
                 get('#document-library-open .document-library-icon'), get('.chat-sidebar-history-header h2'),
                 ...(title ? [title] : [])].every(element => Math.abs(left(element) - leading) < 0.5);
             const menu = get('#chat-sidebar-history-menu-btn');
-            const rowMenu = get('.chat-sidebar-item .chat-sidebar-item-menu');
+            const rowMenu = get('#chat-sidebar-list .chat-sidebar-item-menu, #chat-sidebar-pinned:not([hidden]) .chat-sidebar-item-menu');
             const geometry = element => {
                 const {left, width, height} = element.getBoundingClientRect();
                 return [left + width / 2, width, height, getComputedStyle(element.firstElementChild).fontSize];
@@ -139,7 +151,7 @@ def run(client, url):
             const [newChat, library]=document.querySelector('.chat-sidebar-navigation').children;
             const heading=document.querySelector('.chat-sidebar-history-header');
             return newChat.textContent.endsWith('新規チャット') && library.textContent.trim()==='ライブラリ' &&
-                heading.querySelector('h2').textContent==='履歴' && !document.querySelector('#history-screen, #chat-sidebar-close-btn') &&
+                heading.querySelector('h2').textContent==='チャット' && !document.querySelector('#history-screen, #chat-sidebar-close-btn') &&
                 !document.querySelector('#chat-workspace #document-library-open, #chat-workspace #new-chat-btn') &&
                 newChat.getBoundingClientRect().bottom <= library.getBoundingClientRect().top &&
                 library.getBoundingClientRect().bottom <= heading.getBoundingClientRect().top &&
@@ -165,21 +177,19 @@ def run(client, url):
                 box.right<=header.right && box.height>=40 && button.scrollWidth<=button.clientWidth;
         })()"""), 'The labeled upload button fits on the right side of the header'
         assert ev("""(() => {
-            const back=document.querySelector('#document-library-back');
-            const settingsBack=document.querySelector('#back-to-chat-from-settings');
+            const toggle=document.querySelector('#goto-history-btn');
             const library=document.querySelector('#document-library-workspace');
-            return back.firstElementChild.textContent===settingsBack.firstElementChild.textContent &&
-                back.className===settingsBack.className && !library.querySelector('#document-library-sidebar') &&
+            return toggle.closest('.app-header').parentElement===library &&
+                toggle.firstElementChild.textContent==='menu' && !library.querySelector('#document-library-sidebar, #document-library-back') &&
                 document.querySelector('#chat-overlay').parentElement===library.parentElement &&
                 getComputedStyle(library).backgroundColor===getComputedStyle(document.querySelector('#chat-workspace')).backgroundColor;
-        })()"""), 'Library uses the chat background and settings Back control'
+        })()"""), 'Library uses the chat background and shared sidebar toggle'
 
     def close_workspace(touch):
-        if ev("""document.querySelector('#document-library-mobile-search').offsetWidth &&
-                !document.querySelector('#document-library-preview').hidden"""):
-            pointer(prefix + 'back', touch)
+        if ev("Boolean(history.state?.documentLibraryDetail)"):
+            ev('history.back()')
             wait("document.querySelector('#document-library-preview').hidden", 'Back returns to the collection')
-        pointer(prefix + 'back', touch)
+        ev('history.back()')
         wait("document.querySelector('#document-library-workspace').hidden", 'Back returns to the conversation')
         assert ev("!document.querySelector('#document-library-open').hasAttribute('aria-current')")
 
@@ -210,7 +220,7 @@ def run(client, url):
         candidate = selector('picker-list', doc_id, ' button')
         wait(f"document.querySelector({json.dumps(candidate)})", 'Selection candidate')
         pointer(candidate, touch)
-        wait(f"document.querySelector('#document-library-picker-heading').textContent==='このチャットのファイル' && "
+        wait(f"document.querySelector('#document-library-picker-heading').textContent==='ファイル' && "
              f"document.querySelector({json.dumps(selector('picker-list', doc_id, ' .document-library-more'))})", 'Picker returns to links')
 
     def focus_icon(selector_text):
@@ -237,8 +247,12 @@ def run(client, url):
 
     def open_reference(touch):
         assert ev("document.querySelector('.rag-references summary').textContent.startsWith('参照ファイル')")
+        if ev("document.querySelector('.rag-references').closest('.message-info').hidden"):
+            pointer('.message:has(.rag-references) .tm-message-info-btn', touch)
+            wait("!document.querySelector('.rag-references').closest('.message-info').hidden", 'Reference information opens')
         if not ev("document.querySelector('.rag-references').open"):
             pointer('.rag-references summary', touch)
+        wait("document.querySelector('.rag-references button').getClientRects().length", 'Reference location is visible')
         pointer('.rag-references button', touch)
         wait("!document.querySelector('#document-library-workspace').hidden", 'Reference opens the workspace')
 
@@ -292,14 +306,16 @@ def run(client, url):
 
     ev("document.querySelector('#user-input').value='入力途中の文章'; document.querySelector('#user-input').dispatchEvent(new Event('input'))")
     open_picker(True)
-    assert ev("""document.querySelector('#document-library-picker-heading').textContent === 'このチャットのファイル' &&
+    wait("!document.querySelector('#document-library-picker-empty').hidden", 'Empty chat file list loaded')
+    assert ev("""document.querySelector('#document-library-picker-heading').textContent === 'ファイル' &&
         document.querySelector('#document-library-picker-count').textContent==='0件' &&
-        !document.querySelector('#document-library-picker-empty').textContent &&
-        document.querySelector('#document-library-picker-empty').hidden &&
+        document.querySelector('#document-library-picker-empty').textContent==='ファイルはありません' &&
+        document.querySelector('#document-library-picker-project').hidden &&
         document.querySelector('#document-library-picker-open svg path').getAttribute('d')===
             'M6 3h8l4 4v14H6z M14 3v5h4 M9 12h6 M9 16h6' &&
         document.querySelector('#document-library-picker-search').hidden &&
         document.querySelector('#document-library-picker').getBoundingClientRect().width < innerWidth""")
+    capture('mobile-chat-files-empty')
     pointer(prefix + 'picker-close', True)
     wait("!document.querySelector('#document-library-picker').open", 'Close picker')
     open_workspace(True)
@@ -340,7 +356,7 @@ def run(client, url):
         document.querySelector('#document-library-extracts pre').textContent.includes('<img')"""), 'Preview renders literal text'
     assert ev("""document.querySelector('#document-library-mobile-title').textContent==='返品案内.md' &&
         !document.querySelector('#document-library-add').offsetWidth &&
-        !document.querySelector('#document-library-detail-close').offsetWidth &&
+        document.querySelector('#document-library-detail-close').offsetWidth>0 &&
         document.querySelector('#document-library-detail-find').hidden &&
         document.querySelector('#document-library-show-original').disabled &&
         !document.querySelector('#document-library-workspace button[type=submit]')""")
@@ -352,7 +368,7 @@ def run(client, url):
     assert ev("document.activeElement.matches('.document-library-extract[data-highlight=true]')")
     pointer(prefix + 'mobile-search', True)
     assert ev("document.querySelector('#document-library-detail-find').hidden")
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-list .document-library-file-excerpt') && document.querySelector('#document-library-preview').hidden",
          'Back to the matching search results')
     close_workspace(True)
@@ -470,8 +486,6 @@ def run(client, url):
     wait("!state.isSending", 'Generation finishes while the library is open')
     close_workspace(True)
     assert ev(f"state.currentChatId==={chat1} && document.querySelector('#chat-workspace .main-content').scrollTop===86")
-    ev("""document.querySelector('.rag-references').open=true;
-        document.querySelector('.rag-references button').scrollIntoView({block:'center'});""")
     open_reference(True)
     wait("document.querySelector('.document-library-extract[data-highlight=true]')?.textContent.includes('３０日以内')",
          'Mobile reference opens the recorded passage')
@@ -741,7 +755,7 @@ def run(client, url):
     assert ev(f"dbUtils.getChat({chat1}).then(Boolean)"), 'New chat keeps the previous conversation'
 
     def chat_menu(chat_id, action):
-        row = f'#chat-sidebar-list [data-chat-id="{chat_id}"]'
+        row = f'#chat-sidebar-scroll [data-chat-id="{chat_id}"]'
         wait(f"document.querySelector({json.dumps(row)})", 'Chat row is available')
         position = ev(f"""(() => {{
             const row=document.querySelector({json.dumps(row)});
@@ -903,7 +917,7 @@ def run(client, url):
         const search=document.querySelector('#document-library-mobile-search').getBoundingClientRect();
         return title.scrollWidth>title.clientWidth && search.right<=innerWidth && search.width>=40;
     })()""")
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("""document.querySelector('#document-library-preview').hidden &&
         document.querySelector('#document-library-collection-scroll').scrollTop===250 &&
         document.querySelector('#document-library-sort').value==='updated' &&
@@ -951,6 +965,8 @@ def run(client, url):
         client.call('Page.setInterceptFileChooserDialog', {'enabled': False})
         client.capture_diagnostics = diagnostics
     wait("document.querySelector('#document-library-picker-count').textContent==='1件'", 'File chooser uploads and links to a draft chat')
+    move_mouse(prefix + 'picker-title')
+    capture('pc-chat-files-linked')
     paged_text = '照合キーワード 一\n\n' + '\n\n'.join(f'段落{i} ' + '文章の分割表示を確認します。' * 50 for i in range(1, 10))
     dropped = drop_files(prefix + 'picker-list li', [
         ['upload-first.txt', paged_text], ['upload-second.txt', '照合キーワード 二'], ['invalid.bin', 'invalid']
@@ -1060,7 +1076,7 @@ def run(client, url):
         !document.querySelector('#document-library-search-status').textContent""")
     checks.append('native library drop, PDF canvas, page and zoom controls, PDF hit navigation and all search scopes')
     viewport(390, 760, True)
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden", 'Header returns to the mobile collection after resize')
     pointer('#document-library-list button[title="japanese.pdf"]', True)
     wait("document.querySelector('#document-library-pdf-viewport canvas')", 'Mobile PDF original rendered')
@@ -1072,7 +1088,7 @@ def run(client, url):
     wait("!document.querySelector('#document-library-extracted').hidden && document.querySelector('#document-library-extracts pre')",
          'Mobile PDF extraction tab')
     assert ev("!document.querySelector('#document-library-add').offsetWidth"), 'Mobile extraction hides upload'
-    pointer(prefix + 'back', True)
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden", 'Return from mobile PDF')
     pointer('#document-library-list button[title="upload-first.txt"]', True)
     wait("!document.querySelector('#document-library-pages').hidden", 'Long extraction has multiple pages')
@@ -1124,14 +1140,14 @@ def run(client, url):
     assert ev(f"""(() => {{
         const header=document.querySelector('#document-library-workspace > .app-header');
         const bounds=name=>document.querySelector('#document-library-'+name).getBoundingClientRect();
-        const back=bounds('back'), title=bounds('title'), search=bounds('mobile-search'), add=bounds('add');
+        const back=document.querySelector('#goto-history-btn').getBoundingClientRect(), title=bounds('title'), search=bounds('mobile-search'), add=bounds('add');
         const center=box=>(box.top+box.bottom)/2;
         return getComputedStyle(header).display==='flex' && header.getBoundingClientRect().height==={header_height} &&
             add.width===0 && back.width>0 && title.width>=140 && search.width>0 &&
             back.right<=title.left && title.right<=search.left && search.right<=innerWidth &&
             Math.abs(center(back)-center(title))<1 && Math.abs(center(search)-center(title))<1;
-    }})()"""), 'Compact extraction header has only back, filename and search on one row'
-    pointer(prefix + 'back', True)
+    }})()"""), 'Compact extraction header has sidebar toggle, filename and search on one row'
+    pointer(prefix + 'detail-close', True)
     wait("document.querySelector('#document-library-preview').hidden && document.querySelector('#document-library-add').offsetWidth",
          'Mobile list restores the upload button')
     checks.append('one-row mobile extraction header and upload visibility on return to the list')
@@ -1173,4 +1189,138 @@ def run(client, url):
     assert ev("""!document.querySelector('#document-library-extracted').hidden &&
         document.querySelector('#document-library-add').offsetWidth"""), 'Upload remains visible in regular desktop extraction'
     checks.append('header upload on touch, custom normal and hover colors, and reset')
+
+    close_workspace(False)
+    chat = ev(f"""(async () => {{
+        const {{messages}} = await dbUtils.getChat({chat1});
+        const rag = messages.find(message => message.rag?.sources.length).rag;
+        await appLogic.saveGlobalSettingsV136({{showThoughtProcess:true}});
+        appLogic.startNewChat();
+        state.currentMessages.push(
+            {{role:'user', content:'検証用の質問'}},
+            {{role:'model', content:'通常の回答', executedFunctions:[]}},
+            {{role:'model', content:'資料を使った回答', rag, executedFunctions:['fixture_tool', 'fixture_tool', ' '],
+                groundingMetadata:{{groundingChunks:[{{web:{{uri:'https://example.test/source', title:'検索の出典'}}}}], webSearchQueries:['検索語']}},
+                usageMetadata:{{candidatesTokenCount:1234,totalTokenCount:5048,thoughtsTokenCount:48,tmExecution:{{modelName:'fixture-model'}}}},
+                retryCount:1, proofreadingModelInfo:{{label:'Fixture / proofreader'}}, thoughtSummary:'保存された思考の要約'}},
+            {{role:'model', content:'ツールのみの履歴', executedFunctions:['other_tool']}},
+            {{role:'model', content:'無効な参照', rag:{{...rag,sources:[{{}}],unavailable:[]}},
+                groundingMetadata:{{groundingChunks:[{{web:{{uri:'javascript:void(0)'}}}}],webSearchQueries:[' ']}},
+                executedFunctions:[null,' ']}},
+            {{role:'model', content:'ツール結果を伴う回答', rag:{{...rag,status:'failed',sources:[],unavailable:[]}},
+                search_web_results:[{{title:'表示する検索結果',link:'https://example.test/result'}}]}},
+            {{role:'error', content:'エラー: 検証用のエラー'}},
+            {{role:'model', content:'フッターのみ', retryCount:2}},
+            {{role:'model', content:'思考のみ', thoughtSummary:'独立した思考の要約'}},
+            {{role:'model', content:'参照のみ', rag}},
+            {{role:'model', content:'参照とフッター', rag, usageMetadata:{{candidatesTokenCount:12,totalTokenCount:48}}}},
+            {{role:'model', content:'参照と思考', rag, thoughtSummary:'資料を使った思考の要約'}}
+        );
+        await dbUtils.saveChat('メッセージ情報の検証');
+        uiUtilsV136.renderChatMessages();
+        return state.currentChatId;
+    }})()""")
+    row = '.message[data-index="2"]'
+    info = row + ' .tm-message-info-btn'
+    panel = row + ' > .message-info'
+    body = row + ' > .message-content'
+    remove = row + ' .js-delete-btn'
+    thought = row + ' > .thought-summary-details'
+    assert ev("""(() => {
+        const rows = [...elements.messageContainer.querySelectorAll('.message')];
+        const withInfo = rows.filter(row=>row.querySelector('.tm-message-info-btn')).map(row=>row.dataset.index).join(',');
+        const button = rows[2].querySelector('.tm-message-info-btn'), panel = rows[2].querySelector('.message-info');
+        return withInfo === '2,3,9,10,11' && button.previousElementSibling.matches('.js-delete-btn') &&
+            button.parentElement.lastElementChild === button && panel.hidden && button.getAttribute('aria-expanded') === 'false' &&
+            button.getAttribute('aria-controls') === panel.id && panel.nextElementSibling.matches('.message-actions') &&
+            panel.previousElementSibling.matches('.message-edit-area.hidden') &&
+            rows[5].querySelector('.rag-status').getClientRects().length &&
+            rows[5].querySelector('.search-results-details summary').getClientRects().length &&
+            rows[6].textContent.includes('検証用のエラー') &&
+            rows[7].querySelector('.message-actions > .message-action-meta').textContent==='(リトライ: 2回)' &&
+            rows[8].firstElementChild.matches('.thought-summary-details:not([open])') &&
+            [9,10,11].every(i => rows[i].querySelector('.message-info').children.length===1) &&
+            rows[10].querySelector('.message-actions > .message-action-meta').textContent==='12 / 48' &&
+            rows[11].firstElementChild.matches('.thought-summary-details:not([open])');
+    })()""")
+    pointer('.message[data-index="5"] .search-results-details summary', False)
+    assert ev("document.querySelector('.search-results-details a').getClientRects().length > 0")
+    snapshot = ev(f"""dbUtils.getChat({chat}).then(record=>JSON.stringify(record.messages))""")
+    body_text = ev(f"document.querySelector({json.dumps(body)}).textContent")
+
+    for dark in (False, True):
+        ev(f"appLogic.saveAppearanceValues('theme', {{darkMode:{str(dark).lower()}}}, {{global:true}})")
+        wait(f"document.body.classList.contains('dark-mode')==={str(dark).lower()}", 'Theme applied')
+        if not dark:
+            ev(f"document.querySelector({json.dumps(row)}).scrollIntoView({{block:'center'}})")
+            capture('pc-message-info-closed')
+        styles = []
+        for selector_text in (remove, info):
+            move_mouse(selector_text)
+            ev(f"Promise.all(document.querySelector({json.dumps(selector_text)}).getAnimations().map(animation=>animation.finished))")
+            styles.append(ev(f"""(() => {{
+                const button=document.querySelector({json.dumps(selector_text)}), style=getComputedStyle(button);
+                return [button.matches(':hover'), style.color, style.backgroundColor, style.opacity, style.width, style.height, style.padding];
+            }})()"""))
+        assert styles[0][0] and styles[0] == styles[1], styles
+        pointer(info, False)
+        assert ev(f"""(() => {{
+            const panel=document.querySelector({json.dumps(panel)}), style=getComputedStyle(panel);
+            const thought=document.querySelector({json.dumps(thought)});
+            const thoughtBackground = getComputedStyle(thought).backgroundColor;
+            const meta=panel.nextElementSibling.querySelector('.message-action-meta');
+            const entries=[...meta.children];
+            const expected=['1,234 / 5,000','(リトライ: 1回)','fixture-model','校正: Fixture / proofreader'];
+            const visualOrder=[...entries].sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);
+            const canvas=document.createElement('canvas').getContext('2d');
+            const red=value=>{{canvas.fillStyle=value;canvas.fillRect(0,0,1,1);return canvas.getImageData(0,0,1,1).data[0];}};
+            const delta=red(style.backgroundColor)-red(style.getPropertyValue('--bg-primary'));
+            return !panel.hidden && panel.getBoundingClientRect().bottom <= panel.nextElementSibling.getBoundingClientRect().top &&
+                style.backgroundColor===thoughtBackground && ({str(dark).lower()} ? delta > 0 : delta < 0) &&
+                style.borderWidth==='0px' && style.boxShadow==='none' && panel.querySelector('.rag-references button').getClientRects().length &&
+                ['fixture_tool','検索の出典','検索語'].every(text=>panel.textContent.includes(text)) &&
+                expected.every((text,i)=>entries[i].textContent===text && !panel.textContent.includes(text)) &&
+                visualOrder.map(node=>node.textContent).join('|')===[expected[2],expected[0],expected[1],expected[3]].join('|') &&
+                entries[0].title==='Candidate Tokens / Total Tokens' && entries[1].style.marginLeft==='8px' &&
+                thought.nextElementSibling.matches('.message-content') && !thought.open &&
+                !panel.textContent.includes('検索してモデルへ渡した') &&
+                document.querySelector('.message[data-index="3"] .message-info').hidden;
+        }})()""")
+        capture('pc-message-info-' + ('dark' if dark else 'light'))
+        pointer(thought + ' > summary', False)
+        assert ev(f"document.querySelector({json.dumps(thought)}).open && document.querySelector({json.dumps(thought)}).textContent.includes('保存された思考の要約')")
+        pointer(info, False)
+        assert ev(f"document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(thought)}).open")
+        pointer(thought + ' > summary', False)
+
+    viewport(390, 760, True)
+    pointer(thought + ' > summary', True)
+    wait(f"document.querySelector({json.dumps(thought)}).open", 'Touch expands the independent thought summary')
+    pointer(info, True)
+    assert ev(f"""(() => {{
+        const panel=document.querySelector({json.dumps(panel)}), box=panel.getBoundingClientRect();
+        return !panel.hidden && box.left>=0 && box.right<=innerWidth && panel.scrollWidth<=panel.clientWidth;
+    }})()""")
+    capture('mobile-message-info-dark')
+    assert ev(f"""(() => {{
+        const button=document.querySelector({json.dumps(remove)}), box=button.getBoundingClientRect();
+        return button.contains(document.elementFromPoint((box.left+box.right)/2, (box.top+box.bottom)/2));
+    }})()"""), 'Expanding on mobile keeps the delete action clear of the scroll-to-bottom button'
+    ev('uiUtilsV136.renderChatMessages()')
+    assert ev(f"!document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(body)}).textContent==={json.dumps(body_text)}")
+    assert ev(f"!document.querySelector({json.dumps(thought)}).open")
+    assert ev(f"""dbUtils.getChat({chat}).then(record=>JSON.stringify(record.messages)==={json.dumps(snapshot)})""")
+    assert ev(f"appLogic.loadChat({chat}, {{scrollAfterLoad:false}}).then(result=>result.ok)")
+    assert ev(f"document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(panel)}).textContent.includes('fixture_tool')")
+    assert ev(f"!document.querySelector({json.dumps(thought)}).open && document.querySelector({json.dumps(thought)}).textContent.includes('保存された思考の要約')")
+    pointer(info, True)
+    wait(f"!document.querySelector({json.dumps(panel)}).hidden", 'Touch opens the saved information')
+    ev(f"document.querySelector({json.dumps(remove)}).scrollIntoView({{block:'center'}})")
+    pointer(remove, True)
+    wait("document.querySelector('#confirmDialog').open", 'Delete remains available next to info')
+    pointer('#confirmDialog .dialog-ok-btn', True)
+    wait("!elements.messageContainer.textContent.includes('fixture_tool')", 'Deleting the message removes its information')
+    assert ev("""document.querySelector('.message[data-index="2"] .message-info').hidden &&
+        document.querySelector('.message[data-index="2"] .message-info').textContent.includes('other_tool')""")
+    checks.append('message info condition, multiple sources, inline toggle, themes, touch, rerender, load and deletion')
     return f'ALL PASSED ({len(checks)+1} document library UI scenarios: {"; ".join(checks)}; 320px overflow and keyboard menu)'

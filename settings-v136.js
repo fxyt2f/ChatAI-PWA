@@ -309,14 +309,18 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         }
         return body;
     }
-    const READER_VERSION = 137;
+    const READER_VERSION = 138;
     function assertCompatible(envelope) {
         if (!envelope || envelope.version !== '2.0' || !envelope.data) throw new Error('同期データの形式が無効です。');
+        const reader = envelope.minimumReaderVersion;
+        const hasProjects = Object.hasOwn(envelope.data, 'projectData');
         if ((envelope.settingsSchemaVersion || 0) > 136 || (envelope.minimumReaderVersion || 0) > READER_VERSION ||
+            (hasProjects !== (reader === READER_VERSION)) ||
+            (hasProjects && envelope.data.projectData?.schemaVersion !== 1) ||
             (Object.hasOwn(envelope.data, 'documentLibrary') &&
-                (envelope.minimumReaderVersion !== READER_VERSION || envelope.data.documentLibrary?.schemaVersion !== 1)) ||
+                ((reader !== 137 && reader !== READER_VERSION) || envelope.data.documentLibrary?.schemaVersion !== 1)) ||
             (Object.hasOwn(envelope, 'backupSchemaVersion') &&
-                (envelope.minimumReaderVersion !== READER_VERSION || envelope.backupSchemaVersion !== 1)) ||
+                ((reader !== 137 && reader !== READER_VERSION) || envelope.backupSchemaVersion !== 1)) ||
             envelope.data.settings?.some(s => s.key === GLOBAL_KEY && s.value?.schemaVersion > 1) ||
             envelope.data.settings?.some(s => s.key === MIGRATION_KEY && s.value > 136) ||
             envelope.data.profiles?.some(p => p.profileSchemaVersion > 1) ||
@@ -1454,11 +1458,19 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.settings.apiProvider = this.getApiConfigById(ref.apiConfigId)?.provider || '';
             },
             readExecutionDraft() {
-                try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null'); } catch { return null; }
+                try { return JSON.parse(sessionStorage.getItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY) || 'null'); } catch { return null; }
             },
             persistExecutionDraft() {
                 // sessionStorage is isolated per browsing context, including independent duplicated tabs.
-                sessionStorage.setItem(DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
+                sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(state.currentExecutionSettings));
+            },
+            newChatExecutionDefaults() {
+                const success = state.lastSuccessfulExecution;
+                const fallback = [success?.modelRef, state.legacyInitialModelRefV136]
+                    .find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
+                return executionSettings(fallback && success?.modelRef?.apiConfigId === fallback.apiConfigId &&
+                    success.modelRef.modelName === fallback.modelName ? success : null,
+                    fallback, ref => this.getModelThinkingCapability(ref));
             },
             async initializeNewChatExecution({ restoreDraft = false } = {}) {
                 const generation = (state.executionInitGeneration || 0) + 1;
@@ -1474,11 +1486,11 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 state.legacyInitialModelRefV136 = legacy || null;
                 if (configs) state.apiConfigs = state.settings.apiConfigs = this.normalizeApiConfigs(configs.value);
                 state.removedApiModelRefsV136 = removed?.value || [];
-                const candidates = [success?.modelRef, legacy];
-                const fallback = candidates.find(ref => ref && this.validateModelRefForUsage(ref).valid) || null;
+                const defaults = this.newChatExecutionDefaults();
                 const draft = restoreDraft ? this.clearUnavailableExecutionSelectionV136(this.readExecutionDraft()) : null;
-                const source = draft || (success && modelRef(success.modelRef) && JSON.stringify(success.modelRef) === JSON.stringify(modelRef(fallback)) ? success : null);
-                state.currentExecutionSettings = executionSettings(source, fallback, ref => this.getModelThinkingCapability(ref));
+                state.currentExecutionSettings = draft
+                    ? executionSettings(draft, defaults.modelRef, ref => this.getModelThinkingCapability(ref))
+                    : defaults;
                 state.executionInitializingV136 = false;
                 this.syncChatExecutionToLegacySettings(); this.persistExecutionDraft();
                 uiUtils.applySettingsToUI(); notify('chat');
@@ -1516,7 +1528,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             applyRemovedExecutionSelectionV136(storedExecution = null) {
                 const draft = this.readExecutionDraft(), nextDraft = this.clearUnavailableExecutionSelectionV136(draft);
-                if (nextDraft !== draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(nextDraft));
+                if (nextDraft !== draft) sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(nextDraft));
                 if (state.isSending || state.currentExecutionApiConfig) return;
                 const execution = state.currentExecutionSettings;
                 const next = storedExecution?.modelSelectionRequired && !execution?.modelSelectionRequired
@@ -1578,21 +1590,10 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 };
                 assertContext();
                 if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
-                const current = state.currentExecutionSettings || {};
-                const ref = modelRef(updates.modelRef || current.modelRef);
-                this.assertModelRefForExecution(ref);
-                const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
-                if (capabilityRequest) await capabilityRequest;
-                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
-                const capability = this.getModelThinkingCapability(ref);
-                const changingModel = ref.apiConfigId !== current.modelRef?.apiConfigId || ref.modelName !== current.modelRef?.modelName;
-                const gemini = this.getApiConfigById(ref.apiConfigId)?.provider === 'gemini';
-                if (gemini && validateThinkingEffort && !canSelectEffort(updates.thinkingEffort, capability))
-                    throw new Error('このモデルでは利用できないThinkingレベルです。');
-                const useDefault = gemini && changingModel && (capability.modelDefault || capability.preserveEffort || capability.mode === 'unknown');
-                const desired = useDefault ? { ...current, thinkingEffort: null } : current;
-                const next = executionSettings({ ...desired, ...updates, updatedAt: Date.now() }, ref, () => capability);
+                const next = await this.prepareChatExecutionSelection(state.currentExecutionSettings, updates, validateThinkingEffort);
+                const ref = next.modelRef;
                 assertContext();
+                if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
                 if (state.currentChatId) {
                     const id = state.currentChatId;
                     await transaction(['chats', 'settings'], tx => {
@@ -1608,12 +1609,27 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     assertContext();
                     if (state.isSending || state.currentExecutionApiConfig || matchesRemovedModel(ref, removed?.value))
                         throw new Error('選択したモデルを適用できません。設定を確認してください。');
-                    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+                    sessionStorage.setItem(this.getChatDraftSettingsKey?.(DRAFT_KEY) ?? DRAFT_KEY, JSON.stringify(next));
                 }
                 if (contextId !== state.currentChatId || contextGeneration !== state.executionInitGeneration || selection !== state.executionSelectionGenerationV136) return next;
                 state.currentExecutionSettings = next; this.syncChatExecutionToLegacySettings();
                 this.markAsDirtyAndSchedulePush('structural'); notify('chat');
                 uiUtils.applySettingsToUI(); return structuredClone(next);
+            },
+            async prepareChatExecutionSelection(current, updates, validateThinkingEffort = false) {
+                current ||= {};
+                const ref = modelRef(updates.modelRef || current.modelRef);
+                this.assertModelRefForExecution(ref);
+                const capabilityRequest = this.ensureModelThinkingCapabilities(ref);
+                if (capabilityRequest) await capabilityRequest;
+                const capability = this.getModelThinkingCapability(ref);
+                const changingModel = ref.apiConfigId !== current.modelRef?.apiConfigId || ref.modelName !== current.modelRef?.modelName;
+                const gemini = this.getApiConfigById(ref.apiConfigId)?.provider === 'gemini';
+                if (gemini && validateThinkingEffort && !canSelectEffort(updates.thinkingEffort, capability))
+                    throw new Error('このモデルでは利用できないThinkingレベルです。');
+                const useDefault = gemini && changingModel && (capability.modelDefault || capability.preserveEffort || capability.mode === 'unknown');
+                const desired = useDefault ? { ...current, thinkingEffort: null } : current;
+                return executionSettings({ ...desired, ...updates, updatedAt: Date.now() }, ref, () => capability);
             },
             setCurrentChatModelRef(ref) { return this.setCurrentChatExecution({ modelRef: ref }); },
             setCurrentChatThinkingEffort(value) {

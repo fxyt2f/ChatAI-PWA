@@ -3,9 +3,11 @@
 <script src="../settings-v136.js"></script>
 <script src="../streaming-v136.js"></script>
 <script src="../document-library.js"></script>
+<script src="../project-store.js"></script>
 <script src="../document-search.js"></script>
 <script src="../document-rag.js"></script>
 <script src="../document-library-ui.js"></script>
+<script src="../project-ui.js"></script>
 <script src="../dropbox.js"></script>
 <script src="./v136-ui-tests.js"></script>
 <script src="./review-regressions-v136.js"></script>
@@ -119,7 +121,7 @@ window.addEventListener('load', async () => {
                 seeded.close();
                 indexedDB.open = (_, requestedVersion) => open.call(indexedDB, name, requestedVersion);
                 const connection = await db.openDB();
-                eq(connection.version, 16);
+                eq(connection.version, 17);
                 assert(connection.objectStoreNames.contains(DocumentLibrary.indexStore));
                 for (const store of DocumentLibrary.stores) {
                     assert(connection.objectStoreNames.contains(store));

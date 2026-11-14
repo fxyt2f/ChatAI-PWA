@@ -148,11 +148,31 @@ test('Bedrock rejects invalid token limit and forced tool choice', () => {
 test('future sync versions rejected; legacy v2 accepted', () => {
     S.assertCompatible({version:'2.0',data:{}});
     S.assertCompatible({version:'2.0',minimumReaderVersion:137,data:{documentLibrary:{schemaVersion:1}}});
-    for(const value of [{settingsSchemaVersion:137},{minimumReaderVersion:138},
+    S.assertCompatible({version:'2.0',minimumReaderVersion:137,backupSchemaVersion:1,data:{documentLibrary:{schemaVersion:1}}});
+    S.assertCompatible({version:'2.0',minimumReaderVersion:138,data:{projectData:{schemaVersion:1},documentLibrary:{schemaVersion:1}}});
+    for(const value of [{settingsSchemaVersion:137},{minimumReaderVersion:138},{minimumReaderVersion:139},
+        {minimumReaderVersion:137,data:{projectData:{schemaVersion:1}}},
+        {minimumReaderVersion:138,data:{projectData:{schemaVersion:2}}},
         {minimumReaderVersion:136,data:{documentLibrary:{schemaVersion:1}}},
         {minimumReaderVersion:137,data:{documentLibrary:{schemaVersion:2}}},
         {minimumReaderVersion:137,backupSchemaVersion:2},
         {data:{profiles:[{profileSchemaVersion:2}]}},{data:{chats:[{executionSettings:{schemaVersion:2}}]}},{data:{settings:[{key:'globalSettingsV136',value:{schemaVersion:2}}]}}])
         assert.throws(()=>S.assertCompatible({version:'2.0',data:{},...value}));
+});
+test('released v1.37.0 reader rejects project envelopes even when projects are empty', () => {
+    const { execFileSync } = require('node:child_process');
+    const { runInNewContext } = require('node:vm');
+    const source = execFileSync('git', ['show', 'e7f5dfb4b8bd24b1b61db081b935ced6d8a971df:settings-v136.js'], {
+        cwd: require('node:path').resolve(__dirname, '..'), encoding: 'utf8'
+    });
+    const old = {};
+    runInNewContext(source, { window: old });
+    assert.equal(old.SettingsV136.READER_VERSION, 137);
+    for (const projects of [[], [{ id: 'project' }]]) {
+        const envelope = { version: '2.0', minimumReaderVersion: 138,
+            data: { projectData: { schemaVersion: 1, projects, chats: [], documents: [] } } };
+        S.assertCompatible(envelope);
+        assert.throws(() => old.SettingsV136.assertCompatible(envelope), /復元・上書きできません/);
+    }
 });
 console.log(`${count} tests passed`);

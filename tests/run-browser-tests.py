@@ -34,6 +34,9 @@ parser.add_argument('--documents',action='store_true',help='Run the isolated doc
 parser.add_argument('--document-search',action='store_true',help='Run document extraction, index and ranking tests')
 parser.add_argument('--document-rag',action='store_true',help='Run RAG send, regeneration, persistence and security regressions')
 parser.add_argument('--document-ui',action='store_true',help='Exercise the real library dialog in mobile and wide mode')
+parser.add_argument('--document-ui-screenshots',type=Path,help='Capture the chat files and message information during --document-ui')
+parser.add_argument('--project-ui',action='store_true',help='Exercise project navigation, membership, drafts and shared files')
+parser.add_argument('--project-screenshots',type=Path,help='Capture the project home at the requested responsive widths')
 parser.add_argument('--sw-diagnostics',type=Path,help='Write SW server, Console, Network and registration diagnostics')
 parser.add_argument('--review',action='store_true',help='Run R01-R08 integration regressions')
 parser.add_argument('--j',action='store_true',help='Run J01-J04 storage, wire and responsiveness regressions')
@@ -125,10 +128,10 @@ class Handler(SimpleHTTPRequestHandler):
             if fault=='network' and pathname=='/settings-v136.js':self.send_error(503);return
             file=root/('index.html' if pathname=='/' else pathname[1:])
             body=file.read_bytes()
-            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.37.0',b'1.36.1')
-            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.37.0',b'1.36.1')
+            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.37.1',b'1.36.1')
+            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.37.1',b'1.36.1')
             if fault=='css' and pathname=='/style.css':body=b'/* stale stylesheet */'+body
-            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.37.0',b'./unlisted.js?v=1.37.0')
+            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.37.1',b'./unlisted.js?v=1.37.1')
             self.send_response(200);self.send_header('Content-Type','text/html' if file.suffix=='.html' else 'text/css' if file.suffix=='.css' else 'text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
         elif self.path=='/legacy-sw-fixture.js':
             legacy=subprocess.check_output(['git','show','198c8d5b3ff130034edd1250a965febe3d2aa6b9:sw.js'],cwd=root)
@@ -170,9 +173,12 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
         client.call('Runtime.addBinding',{'name':'testFocusTab'})
         client.call('Emulation.setDeviceMetricsOverride',{'width':1280,'height':900,'deviceScaleFactor':1,'mobile':False})
         startup_output=''
+        if args.project_ui:
+            from project_ui import run as run_project_ui
+            startup_output+=run_project_ui(client, f'http://localhost:{server.server_port}/', args.project_screenshots)+'\n'
         if args.document_ui:
             from document_library_ui import run as run_document_library_ui
-            startup_output+=run_document_library_ui(client, f'http://localhost:{server.server_port}/')+'\n'
+            startup_output+=run_document_library_ui(client, f'http://localhost:{server.server_port}/', args.document_ui_screenshots)+'\n'
         if args.memory_extraction:
             from memory_extraction import run as run_memory_extraction
             startup_output+=run_memory_extraction(client, f'http://localhost:{server.server_port}/')+'\n'
@@ -243,7 +249,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
             output+=f"\nALL PASSED ({details['assertions']} runtime theme color assertions; light/dark, header/accent independence, settings reload, CSS source)"
         if args.sidebar_hover and 'ALL PASSED' in output and 'FAIL' not in output:
             from sidebar_hover_v1361 import run as run_sidebar_hover
-            output+='\n'+run_sidebar_hover(client,root)
+            output+='\n'+run_sidebar_hover(client, root, f'http://localhost:{server.server_port}/',
+                (args.project_screenshots or Path(profile)) / 'sidebar-hover-v1361')
         if args.scroll_buttons and 'ALL PASSED' in output and 'FAIL' not in output:
             def scroll_eval(expression):
                 result=client.call('Runtime.evaluate',{'expression':expression,'awaitPromise':True,'returnByValue':True})
@@ -466,14 +473,14 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                     }
                     await controlledBy('/sw.js');
                     const names=await caches.keys();
-                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.37.0')||!names.includes('unrelated-cache')){
+                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.37.1')||!names.includes('unrelated-cache')){
                         throw new Error('cache upgrade mismatch: '+JSON.stringify(names));
                     }
-                    const primary=await caches.open('chatai-pwa-cache-v1.37.0');
+                    const primary=await caches.open('chatai-pwa-cache-v1.37.1');
                     const pointer=await primary.match(new URL('/.__active_app_shell__',location.href));
                     const shell=pointer?await caches.open(await pointer.text()):primary;
-                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.37.0'))throw new Error('missing versioned asset '+asset);
-                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.37.0'});
+                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.37.1'))throw new Error('missing versioned asset '+asset);
+                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.37.1'});
                     await dbUtils.saveSetting('dropboxTokens',null);sessionStorage.removeItem('pendingVersionNotice');
                     return true;
                 })()''','awaitPromise':True,'returnByValue':True})
@@ -510,7 +517,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                         const deadline=Date.now()+15000;
                         while(Date.now()<deadline){
                             const win=frame.contentWindow;
-                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.37.0'))return true;
+                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.37.1'))return true;
                             await new Promise(r=>setTimeout(r,50));
                         }
                         throw new Error('previous shell failed offline after rejected updates');
@@ -522,8 +529,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 concurrent=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const peer=window.open('about:blank','sw-fetch-peer');
                     try {
-                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.37.0',{cache:'no-store'}).then(async response=>{
-                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.37.0";'))throw new Error('concurrent shell read failed');
+                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.37.1',{cache:'no-store'}).then(async response=>{
+                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.37.1";'))throw new Error('concurrent shell read failed');
                         }));
                         const channel=new MessageChannel(),updated=new Promise((resolve,reject)=>{
                             const timer=setTimeout(()=>reject(new Error('concurrent rebuild timeout')),15000);
@@ -553,7 +560,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 boot_expression='''(async()=>{
                     const deadline=Date.now()+15000;
                     while(Date.now()<deadline){
-                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.37.0')){
+                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.37.1')){
                             if(!document.getElementById('chat-model-button'))throw new Error('picker missing');
                             if(typeof window.DOMPurify?.sanitize!=='function')throw new Error('offline sanitizer missing');
                             if(typeof window.StreamingV136?.collectResponse!=='function')throw new Error('offline SSE module missing');
@@ -591,7 +598,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 time.sleep(.3)
                 offline=client.call('Runtime.evaluate',{'expression':boot_expression,'awaitPromise':True,'returnByValue':True})
                 if 'exceptionDetails' in offline:raise RuntimeError(offline['exceptionDetails'])
-                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.37.0 boot with SSE module and DOMPurify sanitization)'
+                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.37.1 boot with SSE module and DOMPurify sanitization)'
                 offline_search=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const result=await DocumentSearch.searchChat(908173,'返金申請の期限は購入日から何日以内？');
                     const match=result.results[0];

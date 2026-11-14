@@ -11,6 +11,7 @@ window.DocumentLibraryUI = (() => {
         code: fileOutline + ' M10.5 12l-2 2 2 2 M13.5 12l2 2-2 2',
         more: 'M12 5v.1 M12 12v.1 M12 19v.1',
         folder: 'M3 7V5h7l2 2h9v3 M3 7v12h16l3-9H6l-3 9',
+        next: 'M9 6l6 6-6 6',
         back: 'M19 12H5 M12 5l-7 7 7 7',
         add: 'M12 5v14 M5 12h14',
         search: 'M20 20l-4.5-4.5 M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z',
@@ -61,8 +62,9 @@ window.DocumentLibraryUI = (() => {
 
     function ownsPicker(view) {
         const state = window.state;
-        return picker === view && controls.picker.open && state.currentScreen === 'chat' &&
-            state.currentMessages === view.messages && (state.currentChatId === view.chatId ||
+        if (picker !== view || !controls.picker.open || state.currentScreen !== 'chat') return false;
+        if (view.projectTarget) return view.projectTarget.isCurrent();
+        return state.currentMessages === view.messages && (state.currentChatId === view.chatId ||
                 (view.chatId == null && window.dbUtils.chatSaveOwners?.get(view.messages)?.id === state.currentChatId));
     }
 
@@ -115,7 +117,7 @@ window.DocumentLibraryUI = (() => {
         menu.firstElementChild.focus({ preventScroll: true });
     }
 
-    function renderRows(view, list, entries, openEntry, menuId) {
+    function renderRows(view, list, entries, openEntry, menuId, showMenu = openMenu) {
         const focused = list.contains(document.activeElement) ? document.activeElement : null;
         const focusedId = focused?.closest('li')?.dataset.documentId;
         if (rowMenu && list.contains(rowMenu.anchor)) closeMenu();
@@ -128,27 +130,30 @@ window.DocumentLibraryUI = (() => {
                 ? button(null, () => openEntry(entry), 'document-library-file')
                 : node('div', null, 'document-library-file');
             main.dataset.kind = ['csv', 'tsv'].includes(entry.format) ? 'table' : entry.format;
-            main.title = entry.fileName;
+            const linked = view.kind === 'picker' && !view.selecting;
+            main.title = linked ? `${entry.fileName} · 版 ${entry.version}` : entry.fileName;
+            const size = fileSize(entry.size);
             main.append(icon(fileIcons[entry.format] || 'text'),
                 node('span', entry.fileName, 'document-library-file-name'),
-                node('span', fileSize(entry.size), 'document-library-file-size'));
+                node('span', linked ? `版 ${entry.version} · ${size}` : size, 'document-library-file-size'));
             const match = view.matches?.get(entry.id);
             if (match) main.append(node('span', window.DocumentSearch.formatLocation(match.location) +
                 ' · ' + match.excerpt, 'document-library-file-excerpt'));
-            if (view.kind === 'workspace') {
+            if (view.kind === 'workspace' || view.kind === 'project') {
                 row.classList.add('document-library-collection-row');
                 const selected = !view.reference && view.selected?.versionId === entry.versionId;
                 row.dataset.selected = String(selected);
                 main.setAttribute('aria-pressed', String(selected));
             } else if (openEntry) {
                 main.disabled = view.mutating;
-                main.setAttribute('aria-label', entry.fileName + ' をこのチャットに追加');
+                const target = view.projectTarget ? 'このプロジェクト' : 'このチャット';
+                main.setAttribute('aria-label', linked ? main.title + ' をプレビュー' : entry.fileName + ' を' + target + 'に追加');
             }
             row.append(main);
             if (menuId) {
                 const inPicker = view.kind === 'picker';
                 const style = inPicker ? 'chat-dialog-icon-button' : 'chat-sidebar-item-menu';
-                const more = button(null, () => openMenu(view, more, entry), style + ' document-library-more');
+                const more = button(null, () => showMenu(view, more, entry), style + ' document-library-more');
                 const glyph = inPicker ? icon('more') : node('span', 'more_vert', 'material-symbols-outlined');
                 glyph.setAttribute('aria-hidden', 'true');
                 more.append(glyph);
@@ -181,10 +186,16 @@ window.DocumentLibraryUI = (() => {
 
     function renderPicker(view) {
         const selecting = view.selecting;
-        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : 'このチャットのファイル';
-        controls.pickerCount.hidden = selecting;
+        controls.pickerHeading.textContent = selecting ? 'ライブラリから追加' : 'ファイル';
+        controls.pickerProject.hidden = selecting || !view.project;
+        controls.pickerProjectCount.textContent = view.shared.length + '件';
+        controls.pickerProjectEmpty.hidden = !view.loaded || view.shared.length > 0;
+        renderRows(view, controls.pickerProjectList, selecting ? [] : view.shared,
+            entry => openPickerPreview(view, entry));
+        controls.pickerChatIntro.hidden = selecting;
+        controls.pickerChat.setAttribute('aria-labelledby', selecting ? controls.pickerTitle.id : 'document-library-picker-chat-title');
         controls.pickerCount.textContent = view.linked.length + '件';
-        controls.pickerBack.hidden = !selecting;
+        controls.pickerBack.hidden = !selecting || Boolean(view.projectTarget);
         controls.pickerActions.hidden = selecting;
         controls.pickerSearch.hidden = !selecting;
         controls.pickerSelect.disabled = view.mutating;
@@ -198,11 +209,11 @@ window.DocumentLibraryUI = (() => {
         const linked = new Set(view.linked.map(entry => entry.id));
         const entries = selecting ? view.entries.filter(entry =>
             !linked.has(entry.id) && (!query || normalizedName(entry.fileName).includes(query))) : view.linked;
-        controls.pickerEmpty.hidden = !selecting || !view.loaded || entries.length > 0;
-        controls.pickerEmpty.textContent = !selecting ? '' :
+        controls.pickerEmpty.hidden = !view.loaded || entries.length > 0;
+        controls.pickerEmpty.textContent = !selecting ? 'ファイルはありません' :
             (query ? '該当するファイルがありません。' : '追加できるファイルはありません。');
         renderRows(view, controls.pickerList, entries,
-            selecting ? entry => void setLinked(view, entry, true) : null,
+            selecting ? entry => void setLinked(view, entry, true) : entry => openPickerPreview(view, entry),
             selecting ? null : controls.pickerMenu.id);
     }
 
@@ -213,21 +224,48 @@ window.DocumentLibraryUI = (() => {
 
     async function refreshPicker(view) {
         if (!ownsPicker(view)) return;
+        if (view.projectTarget) {
+            const request = ++view.refreshVersion;
+            try {
+                const [entries, linked] = await Promise.all([
+                    window.dbUtils.listLibraryDocuments(), window.dbUtils.listProjectDocuments(view.projectTarget.id)
+                ]);
+                if (!ownsPicker(view) || request !== view.refreshVersion) return;
+                view.entries = entries.sort(byName);
+                view.linked = linked.filter(Boolean).sort(byName);
+                view.loaded = true;
+                renderPickerRows(view);
+            } catch {
+                if (request === view.refreshVersion) notice(view, 'ファイルの一覧を読み取れませんでした。');
+            }
+            return;
+        }
         view.chatId = window.state.currentChatId;
         const request = ++view.refreshVersion;
         const id = view.chatId;
         try {
-            const [entries, linked] = await Promise.all([
+            const [entries, linked, projectInfo] = await Promise.all([
                 window.dbUtils.listLibraryDocuments(),
-                window.dbUtils.getChatDocuments(id, chatOwner(view))
+                window.dbUtils.getChatDocuments(id, chatOwner(view)),
+                (async () => {
+                    const pending = window.dbUtils.projectDrafts?.get(view.messages);
+                    const project = id != null ? await window.dbUtils.getChatProject(id) :
+                        pending ? await window.dbUtils.getProject(pending) : undefined;
+                    return { project, shared: project ? await window.dbUtils.listProjectDocuments(project.id) : [] };
+                })()
             ]);
             if (!ownsPicker(view) || request !== view.refreshVersion || id !== view.chatId) return;
             const sorted = entries.sort(byName);
             const links = linked.filter(Boolean).sort(byName);
-            const changed = !view.loaded || !sameRows(view.entries, sorted) || !sameRows(view.linked, links);
+            const shared = projectInfo.shared.sort(byName);
+            const changed = !view.loaded || !sameRows(view.entries, sorted) || !sameRows(view.linked, links) ||
+                view.project?.id !== projectInfo.project?.id || view.project?.name !== projectInfo.project?.name ||
+                !sameRows(view.shared, shared);
             view.loaded = true;
             view.entries = sorted;
             view.linked = links;
+            view.project = projectInfo.project;
+            view.shared = shared;
             if (changed) renderPicker(view);
         } catch {
             if (request === view.refreshVersion) notice(view, 'ファイルの一覧を読み取れませんでした。');
@@ -235,14 +273,24 @@ window.DocumentLibraryUI = (() => {
     }
 
     function openPicker() {
+        showPicker();
+    }
+
+    function openProjectPicker(id, isCurrent) {
+        install();
+        showPicker({ id, isCurrent });
+    }
+
+    function showPicker(projectTarget = null) {
         if (picker || workspace || window.state.currentScreen !== 'chat') return;
-        const view = picker = { kind: 'picker', chatId: window.state.currentChatId, messages: window.state.currentMessages,
-            entries: [], linked: [], refreshVersion: 0, selecting: false, loaded: false, mutating: false };
+        const view = picker = { kind: 'picker', projectTarget, chatId: window.state.currentChatId, messages: window.state.currentMessages,
+            entries: [], linked: [], shared: [], refreshVersion: 0, selecting: Boolean(projectTarget), loaded: false, mutating: false };
         controls.pickerNotice.textContent = '';
         controls.pickerQuery.value = '';
         renderPicker(view);
         window.uiUtilsV136.prepareChatDialog(controls.picker);
         controls.picker.showModal();
+        if (projectTarget) controls.pickerTitle.focus({ preventScroll: true });
         void refreshPicker(view);
     }
 
@@ -254,7 +302,7 @@ window.DocumentLibraryUI = (() => {
     }
 
     function pickerSelection(selecting) {
-        if (!picker || picker.mutating) return;
+        if (!picker || picker.mutating || picker.projectTarget) return;
         picker.selecting = selecting;
         notice(picker, '');
         renderPicker(picker);
@@ -272,6 +320,12 @@ window.DocumentLibraryUI = (() => {
     }
 
     function setLinked(view, entry, checked) {
+        if (view.projectTarget) {
+            return mutate(view, async () => {
+                await window.dbUtils.addProjectDocument(view.projectTarget.id, entry.id);
+                if (ownsPicker(view)) closePicker();
+            });
+        }
         return mutate(view, () => updateLinks(view, [entry], checked ? 'add' : 'remove'));
     }
 
@@ -336,8 +390,6 @@ window.DocumentLibraryUI = (() => {
         controls.preview.hidden = true;
         controls.layout.dataset.detail = 'false';
         controls.workspace.removeAttribute('data-viewing-file');
-        controls.back.title = 'チャットへ戻る';
-        controls.back.setAttribute('aria-label', controls.back.title);
         controls.mobileTitle.textContent = '';
         controls.extracts.replaceChildren();
     }
@@ -503,10 +555,6 @@ window.DocumentLibraryUI = (() => {
         controls.previewTitle.textContent = (entry.fileName || entry.name) + (reference ? ' · 版 ' + entry.version : '');
         controls.mobileTitle.textContent = entry.fileName || entry.name;
         const narrow = isNarrow();
-        if (narrow) {
-            controls.back.title = 'ライブラリへ戻る';
-            controls.back.setAttribute('aria-label', controls.back.title);
-        }
         controls.originalStatus.textContent = '';
         controls.showOriginal.disabled = entry.format !== 'pdf';
         controls.previewStatus.textContent = '本文を読み込み中…';
@@ -684,16 +732,20 @@ window.DocumentLibraryUI = (() => {
         void window.DocumentSearch.analyzeDocument(entry).catch(() => {});
     }
 
+    async function registerFile(file) {
+        verifyFile(file);
+        const entry = await window.dbUtils.addLibraryDocument(file);
+        analyzeInBackground(entry);
+        return entry;
+    }
+
     function addFiles(view, files) {
         return mutate(view, async () => {
             const errors = [];
             const saved = [];
             for (const file of files) {
                 try {
-                    verifyFile(file);
-                    const entry = await window.dbUtils.addLibraryDocument(file);
-                    saved.push(entry);
-                    analyzeInBackground(entry);
+                    saved.push(await registerFile(file));
                 } catch (error) { errors.push(file.name + ' — ' + (error.message || '保存に失敗しました。')); }
             }
             if (view.kind === 'picker' && saved.length) {
@@ -736,7 +788,7 @@ window.DocumentLibraryUI = (() => {
         });
     }
 
-    function openWorkspace({ fromHistory = false } = {}) {
+    function openWorkspace({ fromHistory = false, returnFocus } = {}) {
         if (window.state.currentScreen !== 'chat') return null;
         const sidebarOverlay = !document.getElementById('chat-sidebar-backdrop').hidden;
         if (workspace) {
@@ -747,20 +799,24 @@ window.DocumentLibraryUI = (() => {
             return workspace;
         }
         closePicker();
+        window.ProjectUI?.close({ fromHistory: true });
         const chat = document.getElementById('chat-workspace');
         const scroller = chat.querySelector('.main-content');
         const activeElement = document.activeElement;
-        const returnFocus = chat.contains(activeElement) ? activeElement
-            : sidebarOverlay ? document.getElementById('goto-history-btn') : controls.open;
+        const focusTarget = returnFocus ?? (chat.contains(activeElement) ? activeElement
+            : sidebarOverlay ? document.getElementById('goto-history-btn') : controls.open);
         const view = workspace = { kind: 'workspace', entries: [], refreshVersion: 0, loaded: false, mutating: false,
             chat, scroller, scrollTop: scroller.scrollTop, messages: window.state.currentMessages,
-            returnFocus };
+            returnFocus: focusTarget };
         window.appLogic.resetSwipeState();
         window.uiUtilsV136.closeHistoryItemMenu();
         window.settingsUiV136?.closePopover(false);
         if (sidebarOverlay) window.uiUtilsV136.closeChatSidebar();
         if (!fromHistory) history.pushState({ screen: 'chat', documentLibrary: true }, '', '#chat');
         controls.workspace.hidden = false;
+        const sidebarToggle = document.getElementById('goto-history-btn');
+        view.sidebarToggleNext = sidebarToggle.nextElementSibling;
+        controls.title.before(sidebarToggle);
         chat.classList.add('document-library-covered');
         window.uiUtilsV136.syncChatWorkspaceInteractivity();
         window.uiUtilsV136.syncChatSidebarCurrentSelection();
@@ -786,6 +842,7 @@ window.DocumentLibraryUI = (() => {
         view.searchController?.abort();
         clearPreview(view);
         controls.workspace.removeAttribute('data-file-drop');
+        view.sidebarToggleNext.before(document.getElementById('goto-history-btn'));
         controls.workspace.hidden = true;
         view.chat.classList.remove('document-library-covered');
         window.uiUtilsV136.syncChatWorkspaceInteractivity();
@@ -798,13 +855,6 @@ window.DocumentLibraryUI = (() => {
                 target.focus({ preventScroll: true });
             }
         }
-    }
-
-    function back() {
-        if (!workspace) return;
-        if (history.state?.documentLibraryDetail) history.go(-2);
-        else if (history.state?.documentLibrary) history.back();
-        else closeWorkspace({ restoreFocus: true });
     }
 
     function returnToCollection(view) {
@@ -851,10 +901,27 @@ window.DocumentLibraryUI = (() => {
             version: reference.version, versionId: reference.versionId, format: reference.format }, { reference, chunkId: reference.chunkId });
     }
 
-    function close() {
+    function openProjectPreview(entry, projectId) {
+        install();
+        openLinkedPreview(entry, { projectPreview: projectId });
+    }
+
+    function openPickerPreview(view, entry) {
+        if (!ownsPicker(view) || view.mutating) return;
+        openLinkedPreview(entry, {}, controls.pickerOpen);
+    }
+
+    function openLinkedPreview(entry, origin = {}, returnFocus) {
+        history.pushState({ screen: 'chat', documentLibrary: true, ...origin,
+            documentLibraryDetail: { id: entry.id, versionId: entry.versionId } }, '', '#chat');
+        const view = openWorkspace({ fromHistory: true, returnFocus });
+        if (view) void preview(view, entry, { fromHistory: true });
+    }
+
+    function close(options) {
         if (!controls) return;
         closePicker();
-        closeWorkspace();
+        closeWorkspace(options);
     }
 
     function installFilePicker(input, trigger, currentView, direct = false) {
@@ -885,7 +952,8 @@ window.DocumentLibraryUI = (() => {
             event.preventDefault();
             event.stopPropagation();
             const surface = picker ? controls.picker : controls.workspace;
-            const canDrop = owns(view) && !view.mutating && !surface.inert &&
+            const canDrop = owns(view) && !view.mutating && !view.projectTarget && !surface.inert &&
+                !event.target.closest?.('#document-library-picker-project') &&
                 !(workspace?.selected && isNarrow()) && surface.contains(event.target);
             if (event.type === 'drop') {
                 clear();
@@ -907,7 +975,7 @@ window.DocumentLibraryUI = (() => {
 
     function install() {
         if (controls) return;
-        const ids = ['open', 'workspace', 'back', 'detail-close', 'title', 'mobile-title', 'mobile-search', 'desktop-search',
+        const ids = ['open', 'workspace', 'detail-close', 'title', 'mobile-title', 'mobile-search', 'desktop-search',
             'notice', 'add', 'files', 'replacement', 'sort',
             'collection', 'collection-scroll', 'list', 'empty', 'menu', 'search', 'query', 'search-mode',
             'search-status', 'preview', 'preview-title', 'preview-status', 'detail-search', 'detail-find',
@@ -916,7 +984,8 @@ window.DocumentLibraryUI = (() => {
             'pdf-previous', 'pdf-next', 'pdf-number', 'pdf-zoom-in', 'pdf-zoom-out',
             'page-number', 'extracts', 'picker', 'picker-open', 'picker-title', 'picker-heading', 'picker-count', 'picker-back', 'picker-close',
             'picker-notice', 'picker-empty', 'picker-list', 'picker-actions', 'picker-search', 'picker-query',
-            'picker-select', 'picker-upload', 'picker-files', 'picker-menu'];
+            'picker-select', 'picker-upload', 'picker-files', 'picker-menu', 'picker-chat', 'picker-chat-intro',
+            'picker-project', 'picker-project-list', 'picker-project-count', 'picker-project-empty', 'picker-project-open'];
         controls = Object.fromEntries(ids.map(id => [
             id.replace(/-([a-z])/g, (_, char) => char.toUpperCase()), document.getElementById('document-library-' + id)
         ]));
@@ -926,6 +995,11 @@ window.DocumentLibraryUI = (() => {
         }
         controls.pickerOpen.addEventListener('click', openPicker);
         controls.pickerClose.addEventListener('click', closePicker);
+        controls.pickerProjectOpen.addEventListener('click', () => {
+            if (picker?.project && ownsPicker(picker) && !picker.mutating) {
+                window.ProjectUI?.open(picker.project.id, { tab: 'files' });
+            }
+        });
         controls.picker.addEventListener('close', () => { if (!controls.picker.open) closePicker(); });
         controls.pickerSelect.addEventListener('click', () => pickerSelection(true));
         controls.pickerBack.addEventListener('click', () => pickerSelection(false));
@@ -933,10 +1007,6 @@ window.DocumentLibraryUI = (() => {
             if (picker?.selecting && ownsPicker(picker)) renderPickerRows(picker);
         });
         controls.open.addEventListener('click', () => openWorkspace());
-        controls.back.addEventListener('click', () => {
-            if (workspace?.selected && isNarrow()) closePreview(workspace);
-            else back();
-        });
         controls.detailClose.addEventListener('click', () => { if (workspace) closePreview(workspace); });
         installFilePicker(controls.files, controls.add, () => workspace, true);
         installFilePicker(controls.pickerFiles, controls.pickerUpload, () => picker);
@@ -1010,9 +1080,6 @@ window.DocumentLibraryUI = (() => {
         }, true);
         new ResizeObserver(() => {
             if (rowMenu) window.uiUtilsV136.positionRowMenu(rowMenu.menu, rowMenu.anchor, rowMenu.container);
-            const label = workspace?.selected && isNarrow() ? 'ライブラリへ戻る' : 'チャットへ戻る';
-            controls.back.title = label;
-            controls.back.setAttribute('aria-label', label);
         }).observe(controls.workspace);
         new ResizeObserver(([entry]) => {
             const view = workspace;
@@ -1024,5 +1091,7 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference };
+    return { install, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
+        closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows,
+        refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

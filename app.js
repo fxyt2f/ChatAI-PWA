@@ -9,7 +9,7 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-const DB_VERSION = 16;
+const DB_VERSION = 17;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -193,8 +193,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.0";
-const APP_CACHE_VERSION = "v1.37.0";
+const APP_VERSION = "1.37.1";
+const APP_CACHE_VERSION = "v1.37.1";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -668,6 +668,7 @@ try {
         appHeader: document.querySelector('.app-header'),
         chatScreen: document.getElementById('chat-screen'),
         chatWorkspace: document.getElementById('chat-workspace'),
+        projectWorkspace: document.getElementById('project-workspace'),
         documentLibraryWorkspace: document.getElementById('document-library-workspace'),
         documentLibraryOpen: document.getElementById('document-library-open'),
         chatHistorySidebar: document.getElementById('chat-history-sidebar'),
@@ -689,6 +690,7 @@ try {
         loadingIndicator: document.getElementById('loading-indicator'),
         generationStatusIndicator: document.getElementById('generation-status-indicator'),
         historyItemMenu: document.getElementById('history-item-menu'),
+        historyProjectMenu: document.getElementById('history-project-menu'),
         historyDeleteModeBtn: document.getElementById('history-delete-mode-btn'),
         historyDeleteDialog: document.getElementById('history-delete-dialog'),
         historyDeleteList: document.getElementById('history-delete-list'),
@@ -1766,6 +1768,7 @@ const dbUtils = {
                 }
                 if (event.oldVersion < 15) DocumentLibrary.upgrade(db);
                 if (event.oldVersion < 16) db.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
+                if (event.oldVersion < 17) ProjectStore.upgrade(db);
                 if (event.oldVersion === 0) {
                     transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
                 }
@@ -1822,6 +1825,7 @@ const dbUtils = {
             const chats = tx.objectStore(CHATS_STORE);
             const chat = chatId ? chats.get(chatId) : null;
             const profile = switching ? tx.objectStore(PROFILES_STORE).get(switching) : null;
+            const draftKey = appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, save.messages);
             let failure, result, previousDraft, draftWritten = false;
             let pending = Number(Boolean(chat)) + Number(Boolean(profile));
             const apply = () => {
@@ -1842,8 +1846,8 @@ const dbUtils = {
                     if (previous) chats.put({ ...previous, ...snapshot, parameterRevision: revision });
                     if (switching) {
                         if (!chatId) {
-                            previousDraft = sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
-                            sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(snapshot));
+                            previousDraft = sessionStorage.getItem(draftKey);
+                            sessionStorage.setItem(draftKey, JSON.stringify(snapshot));
                             draftWritten = true;
                         }
                         tx.objectStore(SETTINGS_STORE).put({ key: 'activeProfileId', value: switching });
@@ -1857,8 +1861,8 @@ const dbUtils = {
             tx.onabort = () => {
                 try {
                     if (draftWritten) {
-                        if (previousDraft === null) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
-                        else sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, previousDraft);
+                        if (previousDraft === null) sessionStorage.removeItem(draftKey);
+                        else sessionStorage.setItem(draftKey, previousDraft);
                     }
                 } finally { reject(failure || tx.error || new Error('パラメータを保存できませんでした。')); }
             };
@@ -1871,6 +1875,7 @@ const dbUtils = {
         // save may still be finishing when navigation changes the active chat.
         const session = options.sendSession;
         const contextMessages = session?.messages ?? state.currentMessages;
+        const draftProjectId = chatObjectToSave ? null : this.projectDrafts?.get(contextMessages);
         let contextChatId = session ? session.chatId : state.currentChatId;
         let targetChatId = chatObjectToSave ? chatObjectToSave.id : contextChatId, savedChatId = null;
         let committedVersion, conflict = false;
@@ -1987,7 +1992,7 @@ const dbUtils = {
                     ? await this.commitChatParametersV136(targetChatId, expectedVersion, promptSave, ownsContext)
                     : { snapshot: { systemPrompt: promptSave.value, generationParameters: promptSave.parameters }, revision: 0 };
                 if (!targetChatId && !promptSave.profileSwitch && ownsContext())
-                    sessionStorage.setItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, JSON.stringify(result.snapshot));
+                    sessionStorage.setItem(appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, contextMessages), JSON.stringify(result.snapshot));
                 promptSave.result = result;
                 if (targetChatId) appLogic.markAsDirtyAndSchedulePush();
                 return targetChatId;
@@ -1998,6 +2003,7 @@ const dbUtils = {
                 try {
                     const scopes = [CHATS_STORE, SETTINGS_STORE];
                     if (documentIds) scopes.push(DocumentLibrary.documents, DocumentLibrary.links);
+                    if (draftProjectId && !targetChatId) scopes.push(ProjectStore.projects, ProjectStore.chats);
                     const transaction = state.db.transaction(scopes, 'readwrite');
                     const store = transaction.objectStore(CHATS_STORE);
                     const settingsStore = transaction.objectStore(SETTINGS_STORE);
@@ -2087,13 +2093,18 @@ const dbUtils = {
                             const savedId = event.target.result;
                             savedChatId = savedId;
                             savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt };
-                            if (documentIds) {
-                                DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode)
-                                    .catch(error => {
-                                        linkError = error;
-                                        try { transaction.abort(); } catch { /* already aborted */ }
-                                    });
-                            }
+                            const relatedWrites = [];
+                            if (documentIds) relatedWrites.push(
+                                DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode));
+                            if (draftProjectId && isNewDraft) relatedWrites.push((async () => {
+                                await ProjectStore.requireProject(transaction, draftProjectId);
+                                transaction.objectStore(ProjectStore.chats).add({ chatId: savedId, projectId: draftProjectId });
+                                await ProjectStore.markChanged(settingsStore);
+                            })());
+                            Promise.all(relatedWrites).catch(error => {
+                                linkError = error;
+                                try { transaction.abort(); } catch { /* already aborted */ }
+                            });
                         };
                         putRequest.onerror = (event) => {
                             console.error("チャット保存(put)エラー:", event.target.error);
@@ -2135,8 +2146,10 @@ const dbUtils = {
                         try {
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) {
+                                    const projectDraftKey = draftProjectId && appLogic.getInputDraftContextKey();
                                     state.currentChatId = contextChatId = savedChatId;
-                                    if (documentIds) appLogic.flushInputDraft();
+                                    if (projectDraftKey && !session) appLogic.clearInputDraftAfterSend(projectDraftKey);
+                                    if (documentIds || (projectDraftKey && !session)) appLogic.flushInputDraft();
                                 }
                                 state.currentChatIsPinned = savedUiState.pinState.isPinned;
                                 state.currentChatPinnedAt = savedUiState.pinState.isPinned ? savedUiState.pinState.pinnedAt : null;
@@ -2144,8 +2157,8 @@ const dbUtils = {
                                 uiUtils.updateChatTitle(savedUiState.title);
                             }
                             if (!options.skipPush) appLogic.markAsDirtyAndSchedulePush(documentIds ? true : 'message');
-                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.DRAFT_KEY);
-                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(appLogic.getChatDraftSettingsKey(SettingsV136.DRAFT_KEY, contextMessages));
+                            if (!chatObjectToSave && ownsContext()) sessionStorage.removeItem(appLogic.getChatDraftSettingsKey(SettingsV136.CHAT_PARAMETER_DRAFT_KEY, contextMessages));
                             if (savedSuccessfulExecution) state.lastSuccessfulExecution = savedSuccessfulExecution;
                         } catch (error) {
                             // A committed write must resolve even if a view/storage side effect fails.
@@ -2183,6 +2196,7 @@ const dbUtils = {
         const db = await this.openDB();
         const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, null, file, options);
         appLogic.markAsDirtyAndSchedulePush(true);
+        void chatListChangeController.notify({ type: 'library' });
         return entry;
     },
 
@@ -2191,13 +2205,17 @@ const dbUtils = {
         const db = await this.openDB();
         const entry = await DocumentLibrary.writeDocument(db, SETTINGS_STORE, id, file, options);
         appLogic.markAsDirtyAndSchedulePush(true);
+        void chatListChangeController.notify({ type: 'library' });
         return entry;
     },
 
     async deleteLibraryDocument(id, options = {}) {
         const db = await this.openDB();
         const deleted = await DocumentLibrary.deleteDocument(db, SETTINGS_STORE, id, options);
-        if (deleted) appLogic.markAsDirtyAndSchedulePush(true);
+        if (deleted) {
+            appLogic.markAsDirtyAndSchedulePush(true);
+            void chatListChangeController.notify({ type: 'library' });
+        }
         return deleted;
     },
 
@@ -2227,6 +2245,38 @@ const dbUtils = {
         return state.db ? read(state.db) : this.openDB().then(read);
     },
 
+    getChatRagDocuments(chatId, owner) {
+        const stores = [CHATS_STORE, DocumentLibrary.links, DocumentLibrary.documents, ...ProjectStore.stores];
+        const read = DocumentLibrary.request;
+        const snapshot = db => DocumentLibrary.transaction(db, stores, 'readonly', async tx => {
+            const [chat, chatDocuments, membership] = await Promise.all([
+                read(tx.objectStore(CHATS_STORE).get(chatId)),
+                DocumentLibrary.readChatDocumentIds(tx, chatId),
+                read(tx.objectStore(ProjectStore.chats).get(chatId))
+            ]);
+            if (!chat || (owner && (chat.recordGenerationId ?? null) !== owner.recordGenerationId)) {
+                throw new DOMException('チャットが別のデータに置き換わりました。', 'ChatContentConflict');
+            }
+            const projectId = membership?.projectId ?? null;
+            let sharedDocuments = [];
+            if (projectId !== null) {
+                await ProjectStore.requireProject(tx, projectId);
+                const shares = await read(tx.objectStore(ProjectStore.documents).index('projectId').getAll(projectId));
+                sharedDocuments = shares.map(share => share.documentId);
+            }
+            // Both relationships resolve to the current immutable version of each library entry in this transaction.
+            const ids = new Set([...chatDocuments, ...sharedDocuments]);
+            const library = tx.objectStore(DocumentLibrary.documents);
+            const documents = await Promise.all([...ids].map(id => read(library.get(id))));
+            if (documents.some(entry => !entry || !DocumentLibrary.isId(entry.versionId) ||
+                !Number.isSafeInteger(entry.version) || entry.version < 1)) {
+                throw new Error('資料の紐づけまたは版を取得できません。');
+            }
+            return { projectId, documents };
+        });
+        return state.db ? snapshot(state.db) : this.openDB().then(snapshot);
+    },
+
     async setChatDocuments(chatId, documentIds, expectedChat, mode) {
         const ids = DocumentLibrary.normalizeIds(documentIds);
         if (state.chatDataChangesV136.has(undefined)) throw new Error('会話データを更新中です。');
@@ -2245,6 +2295,176 @@ const dbUtils = {
 
     async getDocumentLibrarySyncState() {
         return DocumentLibrary.syncState(await this.getSetting(DocumentLibrary.syncKey));
+    },
+
+    async getProjectSyncContext() {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readonly', async tx => {
+            const settings = tx.objectStore(SETTINGS_STORE);
+            const [record, lastSyncId] = await Promise.all([
+                DocumentLibrary.request(settings.get(ProjectStore.syncKey)),
+                DocumentLibrary.request(settings.get('lastSyncId'))
+            ]);
+            return { ...DocumentLibrary.syncState(record), lastSyncId: lastSyncId?.value ?? null };
+        });
+    },
+
+    async _writeProjectData(stores, change) {
+        const db = await this.openDB();
+        const result = await DocumentLibrary.transaction(db, [SETTINGS_STORE, ...stores], 'readwrite', async tx => {
+            const result = await change(tx);
+            if (result) await ProjectStore.markChanged(tx.objectStore(SETTINGS_STORE));
+            return result;
+        });
+        if (result) appLogic.markAsDirtyAndSchedulePush(true);
+        if (result) void chatListChangeController.notify({ type: 'project' });
+        return result;
+    },
+
+    async getProjectSidebarSnapshot() {
+        const db = await this.openDB();
+        const stores = [CHATS_STORE, ProjectStore.projects, ProjectStore.chats];
+        return DocumentLibrary.transaction(db, stores, 'readonly', tx => Promise.all(stores.map(name =>
+            DocumentLibrary.request(tx.objectStore(name).getAll()))));
+    },
+
+    async listProjects() {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(ProjectStore.projects).getAll());
+    },
+
+    async getProject(projectId) {
+        await this.openDB();
+        return DocumentLibrary.request(this._getStore(ProjectStore.projects).get(projectId));
+    },
+
+    createProject({ name, description }, assignment) {
+        const stores = [ProjectStore.projects];
+        if (assignment) stores.push(CHATS_STORE, ProjectStore.chats);
+        return this._writeProjectData(stores, async tx => {
+            const fields = ProjectStore.projectFields(name, description);
+            const now = Date.now();
+            const project = { id: DocumentLibrary.uniqueId(), ...fields, createdAt: now, updatedAt: now };
+            await DocumentLibrary.request(tx.objectStore(ProjectStore.projects).add(project));
+            if (assignment) await this._setChatProject(tx, assignment.record.id, project.id, {
+                expectedRecord: assignment.record, expectedProjectId: assignment.currentProjectId
+            });
+            return project;
+        });
+    },
+
+    updateProject(projectId, fields) {
+        return this._writeProjectData([ProjectStore.projects], async tx => {
+            const store = tx.objectStore(ProjectStore.projects);
+            const previous = await ProjectStore.requireProject(tx, projectId);
+            const next = ProjectStore.projectFields(
+                Object.hasOwn(fields, 'name') ? fields.name : previous.name,
+                Object.hasOwn(fields, 'description') ? fields.description : previous.description);
+            if (previous.name === next.name && (previous.description ?? '') === next.description) return false;
+            store.put({ ...previous, ...next, updatedAt: Date.now() });
+            return true;
+        });
+    },
+
+    deleteProject(projectId) {
+        return this._writeProjectData(ProjectStore.stores, async tx => {
+            const store = tx.objectStore(ProjectStore.projects);
+            if (await DocumentLibrary.request(store.getKey(projectId)) === undefined) return false;
+            store.delete(projectId);
+            await Promise.all([ProjectStore.chats, ProjectStore.documents].map(name =>
+                ProjectStore.deleteByIndex(tx.objectStore(name), 'projectId', projectId)));
+            return true;
+        });
+    },
+
+    async getChatProject(chatId) {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [ProjectStore.chats, ProjectStore.projects], 'readonly', async tx => {
+            const link = await DocumentLibrary.request(tx.objectStore(ProjectStore.chats).get(chatId));
+            if (link) return DocumentLibrary.request(tx.objectStore(ProjectStore.projects).get(link.projectId));
+        });
+    },
+
+    async _listProjectTargets(projectId, linkStore, targetStore, targetKey) {
+        const range = IDBKeyRange.only(projectId);
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [linkStore, targetStore], 'readonly', tx =>
+            this._readProjectTargets(tx, range, linkStore, targetStore, targetKey));
+    },
+
+    async _readProjectTargets(tx, range, linkStore, targetStore, targetKey) {
+        const read = DocumentLibrary.request;
+        const links = await read(tx.objectStore(linkStore).index('projectId').getAll(range));
+        const targets = tx.objectStore(targetStore);
+        return Promise.all(links.map(link => read(targets.get(link[targetKey]))));
+    },
+
+    async getProjectWorkspaceSnapshot(projectId) {
+        const range = IDBKeyRange.only(projectId);
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [...ProjectStore.stores, CHATS_STORE, DocumentLibrary.documents], 'readonly', tx =>
+            Promise.all([
+                DocumentLibrary.request(tx.objectStore(ProjectStore.projects).get(projectId)),
+                this._readProjectTargets(tx, range, ProjectStore.chats, CHATS_STORE, 'chatId'),
+                this._readProjectTargets(tx, range, ProjectStore.documents, DocumentLibrary.documents, 'documentId')
+            ]));
+    },
+
+    listProjectChats(projectId) {
+        return this._listProjectTargets(projectId, ProjectStore.chats, CHATS_STORE, 'chatId');
+    },
+
+    setChatProject(chatId, projectId, { expectedRecord, expectedProjectId } = {}) {
+        return this._writeProjectData([CHATS_STORE, ProjectStore.projects, ProjectStore.chats],
+            tx => this._setChatProject(tx, chatId, projectId, { expectedRecord, expectedProjectId }));
+    },
+
+    async _setChatProject(tx, chatId, projectId, { expectedRecord, expectedProjectId }) {
+        const read = DocumentLibrary.request;
+        const chat = await read(tx.objectStore(CHATS_STORE).get(chatId));
+        if (!chat) throw new Error('チャットが見つかりません。');
+        if (expectedRecord && !this.matchesHistoryDeleteRecord(chat, expectedRecord)) throw new Error('チャットが変更されました。');
+        const store = tx.objectStore(ProjectStore.chats);
+        const previous = (await read(store.get(chatId)))?.projectId ?? null;
+        if (previous === projectId) return false;
+        if (expectedProjectId !== undefined && previous !== expectedProjectId) throw new Error('チャットの所属が変更されました。');
+        if (projectId === null) return ProjectStore.detachChat(tx, chatId);
+        await ProjectStore.requireProject(tx, projectId);
+        store.put({ chatId, projectId });
+        return true;
+    },
+
+    listProjectDocuments(projectId) {
+        return this._listProjectTargets(projectId, ProjectStore.documents, DocumentLibrary.documents, 'documentId');
+    },
+
+    addProjectDocument(projectId, documentId) {
+        return this._writeProjectData([ProjectStore.projects, ProjectStore.documents, DocumentLibrary.documents], async tx => {
+            await ProjectStore.requireProject(tx, projectId);
+            const read = DocumentLibrary.request;
+            if (await read(tx.objectStore(DocumentLibrary.documents).getKey(documentId)) === undefined) {
+                throw new Error('指定したファイルが見つかりません。');
+            }
+            const store = tx.objectStore(ProjectStore.documents);
+            if (await read(store.getKey([projectId, documentId])) !== undefined) return false;
+            store.add({ projectId, documentId });
+            return true;
+        });
+    },
+
+    removeProjectDocument(projectId, documentId) {
+        return this._writeProjectData([ProjectStore.documents], async tx => {
+            const store = tx.objectStore(ProjectStore.documents);
+            const key = [projectId, documentId];
+            if (await DocumentLibrary.request(store.getKey(key)) === undefined) return false;
+            store.delete(key);
+            return true;
+        });
+    },
+
+    clearProjectDocuments(projectId) {
+        return this._writeProjectData([ProjectStore.documents], tx =>
+            ProjectStore.deleteByIndex(tx.objectStore(ProjectStore.documents), 'projectId', projectId));
     },
 
     async hasChatDocumentLinks() {
@@ -2534,7 +2754,7 @@ const dbUtils = {
         const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !String(id).startsWith('background_') && !activeImageIdsInOtherChats.has(id));
 
         // Step 3: トランザクション内でチャットと画像の削除を実行
-        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links];
+        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links, ProjectStore.chats];
         if (finalImageIdsToDelete.length > 0) storeNames.push(IMAGE_STORE);
         const linksChanged = await DocumentLibrary.transaction(state.db, storeNames, 'readwrite', async transaction => {
             const chatStore = transaction.objectStore(CHATS_STORE);
@@ -2552,7 +2772,10 @@ const dbUtils = {
                 finalImageIdsToDelete.forEach(imgId => imageStore.delete(imgId));
             }
 
-            return DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, id, []);
+            const documentLinksChanged = await DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, id, []);
+            const membershipChanged = await ProjectStore.detachChat(transaction, id);
+            if (membershipChanged) await ProjectStore.markChanged(transaction.objectStore(SETTINGS_STORE));
+            return documentLinksChanged || membershipChanged;
         });
         state.chatTitleGenerations.get(String(id))?.abort();
         if (markDirty || linksChanged) appLogic.markAsDirtyAndSchedulePush(true);
@@ -2842,7 +3065,8 @@ const dbUtils = {
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
         uiUtils.showProgressDialog('データベースを準備中...');
 
-        const { profiles, chats, memories, assets, settings, documentLibrary } = data;
+        const { profiles, chats, memories, assets, settings, documentLibrary, projectData } = data;
+        if (projectData) ProjectStore.validateSnapshot(projectData, data);
         if (documentLibrary && !options.originals) throw new Error('ファイル原本の検証が必要です。');
         const linkedChatIds = new Set(documentLibrary?.links.map(link => link.chatId));
         const normalizedChats = (Array.isArray(chats) ? chats : []).map(chat => {
@@ -2924,7 +3148,7 @@ const dbUtils = {
             [SETTINGS_STORE, settings || []]
         ]);
         const localKeys = new Set(['dropboxTokens', 'localUiSettings', SettingsV136.BACKUP_KEY,
-            DocumentLibrary.syncKey, 'lastSyncId', 'lastSyncTimestamp', 'syncIsDirty', 'syncLastError']);
+            DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId', 'lastSyncTimestamp', 'syncIsDirty', 'syncLastError']);
         const excludedKeys = new Set([...localKeys, ...LOCAL_UI_SETTING_KEYS]);
         records.set(SETTINGS_STORE, records.get(SETTINGS_STORE).filter(setting => !excludedKeys.has(setting.key)));
         if (documentLibrary) {
@@ -2932,18 +3156,24 @@ const dbUtils = {
             records.set(DocumentLibrary.originals, options.originals);
             records.set(DocumentLibrary.links, documentLibrary.links);
         }
+        for (const [index, key] of ['projects', 'chats', 'documents'].entries()) {
+            records.set(ProjectStore.stores[index], projectData?.[key] ?? []);
+        }
 
         const names = new Set([...records.keys(), ...DocumentLibrary.stores]);
         const db = await this.openDB();
-        const libraryPending = await DocumentLibrary.transaction(db,
+        const { libraryPending, projectPending } = await DocumentLibrary.transaction(db,
             [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore], 'readwrite', async tx => {
                 const read = DocumentLibrary.request;
                 const localSettings = tx.objectStore(SETTINGS_STORE);
-                const [preserved, linkCount] = await Promise.all([
+                const [preserved, linkCount, projectCount] = await Promise.all([
                     Promise.all([...localKeys].map(key => read(localSettings.get(key)))),
-                    read(tx.objectStore(DocumentLibrary.links).count())
+                    read(tx.objectStore(DocumentLibrary.links).count()),
+                    read(tx.objectStore(ProjectStore.projects).count())
                 ]);
-                const current = DocumentLibrary.syncState(preserved.find(setting => setting?.key === DocumentLibrary.syncKey));
+                const getPreserved = key => preserved.find(setting => setting?.key === key);
+                const current = DocumentLibrary.syncState(getPreserved(DocumentLibrary.syncKey));
+                const currentProjects = DocumentLibrary.syncState(getPreserved(ProjectStore.syncKey));
                 const expected = options.libraryBefore;
                 if (expected && (current.revision !== expected.revision || current.syncedRevision !== expected.syncedRevision)) {
                     throw new Error('復元の準備中にファイルが変更されました。再度お試しください。');
@@ -2958,7 +3188,31 @@ const dbUtils = {
                     current.revision !== current.syncedRevision && current.revision !== documentLibrary.revision) {
                     throw new Error('未同期のファイル変更があります。バックアップを作成してから手動で同期してください。');
                 }
+                const expectedProjects = options.projectsBefore;
+                if (expectedProjects && (!ProjectStore.sameSyncState(currentProjects, expectedProjects) ||
+                    (getPreserved('lastSyncId')?.value ?? null) !== expectedProjects.lastSyncId)) {
+                    throw new Error('復元の準備中にプロジェクト情報または同期状態が変更されました。再度お試しください。');
+                }
+                if (!projectData && options.source === 'file' && !options.allowLegacyProjectClear) {
+                    throw new Error('旧バックアップを復元するには、プロジェクト情報が失われることを確認してください。');
+                }
+                if (!projectData && options.source !== 'file' && (projectCount || currentProjects.revision || currentProjects.syncedRevision)) {
+                    throw new Error(ProjectStore.legacyConflict);
+                }
+                if (options.source === 'dropbox' && ProjectStore.isRollback(currentProjects, projectData)) {
+                    throw new Error(ProjectStore.legacyConflict);
+                }
+                if (options.source === 'dropbox' && ProjectStore.hasLocalConflict(currentProjects, projectData) &&
+                    !options.allowProjectReplace) {
+                    throw new Error(ProjectStore.localConflict);
+                }
                 if (documentLibrary) await DocumentLibrary.discardChangedIndexes(tx, documentLibrary.documents);
+                const nextProjects = { ...currentProjects };
+                if (options.source === 'dropbox' && projectData) {
+                    nextProjects.revision = nextProjects.syncedRevision = projectData.revision;
+                } else if (await ProjectStore.hasChanged(tx, projectData)) {
+                    nextProjects.revision = DocumentLibrary.uniqueId();
+                }
 
                 uiUtils.updateProgressMessage('データを一時領域にインポート中...');
                 // Stage and promote in the same transaction so another tab cannot replace the staged snapshot.
@@ -2987,7 +3241,10 @@ const dbUtils = {
                     next.revision = DocumentLibrary.uniqueId();
                 }
                 if (next.revision) localSettings.put({ key: DocumentLibrary.syncKey, value: next });
-                const pending = next.revision !== next.syncedRevision;
+                if (nextProjects.revision) localSettings.put({ key: ProjectStore.syncKey, value: nextProjects });
+                const libraryPending = next.revision !== next.syncedRevision;
+                const projectPending = nextProjects.revision !== nextProjects.syncedRevision;
+                const pending = libraryPending || projectPending;
                 if (options.source === 'dropbox') {
                     localSettings.put({ key: 'lastSyncId', value: options.syncId });
                     localSettings.put({ key: 'lastSyncTimestamp', value: options.syncTimestamp });
@@ -2996,12 +3253,12 @@ const dbUtils = {
                 } else if (options.source === 'file' || pending) {
                     localSettings.put({ key: 'syncIsDirty', value: true });
                 }
-                return pending;
+                return { libraryPending, projectPending };
             });
 
         for (const controller of state.chatTitleGenerations.values()) controller.abort();
         void chatListChangeController.notify({ type: 'restore' });
-        return { removedAssetInfo: missingAssetInfo, libraryPending };
+        return { removedAssetInfo: missingAssetInfo, libraryPending, projectPending };
     },
 };
 
@@ -3024,7 +3281,8 @@ const chatListChangeController = {
         if (broadcast && broadcastChannel) {
             try {
                 broadcastChannel.postMessage({
-                    type: 'CHAT_LIST_CHANGED', sourceTabId: state.tabId, database: state.db?.name
+                    type: 'CHAT_LIST_CHANGED', sourceTabId: state.tabId, database: state.db?.name,
+                    change: normalizedDetail.type
                 });
             } catch (error) {
                 console.warn('[ChatListChange] 別タブへの通知に失敗しました:', error);
@@ -3044,20 +3302,25 @@ const chatListChangeController = {
 const historyUiState = {
     menuContext: null,
     menuActionPending: false,
-    menuPointerActive: false
+    menuPointerActive: false,
+    projectMenuRequest: null
 };
 
-// 一覧データは一度の全件走査を共有し、常設開閉だけはlocalUiSettingsへ保存する。
+// 一覧データは一度の全件走査を共有する。
+const collapsedSidebarGroupsKey = 'chatai-collapsed-sidebar-groups';
 const chatSidebarUiState = {
     mode: 'disabled',
     isOpen: false,
     query: '',
+    projects: [],
+    memberships: new Map(),
     allChats: [],
     recordsById: new Map(),
     renderGeneration: 0,
     searchTimer: null,
     refreshTimer: null,
     hasLoadedAll: false,
+    collapsedGroups: null,
     unsubscribe: null
 };
 
@@ -4641,6 +4904,8 @@ renderStreamingResult() {
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
 },
 
+openMessageInfo: new WeakSet(),
+
 createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
     const messageData = state.currentMessages[index];
     if (!messageData) return null;
@@ -4657,6 +4922,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     messageDiv.dataset.messageIndex = String(index);
     messageDiv.dataset.role = role;
     
+    const messageInfo = document.createElement('div');
+    messageInfo.className = 'message-info';
     if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
         messageDiv.appendChild(this.createThoughtProcessDetails(messageData, isStreamingPlaceholder));
     }
@@ -4805,32 +5072,32 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     }
     
-    if (role === 'model' && messageData && messageData.groundingMetadata &&
-        ( (messageData.groundingMetadata.groundingChunks && messageData.groundingMetadata.groundingChunks.length > 0) ||
-          (messageData.groundingMetadata.webSearchQueries && messageData.groundingMetadata.webSearchQueries.length > 0) )
-       )
+    if (role === 'model' && !isStreamingPlaceholder && messageData.groundingMetadata)
     {
         try {
             const details = document.createElement('details');
             details.classList.add('citation-details');
+            details.open = true;
             const summary = document.createElement('summary');
             summary.textContent = '引用元/検索クエリ';
             details.appendChild(summary);
             let detailsHasContent = false;
-            if (messageData.groundingMetadata.groundingChunks && messageData.groundingMetadata.groundingChunks.length > 0) {
+            const chunks = messageData.groundingMetadata.groundingChunks;
+            if (Array.isArray(chunks) && chunks.length) {
                 const citationList = document.createElement('ul');
                 citationList.classList.add('citation-list');
                 const citationMap = new Map();
                 let displayIndexCounter = 1;
-                if (messageData.groundingMetadata.groundingSupports) {
+                if (Array.isArray(messageData.groundingMetadata.groundingSupports)) {
                     messageData.groundingMetadata.groundingSupports.forEach(support => {
-                        if (support.groundingChunkIndices) {
+                        if (Array.isArray(support?.groundingChunkIndices)) {
                             support.groundingChunkIndices.forEach(chunkIndex => {
-                                if (!citationMap.has(chunkIndex) && chunkIndex >= 0 && chunkIndex < messageData.groundingMetadata.groundingChunks.length) {
-                                    const chunk = messageData.groundingMetadata.groundingChunks[chunkIndex];
-                                    if (chunk?.web?.uri) {
+                                if (!citationMap.has(chunkIndex) && Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < chunks.length) {
+                                    const chunk = chunks[chunkIndex];
+                                    const uri = typeof chunk?.web?.uri === 'string' && chunk.web.uri.trim() && htmlUtils.safeUrl(chunk.web.uri);
+                                    if (uri) {
                                         citationMap.set(chunkIndex, {
-                                            uri: chunk.web.uri,
+                                            uri,
                                             title: chunk.web.title || 'タイトル不明',
                                             displayIndex: displayIndexCounter++
                                         });
@@ -4842,10 +5109,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 }
                 const sortedCitations = Array.from(citationMap.entries())
                                             .sort(([, a], [, b]) => a.displayIndex - b.displayIndex);
-                sortedCitations.forEach(([chunkIndex, citationInfo]) => {
+                sortedCitations.forEach(([, citationInfo]) => {
                     const listItem = document.createElement('li');
                     const link = document.createElement('a');
-                    link.href = htmlUtils.safeUrl(citationInfo.uri);
+                    link.href = citationInfo.uri;
                     link.textContent = `[${citationInfo.displayIndex}] ${citationInfo.title}`;
                     link.title = citationInfo.title;
                     link.target = '_blank';
@@ -4854,11 +5121,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     citationList.appendChild(listItem);
                 });
                 if (sortedCitations.length === 0) {
-                     messageData.groundingMetadata.groundingChunks.forEach((chunk, idx) => {
-                         if (chunk?.web?.uri) {
+                     chunks.forEach((chunk, idx) => {
+                         const uri = typeof chunk?.web?.uri === 'string' && chunk.web.uri.trim() && htmlUtils.safeUrl(chunk.web.uri);
+                         if (uri) {
                              const listItem = document.createElement('li');
                              const link = document.createElement('a');
-                             link.href = htmlUtils.safeUrl(chunk.web.uri);
+                             link.href = uri;
                              link.textContent = chunk.web.title || `ソース ${idx + 1}`;
                              link.title = chunk.web.title || 'タイトル不明';
                              link.target = '_blank';
@@ -4873,15 +5141,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                     detailsHasContent = true;
                 }
             }
-            if (messageData.groundingMetadata.webSearchQueries && messageData.groundingMetadata.webSearchQueries.length > 0) {
-                if (detailsHasContent) {
-                    const separator = document.createElement('hr');
-                    separator.style.marginTop = '10px';
-                    separator.style.marginBottom = '8px';
-                    separator.style.border = 'none';
-                    separator.style.borderTop = '1px dashed var(--border-tertiary)'; 
-                    details.appendChild(separator);
-                }
+            const rawQueries = messageData.groundingMetadata.webSearchQueries;
+            const queries = Array.isArray(rawQueries) ? rawQueries.filter(query => typeof query === 'string' && query.trim()) : [];
+            if (queries.length) {
                 const queryHeader = document.createElement('div');
                 queryHeader.textContent = '検索に使用されたクエリ:';
                 queryHeader.style.fontWeight = '500';
@@ -4897,7 +5159,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 queryList.style.margin = '0';
                 queryList.style.fontSize = '11px';
                 queryList.style.color = 'var(--text-secondary)';
-                messageData.groundingMetadata.webSearchQueries.forEach(query => {
+                queries.forEach(query => {
                     const queryItem = document.createElement('li');
                     queryItem.textContent = `• ${query}`;
                     queryItem.style.marginBottom = '3px';
@@ -4907,38 +5169,36 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 detailsHasContent = true;
             }
             if (detailsHasContent) {
-                contentDiv.appendChild(details);
+                messageInfo.appendChild(details);
             }
         } catch (e) {
             console.error(`引用元/検索クエリ表示の生成中にエラーが発生しました (index: ${index}):`, e);
         }
     }
     
-    if (role === 'model' && messageData && messageData.executedFunctions && messageData.executedFunctions.length > 0) {
+    const executedFunctions = role === 'model' && !isStreamingPlaceholder && Array.isArray(messageData.executedFunctions)
+        ? [...new Set(messageData.executedFunctions.filter(name => typeof name === 'string' && name.trim()))] : [];
+    if (executedFunctions.length) {
         const details = document.createElement('details');
         details.classList.add('function-call-details');
-        const uniqueFunctions = [...new Set(messageData.executedFunctions)];
+        details.open = true;
         const summary = document.createElement('summary');
-        summary.innerHTML = `⚙️ ツール使用 (${uniqueFunctions.length}件)`;
+        summary.textContent = `ツール使用 (${executedFunctions.length}件)`;
         details.appendChild(summary);
         const list = document.createElement('ul');
         list.classList.add('function-call-list');
-        uniqueFunctions.forEach(funcName => {
+        executedFunctions.forEach(funcName => {
             const listItem = document.createElement('li');
             listItem.textContent = funcName;
             list.appendChild(listItem);
         });
         details.appendChild(list);
-        if (contentDiv.innerHTML.trim() !== '') {
-            contentDiv.appendChild(details);
-        } else {
-            messageDiv.appendChild(details);
-        }
+        messageInfo.appendChild(details);
     }
 
-    if (role === 'model' && messageData && messageData.search_web_results && messageData.search_web_results.length > 0) {
+    if (role === 'model' && Array.isArray(messageData.search_web_results) && messageData.search_web_results.length > 0) {
         const details = document.createElement('details');
-        details.classList.add('function-call-details');
+        details.classList.add('function-call-details', 'search-results-details');
         const summary = document.createElement('summary');
         summary.innerHTML = `🌐 Web検索結果 (${messageData.search_web_results.length}件)`;
         details.appendChild(summary);
@@ -4956,11 +5216,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             list.appendChild(listItem);
         });
         details.appendChild(list);
-        if (contentDiv.innerHTML.trim() !== '') {
-            contentDiv.appendChild(details);
-        } else {
-            messageDiv.appendChild(details);
-        }
+        messageDiv.appendChild(details);
     }
 
     if (role === 'model' && messageData && messageData.generated_videos && messageData.generated_videos.length > 0) {
@@ -5000,8 +5256,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     const editArea = document.createElement('div');
     if (role === 'model' && !isStreamingPlaceholder) {
-        const references = window.DocumentRag?.render(messageData);
-        if (references) messageDiv.appendChild(references);
+        const rag = window.DocumentRag?.render(messageData);
+        if (rag?.references) messageInfo.prepend(rag.references);
+        if (rag?.warning) messageDiv.appendChild(rag.warning);
     }
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
@@ -5190,6 +5447,39 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         
         if (actionMetaDiv.hasChildNodes()) {
             actionsDiv.appendChild(actionMetaDiv);
+        }
+        if (messageInfo.hasChildNodes()) {
+            messageInfo.id = 'message-info-' + index;
+            messageInfo.hidden = !this.openMessageInfo.has(messageData);
+            const infoButton = document.createElement('button');
+            infoButton.type = 'button';
+            infoButton.classList.add('tm-message-info-btn');
+            infoButton.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">info</span>';
+            infoButton.title = 'メッセージ情報';
+            infoButton.setAttribute('aria-label', 'メッセージ情報');
+            infoButton.setAttribute('aria-controls', messageInfo.id);
+            infoButton.setAttribute('aria-expanded', String(!messageInfo.hidden));
+            infoButton.onclick = () => {
+                const anchor = this.captureElementScrollAnchor(infoButton);
+                messageInfo.hidden = !messageInfo.hidden;
+                infoButton.setAttribute('aria-expanded', String(!messageInfo.hidden));
+                const owner = state.currentMessages[messageDiv.dataset.index];
+                if (messageInfo.hidden) {
+                    this.openMessageInfo.delete(owner);
+                    this.restoreElementScrollAnchor(anchor);
+                } else {
+                    if (owner) this.openMessageInfo.add(owner);
+                    const scroller = this.getChatScrollContainer();
+                    if (scroller && messageInfo.offsetHeight > scroller.clientHeight / 2) {
+                        messageInfo.scrollIntoView({ block: 'start' });
+                    } else {
+                        this.keepMessageAboveComposer(messageDiv, 56);
+                    }
+                }
+                appLogic.scheduleScrollToBottomButtonUpdate();
+            };
+            actionButtonsDiv.appendChild(infoButton);
+            messageDiv.appendChild(messageInfo);
         }
         if (actionButtonsDiv.hasChildNodes()) {
             actionsDiv.appendChild(actionButtonsDiv);
@@ -5508,8 +5798,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     syncChatWorkspaceInteractivity() {
         const overlay = chatSidebarUiState.mode === 'overlay' && chatSidebarUiState.isOpen;
         const library = elements.documentLibraryWorkspace;
-        elements.chatWorkspace.inert = overlay || !library.hidden;
+        const project = elements.projectWorkspace;
+        elements.chatWorkspace.inert = overlay || !library.hidden || !project.hidden;
         library.inert = overlay;
+        project.inert = overlay;
+        elements.chatWorkspace.classList.toggle('project-covered', !project.hidden);
     },
 
     applyChatSidebarState({ restoreFocus = false } = {}) {
@@ -5528,11 +5821,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.gotoHistoryBtn.setAttribute('aria-label', label);
         elements.gotoHistoryBtn.setAttribute('aria-expanded', String(isOpen));
         elements.gotoHistoryBtn.title = label;
-        if (restoreFocus && !isOpen) {
-            const trigger = elements.documentLibraryWorkspace.hidden ? elements.gotoHistoryBtn :
-                document.getElementById('document-library-back');
-            trigger.focus({ preventScroll: true });
-        }
+        if (restoreFocus && !isOpen) elements.gotoHistoryBtn.focus({ preventScroll: true });
     },
 
     updateChatSidebarResponsiveState() {
@@ -5552,6 +5841,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             chatSidebarUiState.isOpen = false;
         }
         this.applyChatSidebarState();
+        window.ProjectUI?.positionSidebarMenu();
         if (chatSidebarUiState.isOpen && !chatSidebarUiState.hasLoadedAll) {
             void this.renderChatSidebar({ refreshRecent: true });
         } else if (chatSidebarUiState.isOpen) {
@@ -5583,7 +5873,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     // Native modal dialogs live in the top layer (viewport coordinates); panels
     // inside the workspace use local coordinates and need no sidebar offsets.
     updateChatWorkspaceLayout() {
-        const workspace = elements.chatWorkspace;
+        const workspace = elements.projectWorkspace?.hidden === false ? elements.projectWorkspace : elements.chatWorkspace;
         if (!workspace) return;
         if (!this.chatWorkspaceLayoutObserver) {
             const schedule = () => {
@@ -5594,7 +5884,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 });
             };
             this.chatWorkspaceLayoutObserver = new ResizeObserver(schedule);
-            [workspace, workspace.querySelector('.app-header'), workspace.querySelector('footer')]
+            [elements.chatWorkspace, elements.projectWorkspace, workspace.querySelector('.app-header'), workspace.querySelector('footer')]
                 .filter(Boolean).forEach(node => this.chatWorkspaceLayoutObserver.observe(node));
             window.addEventListener('resize', schedule, { passive: true });
             window.visualViewport?.addEventListener('resize', schedule, { passive: true });
@@ -5640,9 +5930,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 ? COMPOSER_TEXTAREA_MAX_HEIGHT
                 : Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, Math.min(COMPOSER_TEXTAREA_MAX_HEIGHT,
                     Math.floor(bottom - contentTop - bottomGap - controlsHeight - 64)));
+            workspace.style.setProperty('--composer-textarea-max-height', `${maxHeight}px`);
             if (this.composerTextareaMaxHeight !== maxHeight) {
                 this.composerTextareaMaxHeight = maxHeight;
-                workspace.style.setProperty('--composer-textarea-max-height', `${maxHeight}px`);
                 this.scheduleComposerTextareaResize(true);
             }
         }
@@ -5662,6 +5952,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 
     closeChatSidebar({ restoreFocus = false } = {}) {
+        window.ProjectUI?.closeMenu();
         if (appLogic.swipeGesture?.sidebarDrag) appLogic.resetSwipeState();
         if (!chatSidebarUiState.isOpen) {
             this.applyChatSidebarState();
@@ -5678,40 +5969,45 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     syncChatSidebarCurrentSelection() {
         const libraryVisible = !elements.documentLibraryWorkspace.hidden;
+        const projectVisible = !elements.projectWorkspace.hidden;
         if (libraryVisible) elements.documentLibraryOpen.setAttribute('aria-current', 'page');
         else elements.documentLibraryOpen.removeAttribute('aria-current');
-        elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item').forEach(item => {
-            const isCurrent = !libraryVisible && String(item.dataset.chatId) === String(state.currentChatId ?? '');
+        if (!libraryVisible && !projectVisible) window.ProjectUI?.revealCurrentChat(chatSidebarUiState.memberships);
+        elements.chatHistorySidebar?.querySelectorAll('.chat-sidebar-item[data-chat-id]').forEach(item => {
+            const isCurrent = !libraryVisible && !projectVisible && String(item.dataset.chatId) === String(state.currentChatId ?? '');
             if (isCurrent) item.setAttribute('aria-current', 'page');
             else item.removeAttribute('aria-current');
         });
     },
 
     focusChatSidebarItem(chatId, action = 'menu') {
-        const item = [...(elements.chatSidebarList?.querySelectorAll('.chat-sidebar-item') || [])]
-            .find(candidate => String(candidate.dataset.chatId) === String(chatId));
+        const item = [...elements.chatHistorySidebar.querySelectorAll('.chat-sidebar-item[data-chat-id]')]
+            .find(candidate => String(candidate.dataset.chatId) === String(chatId) && candidate.getClientRects().length);
         item?.querySelector(`[data-sidebar-action="${action}"]`)?.focus();
     },
 
-    syncChatSidebarTitleGeneration(chatId, openButton = elements.chatSidebarList?.querySelector(
-        `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`
-    )) {
-        if (!openButton) return;
+    syncChatSidebarTitleGeneration(chatId, openButton) {
+        if (!openButton) {
+            const selector = `.chat-sidebar-item-open[data-chat-id="${CSS.escape(String(chatId))}"]`;
+            elements.chatScreen.querySelectorAll(selector).forEach(button => this.syncChatSidebarTitleGeneration(chatId, button));
+            return;
+        }
         const generatingTitle = state.chatTitleGenerations.has(String(chatId));
         const generatingAnswer = Boolean(appLogic.getSendJobV136(chatId));
-        const dot = openButton.querySelector('.chat-sidebar-title-dot');
+        const dot = openButton.parentElement.querySelector('.chat-sidebar-title-dot');
         const title = openButton.querySelector('.chat-sidebar-item-title').title;
         dot.hidden = !(generatingTitle || generatingAnswer);
         dot.title = generatingAnswer ? '応答生成中' : 'タイトル生成中';
-        openButton.setAttribute('aria-label', `「${title}」を開く${dot.hidden ? '' : `（${dot.title}）`}`);
+        const project = openButton.dataset.projectName;
+        openButton.setAttribute('aria-label', `「${title}」を開く${project ? `（${project}）` : ''}${dot.hidden ? '' : `（${dot.title}）`}`);
     },
 
-    createChatSidebarItem(model, { isSearch = false } = {}) {
+    createChatSidebarItem(model, { isSearch = false, projectName, inlineStatus = false } = {}) {
         const item = document.createElement('div');
         item.className = 'chat-sidebar-item';
         item.dataset.chatId = model.id;
         item.setAttribute('role', 'listitem');
-        if (model.isCurrent && elements.documentLibraryWorkspace.hidden) item.setAttribute('aria-current', 'page');
+        if (model.isCurrent && elements.documentLibraryWorkspace.hidden && elements.projectWorkspace.hidden) item.setAttribute('aria-current', 'page');
 
         const openButton = document.createElement('button');
         openButton.type = 'button';
@@ -5735,9 +6031,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const dot = document.createElement('span');
         dot.className = 'generation-status-dot chat-sidebar-title-dot';
         dot.setAttribute('aria-hidden', 'true');
-        titleLine.append(title, dot);
+        titleLine.append(title);
+        if (inlineStatus) titleLine.append(dot);
         openButton.appendChild(titleLine);
-        this.syncChatSidebarTitleGeneration(model.id, openButton);
+        if (projectName) {
+            const project = document.createElement('span');
+            project.className = 'chat-sidebar-item-snippet';
+            project.textContent = projectName;
+            project.title = projectName;
+            openButton.dataset.projectName = projectName;
+            openButton.append(project);
+        }
         if (isSearch) {
             if (model.snippet) {
                 const snippet = document.createElement('span');
@@ -5758,6 +6062,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menuButton.setAttribute('aria-controls', 'history-item-menu');
         menuButton.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">more_vert</span>';
         item.append(openButton, menuButton);
+        if (!inlineStatus) item.append(dot);
+        this.syncChatSidebarTitleGeneration(model.id, openButton);
         return item;
     },
 
@@ -5765,48 +6071,56 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!elements.chatSidebarList || !chatSidebarUiState.isOpen) return;
         this.closeHistoryItemMenu();
         const query = this.normalizeHistoryText(chatSidebarUiState.query);
+        const { projects, memberships } = chatSidebarUiState;
+        const showProjects = !query;
+        const projectNames = new Map(projects.map(project => [project.id, project.name]));
         const sortOrder = HISTORY_SORT_OPTIONS.includes(state.settings.historySortOrder) ? state.settings.historySortOrder : 'updatedAt';
         const allModels = chatSidebarUiState.allChats
             .map(chat => this.createHistoryDisplayModel(chat, query, sortOrder))
             .filter(Boolean);
         const pinnedModels = this.sortPinnedHistoryDisplayModels(allModels.filter(model => model.isPinned), sortOrder);
-        const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model => !model.isPinned), sortOrder);
-        const models = [...pinnedModels, ...unpinnedModels];
+        const unpinnedModels = this.sortHistoryDisplayModels(allModels.filter(model =>
+            !model.isPinned && (!showProjects || !memberships.has(model.id))), showProjects ? 'updatedAt' : sortOrder);
         chatSidebarUiState.recordsById = new Map(chatSidebarUiState.allChats.map(chat => [String(chat.id), chat]));
-        elements.chatSidebarList.replaceChildren();
-        elements.chatSidebarStatus.textContent = '';
-
-        if (models.length === 0) {
-            elements.chatSidebarStatus.textContent = query ? '一致するチャットはありません' : 'チャット履歴はありません';
-        } else if (query || sortOrder === 'title') {
-            const fragment = document.createDocumentFragment();
-            models.forEach(model => fragment.appendChild(this.createChatSidebarItem(model, { isSearch: Boolean(query) })));
-            elements.chatSidebarList.appendChild(fragment);
-        } else {
-            const labels = {
-                today: '今日', yesterday: '昨日', last7: '過去7日', last30: '過去30日', older: 'それ以前', unknown: '日時不明'
-            };
-            const appendGroup = (label, groupModels) => {
-                if (groupModels.length === 0) return;
-                const group = document.createElement('section');
-                group.className = 'chat-sidebar-group';
-                group.setAttribute('role', 'group');
-                const heading = document.createElement('h2');
-                heading.className = 'chat-sidebar-group-title';
-                heading.textContent = label;
-                group.setAttribute('aria-label', label);
-                group.appendChild(heading);
-                groupModels.forEach(model => group.appendChild(this.createChatSidebarItem(model)));
-                elements.chatSidebarList.appendChild(group);
-            };
-            appendGroup('ピン留め', pinnedModels);
-            ['today', 'yesterday', 'last7', 'last30', 'older', 'unknown'].forEach(groupKey => {
-                appendGroup(labels[groupKey], unpinnedModels.filter(model => model.groupKey === groupKey));
-            });
-        }
+        window.ProjectUI?.renderSidebar(projects, memberships, chatSidebarUiState.allChats, showProjects);
+        const createItem = model => this.createChatSidebarItem(model, {
+            isSearch: Boolean(query), projectName: query || model.isPinned ? projectNames.get(memberships.get(model.id)) : undefined
+        });
+        const pinned = document.getElementById('chat-sidebar-pinned');
+        pinned.hidden = !showProjects || !pinnedModels.length;
+        document.getElementById('chat-sidebar-pinned-list').replaceChildren(...(showProjects ? pinnedModels.map(createItem) : []));
+        const recent = document.getElementById('chat-sidebar-recent');
+        recent.firstElementChild.hidden = !showProjects;
+        const listLabel = showProjects ? 'chat-sidebar-recent-title' : 'chat-sidebar-history-title';
+        recent.setAttribute('aria-labelledby', listLabel);
+        elements.chatSidebarList.setAttribute('aria-labelledby', listLabel);
+        this.syncChatSidebarGroups(!showProjects);
+        const models = showProjects ? unpinnedModels : [...pinnedModels, ...unpinnedModels];
+        const fragment = document.createDocumentFragment();
+        for (const model of models) fragment.append(createItem(model));
+        elements.chatSidebarList.replaceChildren(fragment);
+        elements.chatSidebarStatus.textContent = models.length ? ''
+            : query ? '一致するチャットはありません' : '未所属のチャットはありません';
         elements.chatSidebarLive.textContent = query
             ? `検索結果 ${models.length}件`
             : `ピン留め ${pinnedModels.length}件、チャット ${unpinnedModels.length}件`;
+    },
+
+    syncChatSidebarGroups(searching = Boolean(this.normalizeHistoryText(chatSidebarUiState.query))) {
+        if (!chatSidebarUiState.collapsedGroups) {
+            try {
+                const stored = JSON.parse(localStorage.getItem(collapsedSidebarGroupsKey) || '[]');
+                chatSidebarUiState.collapsedGroups = new Set(Array.isArray(stored) ? stored : []);
+            } catch {
+                chatSidebarUiState.collapsedGroups = new Set();
+            }
+        }
+        for (const button of elements.chatSidebarScroll.querySelectorAll('.chat-sidebar-group-title')) {
+            const id = button.getAttribute('aria-controls');
+            const expanded = searching || !chatSidebarUiState.collapsedGroups.has(id);
+            button.setAttribute('aria-expanded', String(expanded));
+            document.getElementById(id).hidden = !expanded;
+        }
     },
 
     async renderChatSidebar({ refreshRecent = false, invalidateSearch = false } = {}) {
@@ -5819,9 +6133,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.chatSidebarStatus.textContent = '読み込み中…';
         try {
             if (refreshRecent || invalidateSearch || !chatSidebarUiState.hasLoadedAll) {
-                const allChats = await dbUtils.getAllChats('updatedAt');
+                const [allChats, projects, memberships] = await dbUtils.getProjectSidebarSnapshot();
                 if (generation !== chatSidebarUiState.renderGeneration) return;
-                chatSidebarUiState.allChats = Array.isArray(allChats) ? allChats : [];
+                chatSidebarUiState.allChats = allChats;
+                chatSidebarUiState.projects = projects;
+                chatSidebarUiState.memberships = new Map(memberships.map(link => [link.chatId, link.projectId]));
                 chatSidebarUiState.hasLoadedAll = true;
             }
             if (generation !== chatSidebarUiState.renderGeneration) return;
@@ -5848,6 +6164,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const anchor = context?.triggerElement;
         anchor?.closest('.history-item, .chat-sidebar-item')?.classList.remove('menu-active');
         if (anchor?.isConnected) anchor.setAttribute('aria-expanded', 'false');
+        this.closeHistoryProjectMenu();
         elements.historyItemMenu?.classList.add('hidden');
         if (elements.historyItemMenu) {
             elements.historyItemMenu.style.left = '';
@@ -5859,12 +6176,100 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     positionHistoryItemMenu() {
         const menu = elements.historyItemMenu;
-        const anchor = historyUiState.menuContext?.triggerElement;
-        if (!menu || !anchor?.isConnected || menu.classList.contains('hidden')) return;
-        this.positionRowMenu(menu, anchor);
+        const context = historyUiState.menuContext;
+        const anchor = context?.triggerElement;
+        if (!menu || !context || menu.classList.contains('hidden')) return;
+        if (!anchor.isConnected || !anchor.getClientRects().length) {
+            this.closeHistoryItemMenu();
+            return;
+        }
+        if (context.source === 'sidebar') {
+            if (!this.positionSidebarRowMenu(menu, anchor)) {
+                this.closeHistoryItemMenu();
+                return;
+            }
+        } else {
+            this.positionRowMenu(menu, anchor);
+        }
+        if (elements.historyProjectMenu && !elements.historyProjectMenu.classList.contains('hidden')) this.positionHistoryProjectMenu();
     },
 
-    positionRowMenu(menu, anchor, container = null) {
+    closeHistoryProjectMenu({ restoreFocus = false } = {}) {
+        historyUiState.projectMenuRequest = null;
+        const menu = elements.historyProjectMenu;
+        if (!menu || menu.classList.contains('hidden')) return;
+        const anchor = document.getElementById('history-project-move');
+        menu.classList.add('hidden');
+        menu.replaceChildren();
+        anchor.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) anchor.focus({ preventScroll: true });
+    },
+
+    positionHistoryProjectMenu() {
+        const anchor = document.getElementById('history-project-move');
+        const parent = elements.historyItemMenu.getBoundingClientRect();
+        const row = anchor.getBoundingClientRect();
+        if (row.bottom <= parent.top || row.top >= parent.bottom) {
+            this.closeHistoryProjectMenu();
+            return;
+        }
+        this.positionRowMenu(elements.historyProjectMenu, anchor, null, {
+            besideAnchor: true, besideBounds: parent
+        });
+    },
+
+    async openHistoryProjectMenu(context, { hover = false } = {}) {
+        const menu = elements.historyProjectMenu;
+        if (!context || historyUiState.menuActionPending || !menu.classList.contains('hidden') ||
+            (hover && historyUiState.projectMenuRequest)) return;
+        const anchor = document.getElementById('history-project-move');
+        const request = historyUiState.projectMenuRequest = { hover };
+        try {
+            const projects = await dbUtils.listProjects();
+            if (historyUiState.menuContext !== context || historyUiState.projectMenuRequest !== request) return;
+            const available = projects.filter(project => project.id !== context.projectId);
+            const labels = window.ProjectUI.projectLabels(available);
+            const choices = [['new', '新しいプロジェクト'], ...available.map(project => [project.id, labels.get(project.id)])];
+            menu.replaceChildren(...choices.map(([id, title]) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.setAttribute('role', 'menuitem');
+                button.dataset.projectDestination = id;
+                button.title = title;
+                const icon = document.createElement('span');
+                icon.className = 'material-symbols-outlined';
+                icon.setAttribute('aria-hidden', 'true');
+                icon.textContent = id === 'new' ? 'create_new_folder' : 'folder';
+                const label = document.createElement('span');
+                label.textContent = title;
+                button.append(icon, label);
+                return button;
+            }));
+            anchor.setAttribute('aria-expanded', 'true');
+            menu.classList.remove('hidden');
+            this.positionHistoryProjectMenu();
+            menu.scrollTop = 0;
+            if (!hover) menu.firstElementChild?.focus({ preventScroll: true });
+        } catch {
+            if (historyUiState.menuContext !== context || historyUiState.projectMenuRequest !== request) return;
+            this.closeHistoryItemMenu({ restoreFocus: true });
+            await this.showCustomAlert('プロジェクトの一覧を読み込めませんでした。');
+        }
+    },
+
+    positionSidebarRowMenu(menu, anchor) {
+        if (!anchor.isConnected || elements.chatHistorySidebar.inert || !anchor.getClientRects().length) return false;
+        const scroller = anchor.closest('.chat-sidebar-scroll');
+        if (scroller) {
+            const row = anchor.getBoundingClientRect();
+            const bounds = scroller.getBoundingClientRect();
+            if (row.bottom <= bounds.top || row.top >= bounds.bottom) return false;
+        }
+        this.positionRowMenu(menu, anchor, null, { besideAnchor: true });
+        return true;
+    },
+
+    positionRowMenu(menu, anchor, container = null, { besideAnchor = false, besideBounds = null } = {}) {
         const viewportMargin = 8;
         const gap = 4;
         const anchorRect = anchor.getBoundingClientRect();
@@ -5879,15 +6284,17 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         menu.style.setProperty('--row-menu-width', `${Math.max(0, rightEdge - leftEdge)}px`);
         menu.style.setProperty('--row-menu-height', `${Math.max(0, bottomEdge - topEdge)}px`);
         const menuRect = menu.getBoundingClientRect();
-        const left = Math.min(
-            Math.max(leftEdge, anchorRect.right - menuRect.width),
-            Math.max(leftEdge, rightEdge - menuRect.width)
-        );
+        const besideLeft = (besideBounds?.right ?? anchorRect.right) + (besideBounds ? -gap : gap);
+        const leftOfMenu = (besideBounds?.left ?? 0) - menuRect.width + gap;
+        const besideRight = besideAnchor && besideLeft + menuRect.width <= rightEdge;
+        const besideLeftFits = besideBounds && leftOfMenu >= leftEdge;
+        const beside = besideRight || besideLeftFits;
+        const left = besideRight ? besideLeft : besideLeftFits ? leftOfMenu : Math.min(
+            Math.max(leftEdge, (besideBounds?.right ?? anchorRect.right) - menuRect.width), Math.max(leftEdge, rightEdge - menuRect.width));
         const belowTop = anchorRect.bottom + gap;
         const aboveTop = anchorRect.top - menuRect.height - gap;
-        const top = belowTop + menuRect.height <= bottomEdge
-            ? belowTop
-            : Math.max(topEdge, aboveTop);
+        const top = beside || besideBounds ? Math.max(topEdge, Math.min(anchorRect.top, bottomEdge - menuRect.height))
+            : belowTop + menuRect.height <= bottomEdge ? belowTop : Math.max(topEdge, aboveTop);
         menu.style.left = `${Math.round(left - (bounds?.left ?? 0))}px`;
         menu.style.top = `${Math.round(top - (bounds?.top ?? 0))}px`;
     },
@@ -5934,13 +6341,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         });
     },
 
-    showSidebarMenu(anchor, record = null) {
-        if (!anchor.isConnected || !chatSidebarUiState.isOpen || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
+    showSidebarMenu(anchor, record = null, source = 'sidebar', projectId = record ? chatSidebarUiState.memberships.get(record.id) ?? null : null) {
+        if (!anchor.isConnected || (source === 'sidebar' && !chatSidebarUiState.isOpen) || state.currentScreen !== 'chat' || historyUiState.menuActionPending) return;
+        window.ProjectUI?.closeMenu();
         const menu = elements.historyItemMenu;
         const importOnly = !record;
-        historyUiState.menuContext = { chatId: record?.id, source: 'sidebar', triggerElement: anchor, importOnly };
+        const identity = record && { createdAt: record.createdAt, recordGenerationId: record.recordGenerationId };
+        historyUiState.menuContext = { chatId: record?.id, source, triggerElement: anchor, importOnly, identity, projectId };
         for (const item of menu.querySelectorAll('[data-history-menu-action]')) {
-            const hidden = (item.dataset.historyMenuAction === 'import') !== importOnly;
+            const action = item.dataset.historyMenuAction;
+            const hidden = (action === 'import') !== importOnly || (action === 'project-remove' && !projectId);
             item.hidden = hidden;
             item.classList.toggle('hidden', hidden);
         }
@@ -5960,10 +6370,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     focusHistoryActionTarget(context, { preferMenu = true } = {}) {
         if (!context) return;
-        const item = [...elements.chatSidebarList.querySelectorAll('.chat-sidebar-item')]
-            .find(candidate => String(candidate.dataset.chatId) === String(context.chatId));
+        const surface = context.source === 'project' ? elements.projectWorkspace : elements.chatHistorySidebar;
+        const item = [...surface.querySelectorAll('.chat-sidebar-item[data-chat-id]')]
+            .find(candidate => String(candidate.dataset.chatId) === String(context.chatId) && candidate.getClientRects().length);
         const target = item?.querySelector(preferMenu ? '[data-sidebar-action="menu"]' : '[data-sidebar-action="open"]') ||
-            (chatSidebarUiState.isOpen ? elements.chatSidebarSearchToggle : elements.gotoHistoryBtn);
+            (context.source === 'project' && !surface.hidden ? document.getElementById('project-title') :
+                chatSidebarUiState.isOpen ? elements.chatSidebarSearchToggle : elements.gotoHistoryBtn);
         target.focus({ preventScroll: true });
     },
 
@@ -5985,6 +6397,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         if (!record) return { ok: false, notFound: true, reason: 'record-not-found' };
         const title = this.normalizeChatTitleText(record.title, `履歴 ${chatId}`) || `履歴 ${chatId}`;
 
+        if (action === 'project' || action === 'project-remove') {
+            return window.ProjectUI.moveChat(record, context.projectId, context.destination);
+        }
         if (action === 'pin') {
             return chatHistoryActions.setPinned(chatId, !normalizeChatPinState(record).isPinned);
         }
@@ -6047,14 +6462,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 if (id === null) continue;
                 const record = byId.get(model.id);
                 view.records.set(String(id), { id, createdAt: record.createdAt, recordGenerationId: record.recordGenerationId });
-                const item = document.createElement('li');
-                const label = document.createElement('label');
-                const check = document.createElement('input');
-                check.type = 'checkbox';
-                check.value = String(id);
-                label.append(check, document.createTextNode(model.title));
-                item.append(label);
-                fragment.append(item);
+                fragment.append(this.createChecklistItem(id, model.title));
             }
             elements.historyDeleteList.append(fragment);
             elements.historyDeleteStatus.textContent = view.records.size ? '' : 'チャット履歴はありません。';
@@ -6064,6 +6472,21 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         } finally {
             if (this.historyDeleteView === view && dialog.open) this.updateHistoryDeleteControls();
         }
+    },
+
+    createChecklistItem(id, text, { checked = false, onChange } = {}) {
+        const item = document.createElement('li');
+        const label = document.createElement('label');
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.value = String(id);
+        check.checked = checked;
+        if (onChange) check.addEventListener('change', () => onChange(check.checked));
+        const name = document.createElement('span');
+        name.textContent = text;
+        label.append(check, name);
+        item.append(label);
+        return item;
     },
 
     updateHistoryDeleteControls() {
@@ -6794,6 +7217,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           if (screenName !== 'settings' && elements.historyDeleteDialog.open) elements.historyDeleteDialog.close();
 
           if (screenName !== 'chat') {
+            window.ProjectUI?.close({ fromHistory: true });
             window.DocumentLibraryUI?.close();
             appLogic.invalidateSystemPromptOpen();
             this.closeHistoryItemMenu();
@@ -6894,11 +7318,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     updateComposerSendButton() {
         if (state.isSending) return;
         elements.sendButton.disabled = Boolean(appLogic.attachmentOperation) ||
+            (!elements.projectWorkspace.hidden && !window.ProjectUI?.isReady()) ||
             (elements.userInput.value.trim() === '' && state.pendingAttachments.length === 0);
     },
 
     getComposerElement() {
-        return document.querySelector('#chat-screen .chat-workspace > footer.chat-input-area');
+        return elements.userInput?.closest('.chat-input-area');
     },
 
     updateComposerHeight() {
@@ -7470,7 +7895,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     },
 
-    keepMessageAboveComposer(messageElement) {
+    keepMessageAboveComposer(messageElement, bottomClearance = 14) {
         if (!messageElement?.isConnected) return;
 
         const main = document.querySelector('#chat-screen .main-content');
@@ -7488,7 +7913,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const safeBottom = Math.min(
             mainRect?.bottom || viewportHeight,
             composerRect?.top || viewportHeight
-        ) - 14;
+        ) - bottomClearance;
         const delta = visualBottom - safeBottom;
 
         if (delta <= 1) return;
@@ -9739,7 +10164,10 @@ function updateCurrentSystemPrompt() {
                 }
                 if (type === 'CHAT_LIST_CHANGED') {
                     if (state.db && event.data.database === state.db.name) {
-                        void chatListChangeController.notify({ type: 'external' }, { broadcast: false });
+                        const change = event.data.change;
+                        void chatListChangeController.notify({
+                            type: change === 'library' ? 'library' : 'external', replaced: change === 'restore'
+                        }, { broadcast: false });
                     }
                     return;
                 }
@@ -12559,7 +12987,21 @@ const appLogic = {
         if (chatId !== null && chatId !== undefined) {
             return `chat:${String(chatId)}`;
         }
-        return `new:${String(profileId || state.activeProfile?.id || 'default')}`;
+        return this.getNewInputDraftContextKey(dbUtils.projectDrafts?.get(state.currentMessages), profileId);
+    },
+
+    getNewInputDraftContextKey(projectId, profileId = state.activeProfileId) {
+        const profile = String(profileId || state.activeProfile?.id || 'default');
+        return projectId ? `new:project:${projectId}:${profile}` : `new:${profile}`;
+    },
+
+    getChatDraftSettingsKey(key, messages = state.currentMessages) {
+        const projectId = dbUtils.projectDrafts?.get(messages);
+        return projectId ? this.getProjectDraftSettingsKey(key, projectId) : key;
+    },
+
+    getProjectDraftSettingsKey(key, projectId) {
+        return `${key}:${this.getNewInputDraftContextKey(projectId)}`;
     },
 
     getInputDraftStorageKey(contextKey) {
@@ -12727,6 +13169,7 @@ const appLogic = {
 
     prepareForServiceWorkerUpdate() {
         this.flushInputDraft();
+        if (window.ProjectUI?.prepareForUpdate() === false) return false;
         const text = elements.userInput?.value || '';
         // Quota/storage failures and over-limit drafts must also defer reload.
         return !text || this.loadInputDraftLocal(this.getInputDraftContextKey())?.text === text;
@@ -13047,11 +13490,14 @@ const appLogic = {
     async switchProfile(newProfileId) {
         newProfileId = Number(newProfileId);
         if (!newProfileId || newProfileId === state.activeProfileId) return;
+        if (window.ProjectUI?.isSavingFirstMessage()) return false;
+        if (!elements.projectWorkspace.hidden && this.attachmentOperation) await this.attachmentOperation.finished;
         const operation = this.beginChatParameterOperation();
         if (!operation) return false;
         try {
             if (!await this.flushChatParameterEdits(operation)) return false;
             this.flushInputDraft();
+            window.ProjectUI?.saveProfileDraft();
             const save = this.chatParameterSaveRequest({ systemPrompt: state.currentSystemPrompt,
                 generationParameters: this.getChatGenerationParameters() });
             save.profileSwitch = newProfileId;
@@ -13065,7 +13511,7 @@ const appLogic = {
             this.applyActiveProfile();
             this.applyChatParameterSnapshot(snapshot, revision);
             uiUtils.updateProfileSwitcherUI();
-            this.scheduleInputDraftRestore(80, true);
+            if (!window.ProjectUI?.restoreProfileDraft()) this.scheduleInputDraftRestore(80, true);
             return true;
         } catch (error) {
             if (this.ownsChatParameterOperation(operation)) await uiUtils.showCustomAlert(error.message || 'プロファイルを切り替えられませんでした。');
@@ -14269,15 +14715,16 @@ const appLogic = {
      * 同期関連の初期化処理
      */
     async initializeSyncState() {
-        const [lastSyncIdSetting, isDirtySetting, lastErrorSetting, library] = await Promise.all([
-            dbUtils.getSetting('lastSyncId'),
+        const [projects, isDirtySetting, lastErrorSetting, library] = await Promise.all([
+            dbUtils.getProjectSyncContext(),
             dbUtils.getSetting('syncIsDirty'),
             dbUtils.getSetting('syncLastError'),
             dbUtils.getDocumentLibrarySyncState()
         ]);
 
-        state.sync.lastSyncId = lastSyncIdSetting ? lastSyncIdSetting.value : null;
-        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision);
+        state.sync.lastSyncId = projects.lastSyncId;
+        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision ||
+            projects.revision !== projects.syncedRevision);
         state.sync.lastError = lastErrorSetting ? lastErrorSetting.value : null;
         
         console.log(`[Sync] 同期状態を初期化しました。lastSyncId: ${state.sync.lastSyncId}, isDirty: ${state.sync.isDirty}, lastError:`, state.sync.lastError);
@@ -14373,18 +14820,29 @@ const appLogic = {
 
 
 
-    async recordDropboxPush(metadata, librarySync) {
+    async recordDropboxPush(metadata, librarySync, projectSync) {
         const db = await dbUtils.openDB();
         return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readwrite', async tx => {
             const settings = tx.objectStore(SETTINGS_STORE);
-            const current = DocumentLibrary.syncState(await DocumentLibrary.request(settings.get(DocumentLibrary.syncKey)));
-            if (current.syncedRevision !== librarySync.syncedRevision) {
-                // Another tab has already recorded a later library state.
+            const [library, projects, lastSyncId] = await Promise.all(
+                [DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId'].map(key => DocumentLibrary.request(settings.get(key))));
+            const current = DocumentLibrary.syncState(library);
+            const currentProjects = DocumentLibrary.syncState(projects);
+            if (current.syncedRevision !== librarySync.syncedRevision ||
+                currentProjects.syncedRevision !== projectSync.syncedRevision ||
+                (lastSyncId?.value ?? null) !== projectSync.lastSyncId) {
+                // Another tab has already recorded a later sync state.
                 return { acknowledged: false, dirty: true };
             }
             const next = { ...current, syncedRevision: librarySync.revision };
-            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision;
+            const nextProjects = {
+                revision: currentProjects.revision ?? ProjectStore.initialRevision,
+                syncedRevision: metadata.data.projectData.revision
+            };
+            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision ||
+                nextProjects.revision !== nextProjects.syncedRevision;
             if (next.revision || next.syncedRevision) settings.put({ key: DocumentLibrary.syncKey, value: next });
+            settings.put({ key: ProjectStore.syncKey, value: nextProjects });
             settings.put({ key: 'lastSyncId', value: metadata.syncId });
             settings.put({ key: 'lastSyncTimestamp', value: new Date(metadata.exportedAt).getTime() });
             settings.put({ key: 'syncLastError', value: null });
@@ -14426,8 +14884,12 @@ const appLogic = {
             updateProgress('クラウドの状態を確認中...');
             const remote = await window.dropboxApi.downloadMetadata({ withRevision: true });
             const cloudData = remote ? JSON.parse(remote.content) : null;
+            const projectsBefore = await dbUtils.getProjectSyncContext();
+            const cloudProjects = cloudData?.data.projectData;
             if (cloudData) {
                 SettingsV136.assertCompatible(cloudData);
+                if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
+                ProjectStore.assertPushBase(projectsBefore, cloudProjects);
                 const remoteLibrary = cloudData.data.documentLibrary;
                 const local = await dbUtils.getDocumentLibrarySyncState();
                 if (remoteLibrary) {
@@ -14438,12 +14900,17 @@ const appLogic = {
                 }
                 const recoveringLibrary = !remoteLibrary && local.revision &&
                     (local.syncedRevision || await dbUtils.hasChatDocumentLinks());
-                if (recoveringLibrary || cloudData.syncId !== state.sync.lastSyncId) {
+                const recoveringProjects = ProjectStore.isRollback(projectsBefore, cloudProjects) ||
+                    (!cloudProjects && projectsBefore.revision && cloudData.syncId !== projectsBefore.lastSyncId);
+                if (recoveringProjects && !isManual) throw new Error(ProjectStore.legacyConflict);
+                if (recoveringLibrary || recoveringProjects || cloudData.syncId !== projectsBefore.lastSyncId) {
                     console.warn(`[Sync Push] 競合を検出！ Local: ${state.sync.lastSyncId}, Cloud: ${cloudData.syncId}`);
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：同期の競合】\n\n" +
-                        (recoveringLibrary
+                        (recoveringProjects
+                            ? "Dropboxの同期データに、この端末で同期または編集したプロジェクト情報がありません。\n\n"
+                            : recoveringLibrary
                             ? "Dropboxの同期データに、この端末のファイルや紐づけの情報がありません。\n\n"
                             : "クラウド上のデータが、このデバイスが最後に同期した状態から変更されています。（他のデバイスが先に同期した可能性があります）\n\n") +
                         "このまま同期を実行すると、クラウド上のデータがこのデバイスのデータで完全に上書きされます。\n\n" +
@@ -14474,13 +14941,29 @@ const appLogic = {
                     console.log(`[Sync Push] クラウド側が新しいピン状態を ${mergedPinChats.length}件反映しました。`);
                 }
             }
+            if (!cloudData && projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
+            if (!cloudData && projectsBefore.syncedRevision) {
+                uiUtils.hideProgressDialog();
+                const confirmed = await uiUtils.showCustomConfirm(
+                    '以前同期したプロジェクト情報がDropboxに見つかりません。この端末のデータをDropboxに保存しますか？');
+                if (!confirmed) {
+                    this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
+                    return;
+                }
+                uiUtils.showProgressDialog('同期を再開しています...');
+            }
 
             // --- Step 2: データ準備 ---
             await window.dropboxApi.ensureAssetsFolderExists();
             
             updateProgress('ローカルデータを準備中...');
-            const { metadataJson, localAssets, documentBlobs, librarySync } = await this._prepareExportData();
+            const { metadataJson, localAssets, documentBlobs, librarySync, projectSync } = await this._prepareExportData();
             const parsedMetadata = JSON.parse(metadataJson);
+            if (projectsBefore.lastSyncId !== projectSync.lastSyncId || projectsBefore.syncedRevision !== projectSync.syncedRevision ||
+                (!cloudProjects && !ProjectStore.sameSyncState(projectsBefore, projectSync))) {
+                throw new Error('プロジェクトの同期状態が変わったため、上書きを中止しました。');
+            }
+            ProjectStore.assertPushBase(projectSync, cloudProjects);
             const remoteLibraryRevision = cloudData?.data.documentLibrary?.revision;
             if (remoteLibraryRevision && remoteLibraryRevision !== librarySync.revision &&
                 remoteLibraryRevision !== librarySync.syncedRevision) {
@@ -14528,7 +15011,7 @@ const appLogic = {
             await window.dropboxApi.uploadMetadata(metadataJson, remote?.rev ?? null);
 
             // --- Step 6: 状態の更新 ---
-            const result = await this.recordDropboxPush(parsedMetadata, librarySync);
+            const result = await this.recordDropboxPush(parsedMetadata, librarySync, projectSync);
             if (result.acknowledged) {
                 state.sync.lastSyncId = parsedMetadata.syncId;
                 state.sync.lastError = null;
@@ -14636,11 +15119,13 @@ const appLogic = {
             const cloudData = JSON.parse(cloudMetadataString);
             SettingsV136.assertCompatible(cloudData);
             const cloudSyncId = cloudData.syncId;
-            const localSyncId = state.sync.lastSyncId;
-            const library = await dbUtils.getDocumentLibrarySyncState();
+            const [library, projects] = await Promise.all([dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()]);
+            const localSyncId = projects.lastSyncId;
+            const cloudProjects = cloudData.data.projectData;
+            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
             const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
-            if (!cloudLibraryRevision && library.revision &&
-                (library.syncedRevision || await dbUtils.hasChatDocumentLinks())) {
+            if ((!cloudProjects && projects.revision) || ProjectStore.isRollback(projects, cloudProjects) ||
+                (!cloudLibraryRevision && library.revision && (library.syncedRevision || await dbUtils.hasChatDocumentLinks()))) {
                 state.sync.isSyncing = false;
                 await this._doPush(true);
                 return;
@@ -14648,7 +15133,8 @@ const appLogic = {
 
             console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
 
-            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision) {
+            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision ||
+                (cloudProjects?.revision ?? null) !== projects.syncedRevision) {
                 console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
                 uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
                 state.sync.isSyncing = false;
@@ -14666,7 +15152,8 @@ const appLogic = {
             const cloudOriginals = documentBlobs.size ? new Map((await window.dropboxApi.listAssets(window.dropboxApi.DOCUMENTS_DIR_PATH))
                 .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size])) : new Map();
             const missingOriginals = [...documentBlobs].some(([hash, blob]) => cloudOriginals.get(hash) !== blob.size);
-            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision;
+            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision ||
+                projects.revision !== projects.syncedRevision;
             if (missingImages || missingOriginals || dirty) {
                 if (dirty) {
                     console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
@@ -14725,13 +15212,16 @@ const appLogic = {
         try {
             await window.dropboxApi.uploadLockFile('pull');
 
-            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
+            const [libraryBefore, projectsBefore] = await Promise.all([
+                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
+            ]);
             const cloudMetadataString = await window.dropboxApi.downloadMetadata();
 
             if (cloudMetadataString === null) {
+                if (projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
                 console.log("[Sync Pull V2] クラウドにファイルが見つかりません。");
                 const localChats = await dbUtils.getAllChats();
-                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision) {
+                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision || projectsBefore.revision) {
                     console.log("[Sync Pull V2] ローカルにデータが存在するため、初回Pushを実行します。");
                     if (isManual) {
                         console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、updateProgressMessageを呼び出します。");
@@ -14753,6 +15243,12 @@ const appLogic = {
 
             const cloudData = JSON.parse(cloudMetadataString);
             SettingsV136.assertCompatible(cloudData);
+            const cloudProjects = cloudData.data.projectData;
+            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
+            if (ProjectStore.isRollback(projectsBefore, cloudProjects) || (!cloudProjects && projectsBefore.revision)) {
+                throw new Error(ProjectStore.legacyConflict);
+            }
+            const projectConflict = ProjectStore.hasLocalConflict(projectsBefore, cloudProjects);
 
             const cloudSyncId = cloudData.syncId;
             const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
@@ -14767,14 +15263,17 @@ const appLogic = {
 
             console.log(`[Sync Pull V2] Cloud syncId: ${cloudSyncId}, Local lastSyncId: ${state.sync.lastSyncId}`);
 
-            if (cloudSyncId !== state.sync.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision) {
-                if (state.sync.isDirty || libraryConflict) {
+            if (cloudSyncId !== projectsBefore.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision ||
+                (cloudProjects?.revision ?? null) !== projectsBefore.syncedRevision) {
+                if (projectConflict && !isManual) throw new Error(ProjectStore.localConflict);
+                if (state.sync.isDirty || libraryConflict || projectConflict) {
                     if (isManual) uiUtils.hideProgressDialog();
                     const confirmed = await uiUtils.showCustomConfirm(
                         "【警告：データの同期に関する重要な確認】\n\n" +
                         "クラウド上に、このデバイスとは異なるデータが見つかりました。\n\n" +
                         "同期を実行すると、このデバイスのチャット、画像、設定などがDropboxのデータで置き換わります。\n" +
                         (libraryConflict ? "未同期のファイル・原本の版・チャットとの紐づけもDropboxのデータで置き換わります。\n" : "") +
+                        (projectConflict ? "未同期のプロジェクト・チャットの所属・共有ファイルの関連付けもDropboxのデータで置き換わります。\n" : "") +
                         "現在のデータを残すには、キャンセルして設定画面から全データのバックアップを作成してください。\n\n" +
                         "クラウドのデータで同期を開始してもよろしいですか？"
                     );
@@ -14790,7 +15289,8 @@ const appLogic = {
                 }
 
                 const importResult = await this.importDataFromString(cloudMetadataString, {
-                    automatic: !isManual, source: 'dropbox', libraryBefore, allowLibraryReplace: Boolean(libraryConflict && isManual)
+                    automatic: !isManual, source: 'dropbox', libraryBefore, projectsBefore,
+                    allowLibraryReplace: Boolean(libraryConflict && isManual), allowProjectReplace: Boolean(projectConflict && isManual)
                 });
                 if (!importResult) {
                     this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
@@ -14804,7 +15304,7 @@ const appLogic = {
                 }
 
                 state.sync.lastSyncId = importResult.syncId;
-                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending;
+                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending || importResult.projectPending;
                 state.sync.isDirty = hasQueuedChanges;
                 state.sync.lastError = null;
                 
@@ -14837,11 +15337,10 @@ const appLogic = {
 
             } else {
                 console.log("[Sync Pull V2] ローカルは既に最新です。同期は不要です。");
-                const currentLibrary = await dbUtils.getDocumentLibrarySyncState();
-                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty || currentLibrary.revision !== currentLibrary.syncedRevision;
+                await this.initializeSyncState();
+                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty;
                 state.sync.isDirty = hasQueuedChanges;
                 await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
-                await dbUtils.saveSetting('syncIsDirty', hasQueuedChanges);
                 this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
                 await this.updateDropboxUIState();
                 pullCompleted = true;
@@ -14885,6 +15384,7 @@ const appLogic = {
         this._setupEventListenersCallCount++;
         uiUtils.installDialogDismissal();
         window.DocumentLibraryUI?.install();
+        window.ProjectUI?.install();
         this.setupSwipeNavigation();
     
         // --- 画面遷移 ---
@@ -14904,19 +15404,26 @@ const appLogic = {
                 event.preventDefault();
                 if (!event.repeat) trigger.click();
             });
-            elements.historyItemMenu.addEventListener('pointerdown', event => {
-                if (event.target.closest('[data-history-menu-action]')) {
-                    historyUiState.menuPointerActive = true;
-                }
-            });
-            elements.historyItemMenu.addEventListener('click', async event => {
-                const menuItem = event.target.closest('[data-history-menu-action]');
-                if (!menuItem || menuItem.hidden || !elements.historyItemMenu.contains(menuItem)) return;
+            const historyMenus = [elements.historyItemMenu, elements.historyProjectMenu];
+            const inHistoryMenus = target => historyMenus.some(menu => menu.contains(target));
+            const focusProjectMenu = () => {
+                historyUiState.projectMenuRequest.hover = false;
+                elements.historyProjectMenu.firstElementChild?.focus({ preventScroll: true });
+            };
+            const onMenuClick = async event => {
+                const menuItem = event.target.closest('[role="menuitem"]');
+                if (!menuItem || menuItem.hidden || menuItem.disabled) return;
                 if (historyUiState.menuActionPending) return;
-                const context = historyUiState.menuContext
-                    ? { ...historyUiState.menuContext }
-                    : null;
-                const action = menuItem.dataset.historyMenuAction;
+                const context = historyUiState.menuContext;
+                if (menuItem.id === 'history-project-move') {
+                    if (!elements.historyProjectMenu.classList.contains('hidden')) {
+                        if (historyUiState.projectMenuRequest?.hover && !['touch', 'pen'].includes(event.pointerType)) focusProjectMenu();
+                        else uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
+                    } else if (context) await uiUtils.openHistoryProjectMenu(context);
+                    return;
+                }
+                const destination = menuItem.dataset.projectDestination;
+                const action = destination ? 'project' : menuItem.dataset.historyMenuAction;
                 if (context?.importOnly && action === 'import') {
                     uiUtils.closeHistoryItemMenu({ restoreFocus: true });
                     elements.importHistoryInput.click();
@@ -14936,27 +15443,47 @@ const appLogic = {
                     await uiUtils.reportHistoryActionFailure({ action, chatId, source, reason: 'invalid-action' });
                     return;
                 }
-                const actionContext = { chatId, source, triggerElement };
+                const actionContext = { chatId, source, triggerElement, projectId: context.projectId,
+                    destination: destination ?? null };
 
                 historyUiState.menuActionPending = true;
                 uiUtils.setHistoryItemMenuBusy(true);
                 try {
                     const record = await uiUtils.resolveHistoryActionChat(chatId, { action, source });
                     if (!record) return;
-                    uiUtils.closeHistoryItemMenu();
+                    const membershipAction = action === 'project' || action === 'project-remove';
+                    if (membershipAction && historyUiState.menuContext !== context) return;
+                    if (membershipAction && context.identity &&
+                        !dbUtils.matchesHistoryDeleteRecord(record, context.identity)) {
+                        uiUtils.closeHistoryItemMenu();
+                        await uiUtils.showCustomAlert('チャットが変更されました。履歴を開き直してください。');
+                        return;
+                    }
+                    uiUtils.closeHistoryItemMenu({ restoreFocus: membershipAction });
                     const result = await uiUtils.executeHistoryAction(action, actionContext, { record });
                     if (action === 'pin' && result?.ok) uiUtils.focusHistoryActionTarget(actionContext);
                 } catch (error) {
                     console.error(`[History Action] ${action} の実行に失敗しました (chatId: ${chatId}):`, error);
-                    await uiUtils.showCustomAlert('チャット操作を完了できませんでした。');
+                    await uiUtils.showCustomAlert(error.message || 'チャット操作を完了できませんでした。');
                 } finally {
                     historyUiState.menuActionPending = false;
                     historyUiState.menuPointerActive = false;
                     uiUtils.setHistoryItemMenuBusy(false);
                 }
-            });
-            elements.historyItemMenu.addEventListener('keydown', event => {
-                const items = [...elements.historyItemMenu.querySelectorAll('[role="menuitem"]')]
+            };
+            const onMenuKey = event => {
+                if (event.key === 'ArrowRight' && event.target.id === 'history-project-move') {
+                    event.preventDefault();
+                    if (elements.historyProjectMenu.classList.contains('hidden')) event.target.click();
+                    else focusProjectMenu();
+                    return;
+                }
+                if (event.currentTarget === elements.historyProjectMenu && ['Escape', 'ArrowLeft'].includes(event.key)) {
+                    event.preventDefault();
+                    uiUtils.closeHistoryProjectMenu({ restoreFocus: true });
+                    return;
+                }
+                const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')]
                     .filter(item => !item.hidden && !item.disabled);
                 if (items.length === 0) return;
                 const currentIndex = items.indexOf(document.activeElement);
@@ -14973,17 +15500,43 @@ const appLogic = {
                 if (nextIndex === null) return;
                 event.preventDefault();
                 items[nextIndex]?.focus();
-            });
-            elements.historyItemMenu.addEventListener('focusout', () => {
+            };
+            const onMenuFocusOut = event => {
+                // Touch can move focus to another menu item before document.activeElement updates.
+                if (inHistoryMenus(event.relatedTarget) || event.relatedTarget === historyUiState.menuContext?.triggerElement) return;
                 queueMicrotask(() => {
                     if (historyUiState.menuPointerActive) return;
                     const activeElement = document.activeElement;
                     const triggerElement = historyUiState.menuContext?.triggerElement;
-                    if (!elements.historyItemMenu.contains(activeElement) && activeElement !== triggerElement) {
+                    if (!inHistoryMenus(activeElement) && activeElement !== triggerElement) {
                         uiUtils.closeHistoryItemMenu();
                     }
                 });
+            };
+            elements.historyItemMenu.addEventListener('pointerover', event => {
+                if (event.pointerType !== 'mouse' || historyUiState.menuActionPending) return;
+                const item = event.target.closest('[role="menuitem"]');
+                if (item?.id === 'history-project-move' && !item.disabled) {
+                    void uiUtils.openHistoryProjectMenu(historyUiState.menuContext, { hover: true });
+                } else if (item && historyUiState.projectMenuRequest?.hover) {
+                    uiUtils.closeHistoryProjectMenu();
+                }
             });
+            const onMenuPointerLeave = event => {
+                if (event.pointerType === 'mouse' && historyUiState.projectMenuRequest?.hover &&
+                    !historyUiState.menuActionPending && !inHistoryMenus(event.relatedTarget)) {
+                    uiUtils.closeHistoryItemMenu({ restoreFocus: true });
+                }
+            };
+            for (const menu of historyMenus) {
+                menu.addEventListener('pointerdown', event => {
+                    if (event.target.closest('[role="menuitem"]')) historyUiState.menuPointerActive = true;
+                });
+                menu.addEventListener('click', onMenuClick);
+                menu.addEventListener('keydown', onMenuKey);
+                menu.addEventListener('focusout', onMenuFocusOut);
+                menu.addEventListener('pointerleave', onMenuPointerLeave);
+            }
             document.addEventListener('pointerup', () => {
                 setTimeout(() => {
                     historyUiState.menuPointerActive = false;
@@ -14995,19 +15548,37 @@ const appLogic = {
             document.addEventListener('click', event => {
                 if (elements.historyItemMenu.classList.contains('hidden')) return;
                 const triggerElement = historyUiState.menuContext?.triggerElement;
-                if (elements.historyItemMenu.contains(event.target) || triggerElement?.contains(event.target)) return;
+                if (inHistoryMenus(event.target) || triggerElement?.contains(event.target)) return;
                 uiUtils.closeHistoryItemMenu();
             });
             document.addEventListener('keydown', event => {
-                if (event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
+                if (event.defaultPrevented || event.key !== 'Escape' || elements.historyItemMenu.classList.contains('hidden')) return;
                 event.preventDefault();
                 uiUtils.closeHistoryItemMenu({ restoreFocus: true });
             });
-            window.addEventListener('resize', () => uiUtils.closeHistoryItemMenu(), { passive: true });
+            const repositionSidebarMenus = () => {
+                uiUtils.positionHistoryItemMenu();
+                window.ProjectUI?.positionSidebarMenu();
+            };
+            window.addEventListener('resize', repositionSidebarMenus, { passive: true });
+            window.visualViewport?.addEventListener('resize', repositionSidebarMenus, { passive: true });
+            window.visualViewport?.addEventListener('scroll', repositionSidebarMenus, { passive: true });
+            elements.chatSidebarScroll.addEventListener('scroll', repositionSidebarMenus, { passive: true });
+            elements.historyItemMenu.addEventListener('scroll', () => {
+                if (!elements.historyProjectMenu.classList.contains('hidden')) uiUtils.positionHistoryProjectMenu();
+            }, { passive: true });
+            document.getElementById('project-content')?.addEventListener('scroll', event => {
+                if (historyUiState.menuContext?.source !== 'project') return;
+                const anchor = historyUiState.menuContext.triggerElement.getBoundingClientRect();
+                const bounds = event.currentTarget.getBoundingClientRect();
+                if (anchor.bottom <= bounds.top || anchor.top >= bounds.bottom) uiUtils.closeHistoryItemMenu();
+                else uiUtils.positionHistoryItemMenu();
+            }, { passive: true });
             this._historyActionMenuEventsBound = true;
         }
 
         if (!this._chatSidebarEventsBound) {
+            uiUtils.syncChatSidebarGroups();
             const clearSidebarTouchInput = () => elements.chatScreen.classList.remove('sidebar-touch-input');
             document.addEventListener('pointerdown', event => {
                 elements.chatScreen.classList.toggle('sidebar-touch-input', event.pointerType === 'touch');
@@ -15069,9 +15640,20 @@ const appLogic = {
                 clearChatSidebarSearch();
                 elements.chatSidebarSearchInput.focus();
             });
-            elements.chatSidebarList.addEventListener('click', async event => {
+            elements.chatSidebarScroll.addEventListener('click', async event => {
+                const toggle = event.target.closest('.chat-sidebar-group-title');
+                if (toggle) {
+                    const id = toggle.getAttribute('aria-controls');
+                    const collapsed = chatSidebarUiState.collapsedGroups;
+                    if (collapsed.has(id)) collapsed.delete(id);
+                    else collapsed.add(id);
+                    uiUtils.syncChatSidebarGroups();
+                    try { localStorage.setItem(collapsedSidebarGroupsKey, JSON.stringify([...collapsed])); }
+                    catch { /* keep the current tab's state */ }
+                    return;
+                }
                 const actionElement = event.target.closest('[data-sidebar-action]');
-                if (!actionElement || !elements.chatSidebarList.contains(actionElement)) return;
+                if (!actionElement || !elements.chatSidebarScroll.contains(actionElement)) return;
                 const chatId = chatHistoryActions.normalizeChatId(actionElement.dataset.chatId);
                 if (chatId === null) return;
                 const action = actionElement.dataset.sidebarAction;
@@ -15081,7 +15663,9 @@ const appLogic = {
                 }
                 if (action === 'open') {
                     uiUtils.closeHistoryItemMenu();
-                    const result = await chatHistoryActions.open(chatId, { source: 'chat-sidebar' });
+                    const result = !elements.projectWorkspace.hidden
+                        ? await window.ProjectUI.openChat(chatId)
+                        : await chatHistoryActions.open(chatId, { source: 'chat-sidebar' });
                     if (!result?.ok) return;
                     uiUtils.syncChatSidebarCurrentSelection();
                     if (chatSidebarUiState.mode === 'overlay') {
@@ -15089,18 +15673,17 @@ const appLogic = {
                     }
                 }
             });
-            elements.chatSidebarScroll.addEventListener('scroll', () => {
-                if (historyUiState.menuContext?.source === 'sidebar') uiUtils.closeHistoryItemMenu();
-            }, { passive: true });
             document.addEventListener('keydown', event => {
                 if (event.defaultPrevented || event.key !== 'Escape' || chatSidebarUiState.mode !== 'overlay' || !chatSidebarUiState.isOpen ||
                     document.querySelector('dialog[open]')) return;
-                if (!elements.historyItemMenu.classList.contains('hidden')) return;
+                if (!elements.historyItemMenu.classList.contains('hidden') || !document.getElementById('project-menu').hidden) return;
                 event.preventDefault();
                 uiUtils.closeChatSidebar({ restoreFocus: true });
             });
             window.addEventListener('resize', () => uiUtils.updateChatSidebarResponsiveState(), { passive: true });
             chatSidebarUiState.unsubscribe = chatListChangeController.subscribe(detail => {
+                window.ProjectUI?.dataChanged(detail);
+                if (detail.type === 'library') return;
                 if (detail.type === 'save') {
                     chatSidebarUiState.hasLoadedAll = false;
                     if (chatSidebarUiState.isOpen) uiUtils.scheduleChatSidebarRefresh();
@@ -15160,6 +15743,7 @@ const appLogic = {
         });
         elements.userInput.addEventListener('focusout', () => this.flushInputDraft());
         elements.userInput.addEventListener('keydown', (e) => {
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.ctrlKey && e.key === 'Enter') {
                 e.preventDefault();
                 if (!elements.sendButton.disabled) this.handleSend();
@@ -16046,7 +16630,10 @@ const appLogic = {
       this.resetSwipeState();
       if (targetScreen === 'settings') window.settingsUiV136?.restore(entry);
       else window.settingsUiV136?.closePopover(false);
-      if (targetScreen === 'chat') window.DocumentLibraryUI?.handleHistory(entry);
+      if (targetScreen === 'chat') {
+          window.ProjectUI?.handleHistory(entry);
+          window.DocumentLibraryUI?.handleHistory(entry);
+      }
       if (legacyHistory) uiUtils.openChatSidebar();
       console.log(`[popstate] same screen -> ignore: ${targetScreen}`);
       return;
@@ -16054,7 +16641,10 @@ const appLogic = {
     console.log(`popstate event fired: Navigating to screen '${targetScreen}' from history state.`);
     // showScreenを呼び出す (fromPopState = true を渡して履歴操作を抑制)
     void uiUtils.showScreen(targetScreen, true, entry).then(() => {
-        if (targetScreen === 'chat' && history.state?.documentLibrary) window.DocumentLibraryUI?.handleHistory(history.state);
+        if (targetScreen === 'chat' && state.currentScreen === 'chat') {
+            window.ProjectUI?.handleHistory(history.state);
+            window.DocumentLibraryUI?.handleHistory(history.state);
+        }
         if (legacyHistory && state.currentScreen === 'chat') uiUtils.openChatSidebar();
     });
     },
@@ -16134,12 +16724,12 @@ const appLogic = {
         if (!gesture || gesture.control?.contains(document.activeElement)) return false;
         const selection = window.getSelection();
         const surface = gesture.sidebarSurface ? elements.chatHistorySidebar
-            : gesture.librarySurface ? elements.documentLibraryWorkspace
-            : gesture.screen === elements.chatScreen ? elements.chatWorkspace : gesture.screen;
+            : gesture.workspace || (gesture.librarySurface ? elements.documentLibraryWorkspace
+            : gesture.screen === elements.chatScreen ? elements.chatWorkspace : gesture.screen);
         if (selection && !selection.isCollapsed &&
             (surface.contains(selection.anchorNode) || surface.contains(selection.focusNode))) return false;
         if (state.currentScreen === 'chat') {
-            const workspace = gesture.librarySurface ? elements.documentLibraryWorkspace : elements.chatWorkspace;
+            const workspace = gesture.workspace || (gesture.librarySurface ? elements.documentLibraryWorkspace : elements.chatWorkspace);
             const available = gesture.sidebarSurface ? chatSidebarUiState.isOpen : !workspace.hidden && !workspace.inert;
             if (!available) return false;
         }
@@ -16163,8 +16753,9 @@ const appLogic = {
         const { identifier, clientX, clientY } = event.touches[0];
         const control = target.closest(SWIPE_FOCUS_CONTROLS);
         const sidebarSurface = Boolean(target.closest('#chat-history-sidebar, #chat-sidebar-backdrop'));
-        const librarySurface = Boolean(target.closest('#document-library-workspace'));
-        const gesture = { identifier, clientX, clientY, screen, control, sidebarSurface, librarySurface, hash: location.hash };
+        const workspace = target.closest('#document-library-workspace, #project-workspace');
+        const librarySurface = Boolean(workspace);
+        const gesture = { identifier, clientX, clientY, screen, control, sidebarSurface, librarySurface, workspace, hash: location.hash };
         if (!this.canContinueSwipeNavigation(gesture) || !this.isSwipeNavigationTarget(target, screen, control, sidebarSurface) ||
             screen.getAnimations?.().some(animation => animation.transitionProperty === 'transform' && animation.playState === 'running')) return;
         gesture.width = screen.getBoundingClientRect().width;
@@ -16438,6 +17029,7 @@ const appLogic = {
     // 新規チャット開始の確認と実行
     async confirmStartNewChat() {
         if (this.chatParameterOperation) return false;
+        if (window.ProjectUI?.isSavingFirstMessage()) return false;
         const navigation = this.chatNavigationV136 = {};
         const confirmed = await uiUtils.showCustomConfirm(this.hasComposerAttachments()
             ? "添付ファイルを破棄し、現在のチャットを保存して新規チャットを開始しますか？"
@@ -16470,7 +17062,7 @@ const appLogic = {
 
         if (this.chatNavigationV136 !== navigation) return false;
         const previousDraftContextKey = this.getInputDraftContextKey();
-        if (state.currentChatId) {
+        if (state.currentChatId || dbUtils.projectDrafts?.has(state.currentMessages)) {
             this.flushInputDraft();
         } else {
             this.clearInputDraftAfterSend(previousDraftContextKey);
@@ -16498,12 +17090,14 @@ const appLogic = {
 
     startNewChat(options = {}) {
         if (this.chatParameterOperation) return;
+        const homeDraft = options.homeDraft;
+        if (!homeDraft) window.ProjectUI?.close();
         window.DocumentLibraryUI?.close();
         this.chatNavigationV136 = {};
         this.invalidateSystemPromptOpen();
         this.clearComposerAttachments();
         this.cancelSendPreparationV136();
-        this.flushInputDraft();
+        if (!homeDraft) this.flushInputDraft();
         state.currentExecutionSettings = null;
         state.executionInitializingV136 = true;
         window.settingsUiV136?.renderExecution();
@@ -16513,11 +17107,16 @@ const appLogic = {
         state.currentChatPinnedAt = null;
         state.currentChatPinStateUpdatedAt = null;
         state.currentMessages = [];
+        if (options.projectId) {
+            dbUtils.projectDrafts ||= new WeakMap();
+            dbUtils.projectDrafts.set(state.currentMessages, options.projectId);
+        }
         this.projectSendJobV136();
         let draft = null;
         if (options.restoreDraft) {
             try { draft = JSON.parse(sessionStorage.getItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY)); } catch { /* use the profile defaults */ }
-        } else sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        } else if (!homeDraft) sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        if (homeDraft) draft = homeDraft.parameters;
         this.applyChatParameterSnapshot({ systemPrompt: typeof draft?.systemPrompt === 'string' ? draft.systemPrompt : state.settings.systemPrompt || '',
             generationParameters: SettingsV136.normalizeChatNumbers(draft?.generationParameters, state.settings) });
         state.currentPersistentMemory = {};
@@ -16529,20 +17128,105 @@ const appLogic = {
         uiUtils.updateSystemPromptUI();
         uiUtils.renderChatMessages();
         uiUtils.updateChatTitle();
-        elements.userInput.value = '';
+        elements.userInput.value = homeDraft?.text ?? '';
+        if (homeDraft) this.restoreComposerAttachments(homeDraft.attachments);
         uiUtils.adjustTextareaHeight();
         uiUtils.setSendingState(false);
         uiUtils.syncChatSidebarCurrentSelection();
         this.updateCharacterProfileButtonVisibility();
         state.currentStyleProfiles = {};
-        state.executionSettingsReady = this.initializeNewChatExecution(options);
-        this.scheduleInputDraftRestore(0, true);
+        if (homeDraft) {
+            state.executionInitGeneration = (state.executionInitGeneration || 0) + 1;
+            state.executionInitializingV136 = false;
+            state.currentExecutionSettings = structuredClone(homeDraft.execution);
+            state.executionSettingsReady = Promise.resolve();
+            this.persistExecutionDraft();
+            this.syncChatExecutionToLegacySettings();
+            uiUtils.applySettingsToUI();
+        } else {
+            state.executionSettingsReady = this.initializeNewChatExecution(options);
+            this.scheduleInputDraftRestore(0, true);
+        }
+    },
+
+    captureChatViewForProject() {
+        const keys = [
+            'currentChatId', 'currentMessages', 'currentExecutionSettings', 'executionInitializingV136',
+            'currentChatIsPinned', 'currentChatPinnedAt', 'currentChatPinStateUpdatedAt', 'currentSystemPrompt',
+            'currentChatGenerationParameters', 'currentChatParameterRevision', 'currentPersistentMemory',
+            'currentSummarizedContext', 'isMemoryEnabledForChat', 'currentScene', 'currentStyleProfiles', 'syncMessageCounter'
+        ];
+        return {
+            // Preserve the message-array identity used by in-flight sends and queued saves.
+            values: Object.fromEntries(keys.map(key => [key, state[key]])), text: elements.userInput.value,
+            recordGenerationId: dbUtils.chatSaveOwners?.get(state.currentMessages)?.recordGenerationId,
+            attachments: [...state.pendingAttachments], title: elements.chatTitle.title,
+            profileId: state.activeProfileId,
+            scrollTop: elements.chatWorkspace.querySelector('.main-content').scrollTop,
+            draftSettings: state.currentChatId == null ? [SettingsV136.DRAFT_KEY, SettingsV136.CHAT_PARAMETER_DRAFT_KEY]
+                .map(key => this.getChatDraftSettingsKey(key)).map(key => [key, sessionStorage.getItem(key)]) : []
+        };
+    },
+
+    restoreChatViewForProject(snapshot) {
+        this.cancelSendPreparationV136();
+        this.chatNavigationV136 = {};
+        this.invalidateSystemPromptOpen();
+        this.clearComposerAttachments();
+        state.executionInitGeneration = (state.executionInitGeneration || 0) + 1;
+        const previous = snapshot.values;
+        const saved = dbUtils.chatSaveOwners?.get(previous.currentMessages);
+        const job = state.sendJobsV136.get(previous.currentMessages);
+        Object.assign(state, previous);
+        state.currentChatId ??= job?.chatId ?? saved?.id ?? null;
+        if (job) {
+            state.currentExecutionSettings = job.execution;
+            state.currentPersistentMemory = job.persistentMemory;
+            state.currentSummarizedContext = job.summarizedContext;
+        }
+        state.executionSettingsReady = Promise.resolve();
+        this.projectSendJobV136();
+        this.applyChatParameterSnapshot({
+            systemPrompt: state.currentSystemPrompt, generationParameters: state.currentChatGenerationParameters
+        }, state.currentChatParameterRevision);
+        const sameDraft = state.currentChatId != null || snapshot.profileId === state.activeProfileId;
+        if (!sameDraft) {
+            this.applyChatParameterSnapshot(this.profileChatParameters(state.settings));
+            state.currentExecutionSettings = this.newChatExecutionDefaults();
+            this.persistExecutionDraft();
+            sessionStorage.removeItem(SettingsV136.CHAT_PARAMETER_DRAFT_KEY);
+        }
+        for (const [key, value] of state.currentChatId == null && sameDraft ? snapshot.draftSettings : []) {
+            if (value === null) sessionStorage.removeItem(key);
+            else sessionStorage.setItem(key, value);
+        }
+        this.syncChatExecutionToLegacySettings();
+        uiUtils.applySettingsToUI();
+        elements.userInput.value = sameDraft ? snapshot.text : '';
+        this.restoreComposerAttachments(sameDraft ? snapshot.attachments : []);
+        if (!sameDraft) this.scheduleInputDraftRestore(0, true);
+        uiUtils.updateChatTitle(previous.currentChatId === state.currentChatId ? snapshot.title : null);
+        uiUtils.renderChatMessages();
+        this.restoreSendProgressV136(state.sendExecutionV136);
+        this.toggleMemoryIconVisibility();
+        this.updateCharacterProfileButtonVisibility();
+        uiUtils.adjustTextareaHeight();
+        elements.chatWorkspace.querySelector('.main-content').scrollTop = snapshot.scrollTop;
+        uiUtils.syncChatSidebarCurrentSelection();
+    },
+
+    restoreComposerAttachments(attachments) {
+        state.pendingAttachments = [...attachments];
+        elements.composerAttachmentList.replaceChildren();
+        attachments.forEach(attachment => uiUtils.appendComposerAttachment(attachment));
+        uiUtils.updateComposerAttachmentControls();
     },
 
 
     // チャットの切り替え準備と読み込み。成功するまでは現在のstateを破壊しない。
     async loadChat(id, options = {}) {
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
+        if (window.ProjectUI?.isSavingFirstMessage()) return { ok: false, cancelled: true, reason: 'project-saving' };
         const normalizedId = chatHistoryActions.normalizeChatId(id);
         if (normalizedId === null) {
             await uiUtils.showCustomAlert("チャット履歴が見つかりませんでした。");
@@ -16575,7 +17259,7 @@ const appLogic = {
             const saved = await this.saveCurrentSystemPrompt({ keepOpen: true });
             if (!saved) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        const confirmedAttachmentDiscard = this.hasComposerAttachments();
+        const confirmedAttachmentDiscard = !options.keepProjectHistory && this.hasComposerAttachments();
         if (confirmedAttachmentDiscard) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
@@ -16609,7 +17293,7 @@ const appLogic = {
         if (shouldCloseSystemPrompt) {
             if (!await this.closeSystemPromptDialog({ skipSave: true })) return { ok: false, cancelled: true, reason: 'system-prompt-save' };
         }
-        const hasNewAttachments = !confirmedAttachmentDiscard && this.hasComposerAttachments();
+        const hasNewAttachments = !options.keepProjectHistory && !confirmedAttachmentDiscard && this.hasComposerAttachments();
         if (hasNewAttachments) {
             const confirmed = await uiUtils.showCustomConfirm("添付準備中のファイルがあります。破棄して別のチャットを読み込みますか？");
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
@@ -16643,6 +17327,7 @@ const appLogic = {
             }
         });
         if (this.chatParameterOperation) return { ok: false, cancelled: true, reason: 'parameters-saving' };
+        window.ProjectUI?.close({ fromHistory: options.keepProjectHistory });
         window.DocumentLibraryUI?.close();
         uiUtils.closeChatSearch({ restoreFocus: false });
 
@@ -17731,7 +18416,7 @@ const appLogic = {
             throw new DOMException('送信準備の対象が変更されました。', 'AbortError');
         preparation.controller.signal.throwIfAborted();
     },
-    startSendExecutionV136(session) {
+    startSendExecutionV136(session, { captureDocumentsAfterSave = false } = {}) {
         session.id = crypto.getRandomValues(new Uint32Array(4)).join('-');
         session.originalMessages = session.messages.slice();
         session.imageIds = new Set();
@@ -17746,7 +18431,7 @@ const appLogic = {
         session.memoryEnabled = state.isMemoryEnabledForChat;
         session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
             pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
-        window.DocumentRag?.capture(session);
+        if (!captureDocumentsAfterSave) window.DocumentRag?.capture(session);
         session.streaming = session.settings.enableStreamingOutput === true
             && StreamingV136.canStream(session.apiConfig.provider, session.apiConfig.modelName);
         session.auxiliary = {};
@@ -17863,12 +18548,23 @@ const appLogic = {
         const finished = await Promise.all(jobs.map(job => this.waitForGenerationCompletionV136(job)));
         if (finished.includes(false)) throw new Error('応答生成の停止を確認できませんでした。');
     },
-    async handleSend() {
+    async handleSend(options) {
+        const fromProject = !elements.projectWorkspace.hidden;
+        if (fromProject && !window.ProjectUI.isReady()) return;
         const preparation = this.beginSendPreparationV136();
         if (!preparation) return;
-        try { await this._handleSendPreparedV136(preparation); }
+        try {
+            if (fromProject) {
+                options = window.ProjectUI.beginSend();
+                if (!options) return;
+            }
+            await this._handleSendPreparedV136(preparation, options);
+        }
         catch (error) { if (error.name !== 'AbortError') throw error; }
-        finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
+        finally {
+            if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136();
+            options?.onFinished?.();
+        }
     },
     async buildSendSystemInstruction(session, question) {
         let text = session.systemPrompt?.trim() || '';
@@ -17906,7 +18602,7 @@ const appLogic = {
             return { historyForApi, systemInstruction: base };
         }
     },
-    async _handleSendPreparedV136(preparation) {
+    async _handleSendPreparedV136(preparation, { onInitialSave } = {}) {
         if (state.isSending) { return; }
         if (state.editingMessageIndex !== null) { await uiUtils.showCustomAlert("他のメッセージを編集中です。"); return; }
         if (state.isEditingSystemPrompt) {
@@ -17937,12 +18633,14 @@ const appLogic = {
             this.freezeExecutionSettings();
         } catch (error) {
             if (error.name === 'AbortError') return;
-            await uiUtils.showCustomAlert(error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。');
+            const message = error?.message || '基本モデルの設定が無効です。設定画面で基本モデルを選び直してください。';
+            await uiUtils.showCustomAlert(message);
             return;
         }
         const executionMetadata = this.createExecutionMetadataSnapshot();
 
-        this.startSendExecutionV136(preparation);
+        const captureDocumentsAfterSave = preparation.chatId == null && dbUtils.projectDrafts?.has(preparation.messages);
+        this.startSendExecutionV136(preparation, { captureDocumentsAfterSave });
         const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
@@ -17968,11 +18666,15 @@ const appLogic = {
             this.scrollToBottom();
         }
         
+        let firstSaveCommitted = false;
         try {
             await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
+            firstSaveCommitted = Boolean(preparation.chatId);
             if (this.showsSendExecutionV136(preparation) && this.ownsSendExecutionV136(preparation))
                 this.clearInputDraftAfterSend(inputDraftContextKeyBeforeSend, this.getInputDraftContextKey());
             this.assertSendExecutionV136(preparation);
+            if (captureDocumentsAfterSave) window.DocumentRag?.capture(preparation);
+            onInitialSave?.(preparation);
 
             const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
 
@@ -18017,6 +18719,23 @@ const appLogic = {
 
         } catch(error) {
             if (!this.ownsSendExecutionV136(preparation)) return;
+            if (!firstSaveCommitted && dbUtils.projectDrafts?.has(preparation.messages)) {
+                preparation.messages.splice(0, preparation.messages.length, ...preparation.originalMessages);
+                preparation.saveFailed = true;
+                if (this.showsSendExecutionV136(preparation)) {
+                    elements.userInput.value = preparation.input;
+                    state.currentPersistentMemory = preparation.originalMemory;
+                    this.restoreComposerAttachments(preparation.attachments);
+                    uiUtils.adjustTextareaHeight();
+                    uiUtils.renderChatMessages();
+                    this.flushInputDraft();
+                }
+                if (!preparation.controller.signal.aborted) {
+                    const message = `チャットと所属を保存できませんでした。\n${error.message || error}`;
+                    await uiUtils.showCustomAlert(message);
+                }
+                return;
+            }
             const partial = this.getIncompleteStreamMessageV136(preparation);
             const replacement = partial ? [partial] : [];
             if (error.name !== 'AbortError') {
@@ -18042,7 +18761,7 @@ const appLogic = {
         } finally {
             const stillOwner = this.ownsSendExecutionV136(preparation);
             this.finishSendExecutionV136(preparation);
-            if (stillOwner) {
+            if (stillOwner && (firstSaveCommitted || !dbUtils.projectDrafts?.has(preparation.messages))) {
                 this.markAsDirtyAndSchedulePush('message', { completedSend: true });
                 if (!preparation.streaming && preparation.settings.autoScroll) requestAnimationFrame(() => {
                     if (this.showsSendExecutionV136(preparation)) this.scrollToBottom();
@@ -19323,10 +20042,12 @@ const appLogic = {
         delete updatedMessage.error;
         state.currentMessages[index] = updatedMessage;
 
-        // 2. 既存のメタ情報表示を一旦削除
-        messageElement.querySelectorAll('.function-call-details, .citation-details').forEach(el => el.remove());
+        if (uiUtils.openMessageInfo.has(originalMessage)) {
+            uiUtils.openMessageInfo.delete(originalMessage);
+            uiUtils.openMessageInfo.add(updatedMessage);
+        }
 
-        // 3. テキスト部分をDOMに反映
+        // 2. テキスト部分をDOMに反映
         const contentDiv = messageElement.querySelector('.message-content');
         if (contentDiv) {
             if (updatedMessage.role === 'model' && typeof marked !== 'undefined') {
@@ -19341,7 +20062,7 @@ const appLogic = {
             }
         }
 
-        // 4. 画像が存在する場合、画像を再注入
+        // 3. 画像が存在する場合、画像を再注入
             if (updatedMessage.role === 'model' && updatedMessage.imageIds && updatedMessage.imageIds.length > 0) {
             htmlUtils.insertGeneratedImages(contentDiv, updatedMessage.imageIds);
             requestAnimationFrame(() => {
@@ -19350,71 +20071,18 @@ const appLogic = {
             });
         }
 
-        // 5. メタ情報（ツール使用履歴など）を再生成して追加
-        if (updatedMessage.role === 'model') {
-            const detailsFragment = document.createDocumentFragment();
-            // ツール使用履歴
-            if (updatedMessage.executedFunctions && updatedMessage.executedFunctions.length > 0) {
-                const details = document.createElement('details');
-                details.classList.add('function-call-details');
-                const uniqueFunctions = [...new Set(updatedMessage.executedFunctions)];
-                const summary = document.createElement('summary');
-                summary.innerHTML = `⚙️ ツール使用 (${uniqueFunctions.length}件)`;
-                details.appendChild(summary);
-                const list = document.createElement('ul');
-                list.classList.add('function-call-list');
-                uniqueFunctions.forEach(funcName => {
-                    const listItem = document.createElement('li');
-                    listItem.textContent = funcName;
-                    list.appendChild(listItem);
-                });
-                details.appendChild(list);
-                detailsFragment.appendChild(details);
-            }
-            // Web検索結果
-            if (updatedMessage.search_web_results && updatedMessage.search_web_results.length > 0) {
-                const details = document.createElement('details');
-                details.classList.add('function-call-details');
-                const summary = document.createElement('summary');
-                summary.innerHTML = `🌐 Web検索結果 (${updatedMessage.search_web_results.length}件)`;
-                details.appendChild(summary);
-                const list = document.createElement('ul');
-                list.classList.add('function-call-list');
-                updatedMessage.search_web_results.forEach(result => {
-                    const listItem = document.createElement('li');
-                    const link = document.createElement('a');
-                    link.href = htmlUtils.safeUrl(result.link);
-                    link.textContent = result.title;
-                    link.title = result.snippet;
-                    link.target = '_blank';
-                    link.rel = 'noopener noreferrer';
-                    listItem.appendChild(link);
-                    list.appendChild(listItem);
-                });
-                details.appendChild(list);
-                detailsFragment.appendChild(details);
-            }
-            
-            // 生成したメタ情報を適切な場所に追加
-            if (contentDiv.innerHTML.trim() !== '') {
-                contentDiv.appendChild(detailsFragment);
-            } else {
-                messageElement.appendChild(detailsFragment);
-            }
-        }
-
-        // 6. Prism.jsでハイライトを再適用
+        // 4. Prism.jsでハイライトを再適用
         if (window.Prism) {
             contentDiv.querySelectorAll('pre code').forEach((block) => {
                 Prism.highlightElement(block);
             });
         }
 
-        // 7. 編集UIを閉じる
+        // 5. 編集UIを閉じる
         this.finishEditing(messageElement);
         uiUtils.scheduleApplyMessageCollapse(messageElement);
 
-        // 8. DBへの保存処理
+        // 6. DBへの保存処理
         try {
             const requiresTitleUpdate = (index === state.currentMessages.findIndex(m => m.role === 'user'));
             let newTitleForSave = null;
@@ -19960,54 +20628,60 @@ const appLogic = {
     async prepareComposerAttachments(operation) {
         const current = () => this.attachmentOperation === operation && state.currentMessages === operation.messages &&
             (operation.chatId == null || state.currentChatId === operation.chatId);
+        try {
+            const status = await this.addComposerFiles(operation.files, state.pendingAttachments, {
+                current,
+                onAdd: attachment => {
+                    uiUtils.appendComposerAttachment(attachment);
+                    uiUtils.updateComposerAttachmentControls();
+                }
+            });
+            if (this.attachmentOperation === operation) this.cancelAttachmentOperation(status);
+        } finally {
+            if (this.attachmentOperation === operation) this.cancelAttachmentOperation();
+        }
+    },
+
+    async addComposerFiles(files, attachments, { current, onAdd }) {
         const skipped = new Map();
         const skip = reason => skipped.set(reason, (skipped.get(reason) || 0) + 1);
-        try {
-            // The iterator also reads files queued while a conversion is in flight.
-            for (const file of operation.files) {
-                if (!current()) return;
-                if (file.size > MAX_FILE_SIZE) {
-                    skip('10MiB超過');
-                    continue;
-                }
-                if (state.pendingAttachments.some(item => item.name === file.name && item.file?.size === file.size)) {
-                    skip('重複');
-                    continue;
-                }
-                const total = state.pendingAttachments.reduce((sum, item) => sum + (item.file?.size || 0), 0);
-                if (total + file.size > MAX_TOTAL_ATTACHMENT_SIZE) {
-                    skip('合計50MiB超過');
-                    continue;
-                }
-                let attachment;
-                try {
-                    const base64Data = await this.fileToBase64(file);
-                    if (!current()) return;
-                    const blob = await this.base64ToBlob(base64Data, file.type);
-                    const dot = file.name.lastIndexOf('.');
-                    const extension = dot > 0 ? file.name.slice(dot + 1).toLowerCase() : '';
-                    const mimeType = (Object.hasOwn(extensionToMimeTypeMap, extension) && extensionToMimeTypeMap[extension]) ||
-                        file.type || 'application/octet-stream';
-                    attachment = { file: blob, name: file.name, mimeType, base64Data };
-                } catch (error) {
-                    if (!current()) return;
-                    console.error(`添付ファイル "${file.name}" の変換に失敗しました:`, error);
-                    skip('変換失敗');
-                    continue;
-                }
-                if (!current()) return;
-                state.pendingAttachments.push(attachment);
-                uiUtils.appendComposerAttachment(attachment);
-                uiUtils.updateComposerAttachmentControls();
+        // The iterator also reads files queued while a conversion is in flight.
+        for (const file of files) {
+            if (!current()) return;
+            if (file.size > MAX_FILE_SIZE) {
+                skip('10MiB超過');
+                continue;
             }
-        } finally {
-            if (this.attachmentOperation === operation) {
-                const status = current() && skipped.size
-                    ? `追加できなかったファイル: ${Array.from(skipped, ([reason, count]) => `${reason} ${count}件`).join('・')}`
-                    : '';
-                this.cancelAttachmentOperation(status);
+            if (attachments.some(item => item.name === file.name && item.file?.size === file.size)) {
+                skip('重複');
+                continue;
             }
+            const total = attachments.reduce((sum, item) => sum + (item.file?.size || 0), 0);
+            if (total + file.size > MAX_TOTAL_ATTACHMENT_SIZE) {
+                skip('合計50MiB超過');
+                continue;
+            }
+            let attachment;
+            try {
+                const base64Data = await this.fileToBase64(file);
+                if (!current()) return;
+                const blob = await this.base64ToBlob(base64Data, file.type);
+                const dot = file.name.lastIndexOf('.');
+                const extension = dot > 0 ? file.name.slice(dot + 1).toLowerCase() : '';
+                const mimeType = (Object.hasOwn(extensionToMimeTypeMap, extension) && extensionToMimeTypeMap[extension]) ||
+                    file.type || 'application/octet-stream';
+                attachment = { file: blob, name: file.name, mimeType, base64Data };
+            } catch (error) {
+                if (!current()) return;
+                console.error(`添付ファイル "${file.name}" の変換に失敗しました:`, error);
+                skip('変換失敗');
+                continue;
+            }
+            if (!current()) return;
+            attachments.push(attachment);
+            onAdd(attachment);
         }
+        return skipped.size ? `追加できなかったファイル: ${Array.from(skipped, ([reason, count]) => `${reason} ${count}件`).join('・')}` : '';
     },
 
     hasComposerAttachments() {
@@ -22794,7 +23468,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
     scrollToBottom(force = false) {
         const mainContent = elements.chatScreen.querySelector('.main-content');
-        if (!mainContent || !elements.documentLibraryWorkspace.hidden) return;
+        if (!mainContent || !elements.documentLibraryWorkspace.hidden || !elements.projectWorkspace.hidden) return;
 
         if (state.suppressAutoScrollForCollapse && !force) {
             return;
@@ -22809,7 +23483,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         let startTime = null;
 
         const step = (currentTime) => {
-            if (!elements.documentLibraryWorkspace.hidden) return;
+            if (!elements.documentLibraryWorkspace.hidden || !elements.projectWorkspace.hidden) return;
             if (startTime === null) startTime = currentTime;
             const elapsed = currentTime - startTime;
             
@@ -22842,21 +23516,26 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         try {
             const db = await dbUtils.openDB();
             const names = [PROFILES_STORE, CHATS_STORE, 'memory_store', SETTINGS_STORE, 'image_assets',
-                IMAGE_STORE, ...DocumentLibrary.stores];
-            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...libraryRecords] =
+                IMAGE_STORE, ...DocumentLibrary.stores, ...ProjectStore.stores];
+            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...records] =
                 await DocumentLibrary.transaction(db, names, 'readonly', tx => Promise.all(names.map(name => {
                     const store = tx.objectStore(name);
                     return DocumentLibrary.request(store.getAll());
                 })));
             chats.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) || indexedDB.cmp(b.id, a.id));
-            const librarySync = DocumentLibrary.syncState(allSettings.find(setting => setting.key === DocumentLibrary.syncKey));
-            const library = DocumentLibrary.exportSnapshot(librarySync.revision, libraryRecords, chats);
+            const getSetting = key => allSettings.find(setting => setting.key === key);
+            const librarySync = DocumentLibrary.syncState(getSetting(DocumentLibrary.syncKey));
+            const library = DocumentLibrary.exportSnapshot(librarySync.revision, records.slice(0, DocumentLibrary.stores.length), chats);
+            const projectSync = { ...DocumentLibrary.syncState(getSetting(ProjectStore.syncKey)), lastSyncId: getSetting('lastSyncId')?.value ?? null };
+            const projectData = ProjectStore.exportSnapshot(projectSync.revision, records.slice(DocumentLibrary.stores.length), {
+                chats, documentLibrary: library.manifest
+            });
 
             const localUiSettingKeysForExport = new Set(['localUiSettings', ...LOCAL_UI_SETTING_KEYS]);
             const settingsForExport = allSettings
                 .filter(setting =>
                     !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY,
-                        DocumentLibrary.syncKey, 'backgroundImageBlob'].includes(setting.key)
+                        DocumentLibrary.syncKey, ProjectStore.syncKey, 'backgroundImageBlob'].includes(setting.key)
                     && !localUiSettingKeysForExport.has(setting.key)
                 )
                 .map(setting => {
@@ -23017,7 +23696,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             const metadata = {
                 version: "2.0",
                 settingsSchemaVersion: 136,
-                minimumReaderVersion: library.manifest || backup ? SettingsV136.READER_VERSION : 136,
+                minimumReaderVersion: SettingsV136.READER_VERSION,
                 exportedAt: new Date().toISOString(),
                 syncId: syncId,
                 data: {
@@ -23026,7 +23705,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                     memories,
                     assets: imageAssets.map(a => ({ name: a.name, assetId: a.assetId, createdAt: a.createdAt })),
                     settings: settingsForExport,
-                    ...(library.manifest && { documentLibrary: library.manifest })
+                    ...(library.manifest && { documentLibrary: library.manifest }),
+                    projectData
                 }
             };
 
@@ -23037,7 +23717,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 metadataJson: JSON.stringify(metadata),
                 localAssets,
                 documentBlobs: library.blobs,
-                librarySync
+                librarySync,
+                projectSync
             };
 
         } catch (error) {
@@ -23134,15 +23815,21 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         }
         state.sync.isSyncing = true;
         try {
-            const libraryBefore = await dbUtils.getDocumentLibrarySyncState();
+            const [libraryBefore, projectsBefore] = await Promise.all([
+                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
+            ]);
             const json = await file.text();
             const envelope = JSON.parse(json);
             SettingsV136.assertCompatible(envelope);
             const message = envelope.data.documentLibrary
-                ? 'チャット、設定、画像、メモリ、共通ファイル（原本・旧版・紐づけ）をバックアップの内容で置き換えます。必要なデータは先にバックアップしてください。復元しますか？'
-                : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。復元しますか？';
-            if (!await uiUtils.showCustomConfirm(message)) return;
-            await this.importDataFromString(json, { source: 'file', libraryBefore });
+                ? 'チャット、設定、画像、メモリ、共通ファイル（原本・旧版・紐づけ）をバックアップの内容で置き換えます。'
+                : 'このバックアップには共通ファイルの情報がありません。ファイル原本と版は保持します。チャットなどを置き換えるため、現在のチャットとファイルの紐づけは解除されます。';
+            const legacy = !Object.hasOwn(envelope.data, 'projectData');
+            const projectWarning = legacy
+                ? 'このバックアップにはプロジェクト情報がありません。復元すると現在のプロジェクト、チャットの所属、共有ファイルの関連付けが失われます。'
+                : 'プロジェクト、チャットの所属、共有ファイルの関連付けもバックアップの内容で置き換えます。';
+            if (!await uiUtils.showCustomConfirm(`${message}\n\n${projectWarning}\n\n必要なデータは先にバックアップしてください。復元しますか？`)) return;
+            await this.importDataFromString(json, { source: 'file', libraryBefore, projectsBefore, allowLegacyProjectClear: legacy });
             uiUtils.hideProgressDialog();
             state.sync.isDirty = true;
             await uiUtils.showCustomAlert('バックアップを復元しました。アプリを再起動します。');
@@ -23161,11 +23848,15 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
     
         try {
             const libraryBefore = options.libraryBefore ?? await dbUtils.getDocumentLibrarySyncState();
+            const projectsBefore = options.projectsBefore ?? await dbUtils.getProjectSyncContext();
             const parsedData = JSON.parse(jsonString);
             SettingsV136.assertCompatible(parsedData);
             const portableBackup = parsedData.backupSchemaVersion === 1;
             if (portableBackup && options.source !== 'file') throw new Error('ファイルから復元してください。');
             const cloudData = parsedData.data;
+            if (options.source === 'file' && !cloudData.projectData && !options.allowLegacyProjectClear) {
+                throw new Error('旧バックアップを復元するには、プロジェクト情報が失われることを確認してください。');
+            }
             if (options.source && (!Array.isArray(cloudData.chats) || !Array.isArray(cloudData.profiles) ||
                 ['settings', 'memories', 'assets'].some(key =>
                     (portableBackup || cloudData.documentLibrary || Object.hasOwn(cloudData, key)) && !Array.isArray(cloudData[key])))) {
@@ -23178,6 +23869,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             if (Array.isArray(cloudData.profiles) && cloudData.profiles.length > MAX_PROFILES) {
                 throw new Error(PROFILE_LIMIT_MESSAGE);
             }
+            if (cloudData.projectData) ProjectStore.validateSnapshot(cloudData.projectData, cloudData);
             const localChatsForPinMerge = options.source === 'file' ? [] : await dbUtils.getAllChats('updatedAt');
             const localChatsById = new Map(localChatsForPinMerge.map(chat => [String(chat.id), chat]));
             let localPinStateWon = false;
@@ -23252,11 +23944,11 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
             // clearAndImportDataからの戻り値を受け取る
             const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, {
-                ...options, libraryBefore, originals, syncId: parsedData.syncId,
+                ...options, libraryBefore, projectsBefore, originals, syncId: parsedData.syncId,
                 syncTimestamp: new Date(parsedData.exportedAt).getTime()
             });
             if (!result) return null;
-            const { removedAssetInfo, libraryPending } = result;
+            const { removedAssetInfo, libraryPending, projectPending } = result;
             try {
                 await this.loadGlobalSettings();
                 await this.loadProfiles();
@@ -23270,7 +23962,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             // 戻り値にクレンジング情報とメタデータを両方含める
             return {
                 syncId: parsedData.syncId, exportedAt: parsedData.exportedAt,
-                removedAssetInfo, localPinStateWon, libraryPending
+                removedAssetInfo, localPinStateWon, libraryPending, projectPending
             };
     
         } catch (error) {
@@ -23751,7 +24443,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
 // 現行履歴画面と将来の履歴サイドバーが共有する、既存処理の薄い入口。
 const chatHistoryActions = {
-    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'delete']),
+    supportedMenuActions: new Set(['pin', 'rename', 'export', 'duplicate', 'project', 'project-remove', 'delete']),
 
     isSupportedMenuAction(action) {
         return this.supportedMenuActions.has(action);
@@ -23776,7 +24468,7 @@ const chatHistoryActions = {
             return { ok: false, notFound: true, reason: 'invalid-chat-id' };
         }
 
-        const result = await appLogic.loadChat(normalizedId, { scrollAfterLoad: false });
+        const result = await appLogic.loadChat(normalizedId, { scrollAfterLoad: false, keepProjectHistory: options.keepProjectHistory });
         if (!result.ok) return result;
 
         if (options.transition !== false) {
