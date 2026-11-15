@@ -57,6 +57,21 @@ function assertToolActiveV136(chat) {
         .replace(/･/g, '・');
 }
 
+function normalizeRelationshipContext(text) {
+    if (typeof text !== 'string' || !text.includes('\\n')) return text;
+
+    // Preserve code spans, fenced code and recognizable Windows paths.
+    // Escaped backslashes and isolated examples of an escape stay literal.
+    return text.replace(/(\x60+)[\s\S]*?\1|(?:\b[A-Za-z]:|(?:^|\s)\.{1,2}|\\\\[\w.-]+)\\[^\s"'\x60]+|\\+(?:r\\+n|n)/g,
+        (part, _ticks, offset) => {
+            if (part !== '\\n' && part !== '\\r\\n') return part;
+            const before = text[offset - 1];
+            const after = text[offset + part.length];
+            if ((!before || /[\s"'“‘「『]/.test(before)) && (!after || /[\s"'”’」』]/.test(after))) return part;
+            return '\n';
+        });
+}
+
 
 /**
  * メッセージオブジェクトから画像データをBlob形式で抽出するヘルパー
@@ -1561,11 +1576,12 @@ async function generate_image(args = {}, chat) {
                     if (relationship_affinity !== undefined) {
                         targetRelation.affinity = relationship_affinity;
                     }
-                    if (relationship_context !== undefined && String(relationship_context).trim() !== '') {
+                    const context = normalizeRelationshipContext(relationship_context);
+                    if (context !== undefined && String(context).trim() !== '') {
                         if (targetRelation.context) {
-                            targetRelation.context += `\n${relationship_context}`;
+                            targetRelation.context = `${normalizeRelationshipContext(targetRelation.context)}\n${context}`;
                         } else {
-                            targetRelation.context = relationship_context;
+                            targetRelation.context = context;
                         }
                     }
                 }

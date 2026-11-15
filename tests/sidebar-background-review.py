@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-sidebar-',ignore_cleanup_errors=
             client.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':900,'deviceScaleFactor':1,'mobile':False})
             if args.kinds:ev('prepareBackgroundReviewV136("chat","light-individual")')
             for opened in ([False,True] if width>=900 else [False]):
-                for kind in (args.kinds or ['panel','search','replace','system','format','summary','character','debug','memory','models','profile']):
+                for kind in (args.kinds or ['panel','search','replace','system','format','summary','debug','memory','models','profile']):
                     m=ev(f'prepareSidebarReviewV136({json.dumps(kind)},{str(opened).lower()})');name=f'{width}-{"open" if opened else "closed"}-{kind}';shot(name,m)
                     if args.phase=='after':
                         r=m['panel'];w=m['workspace'];blocked_picker=kind in ('models','profile') and opened and 900<=width<1200
@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-sidebar-',ignore_cleanup_errors=
                         if r:
                             check(r['left']>=w['left']-1 and r['right']<=w['right']+1,name+' outside workspace')
                             check(r['top']>=-1 and r['bottom']<=901,name+' outside viewport')
-                            if kind in ['system','format','summary','character','debug','memory']:check(abs(m['centerError'])<1,name+' not centered')
+                            if kind in ['system','format','summary','debug','memory']:check(abs(m['centerError'])<1,name+' not centered')
                             if kind in ['search','replace']:check(abs(r['left']-w['left']-(8 if width<=600 else 16))<1,name+' incorrect left')
                         check(m['inert']==(opened and 900<=width<1200),name+' inert mode')
             print(f'Captured floating UI {width}px',flush=True)

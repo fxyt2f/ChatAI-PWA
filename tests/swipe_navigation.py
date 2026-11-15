@@ -41,6 +41,11 @@ def run(client, url):
     def click(selector):
         ev(f'document.querySelector({json.dumps(selector)}).click()')
 
+    def open_settings():
+        if not ev('chatSidebarUiState.isOpen'):
+            click('#goto-history-btn')
+        click('#goto-settings-btn')
+
     def viewport(width):
         client.call('Emulation.setDeviceMetricsOverride', {
             'width': width, 'height': 740, 'deviceScaleFactor': 1, 'mobile': width < 800,
@@ -155,14 +160,14 @@ def run(client, url):
 
     def feedback_clear():
         wait("""!appLogic.swipeSnap && !appLogic.swipePreview &&
-            [...document.querySelectorAll('.screen, #settings-detail')].every(el =>
+            !document.querySelector('.swipe-library-preview, .swipe-chat-preview') &&
+            [...document.querySelectorAll('.screen, #chat-workspace, #document-library-workspace')].every(el =>
                 !el.style.translate && getComputedStyle(el).translate === 'none')""", 'Swipe feedback is fully cleared')
 
     def release_with_feedback(selector, element, dx, *, follows=True, animated=True):
         result = ev(f"""(async () => {{
             const target = {json.dumps(selector)}, element = document.querySelector({json.dumps(element)});
-            const detail = element.id === 'settings-detail';
-            const neighbor = document.querySelector(detail ? '.settings-category-nav' : element.id === 'chat-screen'
+            const neighbor = document.querySelector(element.id === 'chat-screen'
                 ? '#settings-screen' : '#chat-screen');
             const before = element.getBoundingClientRect().left;
             const neighborBefore = neighbor.getBoundingClientRect().left;
@@ -179,14 +184,13 @@ def run(client, url):
             swipeFixtureEvent(target, 'touchend', [], [[0, 180 + ({dx}), 300]]);
             const released = element.getBoundingClientRect().left - before;
             const duration = appLogic.swipeSnap?.animations[0].effect.getTiming().duration ?? null;
-            return {{offset, released, duration, preview, adjacentOffset, detail, settingsEntry, width:innerWidth,
+            return {{offset, released, duration, preview, adjacentOffset, settingsEntry, width:innerWidth,
                 lastTouches:swipeFixtureTrace.slice(-3)}};
         }})()""")
         if follows:
             assert abs(result['offset'] - (dx - (10 if dx > 0 else -10))) < 0.5, result
             assert result['preview'] and result['settingsEntry'], result
-            if not result['detail']:
-                assert abs(result['adjacentOffset'] - result['offset']) < 0.5, result
+            assert abs(result['adjacentOffset'] - result['offset']) < 0.5, result
             if animated:
                 assert 180 <= result['duration'] <= 320, result
                 assert abs(result['released'] - result['offset']) < 2, result
@@ -255,7 +259,7 @@ def run(client, url):
         assert ev("!state.settings.enableSwipeNavigation && !document.documentElement.classList.contains('swipe-navigation-enabled')")
         unchanged(lambda: drag(chat, -104))
         unchanged(lambda: synthetic(chat, [(205, 300)], (245, 300), start=(140, 300)))
-        click('#goto-settings-btn')
+        open_settings()
         screen('settings')
         unchanged(lambda: drag(settings_top, 104))
         tap('[data-settings-category="other"]')
@@ -269,6 +273,7 @@ def run(client, url):
         screen('settings', '#settings/other')
         assert ev("""state.settings.enableSwipeNavigation && document.getElementById('swipe-navigation-toggle').checked
             && getComputedStyle(document.documentElement).overscrollBehaviorX === 'contain'""")
+        assert ev("state.settings.swipeDestinations.join() === 'settings'")
 
         unchanged(lambda: drag(settings_detail, -104, padding=True))
         ev("document.getElementById('settings-detail').scrollTop = 0")
@@ -279,16 +284,16 @@ def run(client, url):
         swipe_label = 'label:has(#swipe-navigation-toggle)'
         ev(f"document.querySelector({json.dumps(swipe_label)}).scrollIntoView({{block:'center'}})")
         drag(swipe_label, 104)
-        screen('settings')
-        assert ev('settingsUiV136.category') is None and ev('history.length') == depth
+        screen('chat')
+        assert ev('history.length') == depth + 1
         assert ev('state.settings.enableSwipeNavigation'), 'Swiping the label did not toggle its checkbox'
-        ev('history.forward()')
-        screen('settings', '#settings/other')
         ev('history.back()')
+        screen('settings', '#settings/other')
+        click('#settings-menu-btn')
         screen('settings')
         click('[data-settings-category="other"]')
         screen('settings', '#settings/other')
-        click('#back-to-chat-from-settings')
+        click('#settings-menu-btn')
         screen('settings')
         click('[data-settings-category="appearance"]')
         screen('settings', '#settings/appearance')
@@ -315,18 +320,22 @@ def run(client, url):
         screen('settings', '#settings/appearance')
         ev("document.getElementById('dark-mode-toggle').scrollIntoView({block:'center'})")
         drag('#dark-mode-toggle', 104)
-        screen('settings')
-        click('[data-settings-category="appearance"]')
+        screen('chat')
+        ev('history.back()')
         screen('settings', '#settings/appearance')
-        # Two end-to-end gestures in the same task must not queue two history.back() calls.
+        # Two events on the departed detail must not add two navigation entries.
         assert ev(f"""(() => {{
             const target = {json.dumps(settings_detail)};
             for (let i = 0; i < 2; i++) {{
                 swipeFixtureEvent(target, 'touchstart', [[0, 100, 300]]);
                 swipeFixtureEvent(target, 'touchend', [], [[0, 205, 300]]);
             }}
-            return Boolean(appLogic.swipeSettingsBackTimer);
+            return state.currentScreen === 'chat';
         }})()""")
+        screen('chat')
+        ev('history.back()')
+        screen('settings', '#settings/appearance')
+        click('#settings-menu-btn')
         screen('settings')
         unchanged(lambda: drag(settings_top, -104))
         assert ev('settingsUiV136.category') is None
@@ -341,17 +350,17 @@ def run(client, url):
         boot(reload=True)
         screen('chat')
 
-        ev("""window.headerTaps = 0;
-            document.getElementById('goto-settings-btn').addEventListener('click', () => headerTaps++);""")
+        tap('#goto-history-btn')
+        settled_sidebar(True)
         tap('#goto-settings-btn')
         screen('settings')
-        assert ev('headerTaps === 1'), 'A normal header tap still opens settings'
+        assert ev('!chatSidebarUiState.isOpen'), 'A native settings tap leaves the overlay closed'
         click('#back-to-chat-from-settings')
         screen('chat')
-        ev("document.getElementById('goto-settings-btn').focus({preventScroll:true})")
-        drag('#goto-settings-btn', -104)
+        ev("window.titleTaps = 0; elements.chatTitle.addEventListener('click', () => titleTaps++); elements.chatTitle.focus({preventScroll:true})")
+        drag('#chat-title', -104)
         screen('settings')
-        assert ev('headerTaps === 1'), 'A focused header button allows a swipe without another click'
+        assert ev('titleTaps === 0'), 'Swiping from the focused header title does not activate it'
         click('#back-to-chat-from-settings')
         screen('chat')
         boot(reload=True)
@@ -637,7 +646,7 @@ def run(client, url):
                 click('#document-library-open')
                 wait('!elements.documentLibraryWorkspace.hidden', 'Library opens from sidebar')
             if surface == 'settings':
-                click('#goto-settings-btn')
+                open_settings()
                 screen('settings')
             pinch(True)
             wait('visualViewport.scale > 1.2 && state.isZoomed', f'Two-finger pinch zooms {surface}')
@@ -693,7 +702,7 @@ def run(client, url):
         ev(f"""swipeFixtureEvent({json.dumps(chat)}, 'touchstart', [[0, 180, 300]]);
             swipeFixtureEvent({json.dumps(chat)}, 'touchmove', [[0, 130, 300]])""")
         wait("document.getElementById('chat-screen').style.translate !== ''", 'Chat is following the finger')
-        click('#goto-settings-btn')
+        ev("uiUtilsV136.showScreen('settings')")
         screen('settings')
         feedback_clear()
         unchanged(lambda: ev(f"swipeFixtureEvent({json.dumps(chat)}, 'touchend', [], [[0, 205, 300]])"))
@@ -717,6 +726,7 @@ def run(client, url):
 
         for width in (320, 375, 430, 768, 799, 800, 801, 1280):
             viewport(width)
+            ev('settingsUiV136.selectCategory(settingsUiV136.defaultCategory(), false)')
             release_with_feedback(chat, '#chat-screen', -104)
             screen('settings')
             feedback_clear()
@@ -724,7 +734,7 @@ def run(client, url):
                 assert ev('settingsUiV136.category') is None
                 click('[data-settings-category="other"]')
                 screen('settings', '#settings/other')
-                release_with_feedback(settings_detail, settings_detail, 104)
+                click('#settings-menu-btn')
                 screen('settings')
                 feedback_clear()
                 release_with_feedback(settings_top, '#settings-screen', 104)
@@ -737,13 +747,13 @@ def run(client, url):
             feedback_clear()
 
         viewport(799)
-        click('#goto-settings-btn')
+        open_settings()
         screen('settings')
         click('[data-settings-category="other"]')
         screen('settings', '#settings/other')
         ev(f"""swipeFixtureEvent({json.dumps(settings_detail)}, 'touchstart', [[0, 100, 300]]);
             swipeFixtureEvent({json.dumps(settings_detail)}, 'touchmove', [[0, 140, 300]])""")
-        wait("document.getElementById('settings-detail').style.translate !== ''", 'Settings detail is following the finger')
+        wait("document.getElementById('settings-screen').style.translate !== ''", 'Settings screen is following the finger')
         viewport(800)
         feedback_clear()
         viewport(799)
@@ -802,13 +812,14 @@ def run(client, url):
                 wait("!document.querySelector('#chat-screen').classList.contains('chat-sidebar-open')", 'Menu closes the sidebar')
         viewport(375)
         ev("appLogic.updateLocalUiSetting('enableWideMode', false).then(() => appLogic.applyWideMode())")
-        check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear)
+        check_consecutive_swipes(ev, wait, screen, open_settings, boot, touch, feedback_clear)
         ev("uiUtilsV136.showScreen('chat')")
         boot(reload=True)
         check_thinking_drag(ev, wait, screen, tap, touch)
-        check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport)
+        check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport, open_settings)
         viewport(375)
         check_sidebar_button_feedback(client, ev, wait, screen, click, tap, drag, manual_gesture, settled_sidebar, boot)
+        check_selected_destinations(ev, wait, click, drag, boot, viewport, open_settings, feedback_clear)
     finally:
         client.sock.settimeout(socket_timeout)
         client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier': injection})
@@ -822,7 +833,181 @@ def run(client, url):
             'consecutive swipe handoff and reversal, reduced motion, 320–1280px, header and form controls, Thinking drag, and sidebar navigation)\n'
             'ALL PASSED (native drawer position from left, center and right, reversal, backdrop, snap/cancel, timed fling and button interruption)\n'
             'ALL PASSED (sidebar button appearance, outside touch in both modes, Tab focus and desktop hover/press)\n'
-            'ALL PASSED (chat action swipes and taps, wrapped action geometry, floating panel focus/hit-testing, and local formatting settings)')
+            'ALL PASSED (chat action swipes and taps, wrapped action geometry, floating panel focus/hit-testing, and local formatting settings)\n'
+            'ALL PASSED (selected destination order, persistence and profile independence, library preview, hub autosave and active generation)')
+
+
+def check_selected_destinations(ev, wait, click, drag, boot, viewport, open_settings, feedback_clear):
+    surfaces = {
+        'chat': '#chat-workspace .main-content',
+        'library': '#document-library-collection-scroll',
+        'information': '#information-screen .settings-layout',
+        'settings': '#settings-screen .settings-layout',
+    }
+
+    def page(name):
+        wait(f"uiUtilsV136.getSwipePage() === '{name}' && !appLogic.swipeSnap", name)
+        feedback_clear()
+
+    def swipe(source, dx, destination, selector=None, native=False):
+        target = selector or surfaces[source]
+        if native:
+            drag(target, dx)
+        else:
+            ev(f"""(async () => {{
+                const target = {json.dumps(target)}, end = 180 + ({dx});
+                swipeFixtureEvent(target, 'touchstart', [[0, 180, 300]]);
+                swipeFixtureEvent(target, 'touchmove', [[0, end, 300]]);
+                await new Promise(requestAnimationFrame);
+                swipeFixtureEvent(target, 'touchend', [], [[0, end, 300]]);
+            }})()""")
+        page(destination)
+
+    def choose(names):
+        allowed = json.dumps(names)
+        ev(f"""document.querySelectorAll('#swipe-destinations input').forEach(input => {{
+            if (input.checked !== {allowed}.includes(input.value)) input.closest('label').click();
+        }})""")
+        wait(f"dbUtils.getSetting('localUiSettings').then(record => record.value.swipeDestinations.join() === {allowed}.join())",
+             f'Selection saved: {names}')
+
+    viewport(375)
+    boot(reload=True)
+    page('chat')
+    open_settings()
+    click('[data-settings-category=other]')
+    all_pages = ['library', 'information', 'settings']
+    choose(all_pages)
+    click('#swipe-navigation-toggle')
+    assert ev("""[...document.querySelectorAll('#swipe-destinations input')].every(input => input.checked && input.disabled)""")
+    swipe('settings', 115, 'settings', '#settings-detail')
+    wait("dbUtils.getSetting('localUiSettings').then(record => !record.value.enableSwipeNavigation)", 'Disabled state persisted')
+    boot(reload=True)
+    page('settings')
+    assert ev("""[...document.querySelectorAll('#swipe-destinations input')].every(input => input.checked && input.disabled)""")
+    click('#swipe-navigation-toggle')
+    assert ev("""[...document.querySelectorAll('#swipe-destinations input')].every(input => input.checked && !input.disabled)""")
+    assert ev("""(async () => {
+        const before = state.activeProfileId;
+        const id = await dbUtils.addProfile({name:'スワイプ検証用', settings:state.activeProfile.settings});
+        if (!await appLogic.switchProfile(id)) return false;
+        const intact = state.settings.swipeDestinations.join() === 'library,information,settings';
+        return await appLogic.switchProfile(before) && intact;
+    })()"""), 'Selection is browser-local across profiles'
+    choose([])
+    boot(reload=True)
+    assert ev('state.settings.swipeDestinations.length === 0')
+    swipe('settings', 115, 'settings', '#settings-detail')
+    click('#settings-menu-btn')
+    wait("settingsUiV136.category === null", 'Settings detail arrow returns to categories')
+    click('#back-to-chat-from-settings')
+    swipe('chat', -115, 'chat')
+    swipe('chat', 115, 'chat')
+    wait('chatSidebarUiState.isOpen', 'Sidebar still opens without right-hand destinations')
+    click('#chat-sidebar-backdrop')
+
+    ev("appLogic.updateLocalUiSetting('swipeDestinations', ['information'])")
+    swipe('chat', -115, 'information')
+    swipe('information', -115, 'information')
+    swipe('information', 115, 'chat')
+    ev("appLogic.updateLocalUiSetting('swipeDestinations', ['settings','unknown','library','library'])")
+    assert ev("state.settings.swipeDestinations.join() === 'library,settings'")
+    assert ev("appLogic.normalizeLocalUiSettings({swipeDestinations: 'invalid'}).swipeDestinations.join() === 'settings'")
+    swipe('chat', -115, 'library')
+    swipe('library', -115, 'settings')
+    swipe('settings', 115, 'library')
+    swipe('library', 115, 'chat')
+
+    ev(f"""(async () => {{
+        const target = {json.dumps(surfaces['chat'])};
+        swipeFixtureEvent(target, 'touchstart', [[0, 210, 300]]);
+        swipeFixtureEvent(target, 'touchmove', [[0, 120, 300]]);
+        await new Promise(requestAnimationFrame);
+        await appLogic.updateLocalUiSetting('swipeDestinations', {json.dumps(all_pages)});
+        swipeFixtureEvent(target, 'touchend', [], [[0, 95, 300]]);
+    }})()""")
+    page('chat')
+    ev(r"""(async () => {
+        await appLogic.updateLocalUiSetting('autoScroll', false);
+        await dbUtils.saveChat(null, {id: 74321, messages:[{role:'user',content:'会話の本文です。\n\n'.repeat(180)}],
+            persistentMemory:{character_memory_花:{name:'花',status:'作業前'}}});
+        await appLogic.loadChat(74321, {scrollAfterLoad:false});
+        await dbUtils.addLibraryDocument(new File(['プレビューの内容'], 'スワイプ検証.txt'));
+        elements.userInput.value = '入力途中の下書き';
+        elements.userInput.dispatchEvent(new Event('input', {bubbles:true}));
+        await appLogic.handleFileSelection([new File(['保持する添付'], '下書き.txt', {type:'text/plain'})]);
+        const scroll = elements.chatWorkspace.querySelector('.main-content');
+        scroll.scrollTop = 180;
+        window.routeProbe = { messages:state.currentMessages, scrollTop:scroll.scrollTop };
+    })()""")
+    assert ev("routeProbe.scrollTop > 0 && state.pendingAttachments[0]?.name === '下書き.txt'")
+    assert ev(f"""(async () => {{
+        const target = {json.dumps(surfaces['chat'])};
+        swipeFixtureEvent(target, 'touchstart', [[0, 210, 300]]);
+        swipeFixtureEvent(target, 'touchmove', [[0, 120, 300]]);
+        await new Promise(requestAnimationFrame);
+        const library = elements.documentLibraryWorkspace;
+        const visible = library.hidden && library.inert &&
+            library.getBoundingClientRect().left < elements.appContainer.getBoundingClientRect().right;
+        swipeFixtureEvent(target, 'touchcancel', []);
+        return visible;
+    }})()"""), 'The real library surface follows the finger while remaining inert'
+    feedback_clear()
+    swipe('chat', -115, 'library', native=True)
+    ev("""const routeQuery = document.querySelector('#document-library-query');
+        routeQuery.value = 'スワイプ';
+        routeQuery.dispatchEvent(new Event('input', {bubbles:true}));""")
+    wait("Boolean(document.querySelector('#document-library-list .document-library-file'))", 'Library file is listed')
+    click('#document-library-list .document-library-file')
+    wait("Boolean(history.state?.documentLibraryDetail)", 'Preview has its own history entry')
+    swipe('library', -115, 'library', '#document-library-preview')
+    assert ev("Boolean(history.state?.documentLibraryDetail)")
+    ev('history.back()')
+    wait("!history.state?.documentLibraryDetail && !elements.documentLibraryWorkspace.hasAttribute('data-viewing-file')", 'Preview Back returns to collection')
+    swipe('library', -115, 'information', '#document-library-list .document-library-file', native=True)
+    click('[data-information-category=character]')
+    ev("""const status = [...document.querySelectorAll('#information-panel-character label')]
+        .find(label => label.textContent.trim() === '状態').querySelector('textarea');
+        status.value = 'スワイプ直前の編集'; status.dispatchEvent(new Event('input', {bubbles:true}));""")
+    swipe('information', -115, 'settings', '#information-detail')
+    wait("dbUtils.getChat(74321).then(chat => chat.persistentMemory.character_memory_花.status === 'スワイプ直前の編集')",
+         'Leaving the hub flushes the edit')
+    swipe('settings', -115, 'settings', '#settings-detail' if ev('Boolean(settingsUiV136.category)') else None)
+    ev('history.back()')
+    page('information')
+    assert ev("location.hash === '#information/character'")
+    ev('history.forward()')
+    page('settings')
+    swipe('settings', 115, 'information')
+    assert ev("location.hash === '#information/character'")
+    click('#information-menu-btn')
+    assert ev("location.hash === '#information'")
+    swipe('information', 115, 'library')
+    assert ev("document.querySelector('#document-library-query').value === 'スワイプ'")
+    swipe('library', 115, 'chat')
+    assert ev("""state.currentChatId === 74321 && state.currentMessages === routeProbe.messages &&
+        elements.userInput.value === '入力途中の下書き' && state.pendingAttachments[0]?.name === '下書き.txt' &&
+        elements.chatWorkspace.querySelector('.main-content').scrollTop === routeProbe.scrollTop""")
+
+    ev("""(async () => {
+        await appLogic.saveApiConfigs([{id:'routes',provider:'gemini',apiKey:'fixture',modelCandidates:['gemini-2.5-flash']}]);
+        await appLogic.setCurrentChatModelRef({apiConfigId:'routes',modelName:'gemini-2.5-flash'});
+        await appLogic.saveGlobalSettingsV136({enableStreamingOutput:false});
+        routeProbe.provider = appLogic.callApiWithRetry;
+        appLogic.callApiWithRetry = async () => {
+            await new Promise(resolve => { routeProbe.finish = resolve; });
+            return {content:'画面移動中の応答',continuation:{parts:[{text:'画面移動中の応答'}]}};
+        };
+        routeProbe.send = appLogic.handleSend();
+    })()""")
+    wait("Boolean(routeProbe.finish && state.isSending)", 'Active generation is waiting for its response')
+    for source, destination in zip(['chat', 'library', 'information'], all_pages):
+        swipe(source, -115, destination)
+        assert ev("Boolean(appLogic.getSendJobV136(74321) && !state.abortController.signal.aborted)")
+    ev('routeProbe.finish(); routeProbe.send')
+    wait("dbUtils.getChat(74321).then(chat => chat.messages.at(-1).content === '画面移動中の応答')", 'Response saves behind Settings')
+    assert ev("uiUtilsV136.getSwipePage() === 'settings'")
+    ev('appLogic.callApiWithRetry = routeProbe.provider')
 
 
 def check_sidebar_button_feedback(client, ev, wait, screen, click, tap, drag, manual_gesture, settled_sidebar, boot):
@@ -917,7 +1102,7 @@ def check_sidebar_button_feedback(client, ev, wait, screen, click, tap, drag, ma
             click('#confirmDialog .dialog-cancel-btn')
 
 
-def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport):
+def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, boot, viewport, open_settings):
     main = '#chat-screen .main-content'
     thought = '.thought-summary-details > summary'
     message_action = '.message.model .tm-search-message-btn'
@@ -926,7 +1111,7 @@ def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, 
     formatting = '#enable-text-formatting-toggle'
 
     def set_formatting(value):
-        click('#goto-settings-btn')
+        open_settings()
         screen('settings')
         click('[data-settings-category="general"]')
         screen('settings', '#settings/general')
@@ -934,7 +1119,7 @@ def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, 
         click(formatting)
         wait(f"(async () => (await dbUtils.getSetting('localUiSettings')).value.enableTextFormatting === {value})()",
              'Formatting setting persisted')
-        click('#back-to-chat-from-settings')
+        click('#settings-menu-btn')
         screen('settings')
         click('#back-to-chat-from-settings')
         screen('chat')
@@ -1126,7 +1311,7 @@ def check_chat_action_ui(client, ev, wait, screen, click, tap, drag, unchanged, 
         state.textFormattingSettings.target === 'user'""")
 
 
-def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clear):
+def check_consecutive_swipes(ev, wait, screen, open_settings, boot, touch, feedback_clear):
     def route(name, pushes):
         expression = """[window.state?.currentScreen, location.hash, history.state?.screen, window.swipeChain?.pushes,
             [...document.querySelectorAll('.screen')].filter(el => el.classList.contains('active')).map(el => el.id),
@@ -1154,7 +1339,7 @@ def check_consecutive_swipes(ev, wait, screen, click, boot, touch, feedback_clea
         ev("uiUtilsV136.showScreen('chat')")
         boot(reload=True)
         screen('chat')
-        click('#goto-settings-btn')
+        open_settings()
         screen('settings')
         ev("""(() => {
             const ids = ['chat', 'settings'];

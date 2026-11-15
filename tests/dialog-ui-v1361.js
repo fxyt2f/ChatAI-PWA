@@ -4,7 +4,7 @@
     const $ = id => document.getElementById(id);
     const ids = { system: 'system-prompt-dialog', format: 'textFormattingDialog', debug: 'debugLogDialog', summary: 'summaryDialog',
         compression: 'confirmDialog', confirm: 'confirmDialog', prompt: 'promptDialog', alert: 'alertDialog', api: 'api-config-dialog',
-        conflict: 'assetConflictDialog', memory: 'memoryManagementDialog', character: 'characterProfileDialog',
+        conflict: 'assetConflictDialog', memory: 'memoryManagementDialog',
         assets: 'assetManagementDialog', progress: 'progressDialog' };
     let assertions = 0, current, pending, opener, contents, originalSummary, apiCalls = 0, oldSave, late, releaseLate, oldResolver, oldProvider, viewportDescriptors, clipboardWrite, copied;
     const check = (ok, message) => { assertions++; if (!ok) throw new Error(message); };
@@ -67,7 +67,6 @@
                 case 'api': app.openApiConfigDialog(); break;
                 case 'conflict': pending = app.showAssetConflictDialog('fixture.webp'); break;
                 case 'memory': await app.openMemoryManagementDialog(); break;
-                case 'character': await app.openCharacterProfileDialog(); break;
                 case 'assets': $('assetManagementDialog').showModal(); break;
                 case 'progress': ui.showProgressDialog('DBを更新中です。'); break;
             }

@@ -29,7 +29,7 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             reasoning_details: [{ type: 'reasoning.encrypted', data: 'opaque-fixture', signature: 'signed-fixture' }] }, finish_reason: 'stop' }],
         usage: { completion_tokens: 8, total_tokens: 20 }
     });
-    const system = call => call.body.systemInstruction?.parts?.[0]?.text ||
+    const system = call => call.body.systemInstruction?.parts?.map(part => part.text).join('\n\n') ||
         call.body.messages?.find(message => message.role === 'system')?.content || '';
     const defaultReply = call => call.url.includes('rag-router.invalid') ? routerResponse() : gemResponse();
     let reply = defaultReply;
@@ -490,6 +490,52 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             eq((await projectAnswer(chatWithoutFiles, [])).saved.rag, undefined);
         });
 
+        const instructionA = 'プロジェクト甲だけの共通指示';
+        const instructionB = 'プロジェクト乙だけの共通指示';
+        await test('F1: project moves during snapshot capture keep instructions and shared files together', async () => {
+            await db.updateProject(projectA.id, { systemInstruction: instructionA });
+            await db.updateProject(projectB.id, { systemInstruction: instructionB });
+            await db.setChatDocuments(chatA, [personal.id]);
+            assert((await app.loadChat(chatA)).ok);
+            const readProject = db.getChatProject, readScope = db.getChatRagDocuments;
+            const sides = [
+                { project: projectA, file: sharedA, instruction: instructionA },
+                { project: projectB, file: sharedB, instruction: instructionB }
+            ];
+            for (const [from, to] of [sides, [...sides].reverse()]) {
+                const release = gate();
+                let captured = false;
+                const pauseAfterRead = read => async function (id, ...args) {
+                    const result = await read.call(this, id, ...args);
+                    if (id === chatA && !captured) {
+                        captured = true;
+                        await release.promise;
+                    }
+                    return result;
+                };
+                // The old implementation read the project first, then read the RAG scope.
+                db.getChatProject = pauseAfterRead(readProject);
+                db.getChatRagDocuments = pauseAfterRead(readScope);
+                const before = calls.length;
+                const pending = send(query);
+                try {
+                    await wait(() => captured, 'project snapshot read');
+                    await db.setChatProject(chatA, to.project.id);
+                } finally {
+                    release.resolve();
+                    await pending;
+                    db.getChatProject = readProject;
+                    db.getChatRagDocuments = readScope;
+                }
+                eq(calls.length, before + 1);
+                const prompt = system(calls.at(-1));
+                assert(prompt.includes(from.instruction) && prompt.includes(from.file.fileName) &&
+                    !prompt.includes(to.instruction) && !prompt.includes(to.file.fileName), prompt);
+                const next = await projectAnswer(chatA, [personal, to.file, common], [from.instruction, from.file.fileName]);
+                assert(next.prompt.includes(to.instruction), next.prompt);
+            }
+        });
+
         await test('Project send snapshots isolate concurrent requests across membership, share and version changes', async () => {
             added = await projectFile('追加B', '後から共有した印');
             await db.setChatDocuments(chatA, [personal.id]);
@@ -509,7 +555,9 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 await db.setChatProject(chatA, projectB.id);
                 await db.addProjectDocument(projectB.id, added.id);
                 assert((await app.loadChat(chatB)).ok);
-                await projectAnswer(chatB, [sharedB, common, added], ['甲プロジェクトの印', '固有資料の印', '新版の印']);
+                const other = await projectAnswer(chatB, [sharedB, common, added],
+                    ['甲プロジェクトの印', '固有資料の印', '新版の印', instructionA]);
+                assert(other.prompt.includes(instructionB), other.prompt);
                 release.resolve();
                 await pending;
                 const saved = await answer(chatA);
@@ -517,8 +565,8 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 eq(source?.versionId, sharedA.versionId);
                 assert(source.versionId !== replacement.versionId);
                 const prompt = system(calls.at(-1));
-                assert(prompt.includes('甲プロジェクトの印') && prompt.includes('固有資料の印') &&
-                    !['乙プロジェクトの印', '後から共有した印', '新版の印'].some(marker => prompt.includes(marker)), prompt);
+                assert(prompt.includes('甲プロジェクトの印') && prompt.includes('固有資料の印') && prompt.includes(instructionA) &&
+                    !['乙プロジェクトの印', '後から共有した印', '新版の印', instructionB].some(marker => prompt.includes(marker)), prompt);
             } finally {
                 release.resolve();
                 await pending;
@@ -534,7 +582,7 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             await db.removeProjectDocument(projectB.id, added.id);
             await projectAnswer(chatA, [personal, sharedB, common], ['後から共有した印']);
             await db.setChatProject(chatA, null);
-            await projectAnswer(chatA, [personal], ['乙プロジェクトの印', '両方で共有する印']);
+            await projectAnswer(chatA, [personal], ['乙プロジェクトの印', '両方で共有する印', instructionA, instructionB]);
             await db.setChatProject(chatA, projectB.id);
             await db.deleteProject(projectB.id);
             await projectAnswer(chatA, [personal], ['乙プロジェクトの印', '両方で共有する印']);
@@ -548,20 +596,27 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             await projectAnswer(chatA, [personal, common, added], ['新版の印', '甲プロジェクトの印']);
         });
 
-        await test('A failed scope read never falls back, and the existing no-RAG path still sends normally', async () => {
+        await test('Scope read failure stops sending, while unavailable documents preserve the captured instruction', async () => {
             const capture = db.getChatRagDocuments;
             let scopeReads = 0;
             db.getChatRagDocuments = async () => { scopeReads++; throw new Error('scope fixture'); };
             try {
-                const { prompt, saved } = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印']);
+                const before = calls.length;
+                await send(query);
+                eq(calls.length, before);
+                eq(scopeReads, 1);
+                assert((await db.getChat(chatA)).messages.at(-1).content.includes('送信するプロジェクトと資料の情報を取得できませんでした'));
+                db.getChatRagDocuments = async (...args) => ({ ...await capture.apply(db, args), documents: null });
+                const { prompt, saved } = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印', instructionB]);
                 eq(saved.rag.status, 'failed');
-                assert(prompt.includes('資料は未確認'));
+                assert(prompt.includes('資料は未確認') && prompt.includes(instructionA), prompt);
                 const rag = window.DocumentRag;
                 try {
+                    db.getChatRagDocuments = capture;
                     window.DocumentRag = undefined;
-                    const result = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印']);
+                    const result = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印', instructionB]);
+                    assert(result.prompt.includes(instructionA), result.prompt);
                     eq(result.saved.rag, undefined);
-                    eq(scopeReads, 1);
                 } finally { window.DocumentRag = rag; }
             } finally { db.getChatRagDocuments = capture; }
         });
