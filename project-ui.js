@@ -15,6 +15,9 @@ window.ProjectUI = (() => {
     const returns = new Map();
     const chatEntries = new Map();
     const tabs = new Map();
+    const tabNames = ['chats', 'files', 'settings'];
+    const settingsFields = { name: 'name', description: 'description', systemInstruction: 'instruction' };
+    let settingsSizing;
     let dataGeneration = 0;
     const expansionKey = 'chatai-expanded-projects';
 
@@ -175,7 +178,7 @@ window.ProjectUI = (() => {
         const chat = document.getElementById('chat-workspace');
         const header = document.querySelector('#chat-workspace > .app-header, #project-workspace > .app-header');
         const composer = ui().getComposerElement();
-        for (const id of ['title', 'options']) byId(id).hidden = !toProject;
+        byId('title').hidden = !toProject;
         for (const id of ['chat-title', 'goto-settings-btn']) document.getElementById(id).hidden = toProject;
         const input = document.getElementById('user-input');
         input.placeholder = toProject ? 'このプロジェクトでメッセージを送信…' : 'メッセージを入力...';
@@ -234,6 +237,8 @@ window.ProjectUI = (() => {
         byId('workspace').hidden = false;
         moveChatControls(true);
         byId('content').scrollTop = 0;
+        byId('settings-form').reset();
+        byId('settings-status').textContent = '';
         activateTab(tab || tabs.get(id) || 'chats');
         attachDraft(view);
         byId('title').textContent = 'プロジェクト';
@@ -326,7 +331,9 @@ window.ProjectUI = (() => {
     }
 
     function setViewReady(ready) {
-        for (const id of ['options', 'file-add']) byId(id).disabled = !ready;
+        byId('file-add').disabled = !ready;
+        for (const name of Object.values(settingsFields)) byId('settings-' + name).disabled = !ready;
+        for (const action of ['save', 'delete']) byId('settings-' + action).disabled = !ready || Boolean(view?.savingSettings);
         if (view) view.ready = ready;
         ui().updateComposerSendButton();
     }
@@ -342,7 +349,7 @@ window.ProjectUI = (() => {
         ui().closeHistoryItemMenu();
         closeMenu();
         tabs.set(view.id, tab);
-        for (const name of ['chats', 'files']) {
+        for (const name of tabNames) {
             const selected = tab === name;
             const button = byId('tab-' + name);
             button.setAttribute('aria-selected', String(selected));
@@ -350,6 +357,13 @@ window.ProjectUI = (() => {
             document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
         }
         byId('content').scrollTop = 0;
+        if (tab === 'settings') {
+            if (!settingsSizing && window.TextareaSizing) {
+                settingsSizing = new window.TextareaSizing();
+                for (const name of ['description', 'instruction']) settingsSizing.observe(byId('settings-' + name));
+            }
+            requestAnimationFrame(() => settingsSizing?.syncPromptSizes());
+        }
     }
 
     function attachDraft(owner) {
@@ -469,6 +483,12 @@ window.ProjectUI = (() => {
             const [project, chats, documents] = await db().getProjectWorkspaceSnapshot(owner.id);
             if (view !== owner || owner.version !== version) return;
             if (!project) return close({ restoreFocus: true });
+            for (const [key, name] of Object.entries(settingsFields)) {
+                const control = byId('settings-' + name);
+                if (!owner.project || control.value === (owner.project[key] ?? '')) control.value = project[key] ?? '';
+            }
+            owner.project = project;
+            settingsSizing?.syncPromptSizes();
             byId('title').textContent = project.name;
             const description = byId('description');
             description.textContent = project.description ?? '';
@@ -562,24 +582,47 @@ window.ProjectUI = (() => {
         return input;
     }
 
-    async function editProject(project = null, assignment) {
+    async function createProject(assignment) {
         let created;
-        const result = await showDialog(project ? 'プロジェクトを編集' : '新規プロジェクト', project ? '保存' : '作成', (context, fields) => {
+        const result = await showDialog('新規プロジェクト', '作成', (context, fields) => {
             const name = field(fields, '名前', node('input'));
             name.required = true;
-            name.value = project?.name ?? '';
             const description = field(fields, '説明（任意）', node('textarea'));
             description.rows = 3;
-            description.value = project?.description ?? '';
             context.save = async () => {
                 const values = { name: name.value, description: description.value };
-                if (project) await db().updateProject(project.id, values);
-                else created = await db().createProject(values, assignment);
+                created = await db().createProject(values, assignment);
             };
             return name;
         });
         if (result.ok && created && !assignment) open(created.id);
         return result;
+    }
+
+    async function saveProjectSettings(event) {
+        event.preventDefault();
+        const owner = view;
+        if (!owner?.ready || owner.savingSettings) return;
+        const status = byId('settings-status');
+        const fields = Object.fromEntries(Object.entries(settingsFields).map(([key, name]) => [key, byId('settings-' + name).value]));
+        const changed = Object.fromEntries(Object.entries(fields).filter(([key, value]) => value !== (owner.project[key] ?? '')));
+        if (!Object.keys(changed).length) return;
+        owner.savingSettings = true;
+        setViewReady(true);
+        status.textContent = '';
+        try {
+            await db().updateProject(owner.id, changed);
+            if (view !== owner) return;
+            const name = byId('settings-name');
+            if (name.value === fields.name) name.value = fields.name.trim();
+            await refresh(owner);
+            if (view === owner) status.textContent = '保存しました。';
+        } catch (error) {
+            if (view === owner) status.textContent = '保存に失敗しました。 ' + (error.message || error);
+        } finally {
+            owner.savingSettings = false;
+            if (view === owner) setViewReady(true);
+        }
     }
 
     async function removeProject(project) {
@@ -609,7 +652,7 @@ window.ProjectUI = (() => {
     }
 
     async function moveChat(record, currentProjectId, destination) {
-        if (destination === 'new') return editProject(null, { record, currentProjectId });
+        if (destination === 'new') return createProject({ record, currentProjectId });
         await db().setChatProject(record.id, destination, { expectedRecord: record, expectedProjectId: currentProjectId });
         return { ok: true };
     }
@@ -655,8 +698,11 @@ window.ProjectUI = (() => {
         installed = true;
         try { expanded = new Set(JSON.parse(localStorage.getItem(expansionKey) || '[]').filter(DocumentLibrary.isId)); }
         catch { expanded = new Set(); }
-        byId('create').addEventListener('click', () => editProject());
-        byId('options').addEventListener('click', () => { if (view) openMenu(byId('options'), view.id); });
+        byId('create').addEventListener('click', () => createProject());
+        byId('settings-form').addEventListener('submit', saveProjectSettings);
+        byId('settings-delete').addEventListener('click', () => {
+            if (view?.ready && !view.savingSettings) void removeProject(view.project);
+        });
         byId('file-add').addEventListener('click', () => { if (view) openMenu(byId('file-add'), view.id, ['add-file', 'upload']); });
         byId('menu').addEventListener('click', async event => {
             const action = event.target.closest('[data-project-action]')?.dataset.projectAction;
@@ -683,8 +729,10 @@ window.ProjectUI = (() => {
                 const project = await db().getProject(id);
                 if (generation !== dataGeneration || view !== owner) return;
                 if (!project) throw new Error('プロジェクトが見つかりません。');
-                if (action === 'edit') await editProject(project);
-                else await removeProject(project);
+                if (action === 'edit') {
+                    open(project.id, { tab: 'settings' });
+                    if (view?.id === project.id && view.ready) byId('settings-name').focus({ preventScroll: true });
+                } else await removeProject(project);
             } catch (error) { await ui().showCustomAlert(error.message || String(error)); }
         });
         document.addEventListener('pointerdown', event => {
@@ -734,12 +782,15 @@ window.ProjectUI = (() => {
                 if (ownsDialog(context)) submit.disabled = false;
             }
         });
-        for (const name of ['chats', 'files']) byId('tab-' + name).addEventListener('click', () => activateTab(name));
+        for (const name of tabNames) byId('tab-' + name).addEventListener('click', () => activateTab(name));
         byId('tabs').addEventListener('keydown', event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
-            const name = event.key === 'Home' ? 'chats' : event.key === 'End' ? 'files' :
-                event.target.id === 'project-tab-chats' ? 'files' : 'chats';
+            const index = tabNames.indexOf(event.target.id.replace('project-tab-', ''));
+            if (index === -1) return;
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabNames.length - 1 :
+                (index + (event.key === 'ArrowRight' ? 1 : -1) + tabNames.length) % tabNames.length;
+            const name = tabNames[next];
             activateTab(name);
             byId('tab-' + name).focus();
         });

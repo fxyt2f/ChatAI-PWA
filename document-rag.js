@@ -46,8 +46,7 @@ window.DocumentRag = (() => {
     function capture(session) {
         session.documentToolNames = new Set((window.functionDeclarations || [])
             .flatMap(tool => tool.function_declarations || []).map(tool => tool.name));
-        const owner = window.dbUtils.chatSaveOwners?.get(session.messages);
-        try { session.documentSnapshot = window.DocumentSearch.captureChat(session.chatId, owner?.id === session.chatId ? owner : null); }
+        try { session.documentSnapshot ??= window.DocumentSearch.captureSendChat(session); }
         catch { session.documentSnapshotError = true; }
     }
 
@@ -116,7 +115,9 @@ window.DocumentRag = (() => {
         }
         const sources = [], excerpts = [], accepted = [];
         const best = result.results[0]?.score || 0;
-        const budget = Math.min(maximumContext, Math.max(0, 16000 - (baseInstruction?.parts?.[0]?.text.length || 0)));
+        const baseParts = baseInstruction?.parts || [];
+        const baseLength = baseParts.map(part => part.text || '').join('\n\n').length;
+        const budget = Math.min(maximumContext, Math.max(0, 16000 - baseLength));
         for (const candidate of result.results) {
             session.controller.signal.throwIfAborted();
             if (candidate.contentTrust !== 'untrusted-document' || !Number.isFinite(candidate.score) ||
@@ -150,7 +151,8 @@ window.DocumentRag = (() => {
         const delimiter = 'DOCUMENT_REFERENCE_DATA_' + DocumentLibrary.uniqueId();
         const context = note + (result.unavailable.length ? '\n一部の紐づけ資料を取得できませんでした。' : '') +
             (excerpts.length ? '\nBEGIN_' + delimiter + '\n' + safeJson(excerpts) + '\nEND_' + delimiter : '');
-        const base = baseInstruction?.parts?.[0]?.text || '';
+        if (baseParts.length > 1) return { role: 'system', parts: [...baseParts, { text: context }] };
+        const base = baseParts[0]?.text || '';
         return { role: 'system', parts: [{ text: base + (base ? '\n\n' : '') + context }] };
     }
 

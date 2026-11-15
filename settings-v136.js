@@ -779,8 +779,10 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                     let start=0;
                     messages.forEach((m,i) => { if(m.role === 'user' && !m.parts?.some(p=>p.functionResponse)) start=i; });
                     const native=await convert(provider,messages,model);
-                    const systemText=system?.parts?.[0]?.text || '';
-                    const actualSystem=provider === 'gemini' ? (model === 'gemini-2.5-flash-image-preview' ? null : system || null) : systemText;
+                    const systemParts=(system?.parts || []).map(part => part.text).filter(Boolean);
+                    const systemText=systemParts.join('\n\n');
+                    const actualSystem=provider === 'gemini' ? (model === 'gemini-2.5-flash-image-preview' ? null : system || null)
+                        : provider === 'bedrock' && systemParts.length > 1 ? systemParts : systemText;
                     result={version:1,prefix:await digest({system:actualSystem,messages:native}),turn:await digest(await convert(provider,messages.slice(start),model))};
                 } else throw new Error('Unknown history operation');
                 self.postMessage({id,result});

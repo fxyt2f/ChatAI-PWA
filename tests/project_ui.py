@@ -21,8 +21,10 @@ def run(client, url, screenshots=None):
             try:
                 if ev(f'Promise.resolve(window.state && ({condition})).then(Boolean)'):
                     return
-            except AssertionError as error:
-                if 'Execution context was destroyed' not in str(error):
+            except (AssertionError, RuntimeError) as error:
+                if not any(message in str(error) for message in (
+                    'Execution context was destroyed', 'Inspected target navigated or closed'
+                )):
                     raise
             time.sleep(.04)
         raise AssertionError((description, ev("""({
@@ -155,18 +157,16 @@ def run(client, url, screenshots=None):
             const chat = getComputedStyle(elements.chatScreen);
             const overlay = getComputedStyle(document.querySelector('#chat-overlay'));
             const canvas = document.createElement('canvas').getContext('2d');
-            canvas.fillStyle = chat.backgroundColor;
-            canvas.fillRect(0, 0, 1, 1);
-            canvas.globalAlpha = Number(overlay.opacity);
-            canvas.fillStyle = overlay.backgroundColor;
+            canvas.fillStyle = chat.getPropertyValue('--bg-secondary').trim();
             canvas.fillRect(0, 0, 1, 1);
             const chatPixel = [...canvas.getImageData(0, 0, 1, 1).data];
-            canvas.globalAlpha = 1;
+            canvas.clearRect(0, 0, 1, 1);
             canvas.fillStyle = sidebar.backgroundColor;
             canvas.fillRect(0, 0, 1, 1);
-            return [chatPixel, [...canvas.getImageData(0, 0, 1, 1).data], sidebar.backgroundImage];
+            return [chatPixel, [...canvas.getImageData(0, 0, 1, 1).data], sidebar.backgroundImage, Number(overlay.opacity)];
         })()""")
-        assert all(abs(a-b)<=1 for a,b in zip(colors[0], colors[1])) and colors[2]=='none', colors
+        assert all(abs(a-b)<=1 for a,b in zip(colors[0], colors[1])) and colors[1][3] == 255 and colors[2]=='none', colors
+        assert bool(colors[3]) == ev("elements.chatScreen.classList.contains('background-visible')"), colors
 
     def check_straight_menu_rule():
         assert ev("""(() => {
@@ -305,7 +305,7 @@ def run(client, url, screenshots=None):
     wait("!document.body.classList.contains('dark-mode')", 'light theme restored')
     click('#goto-settings-btn')
     wait("state.currentScreen==='settings'", 'settings opened')
-    flat_surfaces('#settings-screen > .app-header', '#settings-screen .settings-category-nav button')
+    flat_surfaces('.settings-sidebar .app-header', '.settings-detail-header', '#settings-screen .settings-category-nav button')
     capture('pc-flat-settings')
     click('#back-to-chat-from-settings')
     wait("state.currentScreen==='chat'", 'returned to chat')
@@ -325,14 +325,19 @@ def run(client, url, screenshots=None):
     assert ev("document.querySelector('#project-description').textContent==='最初の説明'")
     check_home('chats')
     capture('pc-empty')
-    click('#project-options')
-    click('#project-menu [data-project-action="edit"]')
-    wait("document.querySelector('#project-dialog').open", 'project edit')
-    change('#project-dialog-fields input', '第一・編集済み')
-    change('#project-dialog-fields textarea', '更新した説明')
-    click('#project-dialog-submit')
+    assert ev("!document.querySelector('#project-options') && document.querySelectorAll('#project-tabs [role=tab]').length === 3")
+    click('#project-tab-settings')
+    wait("!document.querySelector('#project-settings-panel').hidden", 'settings tab opens')
+    assert ev("document.querySelector('#project-settings-instruction').value === ''")
+    change('#project-settings-name', '第一・編集済み')
+    change('#project-settings-description', '更新した説明')
+    project_instruction = '  共通の指示の原文\n第二行  '
+    change('#project-settings-instruction', project_instruction)
+    click('#project-settings-save')
     wait("document.querySelector('#project-title').textContent==='第一・編集済み' && "
          "document.querySelector('#project-description').textContent==='更新した説明'", 'editing updates visible view')
+    assert ev(f"dbUtils.getProject({json.dumps(alpha)}).then(p => p.systemInstruction === {json.dumps(project_instruction)})")
+    click('#project-tab-chats')
     beta = create('第二プロジェクト')
     assert ev("document.querySelectorAll('.project-folder').length===2")
     ev('history.back()')
@@ -632,8 +637,8 @@ def run(client, url, screenshots=None):
         if menu == '#project-menu':
             capture('sidebar-pc-menu')
             mouse_click('#project-menu [data-project-action="edit"]')
-            wait("document.querySelector('#project-dialog').open", 'menu action outside sidebar opens editor')
-            click('#project-dialog-cancel')
+            wait("!document.querySelector('#project-settings-panel').hidden", 'menu action opens settings')
+            click('#project-tab-chats')
             assert ev(f"document.querySelector({json.dumps(folder(alpha, 'expand'))}).getAttribute('aria-expanded')==='false'")
         else:
             if 'pinned' in anchor:
@@ -903,18 +908,18 @@ def run(client, url, screenshots=None):
     assert ev("dbUtils.listLibraryDocuments().then(entries=>entries.some(entry=>entry.fileName==='登録済み.txt'))")
     checks.append('library chooser, preview and history, separate file scopes, unlink, upload and partial failure')
 
-    click('#project-options')
-    click('#project-menu [data-project-action="edit"]')
-    wait("document.querySelector('#project-dialog').open", 'edit for failure test')
+    click('#project-tab-settings')
+    wait("!document.querySelector('#project-settings-panel').hidden", 'edit for failure test')
     ev("""(() => {
         const update = dbUtils.updateProject;
         dbUtils.updateProject = async () => { dbUtils.updateProject = update; throw new Error('保存のテスト失敗'); };
     })()""")
-    change('#project-dialog-fields input', '保存されない名前')
-    click('#project-dialog-submit')
-    wait("document.querySelector('#project-dialog-notice').textContent.includes('保存のテスト失敗')", 'save failure visible')
-    assert ev("document.querySelector('#project-title').textContent==='第二プロジェクト'")
-    click('#project-dialog-cancel')
+    change('#project-settings-name', '保存されない名前')
+    click('#project-settings-save')
+    wait("document.querySelector('#project-settings-status').textContent.includes('保存のテスト失敗')", 'save failure visible')
+    assert ev("document.querySelector('#project-title').textContent==='第二プロジェクト' && "
+              "document.querySelector('#project-settings-name').value==='保存されない名前'")
+    click('#project-tab-chats')
 
     open_project(alpha, '第一・編集済み')
     rag_file = ev(f"""(async()=>{{
@@ -973,8 +978,8 @@ def run(client, url, screenshots=None):
         const readScope = dbUtils.getChatRagDocuments;
         window.initialRagReads = [];
         dbUtils.getChatRagDocuments = function(id, owner) {
-            initialRagReads.push(Promise.all([this.getChatProject(id), readScope.call(this, id, owner)]));
-            return initialRagReads.at(-1).then(([,scope])=>scope);
+            initialRagReads.push(readScope.call(this, id, owner));
+            return initialRagReads.at(-1);
         };
         const original = window.fetch;
         window.fetch = (url, options) => {
@@ -1009,12 +1014,15 @@ def run(client, url, screenshots=None):
     wait(f"document.querySelector({json.dumps(generating_dot)})?.title==='応答生成中' && "
          f"!document.querySelector({json.dumps(generating_dot)}).hidden", 'actual send marks the owning sidebar row')
     assert ev(f'window.firstWireMembership.then(project=>project.id==={json.dumps(alpha)})')
-    assert ev(f"""initialRagReads.length===1 && initialRagReads[0].then(([project,scope])=>
-        project.id==={json.dumps(alpha)} && scope.projectId===project.id &&
+    assert ev(f"""initialRagReads.length===1 && initialRagReads[0].then(scope=>
+        scope.projectId==={json.dumps(alpha)} && scope.projectInstruction==={json.dumps(project_instruction)} &&
         scope.documents.some(file=>file.id==={json.dumps(rag_file)}))""")
     assert ev("projectRequest.url.includes('gemini-3-flash-preview:generateContent') && "
               "JSON.stringify(projectRequest.body).includes('application/pdf') && "
-              "projectRequest.body.systemInstruction.parts[0].text.includes('甲だけに共有')")
+              "projectRequest.body.systemInstruction.parts.some(part => part.text.includes('甲だけに共有'))")
+    assert ev(f"projectRequest.body.systemInstruction.parts.some(part => part.text.includes({json.dumps(project_instruction)}))")
+    ev(f"dbUtils.updateProject({json.dumps(alpha)}, {{systemInstruction:'次回の指示'}})")
+    assert ev(f"appLogic.getSendJobV136({project_chat}).projectInstruction === {json.dumps(project_instruction)}")
     ev('history.back()')
     wait("!elements.projectWorkspace.hidden && state.currentChatId===null", 'back restores project draft during generation')
     assert ev(f"Boolean(appLogic.getSendJobV136({project_chat}))")
@@ -1032,6 +1040,14 @@ def run(client, url, screenshots=None):
     wait("!elements.projectWorkspace.hidden", 'forward restores project home')
     ev('history.forward()')
     wait(f"elements.projectWorkspace.hidden && state.currentChatId==={project_chat}", 'forward restores generated chat')
+    ev("window.finishProjectSend = null; void appLogic.retryFromMessage(0);")
+    wait("document.querySelector('#confirmDialog[open]')?.textContent.includes('再生成')", 'regeneration confirmation')
+    click('#confirmDialog .dialog-ok-btn')
+    wait('window.finishProjectSend && state.isSending', 'regeneration makes a new request')
+    assert ev("projectRequest.body.systemInstruction.parts.some(part=>part.text.includes('次回の指示')) && "
+              "!projectRequest.body.systemInstruction.parts.some(part=>part.text.includes('共通の指示の原文'))")
+    ev('window.finishProjectSend()')
+    wait(f"!appLogic.getSendJobV136({project_chat})", 'regeneration completes')
     open_project(beta, '第二プロジェクト')
     assert ev("document.querySelector('#user-input').value==='第二の下書き'")
     checks.append('project and ordinary drafts, atomic initial send and failure, generation during navigation')
@@ -1107,8 +1123,8 @@ def run(client, url, screenshots=None):
     wait("innerWidth===1280 && chatSidebarUiState.mode==='permanent'", 'PC restored for remaining actions')
     checks.append('responsive tabs and bottom composer, file menu bounds and draft preservation')
 
-    click('#project-options')
-    click('#project-menu [data-project-action="delete"]')
+    click('#project-tab-settings')
+    click('#project-settings-delete')
     wait("document.querySelector('#confirmDialog').open", 'delete needs confirmation')
     assert ev("document.querySelector('#confirmDialog').textContent.includes('未所属に戻ります') && "
               "document.querySelector('#confirmDialog').textContent.includes('原本と旧版は残ります')")
@@ -1123,16 +1139,20 @@ def run(client, url, screenshots=None):
         return project && document.querySelector('.project-folder')!==project;
     }})()"""), 'Newly edited empty projects sort ahead of a project with an earlier chat'
     open_project(alpha, '第一・編集済み')
-    ev("""(async()=>{
+    assert ev("""(async()=>{
         const backup=await appLogic.createFullBackup();
         const payload=JSON.parse(await backup.text());
         const id=history.state.projectId;
         const data=payload.data.projectData;
+        if (data.projects.find(project=>project.id===id)?.systemInstruction !== '次回の指示') return false;
+        await appLogic.importDataFromString(JSON.stringify(payload),{source:'file'});
+        if ((await dbUtils.getProject(id))?.systemInstruction !== '次回の指示') return false;
         data.projects=data.projects.filter(project=>project.id!==id);
         data.chats=data.chats.filter(link=>link.projectId!==id);
         data.documents=data.documents.filter(link=>link.projectId!==id);
         await appLogic.importDataFromString(JSON.stringify(payload),{source:'file'});
         uiUtilsV136.hideProgressDialog();
+        return true;
     })()""")
     wait(f"""elements.projectWorkspace.hidden && !document.querySelector('[data-project-id="{alpha}"]')""", 'restore updates current workspace')
     assert ev(f'dbUtils.getChat({project_chat}).then(Boolean)')
@@ -1157,10 +1177,9 @@ def run(client, url, screenshots=None):
     assert ev("chatSidebarUiState.isOpen && document.querySelector('#project-menu').hidden")
     click(folder(mobile_id, 'menu'), True)
     click('#project-menu [data-project-action="edit"]', True)
-    wait("document.querySelector('#project-dialog').open", 'touch activates a menu item')
-    click('#project-dialog-cancel', True)
+    wait("!document.querySelector('#project-settings-panel').hidden", 'touch opens project settings')
+    click('#project-tab-chats', True)
     assert ev(f"document.querySelector({json.dumps(folder(mobile_id, 'expand'))}).getAttribute('aria-expanded')==='true'")
-    click(folder(mobile_id), True)
     wait('!elements.projectWorkspace.hidden && !chatSidebarUiState.isOpen', 'touch opens workspace and closes overlay')
     ev("appLogic.updateLocalUiSetting('enableSwipeNavigation',true)")
     for i in range(8):

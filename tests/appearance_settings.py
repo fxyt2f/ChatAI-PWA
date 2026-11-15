@@ -35,6 +35,13 @@ def run(client, url):
     def click(selector):
         ev(f'document.querySelector({json.dumps(selector)}).click()')
 
+    def press_enter(selector):
+        ev(f'document.querySelector({json.dumps(selector)}).focus()')
+        assert ev(f'document.activeElement === document.querySelector({json.dumps(selector)})')
+        key = {'key': 'Enter', 'code': 'Enter', 'windowsVirtualKeyCode': 13}
+        client.call('Input.dispatchKeyEvent', {'type': 'keyDown', 'text': '\r', **key})
+        client.call('Input.dispatchKeyEvent', {'type': 'keyUp', **key})
+
     def category(name):
         click(f'[data-settings-category="{name}"]')
         panel(name)
@@ -102,6 +109,60 @@ def run(client, url):
     client.call('Network.enable')
     client.call('Network.setBlockedURLs', {'urls': ['https://*']})
     try:
+        boot('?settings-navigation#chat')
+        wait("navigator.serviceWorker.controller?.state === 'activated'", 'Local Service Worker serves the settings UI')
+        boot()
+        if ev("document.querySelector('#releaseNotesDialog[open]') !== null"):
+            click('#releaseNotesDialog .dialog-ok-btn')
+        ev("appLogic.updateLocalUiSetting('enableWideMode', true).then(() => appLogic.applyWideMode())")
+        if not ev('chatSidebarUiState.isOpen'):
+            click('#goto-history-btn')
+        assert ev("""(() => {
+            const entries = Array.from(document.querySelectorAll('.chat-sidebar-navigation > button'));
+            return entries.map(button => button.id).join() === 'new-chat-btn,document-library-open,goto-settings-btn'
+                && entries[2].textContent.trim() === 'settings設定'
+                && entries.every(button => button.classList.contains('chat-sidebar-nav-button'))
+                && !document.querySelector('#chat-workspace .app-header #goto-settings-btn');
+        })()""")
+        chat_width = ev('elements.chatHistorySidebar.offsetWidth')
+        press_enter('#goto-settings-btn')
+        wait("state.currentScreen === 'settings' && document.querySelector('#settings-title').textContent === '一般設定'",
+             'Settings sidebar entry opens the default desktop category')
+        assert ev(f"""(() => {{
+            const left = document.querySelector('.settings-sidebar'), right = document.querySelector('.settings-detail-header');
+            const layout = left.parentElement;
+            const back = document.querySelector('#back-to-chat-from-settings'), icon = back.firstElementChild;
+            return {chat_width} === 288 && left.offsetWidth === {chat_width} &&
+                left.offsetHeight === layout.offsetHeight && left.offsetTop === 0 &&
+                getComputedStyle(left).borderRight === getComputedStyle(elements.chatHistorySidebar).borderRight &&
+                right.offsetLeft === left.offsetWidth && right.offsetLeft === document.querySelector('#settings-detail').offsetLeft &&
+                left.querySelector('header').offsetHeight === right.offsetHeight &&
+                Math.abs(back.clientWidth / 2 - icon.offsetLeft - icon.offsetWidth / 2) < 1 &&
+                Math.abs(back.clientHeight / 2 - icon.offsetTop - icon.offsetHeight / 2) < 1;
+        }})()"""), 'Shared pane width, continuous divider, paired headers and centered back icon'
+        for width in (1280, 900):
+            client.call('Emulation.setDeviceMetricsOverride', {'width': width, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
+            category('ai-tools')
+            wait("document.querySelector('#settings-title').textContent === 'AI機能・ツール設定'", 'Desktop/tablet category title')
+            depth = ev('history.length')
+            for expanded in (False, True):
+                press_enter('#settings-menu-btn')
+                assert ev(f"""(() => {{
+                    const menu = document.querySelector('#settings-menu-btn');
+                    const nav = document.getElementById(menu.getAttribute('aria-controls'));
+                    return menu.getAttribute('aria-expanded') === '{str(expanded).lower()}' &&
+                        Boolean(nav.offsetWidth) === {json.dumps(expanded)} &&
+                        document.activeElement === menu && history.length === {depth} &&
+                        location.hash === '#settings/ai-tools';
+                }})()"""), f'Keyboard toggles the category pane at {width}px'
+        press_enter('#back-to-chat-from-settings')
+        wait("state.currentScreen === 'chat'", 'Left header returns to chat')
+        ev('history.back()')
+        panel('ai-tools')
+        ev('history.forward()')
+        wait("state.currentScreen === 'chat'", 'Browser forward returns to chat')
+        client.call('Emulation.setDeviceMetricsOverride', {'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
+
         boot('?f4=desktop#settings/appearance')
         panel('appearance')
         ev('''(async () => {
@@ -212,30 +273,38 @@ def run(client, url):
         boot('?f4=mobile#settings/appearance')
         panel('appearance')
         wait("innerWidth === 390 && document.querySelector('#settings-title').textContent === 'テーマ・表示設定'", 'Mobile appearance title')
-        click('#back-to-chat-from-settings')
+        click('#settings-menu-btn')
         wait("location.hash === '#settings' && document.querySelector('#settings-screen').classList.contains('settings-show-top')", 'Direct mobile link backs to the category list')
         category('appearance')
-        click('#back-to-chat-from-settings')
+        click('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'Mobile detail backs through browser history')
         ev('history.forward()')
         panel('appearance')
         boot()
         panel('appearance')
-        click('#back-to-chat-from-settings')
+        click('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'Reloaded mobile detail preserves its history entry')
-        ev("document.querySelector('[data-settings-category=ai-tools]').focus()")
-        for event in ['keyDown', 'keyUp']:
-            client.call('Input.dispatchKeyEvent', {'type': event, 'key': 'Enter', 'code': 'Enter', 'windowsVirtualKeyCode': 13})
+        press_enter('[data-settings-category=ai-tools]')
         panel('ai-tools')
         wait("document.querySelector('#settings-title').textContent === 'AI機能・ツール設定'", 'Mobile AI tools title')
-        click('#back-to-chat-from-settings')
+        assert ev("document.activeElement.id === 'settings-menu-btn' && document.activeElement.getAttribute('aria-expanded') === 'false'")
+        press_enter('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'AI tools back to category list')
+        assert ev("document.activeElement.dataset.settingsCategory === 'ai-tools'")
+        press_enter('#back-to-chat-from-settings')
+        wait("state.currentScreen === 'chat'", 'Mobile category list returns to chat')
+        ev('history.back()')
+        wait("state.currentScreen === 'settings' && location.hash === '#settings'", 'Browser back restores the category list')
+        category('ai-tools')
+        ev('history.back()')
+        wait("location.hash === '#settings'", 'Browser back restores the list from detail')
         ev('history.forward()')
         panel('ai-tools')
         boot()
         panel('ai-tools')
         tool_state(other, [False, True, False, False])
-        return ('ALL PASSED (F4 real page: desktop/mobile history, boolean theme, colors/reset, profile/background scope)\n'
+        return ('ALL PASSED (settings pane width, divider, headers, sidebar entry, keyboard toggle and desktop/tablet/phone navigation)\n'
+                'ALL PASSED (F4 real page: desktop/mobile history, boolean theme, colors/reset, profile/background scope)\n'
                 'ALL PASSED (F8 real page: AI tools navigation, keyboard, history/reload, profile checkboxes and mocked Gemini requests)')
     finally:
         client.call('Network.setBlockedURLs', {'urls': []})

@@ -4,7 +4,7 @@
     const app = window.appLogic, st = window.state, ui = window.uiUtilsV136;
     const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     const rect = node => { const r=node.getBoundingClientRect(); return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}; };
-    const panels = {system:'system-prompt-dialog',format:'textFormattingDialog',summary:'summaryDialog',character:'characterProfileDialog',debug:'debugLogDialog',memory:'memoryManagementDialog'};
+    const panels = {system:'system-prompt-dialog',format:'textFormattingDialog',summary:'summaryDialog',debug:'debugLogDialog',memory:'memoryManagementDialog'};
     window.prepareSidebarReviewV136 = async (kind, open=false, dark=false) => {
         for (const d of document.querySelectorAll('dialog[open]')) d.close();
         window.settingsUiV136.closePopover(false);
@@ -31,7 +31,6 @@
         } else if(kind==='system') await app.openSystemPromptDialog();
         else if(kind==='format') app.openTextFormattingDialog();
         else if(kind==='summary') app._showSummaryDialog('物語のここまでの展開を圧縮したテキスト。',1200);
-        else if(kind==='character') await app.openCharacterProfileDialog();
         else if(kind==='debug') app.openLogDialog();
         else if(kind==='memory') await app.openMemoryManagementDialog();
         else if(kind==='models') window.settingsUiV136.openModels($('chat-model-button'));

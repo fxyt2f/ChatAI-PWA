@@ -14,18 +14,18 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.37.1">
+    <link rel="stylesheet" href="./style.css?v=1.37.2">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.37.1" defer></script>
-    <script src="./document-library.js?v=1.37.1" defer></script>
-    <script src="./project-store.js?v=1.37.1" defer></script>
-    <script src="./document-search.js?v=1.37.1" defer></script>
-    <script src="./document-rag.js?v=1.37.1" defer></script>
-    <script src="./document-library-ui.js?v=1.37.1" defer></script>
-    <script src="./project-ui.js?v=1.37.1" defer></script>
-    <script src="./dropbox.js?v=1.37.1" defer></script>
+    <script src="./function-calling.js?v=1.37.2" defer></script>
+    <script src="./document-library.js?v=1.37.2" defer></script>
+    <script src="./project-store.js?v=1.37.2" defer></script>
+    <script src="./document-search.js?v=1.37.2" defer></script>
+    <script src="./document-rag.js?v=1.37.2" defer></script>
+    <script src="./document-library-ui.js?v=1.37.2" defer></script>
+    <script src="./project-ui.js?v=1.37.2" defer></script>
+    <script src="./dropbox.js?v=1.37.2" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -39,10 +39,11 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.37.1" defer></script>
-    <script src="./streaming-v136.js?v=1.37.1" defer></script>
-    <script src="./app.js?v=1.37.1" defer></script>
-    <script src="./settings-ui-v136.js?v=1.37.1" defer></script>
+    <script src="./settings-v136.js?v=1.37.2" defer></script>
+    <script src="./streaming-v136.js?v=1.37.2" defer></script>
+    <script src="./app.js?v=1.37.2" defer></script>
+    <script src="./settings-ui-v136.js?v=1.37.2" defer></script>
+    <script src="./information-ui.js?v=1.37.2" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -56,8 +57,9 @@
                 </div>
                 <div class="chat-sidebar-controls">
                     <nav class="chat-sidebar-navigation" aria-label="ワークスペース">
-                        <button id="new-chat-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">edit_square</span>新規チャット</button>
-                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="folder" aria-hidden="true"></span>ライブラリ</button>
+                        <button id="new-chat-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">edit_square</span><span class="sidebar-nav-label">新規チャット</span></button>
+                        <button id="document-library-open" type="button" class="chat-sidebar-nav-button" aria-controls="document-library-workspace"><span data-document-icon="library-big" aria-hidden="true"></span><span class="sidebar-nav-label">ライブラリ</span></button>
+                        <button id="goto-settings-btn" type="button" class="chat-sidebar-nav-button"><span class="material-symbols-outlined" aria-hidden="true">settings</span><span class="sidebar-nav-label">設定</span></button>
                     </nav>
                     <div class="chat-sidebar-history-header">
                         <h2 id="chat-sidebar-history-title">チャット</h2>
@@ -106,8 +108,6 @@
                 <span id="sync-status-header-icon" class="material-symbols-outlined sync-status-header-icon" title="同期ステータス"></span>
                 <h1 id="chat-title" role="button" tabindex="0" aria-label="チャットタイトル。タップして編集" title="新規チャット">新規チャット</h1>
                 <h1 id="project-title" tabindex="-1" hidden>プロジェクト</h1>
-                <button id="project-options" class="header-button" type="button" aria-label="プロジェクトの操作" title="プロジェクトの操作" aria-haspopup="menu" aria-controls="project-menu" aria-expanded="false" hidden><span class="material-symbols-outlined" aria-hidden="true">more_vert</span></button>
-                <button id="goto-settings-btn" class="header-button" title="設定へ"><span class="material-symbols-outlined">settings</span></button>
             </header>
 
             <main class="main-content">
@@ -129,8 +129,8 @@
                 <button id="memory-toggle-btn" class="floating-action-button hidden" title="このチャットの長期記憶を切り替え">
                     <span class="material-symbols-outlined">auto_stories</span>
                 </button>
-                <button id="character-profile-btn" class="floating-action-button" title="キャラクタープロファイル">
-                    <span class="material-symbols-outlined">group</span>
+                <button id="information-open-btn" class="floating-action-button" type="button" title="情報管理" aria-label="情報管理" aria-controls="information-screen">
+                    <span class="material-symbols-outlined" aria-hidden="true">folder_managed</span>
                 </button>
                 <button id="system-prompt-open-btn" class="floating-action-button" title="パラメータ設定" aria-label="パラメータ設定">
                     <span class="material-symbols-outlined">edit_note</span>
@@ -296,6 +296,7 @@
                         <div id="project-tabs" class="project-tabs" role="tablist" aria-label="プロジェクトの内容">
                             <button type="button" id="project-tab-chats" role="tab" aria-controls="project-chat-panel" aria-selected="true">チャット</button>
                             <button type="button" id="project-tab-files" role="tab" aria-controls="project-file-panel" aria-selected="false" tabindex="-1">ファイル</button>
+                            <button type="button" id="project-tab-settings" role="tab" aria-controls="project-settings-panel" aria-selected="false" tabindex="-1">設定</button>
                         </div>
                         <section id="project-chat-panel" role="tabpanel" aria-labelledby="project-tab-chats" tabindex="0">
                             <div id="project-chats" role="list" aria-label="所属チャット"></div>
@@ -307,6 +308,20 @@
                                 <input id="project-files" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.json,.yaml,.xml,.html" hidden>
                             </div>
                             <ul id="project-documents" class="document-library-list" aria-labelledby="project-documents-title"></ul>
+                        </section>
+                        <section id="project-settings-panel" role="tabpanel" aria-labelledby="project-tab-settings" hidden>
+                            <form id="project-settings-form" class="project-settings-form">
+                                <label class="project-field"><span>プロジェクト名</span><input id="project-settings-name" type="text" required></label>
+                                <label class="project-field"><span>プロジェクトの説明</span><textarea id="project-settings-description" rows="3"></textarea></label>
+                                <label class="project-field"><span>プロジェクト共通指示</span><textarea id="project-settings-instruction" rows="4"></textarea></label>
+                                <div class="project-settings-actions">
+                                    <p id="project-settings-status" class="document-library-notice" role="status"></p>
+                                    <button id="project-settings-save" type="submit">保存</button>
+                                </div>
+                            </form>
+                            <div class="project-settings-danger">
+                                <button id="project-settings-delete" type="button" class="dialog-delete-btn">プロジェクトを削除</button>
+                            </div>
                         </section>
                     </div>
                 </div>
@@ -392,21 +407,26 @@
 
         </div>
 
-        <div id="settings-screen" class="screen">
-            <header class="app-header">
-                 <button id="back-to-chat-from-settings" class="header-button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
-                 <h1 id="settings-title">設定</h1>
-
-            </header>
+        <div id="settings-screen" class="screen category-screen" inert>
             <main class="settings-layout">
-                <nav class="settings-category-nav" aria-label="設定カテゴリ">
-                    <button type="button" data-settings-category="general" aria-controls="settings-panel-general"><span class="settings-category-icon" aria-hidden="true">⚙</span><span>一般設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                    <button type="button" data-settings-category="ai-tools" aria-controls="settings-panel-ai-tools"><span class="settings-category-icon" aria-hidden="true">⚒</span><span>AI機能・ツール設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                    <button type="button" data-settings-category="appearance" aria-controls="settings-panel-appearance"><span class="settings-category-icon material-symbols-outlined" aria-hidden="true">palette</span><span>テーマ・表示設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                    <button type="button" data-settings-category="profile" aria-controls="settings-panel-profile"><span class="settings-category-icon" aria-hidden="true">◉</span><span>プロファイル設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                    <button type="button" data-settings-category="integrations" aria-controls="settings-panel-integrations"><span class="settings-category-icon" aria-hidden="true">↗</span><span>外部連携</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                    <button type="button" data-settings-category="other" aria-controls="settings-panel-other"><span class="settings-category-icon" aria-hidden="true">⋯</span><span>その他設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
-                </nav>
+                <div class="settings-sidebar">
+                    <header class="app-header">
+                        <button id="back-to-chat-from-settings" class="header-button" type="button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">chevron_left</span></button>
+                        <h1>設定</h1>
+                    </header>
+                    <nav id="settings-category-nav" class="settings-category-nav" aria-label="設定カテゴリ">
+                        <button type="button" data-settings-category="general" aria-controls="settings-panel-general"><span class="settings-category-icon material-symbols-outlined" aria-hidden="true">settings</span><span class="sidebar-nav-label">一般設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-settings-category="ai-tools" aria-controls="settings-panel-ai-tools"><span class="settings-category-icon" aria-hidden="true">⚒</span><span class="sidebar-nav-label">AI機能・ツール設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-settings-category="appearance" aria-controls="settings-panel-appearance"><span class="settings-category-icon material-symbols-outlined" aria-hidden="true">palette</span><span class="sidebar-nav-label">テーマ・表示設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-settings-category="profile" aria-controls="settings-panel-profile"><span class="settings-category-icon" aria-hidden="true">◉</span><span class="sidebar-nav-label">プロファイル設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-settings-category="integrations" aria-controls="settings-panel-integrations"><span class="settings-category-icon" aria-hidden="true">↗</span><span class="sidebar-nav-label">外部連携</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-settings-category="other" aria-controls="settings-panel-other"><span class="settings-category-icon" aria-hidden="true">⋯</span><span class="sidebar-nav-label">その他設定</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    </nav>
+                </div>
+                <header class="app-header settings-detail-header">
+                    <button id="settings-menu-btn" class="header-button" type="button" aria-controls="settings-category-nav" aria-expanded="false" aria-label="設定カテゴリを開く" title="設定カテゴリを開く"><span class="material-symbols-outlined" aria-hidden="true">menu</span></button>
+                    <h1 id="settings-title">設定</h1>
+                </header>
                 <div id="settings-detail" class="main-content settings-detail">
 <div id="settings-panel-general" class="settings-category-panel" data-settings-panel="general" aria-label="一般設定" hidden><div class="settings-group" id="api-settings-group">
                     <h3>API設定</h3>
@@ -1075,6 +1095,12 @@
                        <input type="checkbox" id="swipe-navigation-toggle">
                        左右スワイプで画面を移動する
                    </label>
+                   <div id="swipe-destinations" class="settings-field-stack" role="group" aria-labelledby="swipe-destinations-title">
+                       <p id="swipe-destinations-title">チャットの右側に表示する画面</p>
+                       <label class="checkbox-label"><input type="checkbox" value="library" disabled>ライブラリ</label>
+                       <label class="checkbox-label"><input type="checkbox" value="information" disabled>情報管理</label>
+                       <label class="checkbox-label"><input type="checkbox" value="settings" checked disabled>設定</label>
+                   </div>
 <p style="height:10px"></p><label class="checkbox-label">
                         <input type="checkbox" id="header-auto-hide-toggle">
                         チャット画面のヘッダーを自動的に隠す
@@ -1147,6 +1173,39 @@
 
 </div></details>
 </section></div></div></main>
+        </div>
+        <div id="information-screen" class="screen category-screen" inert>
+            <main class="settings-layout">
+                <div class="settings-sidebar">
+                    <header class="app-header">
+                        <button id="back-to-chat-from-information" class="header-button" type="button" title="チャットへ戻る" aria-label="チャットへ戻る"><span class="material-symbols-outlined" aria-hidden="true">chevron_left</span></button>
+                        <h1>情報管理</h1>
+                    </header>
+                    <nav id="information-category-nav" class="settings-category-nav" aria-label="情報管理カテゴリ">
+                        <button type="button" data-information-category="character" aria-controls="information-panel-character"><span class="settings-category-icon" data-document-icon="users-round" aria-hidden="true"></span><span class="sidebar-nav-label">キャラクターメモリ</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-information-category="scenario" aria-controls="information-panel-scenario"><span class="settings-category-icon" data-document-icon="scroll-text" aria-hidden="true"></span><span class="sidebar-nav-label">シナリオ情報</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-information-category="profile" aria-controls="information-panel-profile"><span class="settings-category-icon" data-document-icon="id-card" aria-hidden="true"></span><span class="sidebar-nav-label">プロファイルメモリ</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                        <button type="button" data-information-category="summary" aria-controls="information-panel-summary"><span class="settings-category-icon" data-document-icon="file-text" aria-hidden="true"></span><span class="sidebar-nav-label">会話要約</span><span class="settings-nav-chevron" aria-hidden="true">›</span></button>
+                    </nav>
+                </div>
+                <header class="app-header settings-detail-header">
+                    <button id="information-menu-btn" class="header-button" type="button" aria-controls="information-category-nav" aria-expanded="false" aria-label="情報管理カテゴリを開く"><span class="material-symbols-outlined" aria-hidden="true">menu</span></button>
+                    <h1 id="information-title">情報管理</h1>
+                </header>
+                <div id="information-detail" class="main-content settings-detail">
+                    <section id="information-panel-character" class="settings-category-panel" data-information-panel="character" aria-label="キャラクターメモリ" hidden></section>
+                    <section id="information-panel-scenario" class="settings-category-panel" data-information-panel="scenario" aria-label="シナリオ情報" hidden></section>
+                    <section id="information-panel-profile" class="settings-category-panel" data-information-panel="profile" aria-label="プロファイルメモリ" hidden>
+                        <div class="settings-group">
+                            <h2 id="information-profile-name"></h2>
+                            <label class="checkbox-label"><input type="checkbox" id="information-memory-enabled">このチャットで記憶を利用する</label>
+                            <p id="information-memory-status" role="status"></p>
+                            <div id="information-memory-slot"></div>
+                        </div>
+                    </section>
+                    <section id="information-panel-summary" class="settings-category-panel" data-information-panel="summary" aria-label="会話要約" hidden></section>
+                </div>
+            </main>
         </div>
     </div>
 
@@ -1255,17 +1314,19 @@
         <!-- Memory Management Dialog -->
         <dialog id="memoryManagementDialog" class="custom-dialog">
             <h3 class="dialog-title">記憶の管理</h3>
-            <div class="dialog-content">
+            <div id="memory-management-content" class="dialog-content">
                 <div id="memory-list-container" class="memory-list-container">
                     <!-- 記憶項目がここに表示されます -->
                 </div>
                 <div class="memory-add-form">
-                    <textarea id="new-memory-input" placeholder="新しい記憶を追加..."></textarea>
+                    <textarea id="new-memory-input" aria-label="新しい記憶" placeholder="新しい記憶を追加..."></textarea>
                     <button id="add-memory-btn">追加</button>
                 </div>
+                <div class="memory-delete-actions">
+                    <button id="delete-all-memory-btn" type="button" class="dialog-delete-btn">全削除</button>
+                </div>
             </div>
-            <div class="dialog-actions" style="justify-content: space-between; align-items: center;">
-                <button id="delete-all-memory-btn" value="delete_all" class="dialog-delete-btn">全て削除</button>
+            <div class="dialog-actions">
                 <button id="close-memory-dialog-btn" value="close">閉じる</button>
             </div>
         </dialog>
@@ -1461,29 +1522,6 @@
             <div class="dialog-actions" style="justify-content: space-between; align-items: center;">
                 <button id="delete-all-assets-btn" value="delete_all" class="dialog-delete-btn">全て削除</button>
                 <button id="close-asset-dialog-btn" value="close">閉じる</button>
-            </div>
-        </dialog>
-
-        <!-- Character Profile Dialog -->
-        <dialog id="characterProfileDialog" class="custom-dialog">
-            <!-- このラッパーdivを追加 -->
-            <div class="dialog-layout-wrapper">
-                <div class="profile-dialog-header">
-                    <button id="profile-back-btn" class="header-button" title="リストに戻る"><span class="material-symbols-outlined">arrow_back_ios</span></button>
-                    <h3 class="dialog-title">キャラクタープロファイル</h3>
-                </div>
-                <div class="dialog-content profile-dialog-layout">
-                    <div id="character-list-pane" class="profile-character-list">
-                        <!-- キャラクターリストがここに表示されます -->
-                    </div>
-                    <div id="character-detail-pane" class="profile-detail-pane">
-                        <!-- キャラクター詳細がここに表示されます -->
-                    </div>
-                </div>
-                <div class="dialog-actions">
-                    <span class="dialog-note">※編集内容は自動的に保存されます</span>
-                    <button id="close-profile-dialog-btn" value="close">閉じる</button>
-                </div>
             </div>
         </dialog>
 

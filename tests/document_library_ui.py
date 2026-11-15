@@ -833,8 +833,11 @@ def run(client, url, screenshots=None):
         await dbUtils.setChatDocuments(id,[{json.dumps(second)}]);
         return id;
     }})()""")
+    if not ev('chatSidebarUiState.isOpen'):
+        pointer('#goto-history-btn', False)
+    wait("elements.chatHistorySidebar.getBoundingClientRect().left >= -0.5", 'Sidebar is in position')
     pointer('#goto-settings-btn', False)
-    wait("state.currentScreen==='settings'", 'Settings opens from the header')
+    wait("state.currentScreen==='settings'", 'Settings opens from the sidebar')
     click('[data-settings-category="other"]')
     wait("document.querySelector('#history-delete-mode-btn').getClientRects().length", 'History management is available')
     pointer('#history-delete-mode-btn', False)
@@ -853,6 +856,8 @@ def run(client, url, screenshots=None):
     assert ev(f"""(async()=> !(await dbUtils.getChat({imported})) && (await dbUtils.getChatDocuments({chat2}))[0].id==={json.dumps(second)} &&
         (await dbUtils.getLibraryOriginal({json.dumps(second)},1)).blob.size>0 && !(await dbUtils.getChatDocuments({bulk})).length)()""")
     stale = ev("dbUtils.saveChat(null,{id:807703,title:'選択後に置き換わる履歴',createdAt:101,messages:[]})")
+    if not ev('chatSidebarUiState.isOpen'):
+        click('#goto-history-btn')
     click('#goto-settings-btn')
     wait("state.currentScreen==='settings'", 'Reopen history management')
     click('[data-settings-category="other"]')
@@ -1101,6 +1106,8 @@ def run(client, url, screenshots=None):
 
     close_workspace(True)
     viewport(1280, 900, False)
+    if not ev('chatSidebarUiState.isOpen'):
+        click('#goto-history-btn')
     click('#goto-settings-btn')
     wait("state.currentScreen==='settings'", 'Theme settings screen opened')
     click('[data-settings-category="appearance"]')
@@ -1171,6 +1178,8 @@ def run(client, url, screenshots=None):
          'Header upload adds the selected file')
     close_workspace(True)
     viewport(1280, 900, False)
+    if not ev('chatSidebarUiState.isOpen'):
+        click('#goto-history-btn')
     click('#goto-settings-btn')
     wait("state.currentScreen==='settings'", 'Reopened color settings for reset')
     click('[data-settings-category="appearance"]')

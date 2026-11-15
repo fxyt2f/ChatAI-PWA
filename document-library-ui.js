@@ -20,8 +20,35 @@ window.DocumentLibraryUI = (() => {
         replace: fileOutline + ' M12 17v-6 M9.5 13.5L12 11l2.5 2.5',
         delete: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13 M10 10v7 M14 10v7'
     };
+    /*
+     * Navigation paths from Lucide (https://lucide.dev), ISC License.
+     * Copyright (c) 2026 Lucide Icons and Contributors
+     *
+     * Permission to use, copy, modify, and/or distribute this software for any
+     * purpose with or without fee is hereby granted, provided that the above
+     * copyright notice and this permission notice appear in all copies.
+     * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+     * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+     * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+     * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+     * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+     * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+     * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+     */
+    const navigationIconPaths = {
+        'library-big': 'M4 3h6a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z M7 3v18 ' +
+            'M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z',
+        'users-round': 'M18 21a8 8 0 0 0-16 0 M15 8a5 5 0 1 0-10 0 5 5 0 1 0 10 0Z ' +
+            'M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3',
+        'scroll-text': 'M15 12h-5 M15 8h-5 M19 17V5a2 2 0 0 0-2-2H4 ' +
+            'M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3',
+        'id-card': 'M13 19a4 4 0 0 0-8 0 M16 10h2 M16 14h2 M12 12a3 3 0 1 0-6 0 3 3 0 1 0 6 0Z ' +
+            'M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z',
+        'file-text': 'M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z ' +
+            'M14 2v5a1 1 0 0 0 1 1h5 M10 9H8 M16 13H8 M16 17H8'
+    };
     const extractsPerPage = 6;
-    let controls, picker, workspace, rowMenu;
+    let controls, picker, workspace, rowMenu, collectionReturn;
 
     function node(tag, text, className) {
         const element = document.createElement(tag);
@@ -41,15 +68,16 @@ window.DocumentLibraryUI = (() => {
         const svg = 'http://www.w3.org/2000/svg';
         const element = document.createElementNS(svg, 'svg');
         const path = document.createElementNS(svg, 'path');
+        const navigationPath = navigationIconPaths[name];
         element.classList.add('document-library-icon');
         element.setAttribute('aria-hidden', 'true');
         element.setAttribute('viewBox', '0 0 24 24');
         element.setAttribute('fill', 'none');
         element.setAttribute('stroke', 'currentColor');
-        element.setAttribute('stroke-width', name === 'more' ? '2.8' : '1.7');
+        element.setAttribute('stroke-width', navigationPath ? '2' : name === 'more' ? '2.8' : '1.7');
         element.setAttribute('stroke-linecap', 'round');
         element.setAttribute('stroke-linejoin', 'round');
-        path.setAttribute('d', iconPaths[name]);
+        path.setAttribute('d', navigationPath ?? iconPaths[name]);
         element.append(path);
         return element;
     }
@@ -344,7 +372,10 @@ window.DocumentLibraryUI = (() => {
             if (view.selected?.versionId === entry.versionId) closePreview(view);
             else void preview(view, entry, { chunkId: view.matches?.get(entry.id)?.chunkId });
         }, controls.menu.id);
-        controls.collectionScroll.scrollTop = scrollTop;
+        if (view.loaded && !view.searchPending && view.collectionRestoreTop != null) {
+            controls.collectionScroll.scrollTop = view.collectionRestoreTop;
+            view.collectionRestoreTop = null;
+        } else controls.collectionScroll.scrollTop = scrollTop;
     }
 
     async function refreshWorkspace(view) {
@@ -788,7 +819,7 @@ window.DocumentLibraryUI = (() => {
         });
     }
 
-    function openWorkspace({ fromHistory = false, returnFocus } = {}) {
+    function openWorkspace({ fromHistory = false, returnFocus, restoreCollection = false } = {}) {
         if (window.state.currentScreen !== 'chat') return null;
         const sidebarOverlay = !document.getElementById('chat-sidebar-backdrop').hidden;
         if (workspace) {
@@ -822,9 +853,11 @@ window.DocumentLibraryUI = (() => {
         window.uiUtilsV136.syncChatSidebarCurrentSelection();
         controls.add.disabled = false;
         controls.collectionScroll.scrollTop = 0;
-        controls.query.value = '';
-        controls.searchMode.value = 'name';
-        controls.sort.value = 'name';
+        const saved = restoreCollection ? collectionReturn : null;
+        controls.query.value = saved?.query ?? '';
+        controls.searchMode.value = saved?.mode ?? 'name';
+        controls.sort.value = saved?.sort ?? 'name';
+        view.collectionRestoreTop = saved?.scrollTop ?? null;
         controls.notice.textContent = '';
         clearPreview(view);
         queueSearch(view);
@@ -833,10 +866,15 @@ window.DocumentLibraryUI = (() => {
         return view;
     }
 
-    function closeWorkspace({ fromHistory = false, restoreFocus = false } = {}) {
+    function closeWorkspace({ fromHistory = false, restoreFocus = false, preserveCollection = false } = {}) {
         if (!workspace) return;
         closeMenu();
         const view = workspace;
+        collectionReturn = preserveCollection ? {
+            query: controls.query.value, mode: controls.searchMode.value, sort: controls.sort.value,
+            scrollTop: view.collectionRestoreTop ?? (isNarrow() && view.selected
+                ? view.collectionScrollTop ?? 0 : controls.collectionScroll.scrollTop)
+        } : null;
         workspace = null;
         clearTimeout(view.searchTimer);
         view.searchController?.abort();
@@ -884,8 +922,11 @@ window.DocumentLibraryUI = (() => {
 
     function handleHistory(entry) {
         if (!controls) return;
-        if (!entry?.documentLibrary) { closeWorkspace({ fromHistory: true, restoreFocus: true }); return; }
-        const view = openWorkspace({ fromHistory: true });
+        if (!entry?.documentLibrary) {
+            closeWorkspace({ fromHistory: true, restoreFocus: true, preserveCollection: true });
+            return;
+        }
+        const view = openWorkspace({ fromHistory: true, restoreCollection: true });
         if (!view) return;
         if (entry.documentLibraryDetail) void restoreDetail(view, entry);
         else if (view.selected) returnToCollection(view);
@@ -991,7 +1032,9 @@ window.DocumentLibraryUI = (() => {
         ]));
         controls.layout = controls.workspace.querySelector('.document-library-layout');
         for (const placeholder of document.querySelectorAll('[data-document-icon]')) {
-            placeholder.replaceWith(icon(placeholder.dataset.documentIcon));
+            const svg = icon(placeholder.dataset.documentIcon);
+            svg.classList.add(...placeholder.classList);
+            placeholder.replaceWith(svg);
         }
         controls.pickerOpen.addEventListener('click', openPicker);
         controls.pickerClose.addEventListener('click', closePicker);
@@ -1091,7 +1134,7 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
+    return { install, openWorkspace, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
         closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

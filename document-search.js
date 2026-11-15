@@ -285,11 +285,20 @@ window.DocumentSearch = (() => {
 
     function captureChat(chatId, expectedChat) {
         const token = Object.freeze({ chatId });
-        const scope = chatId == null ? Promise.resolve({ projectId: null, documents: [] }) :
+        const scope = chatId == null ? Promise.resolve({ projectId: null, projectInstruction: '', documents: [] }) :
             window.dbUtils.getChatRagDocuments(chatId, expectedChat);
         scope.catch(() => {});
         snapshots.set(token, scope);
         return token;
+    }
+
+    function captureSendChat(session) {
+        const owner = window.dbUtils.chatSaveOwners?.get(session.messages);
+        return captureChat(session.chatId, owner?.id === session.chatId ? owner : null);
+    }
+
+    function readChatSnapshot(snapshot) {
+        return snapshots.get(snapshot);
     }
 
     async function searchChat(chatId, question, { limit = 6, signal, snapshot } = {}) {
@@ -299,8 +308,9 @@ window.DocumentSearch = (() => {
         const query = question.trim().slice(0, 512);
         if (!query || chatId == null) return { chatId, documentCount: 0, results: [], unavailable: [] };
         if (snapshot && (!snapshots.has(snapshot) || snapshot.chatId !== chatId)) throw new TypeError('ファイルの検索対象が無効です。');
-        const scope = snapshot ? await snapshots.get(snapshot) : null;
+        const scope = snapshot ? await readChatSnapshot(snapshot) : null;
         const documents = snapshot ? scope.documents : await window.dbUtils.getChatDocuments(chatId);
+        if (documents === null) throw new Error('資料の紐づけまたは版を取得できません。');
         return { chatId, ...await searchDocuments(documents, query, { limit, signal, useCapturedVersions: scope?.projectId != null }) };
     }
 
@@ -420,6 +430,6 @@ window.DocumentSearch = (() => {
         }
     }
 
-    return { captureChat, searchChat, searchDocuments, analyzeDocument, previewDocument, previewReference, getStatus,
+    return { captureChat, captureSendChat, readChatSnapshot, searchChat, searchDocuments, analyzeDocument, previewDocument, previewReference, getStatus,
         getStatuses, cancelAnalysis, formatLocation, openPdf, findInChunks, findLibraryText };
 })();

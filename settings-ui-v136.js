@@ -28,25 +28,171 @@
     }
     const levelOrder = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className || ''; if (text) node.textContent = text; return node; };
-    class SettingsUI {
-        constructor({ app, state, ui }) {
-            this.app = app; this.state = state; this.ui = ui; this.category = null; this.scroll = {};
-            this.editedGlobalInputs = new Set();
-            this.editedProfileInputs = new Map();
-            this.media = matchMedia('(min-width: 800px)'); this.saveQueue = Promise.resolve(); this.urls = new Map(); this.previewVersions = new Map();
-            this.init();
+    class TextareaSizing {
+        constructor() {
+            this.promptSizes = new Map();
+            const observer = new ResizeObserver(entries => {
+                for (const { target } of entries) {
+                    const size = this.promptSizes.get(target);
+                    const { width, height } = target.getBoundingClientRect();
+                    if (!size || !width || height < size.minimum) continue;
+                    if (size.fitWidth && width !== size.width) {
+                        this.sizePrompt(target);
+                    } else if (Math.abs(height - size.applied) >= 1) {
+                        size.manual = Math.min(500, Math.max(size.minimum, height));
+                        size.applied = height;
+                    }
+                }
+            });
+            this.observer = observer;
         }
-        init() {
-            if (!$('settings-detail')) return;
-            // One set of controls is used at every viewport size. Only presentation changes.
-            document.querySelectorAll('[data-settings-category]').forEach(button => button.addEventListener('click', () => this.selectCategory(button.dataset.settingsCategory)));
+        observe(control, { compact = false } = {}) {
+            const minimum = compact ? parseFloat(getComputedStyle(control).minHeight) || 100 : 100;
+            this.promptSizes.set(control, { minimum, applied: minimum, manual: null, fitWidth: compact, width: 0 });
+            control.addEventListener('input', () => this.sizePrompt(control));
+            control.addEventListener('compositionend', () => this.sizePrompt(control));
+            this.observer.observe(control);
+            this.sizePrompt(control);
+        }
+        prune() {
+            for (const control of this.promptSizes.keys()) {
+                if (control.isConnected) continue;
+                this.observer.unobserve(control);
+                this.promptSizes.delete(control);
+            }
+        }
+        sizePrompt(control) {
+            if (!control.getClientRects().length || !this.promptSizes) return;
+            const size = this.promptSizes.get(control); if (!size) return;
+            let height = size.manual;
+            const scrollTop = control.scrollTop;
+            if (height === null) {
+                control.style.height = size.minimum + 'px';
+                const style = getComputedStyle(control);
+                height = Math.min(500, Math.max(size.minimum, control.scrollHeight + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)));
+            }
+            if (size.fitWidth) size.width = control.getBoundingClientRect().width;
+            size.applied = height; control.style.height = `${height}px`;
+            control.scrollTop = scrollTop;
+        }
+        syncPromptSizes() { this.promptSizes?.forEach((_, control) => this.sizePrompt(control)); }
+    }
+    class CategoryPane {
+        constructor({ app, state, ui, name, title, titles }) {
+            Object.assign(this, { app, state, ui, name, title, titles });
+            this.category = null;
+            this.scroll = {};
+            this.sidebarCollapsed = false;
+            this.media = matchMedia('(min-width: 800px)');
+            this.categoryKey = `${name}Category`;
+            this.screen = $(`${name}-screen`);
+            this.detail = $(`${name}-detail`);
+            this.navigation = $(`${name}-category-nav`);
+            this.heading = $(`${name}-title`);
+            this.menu = $(`${name}-menu-btn`);
+            this.backButton = $(`back-to-chat-from-${name}`);
+            this.buttonAttr = `data-${name}-category`;
+            this.panelAttr = `data-${name}-panel`;
+            this.buttons = this.screen.querySelectorAll(`[${this.buttonAttr}]`);
+            this.panels = this.screen.querySelectorAll(`[${this.panelAttr}]`);
+            this.buttons.forEach(button => button.addEventListener('click', () => this.selectCategory(button.getAttribute(this.buttonAttr))));
+            this.menu.addEventListener('click', () => {
+                if (!this.media.matches) return this.back();
+                this.sidebarCollapsed = !this.sidebarCollapsed;
+                this.layout();
+            });
             this.media.addEventListener('change', () => {
-                if (!this.media.matches && this.category && this.state.currentScreen === 'settings' && !this.mobileDetailPushed) {
-                    history.replaceState({ screen: 'settings', settingsCategory: null }, '', '#settings');
-                    history.pushState({ screen: 'settings', settingsCategory: this.category, settingsDetailPushed: true }, '', `#settings/${this.category}`);
+                if (!this.media.matches && this.category && this.state.currentScreen === this.name && !this.mobileDetailPushed) {
+                    history.replaceState({ screen: this.name, [this.categoryKey]: null }, '', this.hash(null));
+                    history.pushState({ screen: this.name, [this.categoryKey]: this.category, settingsDetailPushed: true }, '', this.hash());
                     this.mobileDetailPushed = true;
                 }
                 this.layout();
+                requestAnimationFrame(() => this.afterLayout());
+            });
+        }
+        defaultCategory() { return this.media.matches ? Object.keys(this.titles)[0] : null; }
+        enter(category = this.defaultCategory(), { resume = false } = {}) {
+            this.mobileDetailPushed = false;
+            if (!resume) this.sidebarCollapsed = false;
+            this.category = category;
+            this.layout();
+            this.detail.scrollTop = this.scroll[this.category] || 0;
+        }
+        leave() { if (this.category) this.scroll[this.category] = this.detail.scrollTop; }
+        afterLayout() {}
+        exitToChat() { this.ui.showScreen('chat'); }
+        selectCategory(category, push = true) {
+            this.app.resetSwipeState?.();
+            if (this.category) this.scroll[this.category] = this.detail.scrollTop;
+            this.category = Object.hasOwn(this.titles, category) ? category : null;
+            this.layout(); this.detail.scrollTop = this.scroll[this.category] || 0;
+            requestAnimationFrame(() => this.afterLayout());
+            if (push && this.state.currentScreen === this.name) {
+                const entry = { screen: this.name, [this.categoryKey]: this.category, settingsDetailPushed: this.mobileDetailPushed };
+                if (this.media.matches) history.replaceState(entry, '', this.hash());
+                else {
+                    if (this.category && !this.mobileDetailPushed) {
+                        history.replaceState({ screen: this.name, [this.categoryKey]: null }, '', this.hash(null));
+                        history.pushState({ ...entry, settingsDetailPushed: true }, '', this.hash());
+                        this.mobileDetailPushed = true;
+                    } else history.replaceState(entry, '', this.hash());
+                }
+            }
+        }
+        hash(category = this.category) {
+            return category ? `#${this.name}/${category}` : `#${this.name}`;
+        }
+        getHashEntry() {
+            const [screen, category, extra] = location.hash.slice(1).split('/');
+            if (screen !== this.name || extra !== undefined || (category !== undefined && !Object.hasOwn(this.titles, category))) return null;
+            return { screen: this.name, [this.categoryKey]: category || null };
+        }
+        restore(entry) {
+            this.mobileDetailPushed = entry?.settingsDetailPushed === true;
+            this.selectCategory(entry?.[this.categoryKey] || this.defaultCategory(), false);
+        }
+        back() {
+            if (!this.media.matches && this.category) {
+                if (this.mobileDetailPushed) history.back();
+                else this.selectCategory(null);
+            } else this.exitToChat();
+        }
+        layout(selected = this.category || this.defaultCategory()) {
+            const { screen, menu } = this;
+            const focused = document.activeElement;
+            const previousCategory = this.navigation.querySelector('[aria-current="page"]');
+            const wide = this.media.matches;
+            const expanded = wide ? !this.sidebarCollapsed : !selected;
+            screen.classList.toggle('settings-show-top', !selected);
+            screen.classList.toggle('settings-sidebar-collapsed', this.sidebarCollapsed);
+            this.panels.forEach(panel => panel.hidden = panel.getAttribute(this.panelAttr) !== selected);
+            this.buttons.forEach(button => {
+                if (button.getAttribute(this.buttonAttr) === selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+            });
+            this.heading.textContent = this.titles[selected] || this.title;
+            menu.querySelector('.material-symbols-outlined').textContent = wide ? 'menu' : 'chevron_left';
+            menu.setAttribute('aria-expanded', String(expanded));
+            const label = !wide ? 'カテゴリ一覧へ戻る' : expanded ? 'カテゴリを閉じる' : 'カテゴリを開く';
+            menu.setAttribute('aria-label', this.title + label);
+            menu.title = this.title + label;
+
+            if (!screen.inert && screen.contains(focused) && !focused.getClientRects().length) {
+                const destination = !wide && !selected ? previousCategory || this.backButton : menu;
+                destination.focus({ preventScroll: true });
+            }
+        }
+    }
+    class SettingsUI extends CategoryPane {
+        constructor({ app, state, ui }) {
+            super({ app, state, ui, name: 'settings', title: '設定', titles });
+            this.editedGlobalInputs = new Set();
+            this.editedProfileInputs = new Map();
+            this.saveQueue = Promise.resolve(); this.urls = new Map(); this.previewVersions = new Map();
+            this.init();
+        }
+        init() {
+            this.media.addEventListener('change', () => {
                 if ((this.popover?.refreshModels || this.popover?.refreshProfiles) &&
                     !this.popover.profileSwitchPending && (this.popover instanceof HTMLDialogElement) === this.media.matches) {
                     const anchor = this.anchor, query = this.popover.querySelector('.model-picker-search').value;
@@ -184,38 +330,17 @@
             });
         }
         enter() {
-            this.closePopover(false); this.mobileDetailPushed = false; this.category = this.media.matches ? 'general' : null;
+            this.closePopover(false);
+            super.enter();
             const danger = $('data-danger-settings').querySelector('details'); if (danger) danger.open = false;
-            this.layout(); this.syncGlobalForms(); this.app.reloadGlobalSettingsV136().catch(() => {});
+            this.syncGlobalForms(); this.app.reloadGlobalSettingsV136().catch(() => {});
         }
         bindPromptSizing() {
-            this.promptSizes = new Map();
-            const observer = new ResizeObserver(entries => {
-                for (const { target } of entries) {
-                    const size = this.promptSizes.get(target), height = target.getBoundingClientRect().height;
-                    if (!size || height < 100 || Math.abs(height - size.applied) < 1) continue;
-                    size.manual = Math.min(500, Math.max(100, height)); size.applied = height;
-                }
-            });
-            $('settings-detail').querySelectorAll('textarea').forEach(control => {
-                this.promptSizes.set(control, { applied: 100, manual: null });
-                control.addEventListener('input', () => this.sizePrompt(control)); observer.observe(control);
-            });
+            this.textareaSizing = new TextareaSizing();
+            this.detail.querySelectorAll('textarea').forEach(control => this.textareaSizing.observe(control));
         }
-        sizePrompt(control) {
-            if (!control.getClientRects().length || !this.promptSizes) return;
-            const size = this.promptSizes.get(control); if (!size) return;
-            let height = size.manual;
-            const scrollTop = control.scrollTop;
-            if (height === null) {
-                control.style.height = '100px';
-                const style = getComputedStyle(control);
-                height = Math.min(500, Math.max(100, control.scrollHeight + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)));
-            }
-            size.applied = height; control.style.height = `${height}px`;
-            control.scrollTop = scrollTop;
-        }
-        syncPromptSizes() { this.promptSizes?.forEach((_, control) => this.sizePrompt(control)); }
+        syncPromptSizes() { this.textareaSizing?.syncPromptSizes(); }
+        afterLayout() { this.syncPromptSizes(); }
         syncGlobalForms() {
             const global = this.state.globalSettingsV136;
             if (!global) return;
@@ -232,48 +357,6 @@
                 ['api-timeout-options', global.enableApiTimeout]
             ]) $(id)?.classList.toggle('hidden', visible !== true);
             $('proofreading-options').classList.remove('hidden'); this.syncPromptSizes();
-        }
-        selectCategory(category, push = true) {
-            this.app.resetSwipeState?.();
-            if (this.category) this.scroll[this.category] = $('settings-detail').scrollTop;
-            this.category = Object.hasOwn(titles, category) ? category : null;
-            this.layout(); $('settings-detail').scrollTop = this.scroll[this.category] || 0;
-            requestAnimationFrame(() => this.syncPromptSizes());
-            if (push && this.state.currentScreen === 'settings') {
-                const entry = { screen: 'settings', settingsCategory: this.category, settingsDetailPushed: this.mobileDetailPushed };
-                if (this.media.matches) history.replaceState(entry, '', `#settings/${this.category}`);
-                else {
-                    if (this.category && !this.mobileDetailPushed) {
-                        history.replaceState({ screen: 'settings', settingsCategory: null }, '', '#settings');
-                        history.pushState({ ...entry, settingsDetailPushed: true }, '', `#settings/${this.category}`);
-                        this.mobileDetailPushed = true;
-                    } else history.replaceState(entry, '', this.category ? `#settings/${this.category}` : '#settings');
-                }
-            }
-        }
-        getHashEntry() {
-            const match = /^#settings(?:\/([^/]+))?$/.exec(location.hash);
-            if (!match || (match[1] && !Object.hasOwn(titles, match[1]))) return null;
-            return { screen: 'settings', settingsCategory: match[1] || null };
-        }
-        restore(entry) {
-            this.mobileDetailPushed = entry?.settingsDetailPushed === true;
-            this.selectCategory(entry?.settingsCategory || (this.media.matches ? 'general' : null), false);
-        }
-        back() {
-            if (!this.media.matches && this.category) {
-                if (this.mobileDetailPushed) history.back();
-                else this.selectCategory(null);
-            } else this.ui.showScreen('chat');
-        }
-        layout(selected = this.category || (this.media.matches ? 'general' : null)) {
-            $('settings-screen').classList.toggle('settings-show-top', !selected);
-            document.querySelectorAll('[data-settings-panel]').forEach(panel => panel.hidden = panel.dataset.settingsPanel !== selected);
-            document.querySelectorAll('[data-settings-category]').forEach(button => {
-                if (button.dataset.settingsCategory === selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
-            });
-            $('settings-title').textContent = !this.media.matches && selected ? titles[selected] : '設定';
-            $('back-to-chat-from-settings').setAttribute('aria-label', !this.media.matches && selected ? '設定トップへ戻る' : 'チャットへ戻る');
         }
         error(anchor, error) {
             if (!anchor) return;
@@ -887,6 +970,8 @@
             if (restoreFocus && anchor?.isConnected && !anchor.disabled) anchor.focus({ preventScroll: true });
         }
     }
+    root.CategoryPane = CategoryPane;
+    root.TextareaSizing = TextareaSizing;
     root.SettingsUIV136 = { create: options => new SettingsUI(options) };
     if (root.appLogic && root.state) root.settingsUiV136 = root.SettingsUIV136.create({ app: root.appLogic, state: root.state, ui: root.uiUtilsV136 });
 })(window);

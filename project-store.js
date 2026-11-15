@@ -9,7 +9,7 @@ const ProjectStore = (() => {
     const legacyConflict = 'Dropboxやバックアップにプロジェクト情報がありません。現在のプロジェクト・所属・共有関係を保持するため、復元を中止しました。';
     const localConflict = '未同期のプロジェクト変更があります。バックアップを作成してから手動で同期してください。';
     const { request, syncState, uniqueId, isId, isChatId } = DocumentLibrary;
-    const projectFieldsList = new Set(['id', 'name', 'description', 'createdAt', 'updatedAt']);
+    const projectFieldsList = new Set(['id', 'name', 'description', 'systemInstruction', 'createdAt', 'updatedAt']);
 
     function upgrade(db) {
         for (const suffix of ['', '_temp']) {
@@ -69,6 +69,7 @@ const ProjectStore = (() => {
                 Object.keys(project).some(key => !projectFieldsList.has(key)) ||
                 typeof project.name !== 'string' || !project.name.trim() ||
                 (Object.hasOwn(project, 'description') && typeof project.description !== 'string') ||
+                (Object.hasOwn(project, 'systemInstruction') && typeof project.systemInstruction !== 'string') ||
                 !Number.isFinite(project.createdAt) || !Number.isFinite(project.updatedAt)) throw invalid();
             projectIds.add(project.id);
         }
