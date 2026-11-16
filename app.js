@@ -7313,7 +7313,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           if (screenName === state.currentScreen) {
             if (library && previousPage !== 'library') {
                 this.screenNavigationGeneration = (this.screenNavigationGeneration || 0) + 1;
-                window.DocumentLibraryUI.openWorkspace({ fromHistory: fromPopState, restoreCollection: true });
+                window.DocumentLibraryUI.openWorkspace({ fromHistory: fromPopState, restoreCollection: !swipe });
             } else if (!library && swipe && previousPage === 'library') {
                 this.screenNavigationGeneration = (this.screenNavigationGeneration || 0) + 1;
                 window.DocumentLibraryUI.close({ fromHistory: true, restoreFocus: true, preserveCollection: true });
@@ -7336,7 +7336,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
           previousPane?.leave?.();
           if (categoryEntry) pane?.restore(categoryEntry);
-          else if (!fromPopState) pane?.enter(swipe ? pane.category || pane.defaultCategory() : undefined, { resume: swipe });
+          else if (!fromPopState) pane?.enter(swipe ? null : undefined);
           screens.forEach(screen => {
             const active = screen.id === screenName + '-screen';
             const slot = screen === elements.chatScreen ? 0 : 1;
@@ -7350,12 +7350,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
           if (!fromPopState && !library) {
             const entry = { screen: screenName };
             if (pane && swipe) entry[pane.categoryKey] = pane.category;
-            const hash = pane && swipe && pane.category !== pane.defaultCategory() ? pane.hash() : `#${screenName}`;
-            history.pushState(entry, '', hash);
+            history.pushState(entry, '', `#${screenName}`);
           }
           state.currentScreen = screenName;
           pane?.display?.();
-          if (library) window.DocumentLibraryUI.openWorkspace({ fromHistory: fromPopState, restoreCollection: true });
+          if (library) window.DocumentLibraryUI.openWorkspace({ fromHistory: fromPopState, restoreCollection: !swipe });
           else if (pane && swipe) {
             (pane.category ? pane.menu : pane.backButton).focus({ preventScroll: true });
           } else if (screenName === 'chat' && information && previousPane === information) {
@@ -14735,7 +14734,8 @@ const appLogic = {
             const categoryEntry = uiUtils.getCategoryHashEntry();
             if (categoryEntry) {
                 const pane = uiUtils.getCategoryPane(categoryEntry.screen);
-                const entry = history.state?.screen === pane.name && history.state[pane.categoryKey] === categoryEntry[pane.categoryKey]
+                const entry = history.state?.screen === pane.name &&
+                    (history.state[pane.categoryKey] ?? null) === (categoryEntry[pane.categoryKey] ?? null)
                     ? history.state : categoryEntry;
                 history.replaceState(entry, '', location.hash);
                 await uiUtils.showScreen(pane.name, true, entry);
@@ -17029,6 +17029,8 @@ const appLogic = {
             library.classList.add('swipe-library-preview');
         }
         if (withinChat) elements.chatWorkspace.classList.add('swipe-chat-preview');
+        const categoryPreview = active === source ? uiUtils.getCategoryPane(destination) : null;
+        categoryPreview?.layout(null, false);
         const direction = SWIPE_PAGE_ORDER.indexOf(destination) > SWIPE_PAGE_ORDER.indexOf(source) ? 1 : -1;
         const origin = elements.appContainer.getBoundingClientRect().left;
         const surfaces = pages.map(page => {
@@ -17038,7 +17040,8 @@ const appLogic = {
             const base = slot * width + (withinChat ? 0 : origin - element.getBoundingClientRect().left);
             return { element, base };
         });
-        this.swipePreview = { source, destination, active, surfaces, width, offset: 0, direction, libraryInert, visibleLibrary, withinChat };
+        this.swipePreview = { source, destination, active, surfaces, width, offset: 0, direction, libraryInert, visibleLibrary, withinChat,
+            categoryPreview };
         // Commit uses the same surfaces against their new layout positions.
         this.setSwipeOffset(0);
     },
@@ -17106,6 +17109,7 @@ const appLogic = {
             elements.documentLibraryWorkspace.inert = preview.libraryInert;
         }
         if (preview.withinChat) elements.chatWorkspace.classList.remove('swipe-chat-preview');
+        preview.categoryPreview?.layout();
         preview.surfaces.forEach(({ element }) => element.style.removeProperty('translate'));
         this.swipePreview = null;
     },

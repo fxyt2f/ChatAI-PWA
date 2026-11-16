@@ -112,9 +112,9 @@
             });
         }
         defaultCategory() { return this.media.matches ? Object.keys(this.titles)[0] : null; }
-        enter(category = this.defaultCategory(), { resume = false } = {}) {
+        enter(category = this.defaultCategory()) {
             this.mobileDetailPushed = false;
-            if (!resume) this.sidebarCollapsed = false;
+            this.sidebarCollapsed = false;
             this.category = category;
             this.layout();
             this.detail.scrollTop = this.scroll[this.category] || 0;
@@ -146,11 +146,13 @@
         getHashEntry() {
             const [screen, category, extra] = location.hash.slice(1).split('/');
             if (screen !== this.name || extra !== undefined || (category !== undefined && !Object.hasOwn(this.titles, category))) return null;
-            return { screen: this.name, [this.categoryKey]: category || null };
+            return category ? { screen: this.name, [this.categoryKey]: category } : { screen: this.name };
         }
         restore(entry) {
             this.mobileDetailPushed = entry?.settingsDetailPushed === true;
-            this.selectCategory(entry?.[this.categoryKey] || this.defaultCategory(), false);
+            const category = entry?.[this.categoryKey];
+            if (category === null) this.sidebarCollapsed = false;
+            this.selectCategory(category === undefined ? this.defaultCategory() : category, false);
         }
         back() {
             if (!this.media.matches && this.category) {
@@ -158,14 +160,14 @@
                 else this.selectCategory(null);
             } else this.exitToChat();
         }
-        layout(selected = this.category || this.defaultCategory()) {
+        layout(selected = this.category, sidebarCollapsed = this.sidebarCollapsed) {
             const { screen, menu } = this;
             const focused = document.activeElement;
             const previousCategory = this.navigation.querySelector('[aria-current="page"]');
             const wide = this.media.matches;
-            const expanded = wide ? !this.sidebarCollapsed : !selected;
+            const expanded = wide ? !sidebarCollapsed : !selected;
             screen.classList.toggle('settings-show-top', !selected);
-            screen.classList.toggle('settings-sidebar-collapsed', this.sidebarCollapsed);
+            screen.classList.toggle('settings-sidebar-collapsed', sidebarCollapsed);
             this.panels.forEach(panel => panel.hidden = panel.getAttribute(this.panelAttr) !== selected);
             this.buttons.forEach(button => {
                 if (button.getAttribute(this.buttonAttr) === selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -329,9 +331,9 @@
                 if ([...node.children].some(child => child.classList.contains('settings-field'))) node.classList.add('settings-field-stack');
             });
         }
-        enter() {
+        enter(category) {
             this.closePopover(false);
-            super.enter();
+            super.enter(category);
             const danger = $('data-danger-settings').querySelector('details'); if (danger) danger.open = false;
             this.syncGlobalForms(); this.app.reloadGlobalSettingsV136().catch(() => {});
         }

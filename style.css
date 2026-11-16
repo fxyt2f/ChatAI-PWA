@@ -399,6 +399,7 @@ label {
 }
 /* --- Header --- */
 .app-header {
+    --app-title-font-size: 1.1rem;
     display: flex;
     align-items: center;
     min-height: var(--app-header-height);
@@ -1055,8 +1056,14 @@ label {
     opacity: 1;
 }
 
-#chat-screen { --chat-overlay-color: var(--bg-overlay-light); }
-body.dark-mode #chat-screen { --chat-overlay-color: var(--bg-overlay-dark); }
+#chat-screen {
+    --chat-overlay-color: var(--bg-overlay-light);
+    --chat-detail-fg: color-mix(in srgb, var(--text-secondary) 85%, var(--text-primary));
+}
+body.dark-mode #chat-screen {
+    --chat-overlay-color: var(--bg-overlay-dark);
+    --chat-composer-bg: var(--bg-tertiary);
+}
 
 #chat-screen .chat-workspace-overlay,
 .category-screen::after {
@@ -1071,7 +1078,8 @@ body.dark-mode #chat-screen { --chat-overlay-color: var(--bg-overlay-dark); }
 }
 
 #chat-screen .chat-workspace-overlay { background-color: var(--chat-overlay-color); }
-#chat-screen:not(.background-visible) .chat-workspace-overlay { opacity: 0; }
+#chat-screen:not(.background-visible) .chat-workspace-overlay,
+.category-screen:not(.background-visible)::after { opacity: 0; }
 #chat-screen.background-visible { --effective-message-bubble-opacity: var(--message-bubble-opacity); }
 body.dark-mode .category-screen::after {
     background-color: var(--bg-overlay-dark);
@@ -1322,7 +1330,7 @@ html.swipe-navigation-enabled:not(.viewport-zoomed) #chat-workspace .main-conten
     column-gap: 8px;
     row-gap: 4px;
     box-sizing: border-box;
-    background-color: var(--bg-primary);
+    background-color: var(--chat-composer-bg, var(--bg-primary));
     border: 1px solid var(--border-primary);
     border-radius: 24px;
     overflow: visible;
@@ -1343,7 +1351,7 @@ html.swipe-navigation-enabled:not(.viewport-zoomed) #chat-workspace .main-conten
     line-height: 1.55;
     color: var(--text-primary);
     caret-color: currentColor;
-    background-color: var(--bg-primary);
+    background-color: var(--chat-composer-bg, var(--bg-primary));
     border: none;
     border-radius: 16px;
     outline: 0;
@@ -1356,10 +1364,13 @@ html.swipe-navigation-enabled:not(.viewport-zoomed) #chat-workspace .main-conten
 }
 #chat-screen #user-input:focus,
 #chat-screen #user-input:focus-visible {
-    background-color: var(--bg-primary);
+    background-color: var(--chat-composer-bg, var(--bg-primary));
     border: none;
     outline: 0;
     box-shadow: none;
+}
+body.dark-mode #chat-screen #user-input::placeholder {
+    color: color-mix(in srgb, var(--text-placeholder) 65%, var(--text-secondary));
 }
 #chat-screen #profile-card-header-wrapper {
     grid-area: profile;
@@ -2449,8 +2460,9 @@ body.dark-mode .message-cascade-controls .cascade-delete-btn {
     font-size: 13px;
     border: 1px solid var(--border-tertiary);
     border-radius: 5px;
-    background-color: var(--bg-secondary);
+    background-color: var(--bg-tertiary);
 }
+#chat-screen .thought-summary-details > summary { color: var(--chat-detail-fg); }
 
 .thought-summary-content ul,
 .thought-summary-content ol {
@@ -2629,7 +2641,7 @@ body.dark-mode #chat-screen.drag-over::after {
 .app-header h1:is(#chat-title, #document-library-title, #project-title) {
     margin: 0;
     margin-right: auto;
-    font-size: 1.1rem;
+    font-size: var(--app-title-font-size);
     font-weight: 700;
     white-space: nowrap;
     overflow: hidden;
@@ -2647,28 +2659,28 @@ body.dark-mode #chat-screen.drag-over::after {
     border-radius: 4px;
 }
 .app-header .chat-title-input {
+    --chat-title-edit-inset: 6px;
     flex: 1 1 auto;
     min-width: 0;
     width: 100%;
-    height: 32px;
+    height: var(--app-header-control-size);
     margin: 0;
     margin-right: auto;
-    padding: 4px 8px;
+    margin-inline-start: calc(-1 * var(--chat-title-edit-inset));
+    padding: 0;
+    padding-inline-start: var(--chat-title-edit-inset);
     box-sizing: border-box;
-    border: 1px solid color-mix(in srgb, var(--app-header-fg, #fff) 46%, transparent);
-    border-radius: 6px;
+    border: 0;
+    border-radius: var(--border-radius-md);
+    outline: none;
     color: var(--app-header-fg, #fff);
-    background: color-mix(in srgb, var(--app-header-bg, #1976d2) 72%, rgba(255,255,255,0.18));
+    background: color-mix(in srgb, var(--app-header-bg) 90%, white);
     font: inherit;
-    font-size: 1rem;
+    font-size: var(--app-title-font-size);
     font-weight: 700;
-    line-height: 1.2;
+    line-height: var(--app-header-control-size);
     white-space: nowrap;
     overflow-x: auto;
-}
-.app-header .chat-title-input:focus {
-    outline: 2px solid color-mix(in srgb, var(--app-header-fg, #fff) 72%, transparent);
-    outline-offset: 1px;
 }
 .profile-card-wrapper {
     position: relative;
@@ -2697,8 +2709,10 @@ body.dark-mode #chat-screen.drag-over::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: rgba(255, 255, 255, 0.3);
     overflow: hidden;
+}
+.profile-icon-container:has(> img) {
+    background-color: rgba(255, 255, 255, 0.3);
 }
 
 .profile-icon-container img {
@@ -2809,8 +2823,10 @@ body.dark-mode #chat-screen.drag-over::after {
     height: 100%;
     border-radius: 50%;
     overflow: hidden;
-    background-color: var(--bg-secondary);
     cursor: pointer;
+}
+.profile-display-icon-wrapper label:has(> img[src]:not([src=""])) {
+    background-color: var(--bg-secondary);
 }
 .profile-display-icon-wrapper img {
     width: 100%;
@@ -2951,10 +2967,14 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
     box-shadow: none;
     cursor: pointer;
     transition: background-color var(--transition-duration) var(--transition-timing);
-    background-color: var(--bg-tertiary);
+    background-color: transparent;
     border: 1px solid var(--border-primary);
     height: 40px;
     width: 40px;
+}
+
+.chat-input-area .profile-card:has(> .profile-icon-container > img) {
+    background-color: var(--bg-tertiary);
 }
 
 .chat-input-area .profile-card:hover:not(:disabled) {
@@ -2969,8 +2989,10 @@ body.dark-mode #profile-management-group .profile-actions button:hover {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: var(--bg-secondary);
     overflow: hidden;
+}
+.chat-input-area .profile-icon-container:has(> img) {
+    background-color: var(--bg-secondary);
 }
 
 .chat-input-area .profile-icon-container img {
@@ -4663,7 +4685,7 @@ body.dark-mode #sd-test-connection-btn {
 }
 
 /* アイコンコンテナの背景を調整してコントラストを改善 */
-#settings-screen .app-header .profile-card .profile-icon-container {
+#settings-screen .app-header .profile-card .profile-icon-container:has(> img) {
     background-color: rgba(255, 255, 255, 0.1);
 }
 
@@ -5469,6 +5491,7 @@ body.dark-mode .category-screen .settings-category-nav button[aria-current] { co
 #settings-screen .profile-card:hover:not(:disabled) { background:var(--bg-tertiary); color:var(--text-primary); box-shadow:none; }
 #settings-screen .profile-card-name { max-width:260px; }
 #settings-screen .profile-card-name, #settings-screen .profile-card-arrow { color:var(--text-primary); }
+#settings-screen .settings-detail .profile-icon-container .material-symbols-outlined { color:var(--text-secondary); }
 #settings-screen :is(.profile-actions,.asset-actions,.sync-actions) { display:flex; flex-wrap:wrap; gap:8px; margin:0; }
 #settings-screen :is(#dropbox-auth-state,#dropbox-connected-state) { display:flex; flex-direction:column; gap:var(--settings-item-space); min-width:0; }
 #settings-screen .sync-description { display:block; }
@@ -6240,14 +6263,14 @@ button.document-library-file { cursor: pointer; }
 
 #chat-screen .message-info {
     display: grid;
-    background-color: var(--bg-secondary);
+    background-color: var(--bg-tertiary);
     gap: 8px;
     margin-top: 6px;
     padding: 6px 10px;
     min-width: 0;
     max-width: 100%;
     border-radius: var(--border-radius-md);
-    color: var(--text-secondary);
+    color: var(--chat-detail-fg);
     font-size: .8rem;
     overflow-wrap: anywhere;
     scroll-margin-top: 10px;

@@ -31,6 +31,7 @@ def run(client, base_url):
 
     client.call('Page.enable')
     client.call('Network.enable')
+    client.call('Emulation.setFocusEmulationEnabled', {'enabled': True})
     client.call('Network.setBlockedURLs', {'urls': ['https://*']})
     injection = client.call('Page.addScriptToEvaluateOnNewDocument', {'source': """
         if (location.search === '?v1372-fixture') {
@@ -100,13 +101,83 @@ def run(client, base_url):
         ev("""(async () => {
             await appLogic.setShowThoughtProcess(true);
             const messages = [{role:'user', content:'ユーザー本文', timestamp:10}, {
-                role:'model', content:'モデル本文', thoughtSummary:'理由', thoughtTranslationMeta:{provider:'gemini', model:'実験モデル'}, timestamp:20
+                role:'model', content:'モデル本文', thoughtSummary:'理由', thoughtTranslationMeta:{provider:'gemini', model:'実験モデル'},
+                executedFunctions:['fixture'], timestamp:20
             }];
             await dbUtils.saveChat(null, {id: 813421, messages, createdAt:10, systemPrompt:'個別の指示'});
             await appLogic.loadChat(813421, {scrollAfterLoad:false});
         })()""")
         wait("state.currentChatId === 813421 && document.querySelector('.thought-summary-details > summary')", 'Message fixture loads')
         assert ev("document.querySelector('.thought-summary-details > summary').textContent.includes('翻訳:') && !document.querySelector('.thought-summary-details > summary').textContent.includes('思考翻訳:')")
+        for width in (390, 1280):
+            viewport(width)
+            for dark in (True, False):
+                ev(f"appLogic.saveAppearanceValues('theme', {{darkMode:{json.dumps(dark)}}}, {{global:true}})")
+                check = ev("""(async () => {
+                    const dark = document.body.classList.contains('dark-mode');
+                    const get = selector => document.querySelector(selector);
+                    const css = (selector, pseudo) => getComputedStyle(get(selector), pseudo);
+                    const palette = css('#chat-screen');
+                    const tertiary = palette.getPropertyValue('--bg-tertiary').trim();
+                    const composer = dark ? tertiary : palette.getPropertyValue('--bg-primary').trim();
+                    const canvas = document.createElement('canvas').getContext('2d');
+                    const pixels = color => {
+                        canvas.clearRect(0, 0, 1, 1);
+                        canvas.fillStyle = color; canvas.fillRect(0, 0, 1, 1);
+                        return [...canvas.getImageData(0, 0, 1, 1).data];
+                    };
+                    const same = (a,b) => pixels(a).join() === pixels(b).join();
+                    const luminance = color => pixels(color).slice(0,3).map(v => v/255)
+                        .map(v => v <= .04045 ? v/12.92 : ((v+.055)/1.055)**2.4)
+                        .reduce((sum,v,i) => sum + v*[.2126,.7152,.0722][i], 0);
+                    const contrast = (fg,bg) => {
+                        const a = luminance(fg) + .05, b = luminance(bg) + .05;
+                        return Math.max(a,b) / Math.min(a,b);
+                    };
+                    const thought = css('.thought-summary-details');
+                    const info = get('.message-info');
+                    if (info.hidden) get('.tm-message-info-btn').click();
+                    const composerInput = get('#user-input');
+                    composerInput.focus();
+                    css('#user-input').backgroundColor;
+                    await Promise.allSettled(composerInput.getAnimations().map(animation => animation.finished));
+                    const colors = same(thought.backgroundColor, tertiary) &&
+                        same(css('.message-info').backgroundColor, tertiary) &&
+                        same(css('.chat-input-area').backgroundColor, composer) &&
+                        same(css('#user-input').backgroundColor, composer) && !info.hidden;
+                    const ratios = [
+                        contrast(css('.thought-summary-details > summary').color, tertiary),
+                        contrast(css('.message-info').color, tertiary),
+                        ...(dark ? [contrast(composer, css('#user-input','::placeholder').color)] : [])
+                    ];
+                    const background = ['#settings-screen','#information-screen'].every(selector =>
+                        css(selector).backgroundColor === palette.backgroundColor && css(selector,'::after').opacity === '0' &&
+                        pixels(css(selector + ' .settings-detail').backgroundColor)[3] === 0);
+                    const heading = get('#chat-title'), header = heading.closest('.app-header');
+                    const { fontSize, lineHeight } = getComputedStyle(heading);
+                    const bounds = heading.getBoundingClientRect(), height = header.offsetHeight;
+                    await uiUtilsV136.startChatTitleEdit();
+                    const titleInput = get('.chat-title-input');
+                    css('.chat-title-input').backgroundColor;
+                    await Promise.allSettled(titleInput.getAnimations().map(animation => animation.finished));
+                    const title = css('.chat-title-input');
+                    const editBounds = titleInput.getBoundingClientRect();
+                    const titleEdit = {
+                        sameSize: title.fontSize === fontSize && title.lineHeight === lineHeight,
+                        samePosition: editBounds.left + parseFloat(title.paddingLeft) === bounds.left &&
+                            editBounds.top === bounds.top && editBounds.height === bounds.height,
+                        paddedAndRounded: editBounds.left < bounds.left &&
+                            title.borderTopLeftRadius === title.getPropertyValue('--border-radius-md').trim(),
+                        sameHeader: header.offsetHeight === height,
+                        focusedWithoutFrame: document.activeElement === titleInput && title.outlineStyle === 'none' &&
+                            title.borderTopWidth === '0px' && title.borderLeftWidth === '0px',
+                        lighter: luminance(title.backgroundColor) > luminance(getComputedStyle(header).backgroundColor)
+                    };
+                    uiUtilsV136.cancelChatTitleEdit(titleInput);
+                    return {dark, colors, ratios, background, titleEdit};
+                })()""")
+                assert (check['dark'] == dark and check['colors'] and check['background'] and all(check['titleEdit'].values())
+                        and min(check['ratios']) >= 4.5), (width, check)
         assert ev("""(async () => {
             const root = document.documentElement;
             const canvas = document.createElement('canvas').getContext('2d');
@@ -233,4 +304,5 @@ def run(client, base_url):
     finally:
         client.call('Page.removeScriptToEvaluateOnNewDocument', {'identifier': injection})
         client.call('Network.setBlockedURLs', {'urls': []})
+        client.call('Emulation.setFocusEmulationEnabled', {'enabled': False})
         viewport(1280)
