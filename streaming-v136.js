@@ -46,9 +46,17 @@
             }
             return false;
         }
+        async function readChunk() {
+            try {
+                return await reader.read();
+            } catch (error) {
+                if (!signal?.aborted && error instanceof TypeError) error.interruptionReason = 'network-error';
+                throw error;
+            }
+        }
         try {
             for (;;) {
-                const { done, value } = await reader.read();
+                const { done, value } = await readChunk();
                 signal?.throwIfAborted();
                 eof = done;
                 streamSize += value?.byteLength || 0;
@@ -75,7 +83,9 @@
                 }
                 if (done) {
                     if (data.length || line.startsWith('data:') || event === 'error') {
-                        throw new Error('APIストリームがイベントの途中で切断されました。');
+                        const error = new Error('APIストリームがイベントの途中で切断されました。');
+                        error.interruptionReason = 'stream-disconnected';
+                        throw error;
                     }
                     return false;
                 }
@@ -118,7 +128,7 @@
                         for (const part of nextContent?.parts || []) {
                             if (typeof part.text !== 'string') continue;
                             if (part.thought === true) thoughtSummary += part.text;
-                            else content += part.text;
+                            else if (!part.thought && !part.functionCall && !part.functionResponse) content += part.text;
                         }
                         for (const part of thoughts?.parts || []) thoughtSummary += part.text || '';
                     }
@@ -128,14 +138,18 @@
             finish() {
                 const ordered = [...candidates.keys()].sort((a, b) => a - b).map(index => candidates.get(index));
                 if (!result.promptFeedback?.blockReason && (!ordered.length || ordered.some(candidate => !candidate.finishReason))) {
-                    throw new Error('Geminiストリームが完了前に切断されました。');
+                    const error = new Error('Geminiストリームが完了前に切断されました。');
+                    error.interruptionReason = 'stream-disconnected';
+                    throw error;
                 }
                 for (const candidate of ordered) {
                     for (const { functionCall } of candidate.content?.parts || []) {
                         if (functionCall && (candidate.finishReason !== 'STOP' || !functionCall.name || functionCall.willContinue
                             || functionCall.partialArgs?.length || (functionCall.args != null
                                 && (typeof functionCall.args !== 'object' || Array.isArray(functionCall.args))))) {
-                            throw new Error('Geminiのツール呼び出しが未完了です。');
+                            const error = new Error('Geminiのツール呼び出しが未完了です。');
+                            error.finishReason = candidate.finishReason;
+                            throw error;
                         }
                     }
                 }
@@ -313,7 +327,6 @@
                 let received = false;
                 for (const choice of chunk.choices || []) {
                     const index = choice.index ?? 0;
-                    if (choice.finish_reason === 'error') throw new Error('OpenRouterストリームの途中でエラーが発生しました。');
                     const current = choices.get(index) || { index, message: { role: 'assistant' }, tools: new Map(), blocks: new Map() };
                     const delta = choice.delta || {};
                     for (const key of ['content', 'reasoning', 'reasoning_content']) {
@@ -321,6 +334,14 @@
                             current.message[key] = (current.message[key] || '') + delta[key];
                             received = true;
                         }
+                    }
+                    if (choice.finish_reason === 'error') {
+                        if (index === 0 && typeof delta.content === 'string' && delta.content) {
+                            progress({ content: current.message.content, getThoughtSummary: () => reasoningText(current.message) });
+                        }
+                        const error = new Error('OpenRouterストリームの途中でエラーが発生しました。');
+                        error.finishReason = choice.finish_reason;
+                        throw error;
                     }
                     if (delta.reasoning_details && (!Array.isArray(delta.reasoning_details) || delta.reasoning_details.length)) {
                         appendReasoningDetails(current.message.reasoning_details ||= [], current.blocks, delta.reasoning_details);
@@ -343,13 +364,17 @@
             },
             finish(done) {
                 if (!done || !choices.size || [...choices.values()].some(choice => !choice.finish_reason)) {
-                    throw new Error('OpenRouterストリームが完了前に切断されました。');
+                    const error = new Error('OpenRouterストリームが完了前に切断されました。');
+                    error.interruptionReason = 'stream-disconnected';
+                    throw error;
                 }
                 result.choices = [...choices.values()].sort((a, b) => a.index - b.index).map(({ tools, blocks, ...choice }) => {
                     if (!tools.size && !['tool_calls', 'function_call'].includes(choice.finish_reason)) return choice;
                     if (!tools.size) throw new Error('OpenRouterのツール呼び出しが未完了です。');
                     if (!['stop', 'tool_calls', 'function_call'].includes(choice.finish_reason)) {
-                        throw new Error('OpenRouterのツール呼び出しが未完了です。');
+                        const error = new Error('OpenRouterのツール呼び出しが未完了です。');
+                        error.finishReason = choice.finish_reason;
+                        throw error;
                     }
                     choice.message.tool_calls = [...tools.keys()].sort((a, b) => a - b).map(index => {
                         const tool = tools.get(index);
@@ -366,8 +391,17 @@
         };
     }
 
-    async function collectResponse(provider, body, signal, progress) {
-        const accumulator = provider === 'gemini' ? geminiAccumulator() : routerAccumulator();
+    function openAIUsageMetadata(usage) {
+        return usage ? {
+            promptTokenCount: usage.prompt_tokens,
+            candidatesTokenCount: usage.completion_tokens,
+            totalTokenCount: usage.total_tokens
+        } : undefined;
+    }
+
+    async function collectResponse(provider, body, signal, progress, reportMetadata) {
+        const isGemini = provider === 'gemini';
+        const accumulator = isGemini ? geminiAccumulator() : routerAccumulator();
         let blockCount = 0;
         const done = await readSse(body, signal, (payload, event) => {
             if (event === 'ping' || event === 'keepalive') return false;
@@ -376,6 +410,9 @@
             try { chunk = JSON.parse(payload); }
             catch (error) { throw new Error('APIストリームのイベントを解析できません。', { cause: error }); }
             if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('APIストリームの応答形式が不正です。');
+            const usageMetadata = isGemini ? chunk.usageMetadata : openAIUsageMetadata(chunk.usage);
+            const modelName = isGemini ? chunk.modelVersion : chunk.model;
+            if (usageMetadata || modelName) reportMetadata?.(usageMetadata, modelName);
             if (chunk.error || event === 'error') {
                 const info = chunk.error || chunk;
                 const error = new Error(info.message || 'APIストリームの途中でエラーが発生しました。');
@@ -401,7 +438,7 @@
         return accumulator.finish(done);
     }
 
-    const api = { canStream, collectResponse, readSse, reasoningText };
+    const api = { canStream, collectResponse, readSse, reasoningText, openAIUsageMetadata };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     else root.StreamingV136 = api;
 })(globalThis);

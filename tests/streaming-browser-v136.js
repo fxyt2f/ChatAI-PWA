@@ -58,6 +58,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             frame: value => write('data: ' + JSON.stringify(value) + '\r\n\r\n'),
             done: () => write('data: [DONE]\r\n\r\n'),
             close() { if (!closed) { closed = true; writer.close(); } },
+            fail(error) { if (!closed) { closed = true; writer.error(error); } },
             get canceled() { return canceled; }
         };
         events.push(stream);
@@ -293,7 +294,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             channel.frame(geminiResult([{text: '\n続き'.repeat(20)}]));
             await waitFor(() => answer.textContent.endsWith('続き'), 'second displayed SSE chunk');
             if (window.settingsUiV136) assert(scroll.scrollTop < 4, 'does not jump when scrolled up');
-            channel.frame({...geminiResult([], 'STOP'), usageMetadata: {totalTokenCount: 52}});
+            channel.frame({...geminiResult([], 'STOP'), usageMetadata: {candidatesTokenCount: 20, totalTokenCount: 52}});
             channel.close();
             await running;
             assert(!body() && el.messageContainer.querySelector('.model .message-content strong')?.textContent === '太字');
@@ -302,6 +303,9 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             const model = (await chat()).messages.at(-1);
             eq(model.continuation.parts[1].thoughtSignature, 'text-signature');
             eq(model.usageMetadata.totalTokenCount, 52);
+            assert(model.usageMetadata.tmExecution.completedAt);
+            eq(el.messageContainer.querySelector('.model [title="Candidate Tokens / Total Tokens"]').textContent, '20 / 52');
+            assert(el.messageContainer.querySelector('.model .tm-execution-meta').textContent.includes(gemini.modelName));
             assert(!model.incomplete);
         });
 
@@ -368,6 +372,23 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             assert((await app.loadChat(toolId)).ok);
             eq(st.currentMessages.at(-1).thoughtSummary, streamed.thoughtSummary);
             await settings({enableStreamingOutput: true});
+
+            await start(gemini, {geminiEnableFunctionCalling: true});
+            const tool = sse(), interrupted = sse();
+            const usage = {candidatesTokenCount: 3, totalTokenCount: 14};
+            const toolStart = calls.length;
+            reply = () => calls.length === toolStart + 1 ? tool.response : interrupted.response;
+            tool.frame(geminiResult([{text: 'ツール実行前'}, ...parts], 'STOP'));
+            tool.close();
+            interrupted.frame({...geminiResult([{text: 'ツール実行後'}]), usageMetadata: usage});
+            interrupted.frame({error: {code: 503, message: 'ツール実行後のエラー'}});
+            await send('ツールの途中で終了');
+            const partial = (await chat()).messages.at(-1);
+            eq(partial.content, 'ツール実行前\n\nツール実行後');
+            eq(partial.usageMetadata.tmLastResponseUsage, usage);
+            eq(partial.executedFunctions, ['stream_fixture']);
+            assert(partial.incomplete && !partial.continuation);
+            assert(!el.messageContainer.querySelector('.model [title="Candidate Tokens / Total Tokens"]'));
             window.functionCallingTools = originalTools;
             window.functionDeclarations = originalDeclarations;
         });
@@ -488,13 +509,30 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             }
         });
 
-        await test('interruption, read timeout and HTTP-200 stream errors keep partials without retries or continuation', async () => {
-            for (const ending of ['stop', 'timeout', 'error']) {
+        await test('interrupted answers keep their footer, original error and plain-text history after reload', async () => {
+            const providerError = '  途中エラー\r\n\n<img src=x onerror="window.partialErrorExecuted=true">\n  詳細  ';
+            const usage = {candidatesTokenCount: 12, totalTokenCount: 38, thoughtsTokenCount: 3};
+            const actualModel = 'gemini-3-flash-fixture-version';
+            const expected = {
+                stop: { reason: 'manual-stop' },
+                timeout: { reason: 'timeout', error: 'APIタイムアウト: 1500ms以内にレスポンスが返りませんでした。' },
+                error: { reason: 'error', error: providerError },
+                network: { reason: 'network-error', error: 'fixture stream network failure' },
+                safety: { reason: 'error', finish: 'SAFETY', error: 'モデルが応答をブロックしました (理由: SAFETY)' },
+                cap: { finish: 'MAX_TOKENS' }
+            };
+            for (const [ending, outcome] of Object.entries(expected)) {
                 await start(gemini, {enableAutoRetry: true, maxRetries: 1, enableApiTimeout: ending === 'timeout', apiTimeoutSeconds: 1.5,
                     useFixedRetryDelay: true, fixedRetryDelaySeconds: 0});
                 const channel = sse();
-                reply = () => channel.response;
                 const begin = calls.length;
+                const retries = ending === 'error' ? 1 : 0;
+                if (retries) {
+                    const first = sse();
+                    first.frame({usageMetadata: usage, modelVersion: 'model-from-failed-attempt'});
+                    first.frame({error: {code: 503, message: '出力前の一時エラー'}});
+                    reply = () => calls.length === begin + 1 ? first.response : channel.response;
+                } else reply = () => channel.response;
                 const before = await existingSuccessful();
                 let expire;
                 if (ending === 'timeout') window.setTimeout = (fn, ms, ...args) => {
@@ -503,33 +541,89 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                     return 0;
                 };
                 const running = send('失敗テスト ' + ending);
-                await waitFor(() => calls.length === begin + 1, 'failure case request');
+                await waitFor(() => calls.length === begin + 1 + retries, 'failure case request');
+                if (ending === 'stop') channel.frame({usageMetadata: usage});
+                if (ending === 'network') {
+                    channel.frame({usageMetadata: {totalTokenCount: 30}});
+                    channel.frame({usageMetadata: {candidatesTokenCount: 15}});
+                }
                 channel.frame(geminiResult([{text: 'partial-' + ending}]));
                 await waitFor(() => body()?.textContent === 'partial-' + ending, 'received partial');
                 if (ending === 'stop') app.abortRequest();
                 else if (ending === 'timeout') { assert(expire); expire(); }
-                else channel.frame({error: {code: 503, message: '途中エラー'}});
+                else if (ending === 'error') channel.frame({error: {code: 503, message: providerError}});
+                else if (ending === 'network') channel.fail(new TypeError(outcome.error));
+                else {
+                    channel.frame({...geminiResult([], outcome.finish), ...(ending === 'safety' && {usageMetadata: usage, modelVersion: actualModel})});
+                    channel.close();
+                }
                 await running;
                 window.setTimeout = rawTimeout;
-                eq(calls.length, begin + 1);
-                assert(channel.canceled && !channel.body.locked);
+                eq(calls.length, begin + 1 + retries);
+                assert(!channel.body.locked);
+                if (['stop', 'timeout', 'error'].includes(ending)) assert(channel.canceled);
                 const saved = await chat();
-                const partial = saved.messages.find(message => message.role === 'model');
+                eq(saved.messages.map(message => message.role), ['user', 'model']);
+                const partial = saved.messages.at(-1);
                 eq(partial.content, 'partial-' + ending);
                 assert(partial.incomplete && !partial.continuation);
-                if (ending === 'stop') {
-                    eq(saved.messages.map(message => message.role), ['user', 'model']);
+                eq(partial.interruptionReason, outcome.reason);
+                eq(partial.finishReason, outcome.finish);
+                eq(partial.error, outcome.error);
+                eq(partial.retryCount, retries);
+                const execution = partial.usageMetadata.tmExecution;
+                eq(execution.provider, 'gemini');
+                eq(execution.modelName, ending === 'safety' ? actualModel : gemini.modelName);
+                eq(execution.completedAt, undefined);
+                eq(partial.usageMetadata.candidatesTokenCount, ['stop', 'safety'].includes(ending) ? 12 : ending === 'network' ? 15 : undefined);
+                for (const reloaded of [false, true]) {
+                    if (reloaded) assert((await app.loadChat(saved.id)).ok);
                     assertQuietStop();
-                } else {
-                    const expected = ending === 'timeout' ? 'APIタイムアウト' : '途中エラー';
-                    assert(saved.messages.at(-1).role === 'error' && saved.messages.at(-1).content.includes(expected));
-                    assert(el.messageContainer.querySelector('.message.error').textContent.includes(expected));
+                    const answer = el.messageContainer.querySelector('.message.model');
+                    eq(answer.querySelector('.message-content').textContent.trim(), partial.content);
+                    assert(answer.querySelector('.tm-copy-message-btn') && answer.querySelector('.js-edit-btn') && answer.querySelector('.js-delete-btn'));
+                    const executionLabel = answer.querySelector('.tm-execution-meta');
+                    assert(executionLabel.textContent.includes(execution.modelName) && executionLabel.title.includes('プロバイダー: Gemini'));
+                    const tokens = answer.querySelector('[title="Candidate Tokens / Total Tokens"]');
+                    eq(tokens?.textContent, ['stop', 'safety'].includes(ending) ? '12 / 35' : undefined);
+                    eq(answer.querySelector('[title^="APIリクエストを"]')?.textContent, retries ? '(リトライ: 1回)' : undefined);
+                    const info = answer.querySelector('.tm-message-info-btn');
+                    if (outcome.error) {
+                        assert(info && info.getAttribute('aria-expanded') === 'false');
+                        info.click();
+                        const displayed = answer.querySelector('.message-info-error');
+                        eq(displayed.textContent, outcome.error);
+                        eq(getComputedStyle(displayed).whiteSpace, 'pre-wrap');
+                        assert(!displayed.children.length && !window.partialErrorExecuted);
+                        info.click();
+                    } else {
+                        assert(!info);
+                    }
                 }
-                assert(app.parseImportedHistory('<|#|model|#|incomplete>途中<|#|/model|#|>').messages[0].incomplete);
-                assert((await app._prepareApiHistory(saved.messages)).every(entry =>
-                    entry.parts.every(part => !part.text?.includes('partial-'))));
+                eq((await app._prepareApiHistory(saved.messages)).at(-1), {role: 'model', parts: [{text: partial.content}]});
                 eq(await existingSuccessful(), before);
+                if (ending === 'error') {
+                    const answer = el.messageContainer.querySelector('.message.model');
+                    const write = app.writeTextToClipboard;
+                    let copied;
+                    try {
+                        app.writeTextToClipboard = async text => { copied = text; };
+                        answer.querySelector('.tm-copy-message-btn').click();
+                        eq(copied, partial.content);
+                    } finally { app.writeTextToClipboard = write; }
+                    await app.startEditMessage(1, answer);
+                    await app.saveEditMessage(1, answer, {value: 'edited partial'});
+                    const edited = (await chat()).messages.at(-1);
+                    eq([edited.content, edited.error, edited.incomplete], ['edited partial', providerError, true]);
+                    const confirm = ui.showCustomConfirm;
+                    try {
+                        ui.showCustomConfirm = async () => true;
+                        await app.deleteMessage(1);
+                        eq((await chat()).messages.map(message => message.role), ['user']);
+                    } finally { ui.showCustomConfirm = confirm; }
+                }
             }
+            assert(app.parseImportedHistory('<|#|model|#|incomplete>途中<|#|/model|#|>').messages[0].incomplete);
             await start(gemini, {enableAutoRetry: true, maxRetries: 1, useFixedRetryDelay: true, fixedRetryDelaySeconds: 0});
             const failed = sse(), recovered = sse();
             failed.frame({error: {code: 503, message: '最初の出力前のエラー'}});
@@ -540,14 +634,378 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             await send('出力前なら再試行');
             eq(calls.length, before + 2);
             eq((await chat()).messages.at(-1).content, 'recovered');
+        });
 
-            await start();
-            reply = () => { throw new TypeError('fixture network failure'); };
-            await send('通信失敗');
-            const failedMessage = (await chat()).messages.at(-1);
-            eq(failedMessage.role, 'error');
-            eq(failedMessage.content, 'fixture network failure');
-            assert(el.messageContainer.querySelector('.message.error').textContent.includes(failedMessage.content));
+        await test('failures before answer text persist as empty AI messages and never reach the next request', async () => {
+            const sourceError = '  Service Unavailable\r\n\n<img src=x onerror="window.partialErrorExecuted=true">\n  詳細  ';
+            const cases = [
+                {kind: 'http', error: `APIエラー (503): ${sourceError}`, retries: 1},
+                {kind: 'network', error: 'fixture network failure', retries: 0},
+                {kind: 'moderation', error: 'モデルが応答をブロックしました (理由: SAFETY)', retries: 0, finishReason: 'SAFETY'},
+                {kind: 'timeout', error: 'APIタイムアウト: 1500ms以内にレスポンスが返りませんでした。', retries: 0}
+            ];
+            const prompt = '回答のないリクエスト';
+            for (const {kind, error, retries, finishReason} of cases) {
+                await start(gemini, {enableAutoRetry: retries > 0, maxRetries: retries, useFixedRetryDelay: true,
+                    fixedRetryDelaySeconds: 0, enableApiTimeout: kind === 'timeout', apiTimeoutSeconds: 1.5});
+                const begin = calls.length;
+                const previousSuccess = await existingSuccessful();
+                let expire;
+                if (kind === 'http') reply = () => new Response(JSON.stringify({error: {message: sourceError}}),
+                    {status: 503, headers: {'Content-Type': 'application/json'}});
+                if (kind === 'network') reply = () => { throw new TypeError(error); };
+                if (kind === 'moderation') reply = () => json({...geminiResult([], finishReason),
+                    usageMetadata: {candidatesTokenCount: 0, totalTokenCount: 14}, modelVersion: 'gemini-moderation-fixture'});
+                if (kind === 'timeout') {
+                    const channel = sse();
+                    reply = () => channel.response;
+                    window.setTimeout = (fn, ms, ...args) => {
+                        if (ms !== 1500) return rawTimeout(fn, ms, ...args);
+                        expire = fn;
+                        return 0;
+                    };
+                }
+                try {
+                    const running = send(prompt);
+                    if (kind === 'timeout') {
+                        await waitFor(() => expire && calls.length === begin + 1, 'timeout before any answer');
+                        expire();
+                    }
+                    await running;
+                } finally { window.setTimeout = rawTimeout; }
+                eq(calls.length, begin + 1 + retries);
+                eq(await existingSuccessful(), previousSuccess);
+
+                const saved = await chat();
+                eq(saved.messages.map(message => message.role), ['user', 'model']);
+                const failure = saved.messages.at(-1);
+                eq([failure.content, failure.error, failure.incomplete, failure.finishReason, failure.retryCount],
+                    ['', error, true, finishReason, retries]);
+                eq(failure.interruptionReason, kind === 'timeout' ? 'timeout' : 'error');
+                assert(!failure.continuation && !failure.tool_calls);
+                const expectedModel = kind === 'moderation' ? 'gemini-moderation-fixture' : gemini.modelName;
+                eq(failure.usageMetadata.tmExecution.modelName, expectedModel);
+                eq(failure.usageMetadata.tmExecution.completedAt, undefined);
+                for (const reloaded of [false, true]) {
+                    if (reloaded) assert((await app.loadChat(saved.id)).ok);
+                    assertQuietStop();
+                    const answer = el.messageContainer.querySelector('.message.model');
+                    const content = answer.querySelector('.message-content');
+                    eq(content.textContent, '');
+                    eq(getComputedStyle(content).display, 'none');
+                    assert(!answer.querySelector('.tm-copy-message-btn, .js-edit-btn, .tm-format-message-btn'));
+                    assert(answer.querySelector('.tm-search-message-btn').disabled);
+                    const execution = answer.querySelector('.tm-execution-meta');
+                    assert(execution.textContent.includes(expectedModel) && execution.title.includes('プロバイダー: Gemini'));
+                    eq(answer.querySelector('[title="Candidate Tokens / Total Tokens"]')?.textContent,
+                        kind === 'moderation' ? '0 / 14' : undefined);
+                    eq(answer.querySelector('[title^="APIリクエストを"]')?.textContent, retries ? '(リトライ: 1回)' : undefined);
+                    const info = answer.querySelector('.tm-message-info-btn');
+                    assert(info.getAttribute('aria-expanded') === 'false');
+                    info.click();
+                    const displayed = answer.querySelector('.message-info-error');
+                    eq(displayed.textContent, error);
+                    assert(!displayed.children.length && !window.partialErrorExecuted);
+                    eq(getComputedStyle(displayed).whiteSpace, 'pre-wrap');
+                    info.click();
+                }
+                eq(await app._prepareApiHistory(saved.messages), [{role: 'user', parts: [{text: prompt}]}]);
+                if (kind === 'http') {
+                    reply = () => json(geminiResult([{text: '再開しました'}], 'STOP'));
+                    await send('続けてください');
+                    eq(calls.at(-1).body.contents, [{role: 'user', parts: [{text: prompt}]},
+                        {role: 'user', parts: [{text: '続けてください'}]}]);
+                    eq((await chat()).messages.at(-1).content, '再開しました');
+                }
+            }
+            await start(gemini);
+            reply = () => json(geminiResult([{text: ' '}], 'STOP'));
+            await send('正常終了の空白応答');
+            const blankSuccess = (await chat()).messages.at(-1);
+            eq([blankSuccess.content, blankSuccess.error, blankSuccess.incomplete], [' ', undefined, undefined]);
+            assert(!el.messageContainer.querySelector('.message.model .message-info-error'));
+        });
+
+        await test('an initial chat save failure keeps the existing storage error path', async () => {
+            await start(gemini);
+            const begin = calls.length;
+            const save = db.saveChat;
+            db.saveChat = async function (...args) {
+                db.saveChat = save;
+                throw new Error('fixture initial save failure');
+            };
+            try { await send('保存に失敗する送信'); }
+            finally { db.saveChat = save; }
+            eq(calls.length, begin);
+            const saved = await chat();
+            eq(saved.messages.map(message => [message.role, message.content]),
+                [['user', '保存に失敗する送信'], ['error', 'fixture initial save failure']]);
+            assert((await app.loadChat(saved.id)).ok);
+            assert(el.messageContainer.querySelector('.message.error').textContent.includes('fixture initial save failure'));
+        });
+
+        await test('continued chats send interrupted text without tool state via all four normal adapters', async () => {
+            const partialText = '途中で止まった本文';
+            const marker = 'DO-NOT-SEND';
+            const toolCall = { functionCall: {name: marker, _toolCallId: marker, args: {}}, thoughtSignature: marker };
+            const continuation = { parts: [toolCall], turns: [{role: 'model', parts: [toolCall]}],
+                openai: {reasoning_content: marker}, bedrock: [{reasoningContent: {reasoningText: {text: marker, signature: marker}}}] };
+            const bedrock = {apiConfigId: 'aws', modelName: 'us.anthropic.claude-opus-4-6-v1'};
+            const zai = {apiConfigId: 'zai', modelName: 'glm-4.6'};
+            const client = window.BedrockRuntimeClient;
+            try {
+                for (const [provider, ref] of Object.entries({gemini, openrouter: router, zai, bedrock})) {
+                    await start(ref);
+                    const history = [
+                        {role: 'user', content: '最初の質問'},
+                        {role: 'model', content: '', tool_calls: [toolCall], continuation: {parts: [toolCall]}},
+                        {role: 'tool', name: marker, response: {bad: marker}, incomplete: true},
+                        {role: 'model', content: partialText, incomplete: true, thoughtSummary: marker, error: marker,
+                            continuation: {...continuation, provider, apiConfigId: ref.apiConfigId, modelName: ref.modelName}, tool_calls: [toolCall]},
+                        {role: 'tool', name: marker, response: {bad: marker}},
+                        {role: 'model', isCascaded: true, isSelected: false, content: marker}
+                    ];
+                    st.currentMessages.push(...history);
+                    let request;
+                    reply = call => {
+                        request = call.body;
+                        if (provider === 'gemini') return json(geminiResult([{text: '続き'}], 'STOP'));
+                        return json({choices: [{message: {content: '続き'}, finish_reason: 'stop'}]});
+                    };
+                    window.BedrockRuntimeClient = class {
+                        async send(command) {
+                            request = command.body;
+                            return {output: {message: {content: [{text: '続き'}]}}, stopReason: 'end_turn'};
+                        }
+                    };
+                    await send('続けてください');
+                    eq((await chat()).messages.at(-1).content, '続き');
+                    const messages = (provider === 'gemini' ? request.contents : request.messages).filter(message => message.role !== 'system');
+                    eq(messages.map(message => message.role), ['user', provider === 'gemini' ? 'model' : 'assistant', 'user']);
+                    if (provider === 'gemini') eq(messages[1], {role: 'model', parts: [{text: partialText}]});
+                    else if (provider === 'bedrock') eq(messages[1], {role: 'assistant', content: [{text: partialText}]});
+                    else assert(JSON.stringify(messages[1].content).includes(partialText));
+                    assert(!JSON.stringify(request).includes(marker));
+                }
+            } finally { window.BedrockRuntimeClient = client; }
+        });
+
+        await test('provider moderation with JSON text and a final OpenRouter error delta keep only the received answer', async () => {
+            await start(gemini);
+            reply = () => json({...geminiResult([{text: '表示された部分'}, {text: '思考だけ', thought: true}], 'SAFETY'),
+                usageMetadata: {candidatesTokenCount: 2, totalTokenCount: 10}});
+            await send('JSONの終了');
+            let partial = (await chat()).messages.at(-1);
+            eq([partial.content, partial.error, partial.finishReason], ['表示された部分', 'モデルが応答をブロックしました (理由: SAFETY)', 'SAFETY']);
+            eq(partial.usageMetadata.totalTokenCount, 10);
+            assert(partial.incomplete && !partial.continuation);
+
+            await start(router);
+            const channel = sse();
+            reply = () => channel.response;
+            channel.frame({choices: [], model: 'google/gemini-fixture-version', usage: {completion_tokens: 6, total_tokens: 27}});
+            channel.frame(routerResult({content: '最終イベントの本文'}, 'error'));
+            await send('SSEの終了');
+            partial = (await chat()).messages.at(-1);
+            eq([partial.content, partial.error, partial.finishReason], ['最終イベントの本文', 'OpenRouterストリームの途中でエラーが発生しました。', 'error']);
+            eq(partial.usageMetadata.tmExecution.modelName, 'google/gemini-fixture-version');
+            eq(el.messageContainer.querySelector('.model [title="Candidate Tokens / Total Tokens"]').textContent, '6 / 27');
+            assert(partial.incomplete && !partial.continuation);
+
+            await start({apiConfigId: 'aws', modelName: 'us.anthropic.claude-opus-4-6-v1'});
+            const client = window.BedrockRuntimeClient;
+            try {
+                window.BedrockRuntimeClient = class {
+                    async send() {
+                        return {output: {message: {content: [{text: '返された本文'}]}}, stopReason: 'content_filtered',
+                            usage: {inputTokens: 11, outputTokens: 3}};
+                    }
+                };
+                await send('Bedrockの終了');
+                partial = (await chat()).messages.at(-1);
+                eq([partial.content, partial.usageMetadata.tmExecution.provider, partial.usageMetadata.candidatesTokenCount],
+                    ['返された本文', 'bedrock', 3]);
+                eq(partial.usageMetadata.totalTokenCount, undefined);
+                assert(!el.messageContainer.querySelector('.model [title="Candidate Tokens / Total Tokens"]'));
+            } finally { window.BedrockRuntimeClient = client; }
+        });
+
+        await test('a failed interrupted-response save leaves the received text in its source chat', async () => {
+            await start(gemini);
+            const otherChat = (await db.getAllChats()).find(chat => chat.id != null);
+            const channel = sse();
+            reply = () => channel.response;
+            const save = db.saveChat;
+            try {
+                db.saveChat = async function (...args) {
+                    const session = args[2]?.sendSession;
+                    if (session?.messages.at(-1)?.incomplete) throw new Error('fixture write failed');
+                    return save.apply(this, args);
+                };
+                const running = send('保存失敗テスト').catch(error => error);
+                await waitFor(() => channel.body.locked && body(), 'source response');
+                const sourceId = st.currentChatId;
+                const sourceMessages = st.currentMessages;
+                const oldOther = (await db.getChat(otherChat.id)).messages;
+                assert((await app.loadChat(otherChat.id)).ok);
+                channel.frame(geminiResult([{text: '保存失敗時も保持'}]));
+                channel.frame({error: {code: 503, message: '生成エラー原文'}});
+                eq((await running).message, 'fixture write failed');
+                eq(st.currentChatId, otherChat.id);
+                eq((await db.getChat(otherChat.id)).messages, oldOther);
+                eq((await db.getChat(sourceId)).messages.map(message => message.role), ['user']);
+                const partial = sourceMessages.at(-1);
+                eq([partial.role, partial.content, partial.error, partial.incomplete], ['model', '保存失敗時も保持', '生成エラー原文', true]);
+                assert(!el.messageContainer.textContent.includes(partial.content));
+            } finally { db.saveChat = save; }
+        });
+
+        await test('regeneration replaces empty failures and preserves answers, selection and later turns', async () => {
+            const prompt = {role: 'user', content: '再生成対象'};
+            const later = [{role: 'user', content: '後続の質問'}, {role: 'model', content: '後続の回答'}];
+            const oldError = {role: 'model', content: '', incomplete: true, error: '古いエラー',
+                usageMetadata: {tmExecution: {modelName: 'old-fixture-model'}}};
+            const oldAnswer = {role: 'model', content: '前回の途中本文', incomplete: true, error: '前回の終了理由'};
+            const seed = async answers => {
+                await start(gemini);
+                st.currentMessages.push(prompt, ...structuredClone(answers), ...later);
+                await db.saveChat();
+            };
+            const regenerate = async (kind, label, beforeReply) => {
+                const sourceId = st.currentChatId;
+                const channel = sse();
+                reply = () => channel.response;
+                const pending = app.retryFromMessage(0);
+                await waitFor(() => channel.body.locked, 'regeneration reader');
+                if (beforeReply) await beforeReply();
+                if (kind === 'cancel' || kind === 'cancel-thought') {
+                    if (kind === 'cancel-thought') {
+                        channel.frame(geminiResult([{text: '思考だけの停止', thought: true}]));
+                        await waitFor(() => st.sendExecutionV136?.getStreamThought?.() === '思考だけの停止', 'thought-only regeneration');
+                    }
+                    app.abortRequest();
+                }
+                else if (kind === 'error') channel.frame({error: {message: label}});
+                else if (kind === 'partial-error') {
+                    channel.frame(geminiResult([{text: label}]));
+                    channel.frame(geminiResult([], 'SAFETY'));
+                    channel.close();
+                }
+                else {
+                    channel.frame(geminiResult([{text: label}], kind === 'partial' ? 'MAX_TOKENS' : 'STOP'));
+                    channel.close();
+                }
+                await pending;
+                assertQuietStop();
+                return db.getChat(sourceId);
+            };
+            const answersIn = saved => {
+                const end = saved.messages.findIndex((message, i) => i > 0 && message.role === 'user');
+                return saved.messages.slice(1, end === -1 ? undefined : end);
+            };
+            const assertLaterTurns = saved => eq(saved.messages.slice(-2).map(message => message.content), later.map(message => message.content));
+            const assertCascade = async saved => {
+                const answers = answersIn(saved);
+                assert(answers.length > 1 && answers.every(message => message.isCascaded && message.siblingGroupId === answers[0].siblingGroupId));
+                eq(answers.map(message => message.isSelected), [...answers.slice(1).map(() => false), true]);
+                assert((await app.loadChat(saved.id)).ok);
+                const selectedIndex = st.currentMessages.indexOf(app.getVisibleMessages().find(message => message.isSelected));
+                eq(st.currentMessages[selectedIndex].content, answers.at(-1).content);
+                assert(!el.messageContainer.querySelector('.cascade-prev-btn').disabled);
+                await app.navigateCascade(selectedIndex, 'prev');
+                eq((await chat()).messages.find(message => message.isSelected)?.content, answers.at(-2).content);
+            };
+
+            await seed([oldError]);
+            for (const error of ['新しいエラー\n詳細', '別のエラー', '最後のエラー']) {
+                const saved = await regenerate('error', error);
+                const answers = answersIn(saved);
+                eq(answers.map(message => message.error), [error]);
+                assertLaterTurns(saved);
+                assert(!answers[0].isCascaded);
+                eq(answers[0].usageMetadata.tmExecution.modelName, gemini.modelName);
+                assert((await app.loadChat(saved.id)).ok);
+                const answer = el.messageContainer.querySelector('.message.model');
+                answer.querySelector('.tm-message-info-btn').click();
+                eq(answer.querySelector('.message-info-error').textContent, error);
+            }
+
+            await seed([oldError]);
+            let saved = await regenerate('normal', '回復した本文');
+            eq(saved.messages.map(message => message.content), [prompt.content, '回復した本文']);
+            assert(!saved.messages[1].incomplete && saved.messages[1].usageMetadata.tmExecution.completedAt);
+
+            await seed([oldError]);
+            saved = await regenerate('partial-error', 'エラー前の新しい本文');
+            assertLaterTurns(saved);
+            const partial = answersIn(saved)[0];
+            eq([partial.content, partial.incomplete, partial.finishReason, partial.error],
+                ['エラー前の新しい本文', true, 'SAFETY', 'モデルが応答をブロックしました (理由: SAFETY)']);
+            eq(answersIn(saved).length, 1);
+            eq((await app._prepareApiHistory(saved.messages))[1], {role: 'model', parts: [{text: partial.content}]});
+
+            await seed([oldAnswer]);
+            saved = await regenerate('normal', '新しい正常本文');
+            eq(saved.messages.map(message => message.content), [prompt.content, oldAnswer.content, '新しい正常本文']);
+            eq(answersIn(saved)[0].error, oldAnswer.error);
+            await assertCascade(saved);
+
+            await seed([oldAnswer]);
+            saved = await regenerate('partial', '出力上限までの本文');
+            assertLaterTurns(saved);
+            eq(answersIn(saved).map(message => message.content), [oldAnswer.content, '出力上限までの本文']);
+            eq(answersIn(saved)[1].finishReason, 'MAX_TOKENS');
+            eq((await app._prepareApiHistory(saved.messages))[1], {role: 'model', parts: [{text: '出力上限までの本文'}]});
+            await assertCascade(saved);
+
+            for (const error of ['候補の失敗1', '候補の失敗2']) {
+                saved = await regenerate('error', error);
+                assertLaterTurns(saved);
+                eq(answersIn(saved).map(message => [message.content, message.error]),
+                    [[oldAnswer.content, oldAnswer.error], ['出力上限までの本文', undefined], ['', error]]);
+                eq((await app._prepareApiHistory(saved.messages)).map(message => message.role), ['user', 'user', 'model']);
+                await assertCascade(saved);
+            }
+
+            const beforeCancel = (await chat()).messages;
+            eq((await regenerate('cancel')).messages, beforeCancel);
+            eq((await regenerate('cancel-thought')).messages, beforeCancel);
+            const save = db.saveChat;
+            db.saveChat = async function (...args) {
+                if (args[2]?.sendSession) throw new Error('regeneration fixture save failure');
+                return save.apply(this, args);
+            };
+            try {
+                for (const kind of ['normal', 'error']) {
+                    const error = await regenerate(kind, '保存されない応答').catch(reason => reason);
+                    eq(error.message, 'regeneration fixture save failure');
+                    eq((await chat()).messages, beforeCancel);
+                    eq(st.currentMessages, beforeCancel);
+                    assertQuietStop();
+                }
+            } finally { db.saveChat = save; }
+
+            const otherChat = await chat();
+            await seed([oldError]);
+            const sourceId = st.currentChatId;
+            saved = await regenerate('error', '切り替え中の新しいエラー', async () => {
+                assert((await app.loadChat(otherChat.id)).ok);
+            });
+            eq(st.currentChatId, otherChat.id);
+            eq((await chat()).messages, otherChat.messages);
+            eq(answersIn(saved).map(message => message.error), ['切り替え中の新しいエラー']);
+            assertLaterTurns(saved);
+            assert((await app.loadChat(sourceId)).ok);
+            assert(el.messageContainer.querySelector('.message-info-error').textContent.includes('切り替え中の新しいエラー'));
+
+            const toolCall = {functionCall: {name: 'legacy_fixture', id: 'tool-id', args: {}}, thoughtSignature: 'legacy-signature'};
+            await seed([{role: 'model', content: '', tool_calls: [toolCall]},
+                {role: 'tool', name: 'legacy_fixture', response: {record: 'legacy-result'}}, {role: 'model', content: '以前のツール利用回答'}]);
+            saved = await regenerate('normal', '新しい回答');
+            assert(saved.messages.some(message => message.role === 'tool' && message.response.record === 'legacy-result'));
+            const history = await app._prepareApiHistory(saved.messages);
+            eq(history.map(message => message.role), ['user', 'model']);
+            eq(history.at(-1).parts, [{text: '新しい回答'}]);
         });
 
         await test('stream survives navigation and restores its partial; regeneration, deletion and title requests remain independent', async () => {
@@ -615,6 +1073,8 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             eq(messages.find(message => message.role === 'model' && !message.incomplete).continuation, original.continuation);
             assert(messages.some(message => message.incomplete && message.content === '再生成の部分'));
             assert(!messages.some(message => message.role === 'error'));
+            const history = await app._prepareApiHistory(messages);
+            assert(!JSON.stringify(history).includes(original.content) && JSON.stringify(history).includes('再生成の部分'));
             assertQuietStop();
             assert((await app.loadChat(toolId)).ok);
             assertQuietStop();
@@ -924,7 +1384,8 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             const rejected = document.querySelector('#settings-thinking-button option[value="xhigh"]');
             assert(rejected.disabled);
             eq(rejected.textContent,'Extra High');
-            assert(st.currentMessages.some(message=>message.content.includes('Thinking レベル「XHIGH」を拒否')));
+            assert(st.currentMessages.some(message=>message.role==='model' && message.content==='' &&
+                message.error?.includes('Thinking レベル「XHIGH」を拒否')));
             let blocked = false;
             try { app.freezeExecutionSettings(); } catch (error) { blocked = error.message.includes('拒否'); }
             assert(blocked && calls.length===before+1);

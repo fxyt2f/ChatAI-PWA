@@ -193,7 +193,7 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                         const saved=await db.getChat(id);
                         if (ids[0]==='same') {
                             eq([calls,requests],[0,1]);
-                            assert(saved.messages.some(m=>m.role==='error' && m.content.includes('同じID')));
+                            assert(saved.messages.some(m=>m.role==='model' && m.incomplete && m.content==='' && m.error?.includes('同じID')));
                         } else {
                             eq([calls,requests],[2,2]);eq(saved.messages.at(-1).content,'done');
                         }
@@ -396,7 +396,7 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                 await wait(async()=>{
                     if (body.locked) return true;
                     const last=(await db.getChat(id)).messages.at(-1);
-                    if (last.role==='error') throw new Error(JSON.stringify({requests,message:last.content}));
+                    if (last.error) throw new Error(JSON.stringify({requests,message:last.error}));
                     return false;
                 },'router reader');
                 for (const delta of [
@@ -415,7 +415,8 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                 assert(!partial.continuation);
                 routerReply=()=>reply('data: {invalid}\n\n');
                 await send('malformed');
-                eq((await db.getChat(id)).messages.at(-1).role,'error');
+                const malformed=(await db.getChat(id)).messages.at(-1);
+                eq([malformed.role,malformed.content,malformed.error],['model','','APIストリームのイベントを解析できません。']);
                 routerReply=()=>reply('data: '+JSON.stringify({choices:[{index:0,delta:{content:'recovered'},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
                 await send('retry again');
                 eq((await db.getChat(id)).messages.at(-1).content,'recovered');
@@ -440,7 +441,10 @@ window.runReviewFixesV136 = async ({app, db, st, ui, el, test, assert, eq, stage
                         };
                         await send('repeat tools');
                         const final=(await db.getChat(id)).messages.at(-1);
-                        if (finalAt===21) eq([requests,calls,final.role],[20,19,'error']);
+                        if (finalAt===21) {
+                            eq([requests,calls,final.role,final.content],[20,19,'model','']);
+                            assert(final.incomplete && final.error.includes('繰り返している'));
+                        }
                         else eq([requests,calls,final.content],finalAt==='terminal'?[20,20,'final answer']:[finalAt,finalAt-1,'final answer']);
                     }
                 } finally {window.functionCallingTools=tools;}

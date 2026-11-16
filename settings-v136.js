@@ -1660,16 +1660,19 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 const c = config?.thinkingCapability || capability(provider, config?.modelName || state.settings.modelName);
                 return applyThinking(body, provider, c, config?.thinkingEffort);
             },
-            completeExecutionMetadata(snapshot, message, { signal = state.abortController?.signal } = {}) {
-                signal?.throwIfAborted();
+            resolveExecutionMetadata(snapshot, message) {
                 const actual = message?.usageMetadata?.tmActualExecution;
-                const result = { ...snapshot, completedAt: Date.now() };
+                const result = { ...snapshot };
                 if (actual?.modelName) result.modelName = actual.modelName;
                 if (actual && actual.modelName !== snapshot.modelName) {
                     result.requestedModelName = snapshot.modelName;
                     result.thinkingEffort = null;
                 }
                 return result;
+            },
+            completeExecutionMetadata(snapshot, message, { signal = state.abortController?.signal } = {}) {
+                signal?.throwIfAborted();
+                return { ...this.resolveExecutionMetadata(snapshot, message), completedAt: Date.now() };
             },
             successfulExecutionRecord(message) {
                 const meta = message?.usageMetadata?.tmExecution;

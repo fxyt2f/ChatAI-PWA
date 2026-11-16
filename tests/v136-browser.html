@@ -250,11 +250,15 @@ window.addEventListener('load', async () => {
             assert(st.currentMessages.at(-1).isSelected);
         });
         await test('failed regeneration preserves every original candidate and success record',async()=>{
-            const original=JSON.stringify(st.currentMessages.filter(m=>m.role==='model'));
+            const original=JSON.stringify(st.currentMessages.filter(m=>m.role==='model').map(m=>({...m,isSelected:false})));
             const success=JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value);
             st.settings.enableAutoRetry=false;window.fetch=async()=>{throw new Error('retry failed')};
             await app.retryFromMessage(0);
-            eq(JSON.stringify(st.currentMessages.filter(m=>m.role==='model')),original);
+            const saved=await db.getChat(st.currentChatId);
+            eq(JSON.stringify(st.currentMessages.slice(0,-1).filter(m=>m.role==='model')),original);
+            const failure=saved.messages.at(-1);
+            eq([failure.role,failure.content,failure.error,failure.incomplete],['model','','retry failed',true]);
+            assert(failure.isSelected && failure.siblingGroupId===saved.messages[1].siblingGroupId);
             eq(JSON.stringify((await db.getSetting('lastSuccessfulExecution')).value),success);
             st.pendingCascadeResponses=null;
         });

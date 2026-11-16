@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.2";
-const APP_CACHE_VERSION = "v1.37.2";
+const APP_VERSION = "1.37.3-beta.1";
+const APP_CACHE_VERSION = "v1.37.3-beta.1";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -1934,6 +1934,7 @@ const dbUtils = {
                 timestamp: msg.timestamp,
                 thoughtSummary: msg.thoughtSummary || null,
                 ...(msg.incomplete === true && { incomplete: true }),
+                ...(msg.interruptionReason && { interruptionReason: msg.interruptionReason }),
                 continuation: msg.continuation || null,
                 thoughtTranslationMeta: msg.thoughtTranslationMeta || null,
                 ...(msg.role === 'model' && window.DocumentRag?.normalize(msg.rag) && { rag: window.DocumentRag.normalize(msg.rag) }),
@@ -1955,6 +1956,7 @@ const dbUtils = {
                     assetId: att.assetId
                 })) : undefined,
                 usageMetadata: msg.usageMetadata,
+                ...(msg.incomplete && Number.isSafeInteger(msg.retryCount) && { retryCount: msg.retryCount }),
                 executedFunctions: msg.executedFunctions,
                 generated_images: msg.generated_images,
                 generated_videos: msg.generated_videos ? msg.generated_videos.map(video => ({
@@ -4969,6 +4971,8 @@ openMessageInfo: new WeakSet(),
 createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
     const messageData = state.currentMessages[index];
     if (!messageData) return null;
+    const isEmptyErrorResponse = role === 'model' && !isStreamingPlaceholder && messageData.incomplete &&
+        content === '' && typeof messageData.error === 'string' && Boolean(messageData.error);
 
     const summaryEndIndex = state.currentSummarizedContext?.summaryRange?.end;
     const isSummarized = summaryEndIndex !== undefined && index < summaryEndIndex;
@@ -4990,6 +4994,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     const contentDiv = document.createElement('div');
     contentDiv.classList.add('message-content');
+    if (isEmptyErrorResponse) contentDiv.classList.add('hidden');
     
     if (isStreamingPlaceholder) {
         contentDiv.id = `streaming-content-${index}`;
@@ -5319,6 +5324,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const rag = window.DocumentRag?.render(messageData);
         if (rag?.references) messageInfo.prepend(rag.references);
         if (rag?.warning) messageDiv.appendChild(rag.warning);
+        if (messageData.incomplete && typeof messageData.error === 'string' && messageData.error) {
+            const errorText = document.createElement('div');
+            errorText.className = 'message-info-error';
+            errorText.textContent = messageData.error;
+            messageInfo.appendChild(errorText);
+        }
     }
     editArea.classList.add('message-edit-area', 'hidden');
     messageDiv.appendChild(editArea);
@@ -5361,7 +5372,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         const actionButtonsDiv = document.createElement('div');
         actionButtonsDiv.classList.add('message-action-buttons');
 
-        if (!isStreamingPlaceholder) {
+        if (!isStreamingPlaceholder && !isEmptyErrorResponse) {
             const copyButton = document.createElement('button');
             copyButton.innerHTML = '<span class="material-symbols-outlined">content_copy</span>';
             copyButton.title = '本文をコピー';
@@ -5429,12 +5440,14 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 });
                 actionButtonsDiv.appendChild(searchButton);
             }
-            const editButton = document.createElement('button');
-            editButton.innerHTML = '<span class="material-symbols-outlined">edit</span> 編集'; 
-            editButton.title = 'メッセージを編集'; 
-            editButton.classList.add('js-edit-btn');
-            editButton.onclick = () => appLogic.startEditMessage(index, messageDiv);
-            actionButtonsDiv.appendChild(editButton);
+            if (!isEmptyErrorResponse) {
+                const editButton = document.createElement('button');
+                editButton.innerHTML = '<span class="material-symbols-outlined">edit</span> 編集';
+                editButton.title = 'メッセージを編集';
+                editButton.classList.add('js-edit-btn');
+                editButton.onclick = () => appLogic.startEditMessage(index, messageDiv);
+                actionButtonsDiv.appendChild(editButton);
+            }
             const deleteButton = document.createElement('button');
             deleteButton.innerHTML = '<span class="material-symbols-outlined">delete</span> 削除'; 
             deleteButton.title = 'この会話ターンを削除'; 
@@ -8763,11 +8776,7 @@ const apiUtils = {
         }
         
         // usageMetadataの変換
-        const usageMetadata = openAIResponse.usage ? {
-            promptTokenCount: openAIResponse.usage.prompt_tokens,
-            candidatesTokenCount: openAIResponse.usage.completion_tokens,
-            totalTokenCount: openAIResponse.usage.total_tokens
-        } : undefined;
+        const usageMetadata = StreamingV136.openAIUsageMetadata(openAIResponse.usage);
         
         return {
             candidates,
@@ -8997,6 +9006,11 @@ const apiUtils = {
                 promptTokenCount: converseResponse.usage?.inputTokens || 0,
                 candidatesTokenCount: converseResponse.usage?.outputTokens || 0,
                 totalTokenCount: (converseResponse.usage?.inputTokens || 0) + (converseResponse.usage?.outputTokens || 0)
+            },
+            tmReportedUsage: {
+                promptTokenCount: converseResponse.usage?.inputTokens,
+                candidatesTokenCount: converseResponse.usage?.outputTokens,
+                totalTokenCount: converseResponse.usage?.totalTokens
             }
         };
     },
@@ -9194,7 +9208,7 @@ const apiUtils = {
             const streamed = stream && !response.headers?.get('content-type')?.includes('application/json');
             if (streamed || (thinking && executionConfig?.ref)) {
                 const data = streamed
-                    ? await StreamingV136.collectResponse('gemini', response.body, signal, onStream)
+                    ? await StreamingV136.collectResponse('gemini', response.body, signal, onStream.progress, onStream.reportMetadata)
                     : await response.json();
                 signal.throwIfAborted();
                 if (thinking && data?.error?.code === 400) {
@@ -10005,7 +10019,7 @@ const apiUtils = {
 
             // レスポンスを取得してGemini形式に変換
             const openAIResponse = stream && !response.headers?.get('content-type')?.includes('application/json')
-                ? await StreamingV136.collectResponse('openrouter', response.body, signal, onStream)
+                ? await StreamingV136.collectResponse('openrouter', response.body, signal, onStream.progress, onStream.reportMetadata)
                 : await response.json();
             if (openAIResponse.error) throw new Error(openAIResponse.error.message || 'OpenRouter APIエラー');
             
@@ -13793,6 +13807,49 @@ const appLogic = {
     ensureHistoryWorkerV136() {
         SettingsV136.configureHistoryWorkerV136(SettingsV136.wireConvertersV136);
     },
+    hasSeparateToolHistoryV137(message, nextMessage) {
+        return nextMessage?.role === 'tool' || (!message.continuation?.turns?.length &&
+            (message.tool_calls?.length || message.continuation?.parts?.some(part => part.functionCall || part.functionResponse)));
+    },
+    projectInterruptedHistoryV137(messages) {
+        const history = [];
+        for (let start = 0; start < messages.length;) {
+            let end = start + 1;
+            while (end < messages.length && messages[end].role !== 'user') end++;
+            const turn = messages.slice(start, end);
+            start = end;
+            const selectedCascade = turn.find(message => message.role === 'model' && message.isCascaded);
+            const interrupted = turn.some(message => message.incomplete && (message.role === 'model' || message.role === 'tool'));
+            // Loose legacy tool records cannot be assigned to a particular alternative.
+            const separateToolsWithAlternatives = selectedCascade && turn.some((message, index) => message.role === 'tool' ||
+                (message.role === 'model' && this.hasSeparateToolHistoryV137(message, turn[index + 1])));
+            if (!interrupted && !separateToolsWithAlternatives) {
+                for (const message of turn) if (!message.incomplete) history.push(message);
+                continue;
+            }
+
+            const hasSeparateToolCall = (message, index) => this.hasSeparateToolHistoryV137(message, turn[index + 1]);
+            const hasAnswerText = message => typeof message.content === 'string' && message.content.trim();
+            // A failed regeneration can leave a partial beside the original answer. Keep the selected answer.
+            const answer = selectedCascade ||
+                turn.find((message, index) => message.role === 'model' && !message.incomplete &&
+                    !hasSeparateToolCall(message, index) && (hasAnswerText(message) || message.imageIds?.length || message.generated_videos?.length)) ||
+                turn.find(message => message.role === 'model' && message.incomplete && hasAnswerText(message));
+            for (const [index, message] of turn.entries()) {
+                if (message.role === 'tool') continue;
+                if (message.incomplete || (message.role === 'model' && hasSeparateToolCall(message, index))) {
+                    // Project only visible answer text. Separate results in an interrupted turn may be orphaned.
+                    if (message.role === 'model' && (!message.incomplete || message === answer) && hasAnswerText(message) &&
+                        (!separateToolsWithAlternatives || message === selectedCascade)) {
+                        history.push({ role: 'model', content: message.content });
+                    }
+                } else {
+                    history.push(message);
+                }
+            }
+        }
+        return history;
+    },
     async _prepareApiHistory(baseMessages, systemInstruction = undefined, session = null) {
         this.ensureHistoryWorkerV136();
         const settings = session?.settings ?? state.settings;
@@ -13811,7 +13868,8 @@ const appLogic = {
         console.log("[API Prep] 履歴をAPIフォーマットに変換します。");
 
         // ディープコピーで元のメッセージ配列を保護する
-        const messagesForApi = structuredClone(baseMessages.filter(m => !m.incomplete && (!m.isCascaded || m.isSelected)));
+        const selected = baseMessages.filter(message => !message.isCascaded || message.isSelected);
+        const messagesForApi = structuredClone(this.projectInterruptedHistoryV137(selected));
 
         let historyToProcess;
 
@@ -18189,6 +18247,7 @@ const appLogic = {
                 continuation: result.continuation,
                 tool_calls: result.toolCalls,
                 timestamp: Date.now(),
+                ...(result.finishReason === 'MAX_TOKENS' && { incomplete: true }),
                 finishReason: result.finishReason,
                 safetyRatings: result.safetyRatings,
                 usageMetadata: result.usageMetadata,
@@ -18276,6 +18335,7 @@ const appLogic = {
 
                 toolResults.push(toolResponseMessage);
                 modelMessage.executedFunctions.push(functionName);
+                if (session) (session.executedFunctions ||= new Set()).add(functionName);
             }
             
             finalTurnResults.push(...toolResults);
@@ -18319,6 +18379,7 @@ const appLogic = {
                     rememberRequest(textResult);
                     finalTurnResults.push({ role: 'model', content: textResult.content || '',
                         thoughtSummary: textResult.thoughtSummary, continuation: textResult.continuation,
+                        ...(textResult.finishReason === 'MAX_TOKENS' && { incomplete: true, retryCount: textResult.retryCount }),
                         usageMetadata: textResult.usageMetadata, finishReason: textResult.finishReason, timestamp: Date.now() });
                 }
                 break;
@@ -18402,6 +18463,10 @@ const appLogic = {
 
         // プライマリメッセージをベースとして、最終的なオブジェクトを作成（ディープコピー）
         const finalAggregatedMessage = JSON.parse(JSON.stringify(primaryModelMessage));
+        if (finalAggregatedMessage.incomplete) {
+            finalAggregatedMessage.content = messages.filter(message => message.role === 'model' && message.content)
+                .map(message => message.content).join('\n\n');
+        }
         const thoughtSummary = messages.filter(msg => msg.role === 'model' && msg.thoughtSummary)
             .map(msg => msg.thoughtSummary).join('\n\n');
         if (thoughtSummary) finalAggregatedMessage.thoughtSummary = thoughtSummary;
@@ -18517,6 +18582,7 @@ const appLogic = {
         session.imageIds = new Set();
         session.finished = new Promise(resolve => { session.resolveFinished = resolve; });
         session.apiConfig = this.getExecutionApiConfig();
+        session.executionMetadata = this.createExecutionMetadataSnapshot();
         session.execution = structuredClone(state.currentExecutionSettings);
         session.settings = structuredClone(state.settings);
         session.parameterRevision = state.currentChatParameterRevision;
@@ -18604,11 +18670,24 @@ const appLogic = {
             content: session.streamContent, thoughtSummary: session.getStreamThought?.()
         });
     },
-    getIncompleteStreamMessageV136(session) {
+    getIncompleteStreamMessageV136(session, error, { includeEmptyError = false } = {}) {
         const thoughtSummary = session.getStreamThought?.();
-        if (!session.streamContent && !thoughtSummary) return null;
-        const message = { role: 'model', content: session.streamContent || '', thoughtSummary: thoughtSummary || null,
-            incomplete: true, timestamp: Date.now() };
+        const hasAnswer = Boolean(session.streamContent?.trim());
+        const aborted = error.name === 'AbortError';
+        const hasError = !aborted && (hasAnswer || includeEmptyError);
+        if (!hasAnswer && !thoughtSummary && !hasError) return null;
+        const finishReason = error.finishReason ?? error.candidate?.finishReason;
+        const message = { role: 'model', content: hasAnswer ? session.streamContent : '', thoughtSummary: thoughtSummary || null,
+            incomplete: true, timestamp: Date.now(),
+            ...(finishReason && { finishReason }),
+            interruptionReason: aborted ? (session.manualStop ? 'manual-stop' : 'aborted') :
+                error.isTimeout ? 'timeout' : error.interruptionReason ?? 'error',
+            ...(hasError && { error: error.message || '不明なエラーが発生しました。' }),
+            ...((hasAnswer || hasError) && session.executedFunctions?.size && { executedFunctions: [...session.executedFunctions] }) };
+        if (hasAnswer || hasError) {
+            Object.assign(message, session.interruptedResponseMetadata);
+            this.attachExecutionMetadataToModelMessage(message, this.resolveExecutionMetadata(session.executionMetadata, message));
+        }
         return window.DocumentRag?.attach(message, session) || message;
     },
     finishSendExecutionV136(session) {
@@ -18768,8 +18847,6 @@ const appLogic = {
             await uiUtils.showCustomAlert(message);
             return;
         }
-        const executionMetadata = this.createExecutionMetadataSnapshot();
-
         const captureDocumentsAfterSave = preparation.chatId == null && dbUtils.projectDrafts?.has(preparation.messages);
         this.startSendExecutionV136(preparation, { captureDocumentsAfterSave });
         const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
@@ -18798,6 +18875,7 @@ const appLogic = {
         }
         
         let firstSaveCommitted = false;
+        let finalizedMessage = null;
         try {
             await dbUtils.saveChat(null, null, { skipPush: true, titleGeneration, sendSession: preparation });
             firstSaveCommitted = Boolean(preparation.chatId);
@@ -18823,8 +18901,10 @@ const appLogic = {
             await this.translateThoughtSummary(finalAggregatedMessage, preparation);
             this.assertSendExecutionV136(preparation);
             this.attachExecutionMetadataToModelMessage(finalAggregatedMessage,
-                this.completeExecutionMetadata(executionMetadata, finalAggregatedMessage, { signal: preparation.controller.signal }));
-            preparation.messages[modelMessageIndex] = finalAggregatedMessage;
+                finalAggregatedMessage.incomplete ? this.resolveExecutionMetadata(preparation.executionMetadata, finalAggregatedMessage) :
+                    this.completeExecutionMetadata(preparation.executionMetadata, finalAggregatedMessage, { signal: preparation.controller.signal }));
+            finalizedMessage = finalAggregatedMessage;
+            preparation.messages[modelMessageIndex] = finalizedMessage;
 
             if (this.showsSendExecutionV136(preparation)) {
                 if (preparation.streaming) uiUtils.renderStreamingResult();
@@ -18850,6 +18930,10 @@ const appLogic = {
 
         } catch(error) {
             if (!this.ownsSendExecutionV136(preparation)) return;
+            if (preparation.messages[modelMessageIndex] !== (finalizedMessage || modelMessage)) {
+                preparation.saveFailed = true;
+                throw error;
+            }
             if (!firstSaveCommitted && dbUtils.projectDrafts?.has(preparation.messages)) {
                 preparation.messages.splice(0, preparation.messages.length, ...preparation.originalMessages);
                 preparation.saveFailed = true;
@@ -18867,12 +18951,14 @@ const appLogic = {
                 }
                 return;
             }
-            const partial = this.getIncompleteStreamMessageV136(preparation);
-            const replacement = partial ? [partial] : [];
+            const partial = !finalizedMessage && firstSaveCommitted
+                ? this.getIncompleteStreamMessageV136(preparation, error, { includeEmptyError: true }) : null;
+            const responseMessage = finalizedMessage || partial;
+            const replacement = responseMessage ? [responseMessage] : [];
             if (error.name !== 'AbortError') {
                 console.error("--- handleSend: 最終catchブロックでエラー捕捉 ---", error);
-                replacement.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
-                    timestamp: Date.now(), ...(partial && { incomplete: true }) });
+                if (!partial?.error) replacement.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
+                    timestamp: Date.now(), ...(responseMessage && { incomplete: true }) });
             }
             preparation.messages.splice(modelMessageIndex, 1, ...replacement);
             if (this.showsSendExecutionV136(preparation)) {
@@ -18906,9 +18992,11 @@ const appLogic = {
     // APIリクエストを中断
     abortRequest() {
         this.cancelSendPreparationV136();
-        const controller = state.sendExecutionV136?.controller || state.abortController;
+        const session = state.sendExecutionV136;
+        const controller = session?.controller || state.abortController;
         if (controller) {
             console.log("中断リクエスト送信");
+            if (session && !controller.signal.aborted) session.manualStop = true;
             controller.abort();
         } else {
             console.log("中断するアクティブなリクエストがありません。");
@@ -20115,7 +20203,7 @@ const appLogic = {
             content: newRawContent,
             timestamp: Date.now()
         };
-        delete updatedMessage.error;
+        if (updatedMessage.role !== 'model' || !updatedMessage.incomplete) delete updatedMessage.error;
         state.currentMessages[index] = updatedMessage;
 
         if (uiUtils.openMessageInfo.has(originalMessage)) {
@@ -20371,6 +20459,25 @@ const appLogic = {
         catch (error) { if (error.name !== 'AbortError') throw error; }
         finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
     },
+    buildRegeneratedTurnV137(originalTurn, response) {
+        const candidates = new Set();
+        const retained = originalTurn.filter((message, index) => {
+            if (message.role !== 'model' || message.isHidden) return response.incomplete || message.role !== 'error';
+            const hasText = typeof message.content === 'string' && message.content.trim();
+            const hasMedia = message.imageIds?.length || message.generated_images?.length || message.generated_videos?.length;
+            const separateToolHistory = this.hasSeparateToolHistoryV137(message, originalTurn[index + 1]);
+            const hasToolHistory = separateToolHistory || message.tool_calls?.length || message.continuation?.turns?.some(turn =>
+                turn.role === 'tool' || turn.parts?.some(part => part.functionCall || part.functionResponse));
+            if (message.incomplete && message.error && !hasText && !hasMedia && !hasToolHistory) return false;
+            if (message.isCascaded || (!separateToolHistory && (hasText || hasMedia || !message.incomplete))) candidates.add(message);
+            return true;
+        });
+        if (!candidates.size) return [...retained, response];
+        const siblingGroupId = retained.find(message => candidates.has(message) && message.siblingGroupId)?.siblingGroupId ||
+            `gid-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        const cascade = (message, isSelected) => ({ ...message, isCascaded: true, isSelected, siblingGroupId });
+        return [...retained.map(message => candidates.has(message) ? cascade(message, false) : message), cascade(response, true)];
+    },
     async _retryFromMessagePreparedV136(index, preparation) {
         if (await this.guardGenerationMutableAction()) return;
         if (state.isSending) { await uiUtils.showCustomAlert("送信中です。"); return; }
@@ -20401,130 +20508,117 @@ const appLogic = {
                 return;
             }
             this.startSendExecutionV136(preparation);
-            const executionMetadata = this.createExecutionMetadataSnapshot();
-    
             const originalSuffix = preparation.originalMessages.slice(index + 1);
             const nextTurn = originalSuffix.findIndex(message => message.role === 'user');
-            const originalTurn = nextTurn === -1 ? originalSuffix : originalSuffix.slice(0, nextTurn);
-            const firstModel = originalTurn.find(message => message.role === 'model' && !message.incomplete);
-            const originalResponses = firstModel?.siblingGroupId
-                ? originalTurn.filter(message => message.siblingGroupId === firstModel.siblingGroupId)
-                : firstModel ? [firstModel] : [];
+            const turnEnd = nextTurn === -1 ? originalSuffix.length : nextTurn;
+            const originalTurn = originalSuffix.slice(0, turnEnd);
+            const laterTurns = originalSuffix.slice(turnEnd);
             
             let truncated = false;
             try {
-                // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
-                this.ensureHistoryWorkerV136();
-                await SettingsV136.rememberHistoryContextsAsyncV136(preparation.messages, preparation.systemPrompt);
-                this.assertSendExecutionV136(preparation);
-                preparation.messages.splice(index + 1);
-                truncated = true;
-                if (this.showsSendExecutionV136(preparation)) {
-                    if (preparation.streaming) uiUtils.renderStreamingResult();
-                    else uiUtils.renderChatMessages();
-                }
-
-                const instruction = await this.buildSendSystemInstruction(preparation,
-                    userMessage.content || userMessage.attachments?.map(attachment => attachment.name).join(' ') || '');
-                const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
-                const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
-                this.assertSendExecutionV136(preparation);
-    
-                const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
-                preparation.messages.push(modelMessage);
-                const modelMessageIndex = preparation.messages.length - 1;
-                preparation.placeholder = modelMessage;
-                preparation.modelIndex = modelMessageIndex;
-                if (this.showsSendExecutionV136(preparation)) {
-                    const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
-                    uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
-                    if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
-                    else if (!preparation.streaming) this.scrollToBottom();
-                }
-    
-                const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
-
-    
-                const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
-                this.assertSendExecutionV136(preparation);
-                const newAggregatedMessage = this._aggregateMessages(newMessages);
-                window.DocumentRag?.attach(newAggregatedMessage, preparation);
-                await this.translateThoughtSummary(newAggregatedMessage, preparation);
-                this.assertSendExecutionV136(preparation);
-                this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
-                    this.completeExecutionMetadata(executionMetadata, newAggregatedMessage, { signal: preparation.controller.signal }));
-    
-                const finalOriginalResponses = originalResponses.map(message => ({ ...message }));
-
-                const siblingGroupId = (finalOriginalResponses.length > 0 && finalOriginalResponses[0].siblingGroupId)
-                    ? finalOriginalResponses[0].siblingGroupId
-                    : `gid-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-
-                finalOriginalResponses.forEach(msg => {
-                    msg.isCascaded = true;
-                    msg.isSelected = false;
-                    msg.siblingGroupId = siblingGroupId;
-                });
-
-                // 最終結果のexecutedFunctionsを初期化
-                newAggregatedMessage.executedFunctions = newAggregatedMessage.executedFunctions || [];
-                
-                // 再生成中に実行された関数呼び出しがあれば、それらも新しいメッセージのexecutedFunctionsに追加する
-                newMessages.forEach(msg => {
-                    if (msg.executedFunctions && Array.isArray(msg.executedFunctions)) {
-                         msg.executedFunctions.forEach(funcName => {
-                             if (!newAggregatedMessage.executedFunctions.includes(funcName)) {
-                                 newAggregatedMessage.executedFunctions.push(funcName);
-                             }
-                         });
-                    }
-                    // ツール実行結果からも復元
-                     if (msg.role === 'tool' && msg.name) {
-                         if (!newAggregatedMessage.executedFunctions.includes(msg.name)) {
-                             newAggregatedMessage.executedFunctions.push(msg.name);
-                         }
-                     }
-                });
-                
-                newAggregatedMessage.isCascaded = true;
-                newAggregatedMessage.isSelected = true;
-                newAggregatedMessage.siblingGroupId = siblingGroupId;
-
-                preparation.messages.splice(modelMessageIndex, 1, ...finalOriginalResponses, newAggregatedMessage);
-                if (this.showsSendExecutionV136(preparation)) {
-                    if (preparation.streaming) uiUtils.renderStreamingResult();
-                    else {
-                        uiUtils.renderChatMessages();
-                        this.scrollToBottom();
-                    }
-                }
-                await dbUtils.saveChat(null, null, { sendSession: preparation,
-                    successfulExecution: this.successfulExecutionRecord(newAggregatedMessage) });
-    
-            } catch(error) {
-                if (!this.ownsSendExecutionV136(preparation)) return;
-                const interrupted = error.name === 'AbortError';
-    
-                // Restore this operation's original history and keep any incomplete response in its turn.
-                if (truncated) {
-                    const partial = this.getIncompleteStreamMessageV136(preparation);
+                let response, generationError;
+                try {
+                    // UI上から古い応答を削除し、stateもユーザープロンプトまでの状態に戻す
+                    this.ensureHistoryWorkerV136();
+                    await SettingsV136.rememberHistoryContextsAsyncV136(preparation.messages, preparation.systemPrompt);
+                    this.assertSendExecutionV136(preparation);
                     preparation.messages.splice(index + 1);
-                    for (const message of originalTurn) preparation.messages.push(message);
-                    if (partial) preparation.messages.push(partial);
-                    if (nextTurn !== -1) for (const message of originalSuffix.slice(nextTurn)) preparation.messages.push(message);
+                    truncated = true;
+                    if (this.showsSendExecutionV136(preparation)) {
+                        if (preparation.streaming) uiUtils.renderStreamingResult();
+                        else uiUtils.renderChatMessages();
+                    }
+
+                    const instruction = await this.buildSendSystemInstruction(preparation,
+                        userMessage.content || userMessage.attachments?.map(attachment => attachment.name).join(' ') || '');
+                    const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
+                    const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
+                    this.assertSendExecutionV136(preparation);
+
+                    const modelMessage = { role: 'model', content: '', timestamp: Date.now() };
+                    preparation.messages.push(modelMessage);
+                    const modelMessageIndex = preparation.messages.length - 1;
+                    preparation.placeholder = modelMessage;
+                    preparation.modelIndex = modelMessageIndex;
+                    if (this.showsSendExecutionV136(preparation)) {
+                        const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
+                        uiUtils.appendMessage(modelMessage.role, modelMessage.content, modelMessageIndex, true);
+                        if (scrollTarget) scrollTarget.scrollTop = scrollTarget.scrollHeight;
+                        else if (!preparation.streaming) this.scrollToBottom();
+                    }
+
+                    const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
+
+
+                    const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
+                    this.assertSendExecutionV136(preparation);
+                    const newAggregatedMessage = this._aggregateMessages(newMessages);
+                    window.DocumentRag?.attach(newAggregatedMessage, preparation);
+                    await this.translateThoughtSummary(newAggregatedMessage, preparation);
+                    this.assertSendExecutionV136(preparation);
+                    this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
+                        newAggregatedMessage.incomplete ? this.resolveExecutionMetadata(preparation.executionMetadata, newAggregatedMessage) :
+                            this.completeExecutionMetadata(preparation.executionMetadata, newAggregatedMessage, { signal: preparation.controller.signal }));
+
+                    // 最終結果のexecutedFunctionsを初期化
+                    newAggregatedMessage.executedFunctions = newAggregatedMessage.executedFunctions || [];
+
+                    // 再生成中に実行された関数呼び出しがあれば、それらも新しいメッセージのexecutedFunctionsに追加する
+                    newMessages.forEach(msg => {
+                        if (msg.executedFunctions && Array.isArray(msg.executedFunctions)) {
+                             msg.executedFunctions.forEach(funcName => {
+                                 if (!newAggregatedMessage.executedFunctions.includes(funcName)) {
+                                     newAggregatedMessage.executedFunctions.push(funcName);
+                                 }
+                             });
+                        }
+                        // ツール実行結果からも復元
+                         if (msg.role === 'tool' && msg.name) {
+                             if (!newAggregatedMessage.executedFunctions.includes(msg.name)) {
+                                 newAggregatedMessage.executedFunctions.push(msg.name);
+                             }
+                         }
+                    });
+
+                    response = newAggregatedMessage;
+                } catch (error) {
+                    if (!this.ownsSendExecutionV136(preparation)) return;
+                    if (error.name !== 'AbortError') {
+                        generationError = error;
+                        console.error("再生成エラー:", error);
+                    }
+                    if (truncated && preparation.placeholder) {
+                        const partial = this.getIncompleteStreamMessageV136(preparation, error, { includeEmptyError: true });
+                        if (partial?.content || partial?.error) response = partial;
+                    }
+                }
+
+                if (response) {
                     try {
-                        await dbUtils.saveChat(null, null, { sendSession: preparation });
+                        const turn = this.buildRegeneratedTurnV137(originalTurn, response);
+                        preparation.messages.splice(index + 1, preparation.messages.length, ...turn,
+                            ...(response.incomplete ? laterTurns : []));
+                        await dbUtils.saveChat(null, null, { sendSession: preparation,
+                            successfulExecution: this.successfulExecutionRecord(response) });
                     } catch (saveError) {
                         preparation.saveFailed = true;
+                        if (this.ownsSendExecutionV136(preparation)) {
+                            preparation.messages.splice(index + 1, preparation.messages.length, ...originalSuffix);
+                            if (this.showsSendExecutionV136(preparation)) {
+                                state.currentPersistentMemory = preparation.originalMemory;
+                                uiUtils.renderChatMessages();
+                            }
+                        }
                         throw saveError;
                     }
                     if (!this.ownsSendExecutionV136(preparation)) return;
+                } else if (truncated) {
+                    preparation.messages.splice(index + 1, preparation.messages.length, ...originalSuffix);
                 }
-    
-                // 実際のエラーだけを一時表示する。
-                if (!interrupted) {
-                    console.error("再生成エラー:", error);
-                    preparation.messages.push({ role: 'error', content: error.message || '不明なエラーが発生しました。',
+
+                const showStandaloneError = generationError && !response && this.showsSendExecutionV136(preparation);
+                if (showStandaloneError) {
+                    preparation.messages.push({ role: 'error', content: generationError.message || '不明なエラーが発生しました。',
                         timestamp: Date.now(), isNonPersistent: true });
                 }
     
@@ -20533,7 +20627,7 @@ const appLogic = {
                     else uiUtils.renderChatMessages();
                     if (!preparation.streaming) this.scrollToBottom();
                 }
-                if (!interrupted) preparation.messages.pop();
+                if (showStandaloneError) preparation.messages.pop();
     
             } finally {
                 const stillOwner = this.ownsSendExecutionV136(preparation);
@@ -20554,7 +20648,7 @@ const appLogic = {
         const groupId = targetMsg.siblingGroupId;
         const siblings = state.currentMessages.filter((msg, i) =>
             msg.role === 'model' &&
-            !msg.tool_calls &&
+            !msg.isHidden &&
             msg.isCascaded &&
             msg.siblingGroupId === groupId &&
             (includeSelf || i !== index)
@@ -20813,13 +20907,6 @@ const appLogic = {
         const previousContent = session?.streamContent;
         const previousThought = session?.getStreamThought?.();
         const joinTurns = (previous, current) => previous && current ? previous + '\n\n' + current : previous || current;
-        const onStream = (session?.streaming ?? settings.enableStreamingOutput === true) ? progress => {
-            receivedStreamData = true;
-            if (session) this.updateSendStreamV136(session, {
-                content: joinTurns(previousContent, progress.content),
-                getThoughtSummary: () => joinTurns(previousThought, progress.getThoughtSummary?.() || progress.thoughtSummary)
-            });
-        } : null;
         
         // タイムアウト設定の取得
         const timeoutEnabled = settings.enableApiTimeout || false;
@@ -20832,6 +20919,42 @@ const appLogic = {
         }
 
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            let reportedCounters, reportedModel;
+            let receivedAnswerText = false;
+            let requested = false;
+            const reportMetadata = (usage, actualModel) => {
+                if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+                    // Use a single reported snapshot so separate events cannot manufacture a complete total.
+                    const counters = Object.fromEntries(Object.entries(usage).filter(([key, count]) =>
+                        key.endsWith('TokenCount') && Number.isSafeInteger(count) && count >= 0));
+                    if (Object.keys(counters).length) reportedCounters = counters;
+                }
+                if (typeof actualModel === 'string' && actualModel.trim()) reportedModel = actualModel;
+            };
+            const interruptedUsageMetadata = () => {
+                // Multiple API responses can contribute text to one interrupted answer.
+                const usage = previousContent?.trim() && reportedCounters
+                    ? { tmLastResponseUsage: reportedCounters } : { ...reportedCounters };
+                if (reportedModel) usage.tmActualExecution = { provider, apiConfigId, modelName: reportedModel };
+                return usage;
+            };
+            const rememberInterruptedMetadata = (failed = false) => {
+                if ((receivedAnswerText || (failed && requested && !previousContent?.trim())) &&
+                    session && this.ownsSendExecutionV136(session)) {
+                    session.interruptedResponseMetadata = { usageMetadata: interruptedUsageMetadata(), retryCount: attempt };
+                }
+            };
+            const onStream = (session?.streaming ?? settings.enableStreamingOutput === true) ? {
+                progress: progress => {
+                    receivedStreamData = true;
+                    if (session) this.updateSendStreamV136(session, {
+                        content: joinTurns(previousContent, progress.content),
+                        getThoughtSummary: () => joinTurns(previousThought, progress.getThoughtSummary?.() || progress.thoughtSummary)
+                    });
+                    receivedAnswerText ||= Boolean(progress.content?.trim());
+                },
+                reportMetadata
+            } : null;
             // このリトライ専用のAbortController
             const attemptController = new AbortController();
             const cancelAttempt = () => attemptController.abort();
@@ -20874,6 +20997,7 @@ const appLogic = {
                     }, timeoutMs);
                 }
 
+                requested = true;
                 const response = await apiUtils.callApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling,
                     attemptController.signal, onStream, session);
                 this.assertSendExecutionV136(session);
@@ -20908,6 +21032,8 @@ const appLogic = {
 
                 // Both transports expose the same completed response shape.
                 const responseData = await response.json();
+                reportMetadata(reportedCounters ? null : responseData.tmReportedUsage ?? responseData.usageMetadata,
+                    responseData.tmActualModel || responseData.modelVersion);
                 this.assertSendExecutionV136(session);
                 attemptController.signal.throwIfAborted();
                 
@@ -20922,7 +21048,9 @@ const appLogic = {
                 if (responseData.error) throw new Error(responseData.error.message || 'APIエラー');
                 if (responseData.promptFeedback?.blockReason || (responseData.promptFeedback && !responseData.candidates?.length)) {
                     const blockReason = responseData.promptFeedback.blockReason || 'SAFETY';
-                    throw new Error(`APIが応答をブロックしました (理由: ${blockReason})`);
+                    const error = new Error(`APIが応答をブロックしました (理由: ${blockReason})`);
+                    error.finishReason = responseData.promptFeedback.blockReason;
+                    throw error;
                 }
                 if (!responseData.candidates || responseData.candidates.length === 0) {
                     throw new Error("API応答に有効な候補(candidates)が含まれていません。プロンプトがブロックされた可能性があります。");
@@ -20930,7 +21058,18 @@ const appLogic = {
                 
                 const candidate = responseData.candidates[0];
                 const finishReasonError = getFinishReasonError(candidate);
-                if (finishReasonError) throw finishReasonError;
+                if (finishReasonError) {
+                    if (session && !receivedStreamData && Array.isArray(candidate.content?.parts)) {
+                        const text = candidate.content.parts.filter(part => typeof part?.text === 'string' &&
+                            !part.thought && !part.functionCall && !part.functionResponse).map(part => part.text).join('');
+                        if (text.trim()) {
+                            session.streamContent = joinTurns(previousContent, text);
+                            receivedStreamData = true;
+                            receivedAnswerText = true;
+                        }
+                    }
+                    throw finishReasonError;
+                }
 
                 const parts = candidate.content?.parts || [];
                 let finalContent = '';
@@ -20976,6 +21115,8 @@ const appLogic = {
                     });
                 }
                 
+                const truncated = candidate.finishReason === 'MAX_TOKENS';
+                if (truncated) finalToolCalls = [];
                 const safetyError = checkForSafetyRejection(candidate, finalContent, finalToolCalls, []);
                 if (safetyError) throw safetyError;
 
@@ -20987,24 +21128,27 @@ const appLogic = {
                     // A complete JSON response may still be interrupted during post-processing.
                     session.streamContent = joinTurns(previousContent, finalContent);
                     session.getStreamThought = () => joinTurns(previousThought, finalThoughtSummary.trim());
+                    receivedAnswerText = Boolean(finalContent.trim());
                 }
+                rememberInterruptedMetadata();
                 return {
                     content: finalContent,
                     thoughtSummary: finalThoughtSummary.trim() || null,
-                    continuation: { provider, apiConfigId,
+                    continuation: truncated ? null : { provider, apiConfigId,
                         modelName, displayContent: finalContent, parts: structuredClone(parts),
                         openai: candidate.tmContinuation || null, bedrock: candidate.tmBedrockContinuation || null },
                     toolCalls: finalToolCalls.length > 0 ? finalToolCalls : null,
                     thoughtParts: finalThoughtParts.length > 0 ? finalThoughtParts : null, // 追加
                     finishReason: candidate.finishReason,
                     safetyRatings: candidate.safetyRatings,
-                    usageMetadata: { ...responseData.usageMetadata, tmActualExecution: {
+                    usageMetadata: truncated ? interruptedUsageMetadata() : { ...responseData.usageMetadata, tmActualExecution: {
                         provider, apiConfigId,
                         modelName: responseData.tmActualModel || responseData.modelVersion || modelName } },
                     retryCount: attempt
                 };
 
             } catch (error) {
+                rememberInterruptedMetadata(true);
                 // タイマークリーンアップ
                 if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -21984,7 +22128,8 @@ const appLogic = {
                 return;
             }
             const firstUserMessageIndex = messages.indexOf(userMessagesInInterval[0]);
-            const historyToSummarize = messages.slice(firstUserMessageIndex).filter(message => !message.incomplete);
+            const historyToSummarize = messages.slice(firstUserMessageIndex).filter(message =>
+                !message.incomplete || (message.finishReason === 'MAX_TOKENS' && !message.error));
 
             const conversationText = historyToSummarize.map(msg => {
                 return `${msg.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${msg.content}`;
@@ -22862,7 +23007,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
         // フィルタリング後のメッセージリストから要約対象を切り出す
         const messagesToSummarize = visibleMessages.slice(start, end);
-        const originalText = messagesToSummarize.filter(message => !message.incomplete)
+        const originalText = this.projectInterruptedHistoryV137(messagesToSummarize)
             .map(m => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.content}`).join('\n\n');
 
         const confirmed = await uiUtils.showCustomConfirm(
