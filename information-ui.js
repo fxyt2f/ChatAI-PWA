@@ -156,7 +156,7 @@
             } else if (previous?.context === context) this.pendingChats.delete(identity.id);
         }
 
-        get selectedCategory() { return this.category || this.defaultCategory(); }
+        get selectedCategory() { return this.category; }
 
         get draft() {
             const { drafts } = this.context;

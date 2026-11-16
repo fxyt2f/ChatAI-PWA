@@ -178,8 +178,8 @@ def run(client, url):
             const neighborBounds = neighbor.getBoundingClientRect();
             const clip = document.querySelector('.app-container').getBoundingClientRect();
             const preview = neighbor.inert && neighborBounds.right > clip.left && neighborBounds.left < clip.right;
-            const settingsEntry = neighbor.id !== 'settings-screen' || (innerWidth < 800
-                ? neighbor.classList.contains('settings-show-top') : !neighbor.querySelector('[data-settings-panel=general]').hidden);
+            const settingsEntry = neighbor.id !== 'settings-screen' ||
+                neighbor.classList.contains('settings-show-top') && !neighbor.querySelector('[data-settings-category][aria-current]');
             const adjacentOffset = neighborBounds.left - neighborBefore;
             swipeFixtureEvent(target, 'touchend', [], [[0, 180 + ({dx}), 300]]);
             const released = element.getBoundingClientRect().left - before;
@@ -726,12 +726,11 @@ def run(client, url):
 
         for width in (320, 375, 430, 768, 799, 800, 801, 1280):
             viewport(width)
-            ev('settingsUiV136.selectCategory(settingsUiV136.defaultCategory(), false)')
             release_with_feedback(chat, '#chat-screen', -104)
             screen('settings')
             feedback_clear()
+            assert ev("settingsUiV136.category === null && document.querySelector('#settings-screen').classList.contains('settings-show-top')")
             if width < 800:
-                assert ev('settingsUiV136.category') is None
                 click('[data-settings-category="other"]')
                 screen('settings', '#settings/other')
                 click('#settings-menu-btn')
@@ -739,7 +738,6 @@ def run(client, url):
                 feedback_clear()
                 release_with_feedback(settings_top, '#settings-screen', 104)
             else:
-                assert ev("settingsUiV136.category === 'general' && !document.querySelector('#settings-screen').classList.contains('settings-show-top')")
                 click('[data-settings-category="other"]')
                 screen('settings', '#settings/other')
                 release_with_feedback(settings_detail, '#settings-screen', 104)
@@ -979,16 +977,89 @@ def check_selected_destinations(ev, wait, click, drag, boot, viewport, open_sett
     ev('history.forward()')
     page('settings')
     swipe('settings', 115, 'information')
-    assert ev("location.hash === '#information/character'")
-    click('#information-menu-btn')
-    assert ev("location.hash === '#information'")
+    assert ev("location.hash === '#information' && informationUi.category === null")
     swipe('information', 115, 'library')
-    assert ev("document.querySelector('#document-library-query').value === 'スワイプ'")
+    assert ev("!document.querySelector('#document-library-query').value && !history.state.documentLibraryDetail")
     swipe('library', 115, 'chat')
     assert ev("""state.currentChatId === 74321 && state.currentMessages === routeProbe.messages &&
         elements.userInput.value === '入力途中の下書き' && state.pendingAttachments[0]?.name === '下書き.txt' &&
         elements.chatWorkspace.querySelector('.main-content').scrollTop === routeProbe.scrollTop""")
 
+    for width in (1280, 375):
+        viewport(width)
+        ev("appLogic.updateLocalUiSetting('swipeDestinations', ['settings'])")
+        swipe('chat', -115, 'settings')
+        click('[data-settings-category=other]')
+        if width >= 800:
+            click('#settings-menu-btn')
+        swipe('settings', 115, 'chat', '#settings-detail')
+        ev('history.back()')
+        page('settings')
+        assert ev("settingsUiV136.category === 'other' && location.hash === '#settings/other'")
+        ev('history.forward()')
+        page('chat')
+        swipe('chat', -115, 'settings')
+        assert ev("""location.hash === '#settings' && settingsUiV136.category === null &&
+            !settingsUiV136.sidebarCollapsed && settingsUiV136.detail.scrollTop === 0""")
+        ev('history.back()')
+        page('chat')
+        ev('history.forward()')
+        page('settings')
+        assert ev("settingsUiV136.category === null")
+        click('#back-to-chat-from-settings')
+        page('chat')
+
+        ev("appLogic.updateLocalUiSetting('swipeDestinations', ['information'])")
+        swipe('chat', -115, 'information')
+        click('[data-information-category=character]')
+        swipe('information', 115, 'chat', '#information-detail')
+        ev('history.back()')
+        page('information')
+        assert ev("location.hash === '#information/character' && informationUi.category === 'character'")
+        ev('history.forward()')
+        page('chat')
+        swipe('chat', -115, 'information')
+        assert ev("""location.hash === '#information' && informationUi.category === null &&
+            history.state.informationCategory === null && document.querySelector('#information-category-nav').offsetWidth > 0 &&
+            !document.querySelector('#information-category-nav [aria-current]') &&
+            [...document.querySelectorAll('[data-information-panel]')].every(panel => panel.hidden)""")
+        click('#back-to-chat-from-information')
+        page('chat')
+
+        ev("""(async () => {
+            await appLogic.updateLocalUiSetting('swipeDestinations', ['library']);
+            uiUtilsV136.openChatSidebar();
+        })()""")
+        click('#document-library-open')
+        page('library')
+        ev("""(() => {
+            const query = document.querySelector('#document-library-query');
+            query.value = 'スワイプ';
+            query.dispatchEvent(new Event('input', {bubbles:true}));
+            document.querySelector('#document-library-sort').value = 'updated';
+        })()""")
+        wait("Boolean(document.querySelector('#document-library-list .document-library-file'))", 'File appears in the collection')
+        click('#document-library-list .document-library-file')
+        wait("elements.documentLibraryWorkspace.hasAttribute('data-viewing-file')", 'Library detail opens normally')
+        if width < 800:
+            assert ev("Boolean(history.state?.documentLibraryDetail)")
+            ev('history.back()')
+            wait("!history.state?.documentLibraryDetail && !elements.documentLibraryWorkspace.hasAttribute('data-viewing-file')", 'Library detail goes back')
+            ev('history.forward()')
+            wait("Boolean(history.state?.documentLibraryDetail && elements.documentLibraryWorkspace.hasAttribute('data-viewing-file'))", 'Library detail history restores')
+            ev('history.back()')
+        else:
+            click('#document-library-detail-close')
+        wait("!history.state?.documentLibraryDetail && !elements.documentLibraryWorkspace.hasAttribute('data-viewing-file')", 'Back restores the collection')
+        swipe('library', 115, 'chat')
+        swipe('chat', -115, 'library')
+        assert ev("""history.state.documentLibrary && !history.state.documentLibraryDetail &&
+            !elements.documentLibraryWorkspace.hasAttribute('data-viewing-file') &&
+            !document.querySelector('#document-library-query').value && document.querySelector('#document-library-sort').value === 'name' &&
+            document.querySelector('#document-library-collection-scroll').scrollTop === 0""")
+        swipe('library', 115, 'chat')
+
+    ev(f"appLogic.updateLocalUiSetting('swipeDestinations', {json.dumps(all_pages)})")
     ev("""(async () => {
         await appLogic.saveApiConfigs([{id:'routes',provider:'gemini',apiKey:'fixture',modelCandidates:['gemini-2.5-flash']}]);
         await appLogic.setCurrentChatModelRef({apiConfigId:'routes',modelName:'gemini-2.5-flash'});
