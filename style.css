@@ -6284,6 +6284,7 @@ button.document-library-file { cursor: pointer; }
     background: transparent;
 }
 #chat-screen .message-info summary { cursor: pointer; }
+#chat-screen .message-info-error { white-space: pre-wrap; }
 #chat-screen .message-info summary:focus-visible { outline: 2px solid currentColor; }
 .message-info .citation-list { margin-block: 4px; padding-inline-start: 1.5em; }
 .message-info .citation-list a, .search-results-details a { color: var(--text-link); }
