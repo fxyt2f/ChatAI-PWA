@@ -14,18 +14,19 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.37.3">
+    <link rel="stylesheet" href="./style.css?v=1.37.4">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.37.3" defer></script>
-    <script src="./document-library.js?v=1.37.3" defer></script>
-    <script src="./project-store.js?v=1.37.3" defer></script>
-    <script src="./document-search.js?v=1.37.3" defer></script>
-    <script src="./document-rag.js?v=1.37.3" defer></script>
-    <script src="./document-library-ui.js?v=1.37.3" defer></script>
-    <script src="./project-ui.js?v=1.37.3" defer></script>
-    <script src="./dropbox.js?v=1.37.3" defer></script>
+    <script src="./function-calling.js?v=1.37.4" defer></script>
+    <script src="./document-library.js?v=1.37.4" defer></script>
+    <script src="./project-store.js?v=1.37.4" defer></script>
+    <script src="./document-embedding.js?v=1.37.4" defer></script>
+    <script src="./document-search.js?v=1.37.4" defer></script>
+    <script src="./document-rag.js?v=1.37.4" defer></script>
+    <script src="./document-library-ui.js?v=1.37.4" defer></script>
+    <script src="./project-ui.js?v=1.37.4" defer></script>
+    <script src="./dropbox.js?v=1.37.4" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -39,11 +40,11 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.37.3" defer></script>
-    <script src="./streaming-v136.js?v=1.37.3" defer></script>
-    <script src="./app.js?v=1.37.3" defer></script>
-    <script src="./settings-ui-v136.js?v=1.37.3" defer></script>
-    <script src="./information-ui.js?v=1.37.3" defer></script>
+    <script src="./settings-v136.js?v=1.37.4" defer></script>
+    <script src="./streaming-v136.js?v=1.37.4" defer></script>
+    <script src="./app.js?v=1.37.4" defer></script>
+    <script src="./settings-ui-v136.js?v=1.37.4" defer></script>
+    <script src="./information-ui.js?v=1.37.4" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -1149,6 +1150,16 @@
 <p style="font-size: 11px; color: var(--text-secondary); margin-top: -5px; margin-bottom: 10px;">
                      アプリ内の動作ログを収集・表示する機能です。開発者向け。
                 </p>
+<label class="checkbox-label">
+    <input type="checkbox" id="document-embedding-enabled"> 資料の意味検索を有効にする
+</label>
+<div class="settings-group-subsection">
+    <label for="document-embedding-model">意味検索モデル</label>
+    <select id="document-embedding-model"></select>
+    <p id="document-embedding-status" class="settings-description" role="status" aria-live="polite"></p>
+    <button type="button" class="document-library-action" id="document-embedding-download">モデルを取得</button>
+    <button type="button" class="document-library-action" id="document-embedding-remove">モデルキャッシュを削除</button>
+</div>
 </section><section class="settings-group" id="app-info-settings"><h2>アプリ情報</h2>
 <p style="text-align: center; color: var(--text-secondary); font-size: 12px; margin-bottom: 10px;">
                          バージョン: <span id="app-version"></span>
@@ -1581,6 +1592,7 @@
         <button type="button" role="menuitem" class="history-item-menu-delete" data-project-action="delete"><span class="material-symbols-outlined" aria-hidden="true">delete</span>プロジェクトを削除</button>
         <button type="button" role="menuitem" id="project-add-document" data-project-action="add-file" hidden><span class="material-symbols-outlined" aria-hidden="true">folder_open</span>ライブラリから追加</button>
         <button type="button" role="menuitem" id="project-upload-document" data-project-action="upload" hidden><span class="material-symbols-outlined" aria-hidden="true">upload</span>新しいファイルをアップロード</button>
+        <button type="button" role="menuitem" data-project-action="reference-mode" hidden><span class="material-symbols-outlined" aria-hidden="true">description</span><span></span></button>
         <button type="button" role="menuitem" data-project-action="unlink-file" hidden><span class="material-symbols-outlined" aria-hidden="true">link_off</span>共有を解除</button>
     </div>
     <div id="history-item-menu" class="history-item-menu hidden" role="menu" aria-label="チャット操作">

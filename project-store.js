@@ -84,7 +84,8 @@ const ProjectStore = (() => {
         const documentIds = new Set(Array.isArray(library) ? library.map(document => document?.id) : []);
         const shares = new Set();
         for (const link of snapshot.documents) {
-            if (!link || Object.keys(link).length !== 2 || !projectIds.has(link.projectId) || !documentIds.has(link.documentId)) throw invalid();
+            if (!link || Object.keys(link).some(key => !['projectId', 'documentId', 'referenceMode'].includes(key)) ||
+                !projectIds.has(link.projectId) || !documentIds.has(link.documentId) || !DocumentLibrary.validReferenceMode(link)) throw invalid();
             const key = JSON.stringify([link.projectId, link.documentId]);
             if (shares.has(key)) throw invalid();
             shares.add(key);

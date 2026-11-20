@@ -37,28 +37,37 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
     }, { skipPush: true });
     const ids = async chatId => (await db.getChatDocuments(chatId)).map(document => document.id);
 
-    await test('IndexedDB v16 upgrades in place with chats, document versions and links intact', async () => {
-        const blob = file('v16 original');
+    for (const version of [16, 17]) await test('IndexedDB v' + version + ' upgrades in place with chats, projects, originals and links intact', async () => {
+        const blob = file('legacy original');
+        const project = { id: DocumentLibrary.uniqueId(), name: '旧プロジェクト', description: '', createdAt: 1, updatedAt: 1 };
         const entry = { id: DocumentLibrary.uniqueId(), version: 1, versionId: DocumentLibrary.uniqueId(), name: blob.name,
             fileName: blob.name, format: 'md', mimeType: blob.type, size: blob.size, hash: await DocumentLibrary.digest(blob),
             createdAt: 1, updatedAt: 1 };
         await withDatabase(async () => {
-            eq(st.db.version, 17);
-            eq((await db.getChat(42)).title, 'v16 chat');
+            eq(st.db.version, 18);
+            eq((await db.getChat(42)).title, 'legacy chat');
             eq(await db.getLibraryDocument(entry.id), entry);
-            eq(await (await db.getLibraryOriginal(entry.id, 1)).blob.text(), 'v16 original');
+            eq(await (await db.getLibraryOriginal(entry.id, 1)).blob.text(), 'legacy original');
             eq(await ids(42), [entry.id]);
+            const hasProjects = version >= 17;
+            if (hasProjects) {
+                eq(await db.getChatProject(42), project);
+                eq((await db.listProjectDocuments(project.id))[0].referenceMode, 'full');
+                eq(DocumentLibrary.referenceMode((await db.getChatDocuments(42))[0]), 'rag');
+                eq((await db.getChatRagDocuments(42)).documents[0].referenceMode, 'full');
+            }
+            eq(await DocumentLibrary.request(db._getStore(DocumentLibrary.embeddingStore).count()), 0);
             for (const store of ProjectStore.stores) {
-                eq(await DocumentLibrary.request(db._getStore(store).count()), 0);
+                eq(await DocumentLibrary.request(db._getStore(store).count()), hasProjects ? 1 : 0);
                 eq(await DocumentLibrary.request(db._getStore(store + '_temp').count()), 0);
             }
         }, async name => {
             const connection = await new Promise((resolve, reject) => {
-                const open = indexedDB.open(name, 16);
+                const open = indexedDB.open(name, version);
                 open.onerror = () => reject(open.error);
                 open.onupgradeneeded = () => {
                     const legacy = open.result;
-                    legacy.createObjectStore('chats', { keyPath: 'id', autoIncrement: true }).add({ id: 42, title: 'v16 chat' });
+                    legacy.createObjectStore('chats', { keyPath: 'id', autoIncrement: true }).add({ id: 42, title: 'legacy chat' });
                     legacy.createObjectStore('settings', { keyPath: 'key' });
                     legacy.createObjectStore('profiles', { keyPath: 'id' });
                     legacy.createObjectStore('image_store', { keyPath: 'id' });
@@ -73,6 +82,12 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     open.transaction.objectStore(DocumentLibrary.documents).add(entry);
                     open.transaction.objectStore(DocumentLibrary.originals).add({ ...entry, documentId: entry.id, blob });
                     open.transaction.objectStore(DocumentLibrary.links).add({ chatId: 42, documentId: entry.id });
+                    if (version >= 17) {
+                        ProjectStore.upgrade(legacy);
+                        open.transaction.objectStore(ProjectStore.projects).add(project);
+                        open.transaction.objectStore(ProjectStore.chats).add({ chatId: 42, projectId: project.id });
+                        open.transaction.objectStore(ProjectStore.documents).add({ projectId: project.id, documentId: entry.id, referenceMode: 'full' });
+                    }
                 };
                 open.onsuccess = () => resolve(open.result);
             });

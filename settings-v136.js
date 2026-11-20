@@ -1312,6 +1312,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             },
             getModelMetadataV136(ref) {
                 const config = this.getApiConfigById(ref?.apiConfigId);
+                if (config?.provider === 'gemini') return geminiRecord(config, ref.modelName).metadata;
                 const source = state.modelMetadataSourcesV136?.[ref?.apiConfigId];
                 if (source && (config?.provider !== 'openrouter' || config.enabled === false
                     || source.base !== (config.baseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '')
@@ -1366,7 +1367,8 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                         record.metadata = {
                             thinking: typeof data.thinking === 'boolean' ? data.thinking : undefined,
                             baseModelId: typeof data.baseModelId === 'string' ? data.baseModelId : undefined,
-                            supportedGenerationMethods: Array.isArray(data.supportedGenerationMethods) ? data.supportedGenerationMethods : undefined
+                            supportedGenerationMethods: Array.isArray(data.supportedGenerationMethods) ? data.supportedGenerationMethods : undefined,
+                            inputTokenLimit: data.inputTokenLimit, outputTokenLimit: data.outputTokenLimit
                         };
                         record.refreshAfter = Date.now() + 15 * 60 * 1000;
                         notify('capabilities', { apiConfigId, modelName: ref.modelName });
@@ -1423,8 +1425,9 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                         if (!current()) return;
                         state.modelMetadataV136 ||= {};
                         state.modelMetadataV136[apiConfigId] = Object.fromEntries(data.data.filter(m => typeof m.id === 'string').map(m => [m.id, {
-                            reasoning: m.reasoning, inputModalities: m.architecture?.input_modalities,
-                            supportedParameters: m.supported_parameters
+                            reasoning: m.reasoning, inputModalities: m.architecture?.input_modalities ?? m.input_modalities,
+                            supportedParameters: m.supported_parameters,
+                            contextLength: m.context_length, inputTokenLimit: m.max_prompt_tokens, outputTokenLimit: m.max_completion_tokens
                         }]));
                         state.modelMetadataSourcesV136 ||= {};
                         state.modelMetadataSourcesV136[apiConfigId] = { base, apiKey: config.apiKey };

@@ -260,17 +260,21 @@ function docxHeadingStyles(bytes) {
     return headingStyles;
 }
 
-function extractDOCX(bytes, add) {
+function extractDOCX(bytes, add, full = false) {
     if (bytes.length < 22) throw invalid('DOCXファイルを開けませんでした。');
     const wanted = new Set(['word/document.xml', 'word/styles.xml']);
+    const supplementary = /^word\/(?:header\d+|footer\d+|footnotes|endnotes)\.xml$/;
+    const incomplete = () => new AnalysisError('partial-docx', 'ヘッダー・脚注・テキストボックスなど、全文を抽出できないDOCX要素があります。');
     const seen = new Set();
-    let zip;
+    let zip, uncompressedBytes = 0;
     try {
         zip = unzipSync(bytes, { filter(entry) {
-            if (!wanted.has(entry.name)) return false;
+            if (!wanted.has(entry.name) && !(full && supplementary.test(entry.name))) return false;
             if (seen.has(entry.name)) throw invalid('DOCX内に重複した文書データがあります。');
             seen.add(entry.name);
-            if (entry.originalSize > MAX_DOCX_XML || entry.size > MAX_DOCX_XML) throw tooLarge();
+            uncompressedBytes += entry.originalSize;
+            if (entry.originalSize > MAX_DOCX_XML || entry.size > MAX_DOCX_XML ||
+                (full && uncompressedBytes > MAX_DOCX_XML)) throw tooLarge();
             return true;
         } });
     } catch (error) {
@@ -278,6 +282,9 @@ function extractDOCX(bytes, add) {
         throw invalid('DOCXの圧縮データが破損しているか、暗号化されています。');
     }
     if (!zip['word/document.xml']) throw invalid('DOCX内に本文が見つかりません。');
+    const supplementTags = { headerReference: 'header', footerReference: 'footer',
+        footnoteReference: 'footnotes', endnoteReference: 'endnotes' };
+    const referencedParts = new Set();
     const headings = docxHeadingStyles(zip['word/styles.xml']);
     let body = false, paragraph, paragraphNumber = 0, heading, tableNumber = 0, textDepth = 0, ignored = 0;
     const tables = [];
@@ -286,7 +293,9 @@ function extractDOCX(bytes, add) {
     parseXML(decode(zip['word/document.xml']), {
         open(tag) {
             const name = word(tag);
+            if (full && ['altChunk', 'txbxContent'].includes(name)) throw incomplete();
             if (ignored || skip.has(name)) { ignored++; return; }
+            if (full && Object.hasOwn(supplementTags, name)) referencedParts.add(supplementTags[name]);
             if (name === 'body') body = true;
             if (!body) return;
             switch (name) {
@@ -344,16 +353,32 @@ function extractDOCX(bytes, add) {
             }
         }
     });
+    for (const part of referencedParts) {
+        const matches = Object.keys(zip).filter(name => supplementary.test(name) && name.startsWith('word/' + part));
+        if (!matches.length) throw incomplete();
+        for (const name of matches) {
+            let text = false;
+            parseXML(decode(zip[name]), {
+                open(tag) { if (word(tag) === 't') text = true; },
+                text(value) { if (text && value.trim()) throw incomplete(); },
+                close(tag) { if (word(tag) === 't') text = false; }
+            });
+        }
+    }
 }
 
-async function extract(entry, blob) {
+async function extract(entry, blob, full = false) {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const { blocks, add } = textBlocks();
     if (entry.format === 'docx') {
-        extractDOCX(bytes, add);
+        extractDOCX(bytes, add, full);
         return blocks;
     }
     const text = decode(bytes);
+    if (full && ['txt', 'md'].includes(entry.format)) {
+        if (text.length > MAX_TEXT) throw tooLarge();
+        return text.trim() ? [{ text, location: { type: 'lines', lineStart: 1, lineEnd: text.split('\n').length } }] : [];
+    }
     switch (entry.format) {
         case 'txt':
         case 'md': extractLines(text, entry.format === 'md', add); break;
@@ -583,6 +608,7 @@ self.onmessage = async ({ data }) => {
         let result;
         switch (data.operation) {
             case 'analyze': result = buildIndex(data.entry, await extract(data.entry, data.blob)); break;
+            case 'extract-full': result = await extract(data.entry, data.blob, true); break;
             case 'index': result = buildIndex(data.entry, data.blocks); break;
             case 'terms': result = queryFeatures(data.query); break;
             case 'search': result = search(data.indexes, data.query, data.terms, data.limit); break;

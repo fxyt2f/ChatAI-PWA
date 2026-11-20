@@ -874,7 +874,14 @@ def run(client, url, screenshots=None):
         const entry = await dbUtils.getLibraryDocument({json.dumps(doc)});
         await dbUtils.replaceLibraryDocument(entry.id, new File(['差し替えた共有資料'], '共有資料.md'), {{expectedVersionId:entry.versionId}});
     }})()""")
-    click(f'#project-documents [data-document-id="{doc}"] .document-library-more')
+    file_menu = f'#project-documents [data-document-id="{doc}"] .document-library-more'
+    click(file_menu)
+    click('#project-menu [data-project-action=reference-mode]')
+    wait("document.querySelector('#confirmDialog').open", 'Full project reference consent opens')
+    click('#confirmDialog button[value=ok]')
+    wait("document.querySelector('#project-documents').textContent.includes('常に全文参照')", 'Project reference mode is visible')
+    assert ev(f"(async()=> (await dbUtils.getChatDocuments({member}))[0].referenceMode===undefined)()")
+    click(file_menu)
     click('#project-menu [data-project-action=unlink-file]')
     wait("!document.querySelector('#project-documents').textContent.includes('共有資料.md')", 'share removed')
     assert ev(f"""(async () => {{
