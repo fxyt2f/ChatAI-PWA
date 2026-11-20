@@ -81,6 +81,16 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
     const body = () => el.messageContainer.querySelector('[id^="streaming-content-"]');
     const visibleThoughtLabel = () => el.messageContainer.querySelector('.thought-summary-details summary')?.textContent;
     const existingSuccessful = async () => (await db.getSetting(SettingsV136.SUCCESS_KEY))?.value;
+    const assertGenerationStatus = (userIndex) => {
+        const statuses = [...el.messageContainer.querySelectorAll('.generation-placeholder-content')];
+        eq(statuses.length, 1);
+        const status = statuses[0];
+        eq(status.textContent, '応答生成中…');
+        assert(status.getClientRects().length > 0);
+        const dot = getComputedStyle(status.querySelector('.generation-status-dot'));
+        eq([dot.width, dot.height, dot.animationName], ['7px', '7px', 'generationStatusPulse']);
+        if (userIndex !== undefined) eq(status.closest('.generation-placeholder').previousElementSibling?.dataset.index, String(userIndex));
+    };
     const assertQuietStop = () => {
         assert(!body() && !el.messageContainer.querySelector('.generation-placeholder, .message.error'));
         assert(!el.messageContainer.textContent.includes('リクエストがキャンセルされました'));
@@ -281,8 +291,10 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             }
             const raw = '**太字** <svg onload="window.streamMarkupExecuted=true"></svg>';
             const first = raw + '\n長い行'.repeat(90);
+            assertGenerationStatus(0);
             channel.frame(geminiResult([{text: '<b>思考</b>', thought: true}, {text: first, thoughtSignature: 'text-signature'}]));
             await waitFor(() => answer.textContent === first, 'first displayed SSE chunk');
+            assertGenerationStatus(0);
             assert(body() === answer && !answer.querySelector('svg,strong'));
             eq(visibleThoughtLabel(), '思考プロセス');
             assert(!el.messageContainer.querySelector('.thought-summary-content b'));
@@ -492,6 +504,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                 assertQuietStop();
                 const saved = await chat();
                 eq(saved.messages.map(message => message.role), thoughtOnly ? ['user', 'model'] : ['user']);
+                assert(!el.messageContainer.querySelector('.message.user .js-retry-btn'));
                 if (thoughtOnly) {
                     const partial = saved.messages.at(-1);
                     eq(partial.content, '');
@@ -860,6 +873,244 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             } finally { db.saveChat = save; }
         });
 
+        await test('answer-only regeneration preserves later records and bypasses current memory and tools', async () => {
+            await start(gemini);
+            const prefix = [{role:'user', content:'earlier question'}, {role:'model', content:'previous attempt', isCascaded:true, isSelected:false, siblingGroupId:'earlier'},
+                {role:'model', content:'selected partial', incomplete:true, isCascaded:true, isSelected:true, siblingGroupId:'earlier'}];
+            const original = {role:'model', content:'original middle answer', usageMetadata:{totalTokenCount:32}, timestamp:73};
+            st.currentPersistentMemory = {character_memory:{name:'CURRENT-CHARACTER'}, scene_stack:[{location:'CURRENT-SCENE'}], inventory:['CURRENT-INVENTORY']};
+            st.currentSummarizedContext = {summaryText:'CURRENT-SUMMARY', summaryRange:{start:0,end:5}};
+            st.currentMessages.push(...prefix, {role:'user', content:'target middle question'}, original,
+                {role:'user', content:'LATER-QUESTION'}, {role:'model', content:'LATER-ANSWER', usageMetadata:{totalTokenCount:88}, timestamp:74});
+            await db.saveChat();
+            const initial = await chat();
+            initial.messages.at(-1).extraFixtureMetadata = {keep:true};
+            await db.saveChat(null, initial, {existingSnapshot:true});
+            assert((await app.loadChat(initial.id)).ok);
+            const before = await chat();
+            const rows = st.currentMessages.slice();
+            const success = await existingSuccessful();
+            const readMemory = db.getMemory, autoMemory = app.triggerAutoMemorySave;
+            let memoryReads = 0, autoRuns = 0, toolRuns = 0;
+            const incoming = {functionCall:{name:'answer_only_fixture',args:{},id:'UNSOLICITED-CALL'}, thoughtSignature:'UNSOLICITED-SIGNATURE'};
+            db.getMemory = async () => { memoryReads++; return {items:['CURRENT-LONG-TERM']}; };
+            app.triggerAutoMemorySave = async () => { autoRuns++; };
+            window.functionDeclarations = [{function_declarations:[{name:'answer_only_fixture', parameters:{type:'object'}}]}];
+            window.functionCallingTools = {answer_only_fixture:async()=>{toolRuns++; return {};}};
+            Object.assign(st.settings, {enableMemory:true, memoryAutoSaveInterval:1, geminiEnableFunctionCalling:true,
+                forceFunctionCalling:true, geminiEnableGrounding:true});
+            try {
+                const channel = sse();
+                reply = () => channel.response;
+                const button = el.messageContainer.querySelector('.message[data-index="4"] .tm-message-menu-btn');
+                button.click();
+                const item = document.querySelector('#message-action-menu [role="menuitem"]');
+                eq(item.textContent.trim(), 'replayこの回答のみ再生成');
+                item.click();
+                await waitFor(() => channel.body.locked, 'answer-only started from footer');
+                assertGenerationStatus(3);
+                eq(st.currentMessages, rows);
+                eq((await chat()).messages, before.messages);
+                const request = calls.at(-1).body;
+                const wire = JSON.stringify(request);
+                assert(!/CURRENT-|LATER-|original middle answer|previous attempt/.test(wire));
+                eq(request.contents.map(message => message.parts[0].text), ['earlier question','selected partial','target middle question']);
+                assert(!request.tools && !request.toolConfig);
+                channel.frame(geminiResult([{text:'new middle answer'}, incoming], 'STOP'));
+                channel.close();
+                await waitFor(() => !st.isSending && st.currentMessages.some(message => message.content === 'new middle answer'), 'answer-only completed');
+                const saved = await chat();
+                eq(saved.messages.slice(0,4), before.messages.slice(0,4));
+                eq(saved.messages.slice(-2), before.messages.slice(-2));
+                eq(st.currentMessages.slice(-2).map((message,i) => message === rows[5+i]), [true,true]);
+                eq(saved.persistentMemory, before.persistentMemory);
+                eq(saved.summarizedContext, before.summarizedContext);
+                eq([memoryReads,autoRuns,toolRuns], [0,0,0]);
+                eq(await existingSuccessful(), success);
+                const candidate = saved.messages[5];
+                assert(candidate.isSelected && candidate.siblingGroupId === saved.messages[4].siblingGroupId);
+                assert(!candidate.continuation && !candidate.tool_calls);
+                eq(saved.messages[4].usageMetadata, original.usageMetadata);
+                assert((await app.loadChat(saved.id)).ok);
+                el.messageContainer.querySelector('.message[data-index="5"] .tm-message-menu-btn').click();
+                const stale = document.querySelector('#message-action-menu button');
+                const callCount = calls.length;
+                await app.navigateCascade(5, 'prev');
+                assert(!document.getElementById('message-action-menu'));
+                stale.click();
+                eq(calls.length, callCount);
+                assert(!st.isSending && !st.sendPreparationV136);
+                assert((await chat()).messages[4].isSelected);
+                await app.navigateCascade(4, 'next');
+                const switched = await chat();
+                assert(switched.messages[5].isSelected);
+                eq(switched.messages.slice(-2), before.messages.slice(-2));
+                Object.assign(st.settings, {enableMemory:false, geminiEnableFunctionCalling:true, forceFunctionCalling:true});
+                reply = () => json(geminiResult([{text:'normal send answer'}], 'STOP'));
+                await send('after regeneration');
+                assert(calls.at(-1).body.tools?.length && calls.at(-1).body.toolConfig?.functionCallingConfig.mode === 'ANY');
+                assert(JSON.stringify(calls.at(-1).body.contents).includes('new middle answer'));
+                assert(!JSON.stringify(calls.at(-1).body.contents).includes('UNSOLICITED-'));
+            } finally {
+                db.getMemory = readMemory;
+                app.triggerAutoMemorySave = autoMemory;
+                window.functionDeclarations = originalDeclarations;
+                window.functionCallingTools = originalTools;
+            }
+        });
+
+        await test('answer-only failures, stopping and navigation protect the saved target turn', async () => {
+            await start(gemini);
+            st.currentMessages.push({role:'user',content:'target'}, {role:'model',content:'original partial',incomplete:true},
+                {role:'user',content:'later'}, {role:'model',content:'later reply'});
+            await db.saveChat();
+            const source = await chat();
+            assert((await app.loadChat(source.id)).ok);
+            const other = (await db.getAllChats()).find(chat => chat.id !== source.id);
+            const regenerate = async (index, finish) => {
+                const channel = sse();
+                reply = () => channel.response;
+                const running = app.regenerateAnswerV137(index);
+                await waitFor(() => channel.body.locked, 'answer-only reader');
+                assertGenerationStatus(0);
+                await finish(channel);
+                await running;
+                assert(!el.messageContainer.querySelector('.generation-placeholder-content'));
+                return db.getChat(source.id);
+            };
+            let saved = await regenerate(1, async () => app.abortRequest());
+            eq(saved.messages, source.messages);
+            saved = await regenerate(1, async channel => {
+                channel.frame(geminiResult([{text:'stopped after text'}]));
+                await waitFor(() => st.sendExecutionV136?.streamContent === 'stopped after text', 'answer-only buffered text');
+                assertGenerationStatus(0);
+                app.abortRequest();
+            });
+            eq(saved.messages.slice(1,3).map(message => [message.content,message.incomplete,message.isSelected]),
+                [['original partial',true,false],['stopped after text',true,true]]);
+            for (const err of ['first empty failure','replacement empty failure']) {
+                saved = await regenerate(saved.messages.findIndex(message=>message.isSelected), async channel => channel.frame({error:{message:err}}));
+                eq(saved.messages.filter(message=>message.error).map(message=>[message.content,message.error]), [['',err]]);
+                eq(saved.messages.slice(-2), source.messages.slice(-2));
+            }
+            const save = db.saveChat, alert = ui.showCustomAlert;
+            try {
+                ui.showCustomAlert = async () => {};
+                db.saveChat = async function (...args) {
+                    if (args[2]?.answerReplacement) throw new Error('fixture answer-only save failed');
+                    return save.apply(this,args);
+                };
+                const records = st.currentMessages.slice();
+                eq((await regenerate(3, async channel => {
+                    channel.frame(geminiResult([{text:'must not persist'}],'STOP')); channel.close();
+                })).messages, saved.messages);
+                assert(st.currentMessages.every((message,index)=>message===records[index]));
+            } finally { db.saveChat = save; ui.showCustomAlert = alert; }
+            saved = await regenerate(3, async channel => {
+                assert((await app.loadChat(other.id)).ok);
+                assert(!el.messageContainer.querySelector('.generation-placeholder-content'));
+                assert((await app.loadChat(source.id)).ok);
+                assertGenerationStatus(0);
+                assert((await app.loadChat(other.id)).ok);
+                channel.frame(geminiResult([{text:'background replacement'}],'STOP')); channel.close();
+            });
+            eq(st.currentChatId, other.id);
+            eq((await chat()).messages, other.messages);
+            eq(saved.messages.filter(message=>message.isSelected).map(message=>message.content), ['background replacement']);
+            eq(saved.messages.slice(-2), source.messages.slice(-2));
+            assert(!saved.messages.some(message=>message.error));
+        });
+
+        await test('answer-only regeneration remaps Undo and Redo through two inserts and rejects a history storage failure', async () => {
+            await start(gemini);
+            st.currentMessages.push({role:'user',content:'first'}, {role:'model',content:'first answer'},
+                {role:'user',content:'second'}, {role:'model',content:'same answer'},
+                {role:'user',content:'third'}, {role:'model',content:'original third answer'});
+            const id = await db.saveChat();
+            const row = el.messageContainer.querySelector('.message[data-index="5"]') || document.createElement('div');
+            await app.saveEditMessage(5, row, {value:'same answer'});
+            const before = await chat();
+            const alert = ui.showCustomAlert, setItem = Storage.prototype.setItem;
+            let storageFailureObserved = false;
+            try {
+                ui.showCustomAlert = async () => {};
+                Storage.prototype.setItem = function(key, value) {
+                    if (this === localStorage && key.startsWith(makeChangeHistoryStorageKey(id) + ':')) {
+                        storageFailureObserved = true;
+                        throw new DOMException('fixture', 'QuotaExceededError');
+                    }
+                    return setItem.call(this, key, value);
+                };
+                reply = () => json(geminiResult([{text:'discard this candidate'}],'STOP'));
+                await app.regenerateAnswerV137(1);
+                assert(storageFailureObserved);
+                eq((await chat()).messages, before.messages);
+            } finally { Storage.prototype.setItem = setItem; ui.showCustomAlert = alert; }
+            reply = () => json(geminiResult([{text:'new alternative'}],'STOP'));
+            await app.regenerateAnswerV137(1);
+            await app.regenerateAnswerV137(st.currentMessages.findIndex(message => message.isSelected));
+            assert((await app.loadChat(id)).ok);
+            await app.navigateCascade(3, 'prev');
+            const undo = (index, direction) => app.applyLatestChangeForMessage(index, 'model', direction);
+            const setStatus = app.setChangeHistoryStatus;
+            try {
+                app.setChangeHistoryStatus = () => {};
+                assert(!(await undo(5,'undo')).success && !(await undo(5,'redo')).success);
+                assert((await undo(7,'undo')).success);
+                eq((await chat()).messages.slice(-3).map(message => message.content),
+                    ['same answer','third','original third answer']);
+                assert((await app.loadChat(id)).ok);
+                assert((await undo(7,'redo')).success);
+                eq((await chat()).messages.slice(-3).map(message => message.content), ['same answer','third','same answer']);
+            } finally { app.setChangeHistoryStatus = setStatus; }
+        });
+
+        await test('saved Bedrock tool history survives an unchanged cascade and rejects changed or unverified prefixes', async () => {
+            const bedrock = {apiConfigId:'aws',modelName:'us.anthropic.claude-opus-4-6-v1'};
+            await start(bedrock);
+            const toolCall = {functionCall:{name:'legacy_fixture',id:'legacy-id',args:{}}};
+            const messages = [{role:'user',content:'earlier'}, {role:'model',content:'selected answer'},
+                {role:'user',content:'later'}, {role:'model',content:'', continuation:{provider:'bedrock',
+                    apiConfigId:bedrock.apiConfigId,modelName:bedrock.modelName,parts:[toolCall]}},
+                {role:'tool',name:'legacy_fixture',_toolCallId:'legacy-id',response:{found:true}},
+                {role:'model',content:'lookup completed'}];
+            await SettingsV136.rememberHistoryContextsAsyncV136(messages, st.currentSystemPrompt);
+            assert(messages[3].continuation.historyPrefixV136, 'fixture has a previously saved legacy hash');
+            Object.assign(messages[1], {isCascaded:true,isSelected:true,siblingGroupId:'test-alternatives'});
+            messages.splice(1, 0, {role:'model',content:'other alternative',isCascaded:true,isSelected:false,siblingGroupId:'test-alternatives'});
+            st.currentMessages.push(...messages);
+            const id = await db.saveChat();
+            assert((await app.loadChat(id)).ok);
+            const client = window.BedrockRuntimeClient;
+            let wire;
+            try {
+                window.BedrockRuntimeClient = class {
+                    async send(command) {
+                        wire = JSON.stringify(command.body.messages);
+                        return {output:{message:{content:[{text:'follow-up answer'}]}},stopReason:'end_turn'};
+                    }
+                };
+                st.settings.geminiEnableFunctionCalling = true;
+                await send('follow-up');
+                const last = (await chat()).messages.at(-1);
+                assert(wire?.includes('"toolUseId":"legacy-id"') && wire.includes('"toolResult"'), last.error || wire);
+                eq(last.content, 'follow-up answer');
+            } finally { window.BedrockRuntimeClient = client; }
+
+            const changed = (await db.getChat(id)).messages;
+            changed[1].isSelected = true;
+            changed[2].isSelected = false;
+            const prepare = () => app._prepareApiHistory(changed, null).catch(reason => reason);
+            eq((await prepare()).code, 'unsafe-history-continuation');
+            const continuation = changed[4].continuation;
+            delete continuation.historyPrefixV136;
+            await SettingsV136.rememberHistoryContextsAsyncV136(changed);
+            assert(!continuation.historyPrefixV136 && continuation.historyPrefixInvalidV136);
+            const before = JSON.stringify(changed);
+            eq((await prepare()).code, 'unsafe-history-continuation');
+            eq(JSON.stringify(changed), before);
+        });
+
         await test('regeneration replaces empty failures and preserves answers, selection and later turns', async () => {
             const prompt = {role: 'user', content: '再生成対象'};
             const later = [{role: 'user', content: '後続の質問'}, {role: 'model', content: '後続の回答'}];
@@ -968,6 +1219,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             }
 
             const beforeCancel = (await chat()).messages;
+            const beforeCancelView = structuredClone(st.currentMessages);
             eq((await regenerate('cancel')).messages, beforeCancel);
             eq((await regenerate('cancel-thought')).messages, beforeCancel);
             const save = db.saveChat;
@@ -980,7 +1232,7 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                     const error = await regenerate(kind, '保存されない応答').catch(reason => reason);
                     eq(error.message, 'regeneration fixture save failure');
                     eq((await chat()).messages, beforeCancel);
-                    eq(st.currentMessages, beforeCancel);
+                    eq(st.currentMessages, beforeCancelView);
                     assertQuietStop();
                 }
             } finally { db.saveChat = save; }
@@ -1048,8 +1300,20 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             const original = (await chat()).messages.find(message => message.role === 'model');
             const emptyRegen = sse();
             reply = () => emptyRegen.response;
-            const emptyRerun = app.retryFromMessage(0);
+            let emptyRerun;
+            const retry = app.retryFromMessage;
+            try {
+                app.retryFromMessage = function (index) {
+                    eq(index, 0);
+                    return emptyRerun = retry.call(this, index);
+                };
+                assert(!el.messageContainer.querySelector('.message.user .js-retry-btn'));
+                el.messageContainer.querySelector('.message.model .tm-message-menu-btn').click();
+                document.querySelectorAll('#message-action-menu [role="menuitem"]')[1].click();
+                assert(emptyRerun);
+            } finally { app.retryFromMessage = retry; }
             await waitFor(() => emptyRegen.body.locked && body(), 'regeneration without output');
+            assertGenerationStatus(0);
             app.abortRequest();
             await emptyRerun;
             assertQuietStop();
@@ -1063,10 +1327,13 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
             await waitFor(body, 'regeneration placeholder');
             regen.frame(geminiResult([{text: '再生成の部分'}]));
             await waitFor(() => body()?.textContent === '再生成の部分', 'regeneration partial');
+            assertGenerationStatus(0);
             await app.loadChat(sourceId);
             assert(!regen.canceled && !st.isSending);
+            assert(!el.messageContainer.querySelector('.generation-placeholder-content'));
             await app.loadChat(toolId);
             eq(body()?.textContent, '再生成の部分');
+            assertGenerationStatus(0);
             app.abortRequest();
             await rerun;
             const messages = (await chat()).messages;
@@ -1155,8 +1422,10 @@ window.runStreamingBrowserTestsV136 = async ({app, db, st, ui, el, test, assert,
                 eq((await db.getChat(copied.chatId)).messages.map(message => message.content), ['A draft prompt']);
                 await app.loadChat(sourceId);
                 await waitFor(() => body()?.textContent === 'A partial', 'first stream restored');
+                assertGenerationStatus(0);
                 await app.loadChat(targetId);
                 await waitFor(() => body()?.textContent === 'B partial', 'second stream restored');
+                assertGenerationStatus(0);
                 await send('duplicate B');
                 el.sendButton.click();
                 await waitFor(() => stopping, 'second job saving its stopped partial');

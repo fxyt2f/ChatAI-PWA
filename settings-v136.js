@@ -389,17 +389,26 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         if (!(messages || []).some(m => m.continuation?.provider && !m.continuation.historyWireV136
             && (m.continuation.historyPrefixV136 === undefined || m.continuation.historyTurnV136 === undefined))) return;
         let prefix = historySeedV136(system), turn = historySeedV136(''), editedPrefix = false, editedTurn = false;
+        let earlierCascade = false, cascadeInTurn = false;
         const groups = new Map();
         for (const message of messages || []) {
-            if (message.role === 'user') { turn = historySeedV136(''); editedTurn = false; }
+            if (message.role === 'user') {
+                turn = historySeedV136('');
+                editedTurn = false;
+                earlierCascade ||= cascadeInTurn;
+                cascadeInTurn = false;
+            }
             const group = message.isCascaded && message.siblingGroupId;
+            cascadeInTurn ||= Boolean(group);
             if (group && !groups.has(group)) groups.set(group, { prefix, turn, editedPrefix, editedTurn });
             const context = group ? groups.get(group) : { prefix, turn, editedPrefix, editedTurn };
             const c = message.continuation;
             if (c?.provider && !c.historyWireV136) {
                 // Known edits in legacy data still use N01's conservative fallback.
                 // Newly generated responses already carry their request's context.
-                if (c.historyPrefixV136 === undefined && context.editedPrefix) c.historyPrefixInvalidV136 = true;
+                // The first hash learned after an earlier cascade cannot prove which
+                // alternative was used when this continuation was generated.
+                if (c.historyPrefixV136 === undefined && (context.editedPrefix || earlierCascade)) c.historyPrefixInvalidV136 = true;
                 if (c.historyTurnV136 === undefined && context.editedTurn) c.historyTurnInvalidV136 = true;
                 if (!context.editedPrefix && !c.historyPrefixInvalidV136) c.historyPrefixV136 ??= context.prefix;
                 if (!context.editedTurn && !c.historyTurnInvalidV136) c.historyTurnV136 ??= context.turn;

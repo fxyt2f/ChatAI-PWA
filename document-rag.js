@@ -183,7 +183,7 @@ window.DocumentRag = (() => {
                 : metadata.status === 'unsupported' ? 'このモデルへのファイル送信は利用できません' : 'ファイル検索を利用できませんでした';
             if (metadata.status === 'no-match' && !status.textContent) {
                 status.textContent = label;
-                return { references: status };
+                return { warning: status };
             }
             if (!['used', 'partial'].includes(record.status) || status.textContent) {
                 status.textContent = [label, status.textContent].filter(Boolean).join('。');
@@ -191,32 +191,27 @@ window.DocumentRag = (() => {
             return status.textContent ? { warning: status } : null;
         }
 
-        const details = document.createElement('details');
-        details.className = 'rag-references';
-        details.open = true;
-        const summary = document.createElement('summary');
-        summary.textContent = '参照ファイル · ' + metadata.sources.length + ' 箇所';
-        details.append(summary);
+        const references = document.createElement('div');
+        references.className = 'rag-references';
         const groups = new Map();
         for (const source of metadata.sources) {
-            const key = source.documentId + ':' + source.versionId;
-            if (!groups.has(key)) {
-                const section = document.createElement('div');
-                const label = document.createElement('strong');
-                label.textContent = source.documentName + ' · 版 ' + source.version;
+            if (!groups.has(source.documentId)) {
+                const section = document.createElement('section');
+                const label = document.createElement('h4');
+                label.textContent = source.fileName || source.documentName;
                 const list = document.createElement('ul');
                 section.append(label, list);
-                details.append(section);
-                groups.set(key, list);
+                references.append(section);
+                groups.set(source.documentId, list);
             }
             const item = document.createElement('li'), button = document.createElement('button');
             button.type = 'button';
             button.textContent = window.DocumentSearch.formatLocation(source.location);
             button.addEventListener('click', () => void window.DocumentLibraryUI?.openReference(source));
             item.append(button);
-            groups.get(key).append(item);
+            groups.get(source.documentId).append(item);
         }
-        return { references: details, warning: status.textContent ? status : null };
+        return { references, warning: status.textContent ? status : null };
     }
 
     // Used only after the existing history fingerprints establish that the

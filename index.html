@@ -14,18 +14,18 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.37.3-beta.1">
+    <link rel="stylesheet" href="./style.css?v=1.37.3">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.37.3-beta.1" defer></script>
-    <script src="./document-library.js?v=1.37.3-beta.1" defer></script>
-    <script src="./project-store.js?v=1.37.3-beta.1" defer></script>
-    <script src="./document-search.js?v=1.37.3-beta.1" defer></script>
-    <script src="./document-rag.js?v=1.37.3-beta.1" defer></script>
-    <script src="./document-library-ui.js?v=1.37.3-beta.1" defer></script>
-    <script src="./project-ui.js?v=1.37.3-beta.1" defer></script>
-    <script src="./dropbox.js?v=1.37.3-beta.1" defer></script>
+    <script src="./function-calling.js?v=1.37.3" defer></script>
+    <script src="./document-library.js?v=1.37.3" defer></script>
+    <script src="./project-store.js?v=1.37.3" defer></script>
+    <script src="./document-search.js?v=1.37.3" defer></script>
+    <script src="./document-rag.js?v=1.37.3" defer></script>
+    <script src="./document-library-ui.js?v=1.37.3" defer></script>
+    <script src="./project-ui.js?v=1.37.3" defer></script>
+    <script src="./dropbox.js?v=1.37.3" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -39,11 +39,11 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.37.3-beta.1" defer></script>
-    <script src="./streaming-v136.js?v=1.37.3-beta.1" defer></script>
-    <script src="./app.js?v=1.37.3-beta.1" defer></script>
-    <script src="./settings-ui-v136.js?v=1.37.3-beta.1" defer></script>
-    <script src="./information-ui.js?v=1.37.3-beta.1" defer></script>
+    <script src="./settings-v136.js?v=1.37.3" defer></script>
+    <script src="./streaming-v136.js?v=1.37.3" defer></script>
+    <script src="./app.js?v=1.37.3" defer></script>
+    <script src="./settings-ui-v136.js?v=1.37.3" defer></script>
+    <script src="./information-ui.js?v=1.37.3" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -1566,6 +1566,16 @@
             </div>
         </form>
     </dialog>
+    <dialog id="message-sources-dialog" class="custom-dialog message-sources-dialog" aria-labelledby="message-sources-title">
+        <form method="dialog" class="system-prompt-dialog-header">
+            <h3 id="message-sources-title" class="dialog-title system-prompt-dialog-title">ソース</h3>
+            <button class="chat-dialog-icon-button" type="submit" autofocus title="閉じる" aria-label="閉じる">
+                <span class="material-symbols-outlined" aria-hidden="true">close</span>
+            </button>
+        </form>
+        <div class="message-sources" tabindex="0" role="region" aria-labelledby="message-sources-title"></div>
+    </dialog>
+
     <div id="project-menu" class="history-item-menu" role="menu" aria-label="プロジェクトの操作" hidden>
         <button type="button" role="menuitem" data-project-action="edit"><span class="material-symbols-outlined" aria-hidden="true">edit</span>名前・説明を編集</button>
         <button type="button" role="menuitem" class="history-item-menu-delete" data-project-action="delete"><span class="material-symbols-outlined" aria-hidden="true">delete</span>プロジェクトを削除</button>
