@@ -19454,7 +19454,9 @@ const appLogic = {
         while ((match = blockRegex.exec(remainingText)) !== null) {
             const role = match[1];
             const attributesString = match[2].trim();
-            const content = match[3].trim();
+            const content = match[3]
+                .replace(/^\r?\n/, '')
+                .replace(/\r?\n$/, '');
     
             if (role === 'system' && content) {
                 systemPrompt = content;
