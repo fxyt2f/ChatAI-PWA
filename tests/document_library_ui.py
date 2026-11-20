@@ -246,15 +246,13 @@ def run(client, url, screenshots=None):
         }})()""")
 
     def open_reference(touch):
-        assert ev("document.querySelector('.rag-references summary').textContent.startsWith('参照ファイル')")
-        if ev("document.querySelector('.rag-references').closest('.message-info').hidden"):
-            pointer('.message:has(.rag-references) .tm-message-info-btn', touch)
-            wait("!document.querySelector('.rag-references').closest('.message-info').hidden", 'Reference information opens')
-        if not ev("document.querySelector('.rag-references').open"):
-            pointer('.rag-references summary', touch)
+        pointer('.message.model:last-child .tm-message-menu-btn', touch)
+        pointer('#message-action-menu button:last-child', touch)
+        wait("document.getElementById('message-sources-dialog').matches(':modal')", 'Source dialog opens')
         wait("document.querySelector('.rag-references button').getClientRects().length", 'Reference location is visible')
         pointer('.rag-references button', touch)
         wait("!document.querySelector('#document-library-workspace').hidden", 'Reference opens the workspace')
+        assert ev("!document.getElementById('message-sources-dialog').open")
 
     def type_search(query, scope=''):
         field = prefix + scope + 'query'
@@ -1203,13 +1201,27 @@ def run(client, url, screenshots=None):
     chat = ev(f"""(async () => {{
         const {{messages}} = await dbUtils.getChat({chat1});
         const rag = messages.find(message => message.rag?.sources.length).rag;
+        const firstSource = rag.sources[0];
+        const localSources = {{
+            ...rag,
+            sources: [
+                ...[10, 1, 5, 10000008, 10000012].map((page, index) => ({{
+                    ...firstSource, fileName:'資料'.repeat(32) + '.pdf',
+                    versionId: index === 1 ? 'a'.repeat(32) : firstSource.versionId,
+                    chunkId: index === 1 ? 'a'.repeat(32) + ':1' : firstSource.chunkId,
+                    location:{{type:'pdf', page}}
+                }})),
+                {{...firstSource, documentId:'b'.repeat(32), fileName:'参考資料.pdf', location:{{type:'pdf', page:3}}}}
+            ]
+        }};
         await appLogic.saveGlobalSettingsV136({{showThoughtProcess:true}});
         appLogic.startNewChat();
         state.currentMessages.push(
             {{role:'user', content:'検証用の質問'}},
             {{role:'model', content:'通常の回答', executedFunctions:[]}},
-            {{role:'model', content:'資料を使った回答', rag, executedFunctions:['fixture_tool', 'fixture_tool', ' '],
-                groundingMetadata:{{groundingChunks:[{{web:{{uri:'https://example.test/source', title:'検索の出典'}}}}], webSearchQueries:['検索語']}},
+            {{role:'model', content:'資料を使った回答', rag:localSources, executedFunctions:['fixture_tool', 'fixture_tool', ' '],
+                groundingMetadata:{{groundingChunks:[{{web:{{uri:'https://example.test/source', title:'検索の出典'}}}}],
+                    webSearchQueries:['検索語', ...Array.from({{length:30}}, (_,i)=>`補足検索 ${{i}}`)]}},
                 usageMetadata:{{candidatesTokenCount:1234,totalTokenCount:5048,thoughtsTokenCount:48,tmExecution:{{modelName:'fixture-model'}}}},
                 retryCount:1, proofreadingModelInfo:{{label:'Fixture / proofreader'}}, thoughtSummary:'保存された思考の要約'}},
             {{role:'model', content:'ツールのみの履歴', executedFunctions:['other_tool']}},
@@ -1239,16 +1251,16 @@ def run(client, url, screenshots=None):
         const rows = [...elements.messageContainer.querySelectorAll('.message')];
         const withInfo = rows.filter(row=>row.querySelector('.tm-message-info-btn')).map(row=>row.dataset.index).join(',');
         const button = rows[2].querySelector('.tm-message-info-btn'), panel = rows[2].querySelector('.message-info');
-        return withInfo === '2,3,9,10,11' && button.previousElementSibling.matches('.js-delete-btn') &&
-            button.parentElement.lastElementChild === button && panel.hidden && button.getAttribute('aria-expanded') === 'false' &&
+        return withInfo === '2,3,5' && button.nextElementSibling.matches('.tm-message-menu-btn') &&
+            panel.hidden && button.getAttribute('aria-expanded') === 'false' &&
             button.getAttribute('aria-controls') === panel.id && panel.nextElementSibling.matches('.message-actions') &&
             panel.previousElementSibling.matches('.message-edit-area.hidden') &&
-            rows[5].querySelector('.rag-status').getClientRects().length &&
+            rows[5].querySelector('.message-info .rag-status') && !rows[5].querySelector('.message-sources') &&
             rows[5].querySelector('.search-results-details summary').getClientRects().length &&
             rows[6].textContent.includes('検証用のエラー') &&
             rows[7].querySelector('.message-actions > .message-action-meta').textContent==='(リトライ: 2回)' &&
             rows[8].firstElementChild.matches('.thought-summary-details:not([open])') &&
-            [9,10,11].every(i => rows[i].querySelector('.message-info').children.length===1) &&
+            [9,10,11].every(i => !rows[i].querySelector('.message-sources, .message-info')) &&
             rows[10].querySelector('.message-actions > .message-action-meta').textContent==='12 / 48' &&
             rows[11].firstElementChild.matches('.thought-summary-details:not([open])');
     })()""")
@@ -1286,8 +1298,8 @@ def run(client, url, screenshots=None):
             const delta=red(style.backgroundColor)-red(style.getPropertyValue('--bg-primary'));
             return !panel.hidden && panel.getBoundingClientRect().bottom <= panel.nextElementSibling.getBoundingClientRect().top &&
                 style.backgroundColor===thoughtBackground && ({str(dark).lower()} ? delta > 0 : delta < 0) &&
-                style.borderWidth==='0px' && style.boxShadow==='none' && panel.querySelector('.rag-references button').getClientRects().length &&
-                ['fixture_tool','検索の出典','検索語'].every(text=>panel.textContent.includes(text)) &&
+                style.borderWidth==='0px' && style.boxShadow==='none' &&
+                panel.textContent.includes('fixture_tool') && !/検索の出典|検索語|参照ファイル/.test(panel.textContent) &&
                 expected.every((text,i)=>entries[i].textContent===text && !panel.textContent.includes(text)) &&
                 visualOrder.map(node=>node.textContent).join('|')===[expected[2],expected[0],expected[1],expected[3]].join('|') &&
                 entries[0].title==='Candidate Tokens / Total Tokens' && entries[1].style.marginLeft==='8px' &&
@@ -1301,6 +1313,72 @@ def run(client, url, screenshots=None):
         pointer(info, False)
         assert ev(f"document.querySelector({json.dumps(panel)}).hidden && document.querySelector({json.dumps(thought)}).open")
         pointer(thought + ' > summary', False)
+
+    menu_trigger = row + ' .tm-message-menu-btn'
+    for width, touch in ((1280, False), (768, True), (390, True), (320, True)):
+        viewport(width, 760, touch)
+        pointer(menu_trigger, touch)
+        assert ev("""(() => {
+            const menu=document.getElementById('message-action-menu'), box=menu.getBoundingClientRect();
+            const footer=index=>document.querySelector(`.message[data-index="${index}"] .message-action-buttons`);
+            const more=footer(2).querySelector('.tm-message-menu-btn'), info=more.previousElementSibling;
+            const withoutInfo=footer(9).querySelector('.tm-message-menu-btn');
+            const buttons=[info.previousElementSibling,info,more];
+            const boxes=buttons.map(button=>button.getBoundingClientRect());
+            const gap=parseFloat(getComputedStyle(footer(2)).columnGap);
+            return more.firstElementChild.textContent==='more_vert' && info.matches('.tm-message-info-btn') &&
+                withoutInfo.previousElementSibling.matches('.js-delete-btn') && boxes.slice(1).every((rect,i)=>
+                    rect.top===boxes[i].top && Math.abs(rect.left-boxes[i].right-gap)<1 && rect.width===boxes[i].width) &&
+                box.left>=0 && box.right<=innerWidth && box.top>=0 && box.bottom<=innerHeight &&
+                [...menu.children].map(button=>button.lastChild.textContent).join('|')==='この回答のみ再生成|ここから再生成|ソースを表示';
+        })()""")
+        key('End', 35)
+        assert ev("document.activeElement.lastChild.textContent==='ソースを表示'")
+        key('Escape', 27)
+        assert ev(f"!document.getElementById('message-action-menu') && document.activeElement===document.querySelector({json.dumps(menu_trigger)})")
+        pointer(menu_trigger, touch)
+        pointer('#message-action-menu button:last-child', touch)
+        assert ev(f"""(() => {{
+            const dialog=document.getElementById('message-sources-dialog'), sources=dialog.querySelector('.message-sources');
+            const box=dialog.getBoundingClientRect();
+            const references=sources.querySelector('.rag-references');
+            const [first, second]=references.children;
+            const chips=[...first.querySelectorAll('button')];
+            const chipRows=chips.map(chip=>chip.getBoundingClientRect().top);
+            return dialog.matches(':modal') && document.getElementById('message-sources-title').textContent==='ソース' &&
+                Math.abs(box.left+box.right-innerWidth)<2 && box.width<=Math.min(560,innerWidth-24) &&
+                box.top>=0 && box.bottom<=innerHeight && sources.scrollHeight>sources.clientHeight &&
+                !document.getElementById('message-action-menu') && sources.scrollWidth<=sources.clientWidth &&
+                references.children.length===2 && [first,second].every(group=>
+                    [...group.children].map(child=>child.tagName).join('|')==='H4|UL' &&
+                    group.querySelector('h4').scrollWidth<=group.querySelector('h4').clientWidth) &&
+                first.querySelector('h4').textContent==='資料'.repeat(32)+'.pdf' &&
+                second.textContent==='参考資料.pdfページ 3' &&
+                chips.map(chip=>chip.textContent).join('|')==='ページ 10|ページ 1|ページ 5|ページ 10000008|ページ 10000012' &&
+                chipRows[0]===chipRows[1] && (innerWidth>390 || chipRows[0]<chipRows.at(-1)) &&
+                sources.querySelector('.citation-list a').href==='https://example.test/source' && sources.textContent.includes('検索語') &&
+                document.querySelector({json.dumps(body)}).textContent==={json.dumps(body_text)};
+        }})()""")
+        if width in (1280, 390):
+            capture(f'source-modal-{width}')
+        if width == 1280:
+            key('Escape', 27)
+        elif width == 390:
+            client.call('Input.dispatchTouchEvent', {'type':'touchStart', 'touchPoints':[{'x':5,'y':380}]})
+            client.call('Input.dispatchTouchEvent', {'type':'touchEnd', 'touchPoints':[]})
+        else:
+            pointer('#message-sources-dialog form button', touch)
+        wait("!document.getElementById('message-sources-dialog').open", 'Source dialog closes')
+        assert ev(f"document.activeElement===document.querySelector({json.dumps(menu_trigger)})")
+        if width == 390:
+            # The shared backdrop dismissal suppresses the synthetic click following the tap.
+            time.sleep(.85)
+        pointer(menu_trigger, touch)
+        ev("elements.messageContainer.dispatchEvent(new Event('scroll'))")
+        assert ev("!document.getElementById('message-action-menu')")
+        pointer(menu_trigger, touch)
+        ev("document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}))")
+        assert ev("!document.getElementById('message-action-menu')")
 
     viewport(390, 760, True)
     pointer(thought + ' > summary', True)
@@ -1331,5 +1409,24 @@ def run(client, url, screenshots=None):
     wait("!elements.messageContainer.textContent.includes('fixture_tool')", 'Deleting the message removes its information')
     assert ev("""document.querySelector('.message[data-index="2"] .message-info').hidden &&
         document.querySelector('.message[data-index="2"] .message-info').textContent.includes('other_tool')""")
-    checks.append('message info condition, multiple sources, inline toggle, themes, touch, rerender, load and deletion')
+    ev("""(() => {
+        state.currentMessages.push({role:'user',content:'出典の異なる候補'}, ...['候補Aの出典','候補Bの出典'].map((title,index)=>({
+            role:'model',content:'候補 '+index,isCascaded:true,isSelected:index===0,siblingGroupId:'source-dialog-fixture',
+            groundingMetadata:{groundingChunks:[{web:{uri:'https://example.test/'+index,title}}]}
+        })));
+        uiUtilsV136.renderChatMessages();
+    })()""")
+    for index, title in enumerate(('候補Aの出典', '候補Bの出典')):
+        ev("""(() => {
+            document.querySelector('.message.model:last-child .tm-message-menu-btn').click();
+            document.querySelector('#message-action-menu button:last-child').click();
+        })()""")
+        assert ev(f"document.querySelector('#message-sources-dialog .citation-list').textContent.trim()==={json.dumps(title)}")
+        if index == 0:
+            ev("appLogic.navigateCascade(state.currentMessages.length-2,'next')")
+            assert ev("!document.getElementById('message-sources-dialog').open")
+        else:
+            assert ev(f"appLogic.loadChat({chat}).then(result=>result.ok)")
+            assert ev("!document.getElementById('message-sources-dialog').open")
+    checks.append('message info, source dialog layout and dismissal, versioned links, candidate isolation, themes, and touch')
     return f'ALL PASSED ({len(checks)+1} document library UI scenarios: {"; ".join(checks)}; 320px overflow and keyboard menu)'

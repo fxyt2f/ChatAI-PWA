@@ -195,8 +195,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.3-beta.1";
-const APP_CACHE_VERSION = "v1.37.3-beta.1";
+const APP_VERSION = "1.37.3";
+const APP_CACHE_VERSION = "v1.37.3";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -1813,7 +1813,8 @@ const dbUtils = {
 
     bindChatSaveOwnerV136(messages, chat) {
         this.chatSaveOwners ||= new WeakMap();
-        const owner = { id: chat.id, createdAt: chat.createdAt, ...SettingsV136.chatContentVersion(chat) };
+        const owner = { id: chat.id, createdAt: chat.createdAt, changeHistoryLayout: chat.changeHistoryLayout,
+            ...SettingsV136.chatContentVersion(chat) };
         this.chatSaveOwners.set(messages, owner);
     },
     commitChatInformation(chatId, expectedVersion, update) {
@@ -1893,6 +1894,7 @@ const dbUtils = {
         // Capture the owner and contents before the first async boundary. A prompt
         // save may still be finishing when navigation changes the active chat.
         const session = options.sendSession;
+        const answerReplacement = options.answerReplacement;
         const contextMessages = session?.messages ?? state.currentMessages;
         const draftProjectId = chatObjectToSave ? null : this.projectDrafts?.get(contextMessages);
         let contextChatId = session ? session.chatId : state.currentChatId;
@@ -1924,7 +1926,9 @@ const dbUtils = {
                 && !contextMessages?.length && !systemPrompt && !documentIds?.length) return contextChatId;
 
             const placeholder = session?.placeholder;
-            const snapshot = placeholder ? contextMessages.filter(message => message !== placeholder) : contextMessages;
+            const snapshot = answerReplacement ? [...contextMessages.slice(0, answerReplacement.start),
+                ...answerReplacement.messages, ...contextMessages.slice(answerReplacement.end)] :
+                placeholder ? contextMessages.filter(message => message !== placeholder) : contextMessages;
             const messagesToSave = snapshot.map(msg => ({
                 ...SettingsV136.pick(msg, ['geminiFunctionCallId', 'name', 'response', '_toolCallId', 'tool_call_id',
                     'thinkingBudget', 'thinkingConfig', 'thoughtParts', 'thoughtSignature',
@@ -2043,6 +2047,7 @@ const dbUtils = {
                     const removed = settingsStore.get(SettingsV136.REMOVED_MODELS_KEY);
                     let savedSuccessfulExecution = null;
                     let linkError;
+                    let historyStorageError, stagedHistory;
                     const now = Date.now();
 
                     const processSave = (existingChatData = null) => {
@@ -2071,6 +2076,33 @@ const dbUtils = {
                             pinnedAt: pinState.isPinned ? pinState.pinnedAt : null,
                             pinStateUpdatedAt: pinState.pinStateUpdatedAt
                         };
+                        if (answerReplacement && existingChatData) {
+                            const { start, end, messages, sourceIndices } = answerReplacement;
+                            const original = existingChatData.messages;
+                            const turn = messages.map((message, offset) => {
+                                const oldIndex = sourceIndices.get(message);
+                                if (oldIndex === undefined) return chatDataToSave.messages[start + offset];
+                                const old = original[oldIndex];
+                                const selectionChanged = answerReplacement.selectionGroupId && message.siblingGroupId === answerReplacement.selectionGroupId;
+                                return message === contextMessages[oldIndex] && !selectionChanged ? old : { ...old,
+                                    ...SettingsV136.pick(message, ['siblingGroupId', 'isCascaded', 'isSelected']) };
+                            });
+                            finalChatData.messages = [...original.slice(0, start), ...turn, ...original.slice(end)];
+                            if (!answerReplacement.selectionGroupId) {
+                                try {
+                                    stagedHistory = stageRegeneratedChangeHistory(existingChatData, finalChatData.messages, answerReplacement);
+                                    finalChatData.changeHistoryLayout = stagedHistory.layout;
+                                } catch (error) {
+                                    historyStorageError = error;
+                                    transaction.abort();
+                                    return;
+                                }
+                            }
+                            for (const key of ['persistentMemory', 'summarizedContext', 'isMemoryEnabledForChat']) {
+                                if (Object.hasOwn(existingChatData, key)) finalChatData[key] = existingChatData[key];
+                                else delete finalChatData[key];
+                            }
+                        }
                         const removedRefs = removed.result?.value;
                         if (existingChatData?.parameterRevision > (chatDataToSave.parameterRevision || 0)) {
                             finalChatData.systemPrompt = existingChatData.systemPrompt;
@@ -2125,7 +2157,8 @@ const dbUtils = {
                         putRequest.onsuccess = (event) => {
                             const savedId = event.target.result;
                             savedChatId = savedId;
-                            savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt };
+                            savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt,
+                                changeHistoryLayout: finalChatData.changeHistoryLayout };
                             const relatedWrites = [];
                             if (documentIds) relatedWrites.push(
                                 DocumentLibrary.replaceLinks(transaction, SETTINGS_STORE, savedId, documentIds, options.documentLinkMode));
@@ -2174,9 +2207,11 @@ const dbUtils = {
                             }
                             return;
                         }
-                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, createdAt: savedUiState?.createdAt });
+                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, createdAt: savedUiState?.createdAt,
+                            changeHistoryLayout: savedUiState?.changeHistoryLayout });
                         if (session) session.chatId = savedChatId;
                         try {
+                            if (stagedHistory) removeStoredChangeHistory(stagedHistory.previousKey);
                             if (savedUiState && ownsContext()) {
                                 if (!contextChatId && savedChatId) {
                                     const projectDraftKey = draftProjectId && appLogic.getInputDraftContextKey();
@@ -2208,7 +2243,10 @@ const dbUtils = {
                         console.error("チャット保存トランザクション失敗:", event.target.error);
                         reject(new Error(`チャット保存トランザクション失敗: ${event.target.error.message}`));
                     };
-                    transaction.onabort = () => reject(linkError || transaction.error || new Error('チャット保存が中断されました。'));
+                    transaction.onabort = () => {
+                        if (stagedHistory) removeStoredChangeHistory(stagedHistory.nextKey);
+                        reject(historyStorageError || linkError || transaction.error || new Error('チャット保存が中断されました。'));
+                    };
 
                 } catch (error) {
                     console.error("チャット保存処理の開始に失敗:", error);
@@ -3451,6 +3489,18 @@ const uiUtils = {
 
     updateGenerationStatusIndicator() {
         const indicator = this.ensureGenerationStatusIndicator();
+        const session = state.sendExecutionV136;
+        const container = elements.messageContainer;
+        const hasPlaceholder = session?.placeholder && container.querySelector(`#streaming-message-${session.modelIndex}`);
+        const anchorIndex = session?.regenerationUserMessage ? session.messages.indexOf(session.regenerationUserMessage) : -1;
+        const anchor = anchorIndex >= 0 && !hasPlaceholder && appLogic.ownsSendExecutionV136(session) &&
+            appLogic.showsSendExecutionV136(session) && container.querySelector(`:scope > .message.user[data-index="${anchorIndex}"]`);
+        const temporary = container.querySelector(':scope > #streaming-message--1');
+        if (anchor && !temporary) {
+            anchor.after(this.createMessageElement('model', '', -1, true, null, null, { role: 'model' }));
+        } else if (!anchor) {
+            temporary?.remove();
+        }
         const isActive = this.isResponseGenerationActive();
         const chatScreen = elements.chatScreen || document.getElementById('chat-screen');
 
@@ -4784,6 +4834,8 @@ const uiUtils = {
     },
 
 renderChatMessages(options = {}) {
+    this.closeMessageActionMenu();
+    this.closeMessageSources();
     const renderStartTime = performance.now();
     const renderOptions = typeof options === 'function' ? { afterRender: options } : (options || {});
     const suppressMessageAnimation = Boolean(renderOptions.suppressMessageAnimation);
@@ -4943,6 +4995,8 @@ updateStreamingMessage(index, { content, thoughtSummary }) {
     if (!body || !elements.messageContainer.contains(body)) return;
     const scroll = this.getStreamingScrollTarget();
     if (content) {
+        const status = body.querySelector(':scope > .generation-placeholder-content');
+        if (status) body.after(status);
         body.classList.add('streaming-plain-text');
         if (body.textContent !== content) body.textContent = content;
     }
@@ -4968,8 +5022,8 @@ renderStreamingResult() {
 
 openMessageInfo: new WeakSet(),
 
-createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null) {
-    const messageData = state.currentMessages[index];
+createMessageElement(role, content, index, isStreamingPlaceholder = false, cascadeInfo = null, attachments = null,
+    messageData = state.currentMessages[index]) {
     if (!messageData) return null;
     const isEmptyErrorResponse = role === 'model' && !isStreamingPlaceholder && messageData.incomplete &&
         content === '' && typeof messageData.error === 'string' && Boolean(messageData.error);
@@ -4988,6 +5042,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     
     const messageInfo = document.createElement('div');
     messageInfo.className = 'message-info';
+    const sources = document.createElement('div');
     if (role === 'model' && messageData?.thoughtSummary && appLogic.getShowThoughtProcess()) {
         messageDiv.appendChild(this.createThoughtProcessDetails(messageData, isStreamingPlaceholder));
     }
@@ -5128,6 +5183,10 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
     }
     messageDiv.appendChild(contentDiv);
+    if (index === -1 && isStreamingPlaceholder) {
+        messageDiv.id = 'streaming-message--1';
+        return messageDiv;
+    }
             
     if (role === 'model' && messageData && messageData.imageIds && messageData.imageIds.length > 0) {
         htmlUtils.insertGeneratedImages(contentDiv, messageData.imageIds);
@@ -5234,7 +5293,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
                 detailsHasContent = true;
             }
             if (detailsHasContent) {
-                messageInfo.appendChild(details);
+                sources.appendChild(details);
             }
         } catch (e) {
             console.error(`引用元/検索クエリ表示の生成中にエラーが発生しました (index: ${index}):`, e);
@@ -5322,8 +5381,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     const editArea = document.createElement('div');
     if (role === 'model' && !isStreamingPlaceholder) {
         const rag = window.DocumentRag?.render(messageData);
-        if (rag?.references) messageInfo.prepend(rag.references);
-        if (rag?.warning) messageDiv.appendChild(rag.warning);
+        if (rag?.references) sources.prepend(rag.references);
+        if (rag?.warning) messageInfo.appendChild(rag.warning);
         if (messageData.incomplete && typeof messageData.error === 'string' && messageData.error) {
             const errorText = document.createElement('div');
             errorText.className = 'message-info-error';
@@ -5454,14 +5513,6 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             deleteButton.classList.add('js-delete-btn');
             deleteButton.onclick = () => appLogic.deleteMessage(index);
             actionButtonsDiv.appendChild(deleteButton);
-            if (role === 'user') {
-                const retryButton = document.createElement('button');
-                retryButton.innerHTML = '<span class="material-symbols-outlined">replay</span> 再生成'; 
-                retryButton.title = 'このメッセージから再生成'; 
-                retryButton.classList.add('js-retry-btn');
-                retryButton.onclick = () => appLogic.retryFromMessage(index);
-                actionButtonsDiv.appendChild(retryButton);
-            }
         }
 
         if (role === 'model' && messageData?.usageMetadata &&
@@ -5553,6 +5604,35 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             };
             actionButtonsDiv.appendChild(infoButton);
             messageDiv.appendChild(messageInfo);
+        }
+        if (role === 'model' && !isStreamingPlaceholder) {
+            const trigger = document.createElement('button');
+            trigger.type = 'button';
+            trigger.className = 'tm-message-menu-btn';
+            trigger.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">more_vert</span>';
+            trigger.title = '回答の操作';
+            trigger.setAttribute('aria-label', '回答の操作');
+            trigger.setAttribute('aria-haspopup', 'menu');
+            trigger.setAttribute('aria-expanded', 'false');
+            trigger.setAttribute('aria-controls', 'message-action-menu');
+            const owner = state.currentMessages;
+            const chatId = state.currentChatId;
+            const isCurrent = () => trigger.isConnected && state.currentScreen === 'chat' && state.currentChatId === chatId &&
+                state.currentMessages === owner && owner[index] === messageData && (!messageData.isCascaded || messageData.isSelected);
+            const canMutate = () => !appLogic.isGenerationBlockingActive() && state.editingMessageIndex === null;
+            trigger.onclick = () => {
+                const actions = [
+                    { icon: 'replay', label: 'この回答のみ再生成', enabled: () => canMutate() && !state.isEditingSystemPrompt &&
+                        appLogic.canRegenerateAnswerV137(owner, index),
+                        run: () => appLogic.regenerateAnswerV137(index, messageData) },
+                    { icon: 'replay', label: 'ここから再生成', enabled: () => canMutate() && appLogic.getAnswerRetryUserIndexV137(index) >= 0,
+                        run: () => appLogic.retryFromMessage(appLogic.getAnswerRetryUserIndexV137(index)) }
+                ];
+                if (sources.hasChildNodes()) actions.push({ icon: 'source', label: 'ソースを表示', enabled: () => true,
+                    run: () => this.openMessageSources(sources) });
+                this.openMessageActionMenu(trigger, actions, isCurrent);
+            };
+            actionButtonsDiv.appendChild(trigger);
         }
         if (actionButtonsDiv.hasChildNodes()) {
             actionsDiv.appendChild(actionButtonsDiv);
@@ -6245,6 +6325,97 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         historyUiState.menuContext = null;
         if (restoreFocus && anchor?.isConnected) anchor.focus();
+    },
+
+    closeMessageActionMenu(restoreFocus = false) {
+        const context = this.messageActionMenu;
+        if (!context) return;
+        this.messageActionMenu = null;
+        context.listeners.abort();
+        context.menu.remove();
+        context.trigger.setAttribute('aria-expanded', 'false');
+        if (restoreFocus && context.trigger.isConnected) context.trigger.focus({ preventScroll: true });
+    },
+
+    openMessageSources(sources) {
+        this.installDialogDismissal();
+        const dialog = document.getElementById('message-sources-dialog');
+        if (dialog.open) return;
+        const content = dialog.querySelector('.message-sources');
+        content.replaceChildren(sources);
+        content.scrollTop = 0;
+        dialog.onclose = () => {
+            if (!dialog.open) content.replaceChildren();
+        };
+        dialog.showModal();
+    },
+
+    closeMessageSources() {
+        const dialog = document.getElementById('message-sources-dialog');
+        if (dialog?.open) dialog.close();
+    },
+
+    openMessageActionMenu(trigger, actions, isCurrent) {
+        const toggling = this.messageActionMenu?.trigger === trigger;
+        this.closeMessageActionMenu();
+        if (toggling || !isCurrent()) return;
+        this.closeHistoryItemMenu();
+        const menu = document.createElement('div');
+        menu.id = 'message-action-menu';
+        menu.className = 'history-item-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', '回答の操作');
+        menu.tabIndex = -1;
+        for (const action of actions) {
+            const item = document.createElement('button');
+            const icon = document.createElement('span');
+            icon.className = 'material-symbols-outlined';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = action.icon;
+            item.type = 'button';
+            item.setAttribute('role', 'menuitem');
+            item.disabled = !action.enabled();
+            item.tabIndex = -1;
+            item.append(icon, action.label);
+            item.onclick = () => {
+                if (this.messageActionMenu?.menu !== menu) return;
+                const allowed = isCurrent() && action.enabled();
+                this.closeMessageActionMenu(true);
+                if (allowed) return action.run();
+            };
+            menu.appendChild(item);
+        }
+        const listeners = new AbortController();
+        const options = { capture: true, signal: listeners.signal };
+        this.messageActionMenu = { menu, trigger, listeners };
+        document.body.appendChild(menu);
+        trigger.setAttribute('aria-expanded', 'true');
+        this.positionRowMenu(menu, trigger);
+        const items = [...menu.querySelectorAll('button:not(:disabled)')];
+        (items[0] || menu).focus({ preventScroll: true });
+        document.addEventListener('pointerdown', event => {
+            if (!menu.contains(event.target) && !trigger.contains(event.target)) this.closeMessageActionMenu();
+        }, options);
+        window.addEventListener('scroll', event => {
+            if (!(event.target instanceof Node && menu.contains(event.target))) this.closeMessageActionMenu();
+        }, options);
+        window.addEventListener('resize', () => this.closeMessageActionMenu(), options);
+        window.visualViewport?.addEventListener('resize', () => this.closeMessageActionMenu(), options);
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                this.closeMessageActionMenu(true);
+            } else if (event.key === 'Tab') {
+                this.closeMessageActionMenu(true);
+            } else if (items.length && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                event.preventDefault();
+                const index = items.indexOf(document.activeElement);
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+                    (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+                items[next].focus({ preventScroll: true });
+            }
+        }, options);
     },
 
     positionHistoryItemMenu() {
@@ -7306,6 +7477,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         return this.getCategoryPane('settings')?.getHashEntry() || this.getCategoryPane('information')?.getHashEntry();
     },
     showScreen(screenName, fromPopState = false, categoryEntry = null, { swipe = false } = {}) {
+        this.closeMessageActionMenu();
+        this.closeMessageSources();
         const library = screenName === 'library';
         if (library) screenName = 'chat';
         const pane = this.getCategoryPane(screenName);
@@ -8063,6 +8236,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     installDialogDismissal() {
         if (this.dialogDismissalInstalled) return;
         this.dialogDismissalInstalled = true;
+        document.getElementById('message-sources-dialog')?.addEventListener('click', event => {
+            if (event.target.closest('.rag-references button')) this.closeMessageSources();
+        }, true);
         let gesture = null;
         let blockClickUntil = 0;
         const previousFocus = new WeakMap();
@@ -10292,8 +10468,20 @@ function hasChangeHistoryChatId(chatId) {
     return chatId !== null && chatId !== undefined && String(chatId) !== '';
 }
 
-function makeChangeHistoryStorageKey(chatId) {
-    return `${CHANGE_HISTORY_STORAGE_PREFIX}${encodeURIComponent(String(chatId ?? ''))}`;
+function makeChangeHistoryStorageKey(chatId, layout) {
+    const key = `${CHANGE_HISTORY_STORAGE_PREFIX}${encodeURIComponent(String(chatId ?? ''))}`;
+    return layout ? `${key}:${layout}` : key;
+}
+
+function getChangeHistoryStorageKey(chatId, messages = state.currentMessages) {
+    const owner = dbUtils.chatSaveOwners?.get(messages);
+    return makeChangeHistoryStorageKey(chatId, String(owner?.id) === String(chatId) ? owner.changeHistoryLayout : undefined);
+}
+
+function removeStoredChangeHistory(key) {
+    changeHistoryCache.delete(key);
+    try { localStorage.removeItem(key); }
+    catch (error) { console.warn('[ChangeHistory] 履歴の削除に失敗しました:', error); }
 }
 
 function createChangeHistoryId() {
@@ -10476,15 +10664,62 @@ function pruneChangeHistory(entries) {
     return pruned;
 }
 
+function stageRegeneratedChangeHistory(chat, nextMessages, { start, end, messages, sourceIndices }) {
+    // Select the staged key only when the IndexedDB transaction commits the new layout.
+    const layout = crypto.randomUUID();
+    const previousKey = makeChangeHistoryStorageKey(chat.id, chat.changeHistoryLayout);
+    const nextKey = makeChangeHistoryStorageKey(chat.id, layout);
+    const entries = JSON.parse(localStorage.getItem(previousKey) ?? '[]');
+    const original = chat.messages;
+    const nextIndices = new Map();
+    messages.forEach((message, offset) => {
+        if (sourceIndices.has(message)) nextIndices.set(sourceIndices.get(message), start + offset);
+    });
+    const identify = (records, index) => {
+        const message = records[index];
+        if (!message || message.isHidden || !CHANGE_HISTORY_ROLES.has(message.role)) return null;
+        const siblingGroupId = message.isCascaded && message.siblingGroupId || undefined;
+        const cascadeIndex = siblingGroupId ? records.slice(0, index).filter(entry =>
+            !entry.isHidden && entry.isCascaded && entry.siblingGroupId === siblingGroupId).length : undefined;
+        return { index, role: message.role, siblingGroupId, cascadeIndex };
+    };
+    const remap = target => {
+        const { index } = target;
+        const previous = identify(original, index);
+        if (!previous || previous.role !== target.role || previous.siblingGroupId !== (target.siblingGroupId || undefined) ||
+            previous.cascadeIndex !== (target.cascadeIndex ?? undefined)) return null;
+        const nextIndex = index < start ? index : index < end ? nextIndices.get(index) : index + nextMessages.length - original.length;
+        return identify(nextMessages, nextIndex);
+    };
+    const history = (Array.isArray(entries) ? entries : []).map(entry => normalizeChangeHistoryEntry(entry, chat.id))
+        .filter(Boolean).map(entry => {
+            const changes = entry.changes.flatMap(change => {
+                const target = remap(change);
+                return target ? [{ ...change, ...target }] : [];
+            });
+            if (!changes.length) return null;
+            if (entry.scope === 'message' && entry.targetMessageRole) {
+                const target = remap({ index: entry.targetMessageIndex, role: entry.targetMessageRole,
+                    siblingGroupId: entry.targetSiblingGroupId,
+                    cascadeIndex: entry.targetSiblingGroupId ? entry.targetCascadeIndex : undefined });
+                entry = { ...entry, targetMessageIndex: target?.index ?? null,
+                    targetCascadeIndex: target?.cascadeIndex ?? null, targetSiblingGroupId: target?.siblingGroupId ?? null };
+            }
+            return { ...entry, changes, status: summarizeChangeHistoryEntryStatus({ ...entry, changes }) };
+        });
+    localStorage.setItem(nextKey, JSON.stringify(pruneChangeHistory(history)));
+    return { layout, previousKey, nextKey };
+}
+
 async function loadChangeHistory(chatId, forceReload = false) {
     if (!hasChangeHistoryChatId(chatId)) return [];
-    const cacheKey = String(chatId);
+    const cacheKey = getChangeHistoryStorageKey(chatId);
     if (!forceReload && changeHistoryCache.has(cacheKey)) {
         return changeHistoryCache.get(cacheKey);
     }
 
     try {
-        const rawValue = localStorage.getItem(makeChangeHistoryStorageKey(chatId));
+        const rawValue = localStorage.getItem(cacheKey);
         if (!rawValue) {
             changeHistoryCache.set(cacheKey, []);
             return [];
@@ -10504,9 +10739,9 @@ async function loadChangeHistory(chatId, forceReload = false) {
     }
 }
 
-async function saveChangeHistory(chatId, history) {
+async function saveChangeHistory(chatId, history, messages = state.currentMessages) {
     if (!hasChangeHistoryChatId(chatId)) return false;
-    const cacheKey = String(chatId);
+    const cacheKey = getChangeHistoryStorageKey(chatId, messages);
     const normalizedHistory = pruneChangeHistory(
         (Array.isArray(history) ? history : [])
             .map(entry => normalizeChangeHistoryEntry(entry, chatId))
@@ -10515,7 +10750,7 @@ async function saveChangeHistory(chatId, history) {
 
     try {
         const serialized = JSON.stringify(normalizedHistory);
-        localStorage.setItem(makeChangeHistoryStorageKey(chatId), serialized);
+        localStorage.setItem(cacheKey, serialized);
         changeHistoryCache.set(cacheKey, normalizedHistory);
         return true;
     } catch (error) {
@@ -10563,7 +10798,7 @@ async function appendChangeHistory(chatId, entry) {
     const saved = await saveChangeHistory(chatId, nextHistory);
     return {
         saved,
-        history: changeHistoryCache.get(String(chatId)) || nextHistory
+        history: changeHistoryCache.get(getChangeHistoryStorageKey(chatId)) || nextHistory
     };
 }
 
@@ -11146,6 +11381,9 @@ const appLogic = {
 
     async applyLatestChangeForMessage(messageIndex, role, direction) {
         if (state.isApplyingChangeHistory || state.chatReplacePreview.isExecuting) return { success: false };
+        const chatId = state.currentChatId;
+        const messages = state.currentMessages;
+        const ownsChat = () => state.currentChatId === chatId && state.currentMessages === messages;
         const isUndo = direction === 'undo';
         const actionLabel = isUndo ? 'Undo' : 'Redo';
 
@@ -11153,7 +11391,7 @@ const appLogic = {
             this.setChangeHistoryStatus(`生成中は${actionLabel}できません`, true);
             return { success: false };
         }
-        if (state.isApplyingChangeHistory || state.chatReplacePreview.isExecuting) return { success: false };
+        if (!ownsChat() || state.isApplyingChangeHistory || state.chatReplacePreview.isExecuting) return { success: false };
         if (state.editingMessageIndex !== null || state.isEditingSystemPrompt) {
             this.setChangeHistoryStatus(`編集中は${actionLabel}できません`, true);
             return { success: false };
@@ -11172,8 +11410,12 @@ const appLogic = {
         state.isApplyingChangeHistory = true;
         await this.updateChangeHistoryControls();
 
-        const chatId = state.currentChatId;
         const history = await loadChangeHistory(chatId, true);
+        if (!ownsChat()) {
+            state.isApplyingChangeHistory = false;
+            await this.updateChangeHistoryControls();
+            return { success: false };
+        }
         const cascadeIndex = visibleTarget.cascadeIndex ?? null;
         const changeTarget = findLatestApplicableChangeForMessage(
             history,
@@ -11228,7 +11470,7 @@ const appLogic = {
                 changeTarget.changeIndex,
                 direction
             );
-            const saved = await saveChangeHistory(chatId, nextHistory);
+            const saved = await saveChangeHistory(chatId, nextHistory, messages);
             if (!saved) {
                 throw new Error('変更履歴statusの保存に失敗しました');
             }
@@ -11241,7 +11483,7 @@ const appLogic = {
             original.message.content = original.content;
             original.message.timestamp = original.timestamp;
             try {
-                await dbUtils.saveChat();
+                if (ownsChat()) await dbUtils.saveChat();
             } catch (rollbackError) {
                 console.warn('[ChangeHistory] メッセージUndo/Redo失敗後のロールバック保存に失敗しました:', rollbackError);
             }
@@ -11320,7 +11562,7 @@ const appLogic = {
             await dbUtils.saveChat(newTitleForSave);
 
             const nextHistory = updateChangeHistoryEntryStatus(history, entry, direction);
-            const saved = await saveChangeHistory(chatId, nextHistory);
+            const saved = await saveChangeHistory(chatId, nextHistory, messages);
             if (!saved) {
                 throw new Error('変更履歴statusの保存に失敗しました');
             }
@@ -13853,7 +14095,7 @@ const appLogic = {
     async _prepareApiHistory(baseMessages, systemInstruction = undefined, session = null) {
         this.ensureHistoryWorkerV136();
         const settings = session?.settings ?? state.settings;
-        const summarizedContext = session ? session.summarizedContext : state.currentSummarizedContext;
+        const summarizedContext = session?.answerOnly ? null : session ? session.summarizedContext : state.currentSummarizedContext;
         const owner = session || { messages:state.currentMessages, chatId:state.currentChatId, profileId:state.activeProfileId,
             system:state.currentSystemPrompt, execution:JSON.stringify(state.currentExecutionSettings), signal:state.abortController?.signal };
         const initiallyAborted = owner.signal?.aborted;
@@ -13869,7 +14111,21 @@ const appLogic = {
 
         // ディープコピーで元のメッセージ配列を保護する
         const selected = baseMessages.filter(message => !message.isCascaded || message.isSelected);
-        const messagesForApi = structuredClone(this.projectInterruptedHistoryV137(selected));
+        const unverifiedPrefixes = new Set();
+        let earlierCascade = false, cascadeInTurn = false;
+        for (const message of baseMessages) {
+            if (message.role === 'user') {
+                earlierCascade ||= cascadeInTurn;
+                cascadeInTurn = false;
+            }
+            cascadeInTurn ||= Boolean(message.isCascaded && message.siblingGroupId);
+            const continuation = message.continuation;
+            // A legacy hash can be learned after a candidate has already changed.
+            if (earlierCascade && continuation && !continuation.historyWireV136 && continuation.historyPrefixV136 === undefined)
+                unverifiedPrefixes.add(message);
+        }
+        const messagesForApi = structuredClone(this.projectInterruptedHistoryV137(selected).map(message =>
+            unverifiedPrefixes.has(message) ? { ...message, unverifiedPrefixV137: true } : message));
 
         let historyToProcess;
 
@@ -13929,7 +14185,7 @@ const appLogic = {
         assertOwner();
         let oldChanges = [];
         if (owner.chatId) {
-            const raw = localStorage.getItem(makeChangeHistoryStorageKey(owner.chatId));
+            const raw = localStorage.getItem(getChangeHistoryStorageKey(owner.chatId, owner.messages));
             if (raw) {
                 try { oldChanges = JSON.parse(raw).slice().sort((a,b) => a.timestamp - b.timestamp).flatMap(e => e.changes || []); }
                 catch { if (provider === 'bedrock') throw new Error('変更履歴を確認できないため署名付き履歴を送信できません。チャットを再読込してください。'); }
@@ -13954,7 +14210,8 @@ const appLogic = {
             else turnChanged ||= edited;
             const opaqueRouter = provider === 'openrouter' && (continuation?.modelName?.startsWith('anthropic/')
                 || continuation?.openai?.reasoning_details?.some(d => d.type === 'reasoning.encrypted' || d.signature));
-            let dependentPrefixChanged = continuation?.historyPrefixInvalidV136 || (continuation?.historyPrefixV136 === undefined ? prefixChanged : prefixMismatch);
+            let dependentPrefixChanged = msg.unverifiedPrefixV137 || continuation?.historyPrefixInvalidV136 ||
+                (continuation?.historyPrefixV136 === undefined ? prefixChanged : prefixMismatch);
             let dependentTurnChanged = continuation?.historyTurnInvalidV136 || (continuation?.historyTurnV136 === undefined ? turnChanged : turnMismatch);
             let ragSystemChangedOnly = false;
             if (continuation?.historyWireV136) {
@@ -18227,16 +18484,17 @@ const appLogic = {
                 messagesForApi: currentTurnHistory,
                 generationConfig,
                 systemInstruction,
-                tools: window.functionDeclarations,
+                tools: session?.answerOnly ? null : window.functionDeclarations,
                 isFirstCall: (loopCount === 1),
                 session
             });
 
             assertOwner();
             rememberRequest(result);
-            if (session?.rag && result.toolCalls?.length &&
-                (!session.settings.geminiEnableFunctionCalling || session.rag.status === 'unsupported')) {
-                result.toolCalls = [];
+            if (result.toolCalls?.length && (session?.answerOnly || (session?.rag &&
+                (!session.settings.geminiEnableFunctionCalling || session.rag.status === 'unsupported')))) {
+                if (session.answerOnly && !result.content?.trim()) throw new Error('再生成中に実行できないツール呼び出しが返されました。');
+                result.toolCalls = session.answerOnly ? null : [];
                 // An unexecuted call must not survive in the provider history.
                 delete result.continuation;
             }
@@ -18585,10 +18843,15 @@ const appLogic = {
         session.executionMetadata = this.createExecutionMetadataSnapshot();
         session.execution = structuredClone(state.currentExecutionSettings);
         session.settings = structuredClone(state.settings);
+        if (session.answerOnly) {
+            session.settings.geminiEnableFunctionCalling = false;
+            session.settings.forceFunctionCalling = false;
+            session.settings.geminiEnableGrounding = false;
+        }
         session.parameterRevision = state.currentChatParameterRevision;
         session.originalMemory = state.currentPersistentMemory;
-        session.persistentMemory = structuredClone(state.currentPersistentMemory || {});
-        session.summarizedContext = structuredClone(state.currentSummarizedContext || null);
+        session.persistentMemory = session.answerOnly ? state.currentPersistentMemory : structuredClone(state.currentPersistentMemory || {});
+        session.summarizedContext = session.answerOnly ? state.currentSummarizedContext : structuredClone(state.currentSummarizedContext || null);
         session.memoryEnabled = state.isMemoryEnabledForChat;
         session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
             pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
@@ -18767,9 +19030,9 @@ const appLogic = {
         const project = session.projectInstruction?.trim() ? session.projectInstruction : '';
         const prompt = session.systemPrompt?.trim() ? session.systemPrompt : '';
         let text = project && prompt ? '[チャット個別のシステムプロンプト]\n' + prompt : prompt.trim();
-        const summary = this._buildSummaryForPrompt(session.persistentMemory);
+        const summary = session.answerOnly ? null : this._buildSummaryForPrompt(session.persistentMemory);
         if (summary) text += '\n\n' + summary;
-        if (session.settings.enableMemory && session.memoryEnabled && session.profileId) {
+        if (!session.answerOnly && session.settings.enableMemory && session.memoryEnabled && session.profileId) {
             const memory = await dbUtils.getMemory(session.profileId);
             this.assertSendExecutionV136(session);
             if (memory?.items?.length) text = '[長期記憶]\n- ' + memory.items.join('\n- ') + '\n---\n\n' + text;
@@ -20459,24 +20722,159 @@ const appLogic = {
         catch (error) { if (error.name !== 'AbortError') throw error; }
         finally { if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136(); }
     },
-    buildRegeneratedTurnV137(originalTurn, response) {
+    buildRegeneratedTurnV137(originalTurn, response, { target, sourceIndices } = {}) {
         const candidates = new Set();
         const retained = originalTurn.filter((message, index) => {
-            if (message.role !== 'model' || message.isHidden) return response.incomplete || message.role !== 'error';
+            const belongs = !target || message === target || (target.siblingGroupId && message.siblingGroupId === target.siblingGroupId);
+            if (!belongs && message.siblingGroupId) return true;
+            if (message.role !== 'model' || message.isHidden) return Boolean(target) || response.incomplete || message.role !== 'error';
             const hasText = typeof message.content === 'string' && message.content.trim();
             const hasMedia = message.imageIds?.length || message.generated_images?.length || message.generated_videos?.length;
             const separateToolHistory = this.hasSeparateToolHistoryV137(message, originalTurn[index + 1]);
             const hasToolHistory = separateToolHistory || message.tool_calls?.length || message.continuation?.turns?.some(turn =>
                 turn.role === 'tool' || turn.parts?.some(part => part.functionCall || part.functionResponse));
             if (message.incomplete && message.error && !hasText && !hasMedia && !hasToolHistory) return false;
-            if (message.isCascaded || (!separateToolHistory && (hasText || hasMedia || !message.incomplete))) candidates.add(message);
+            if (belongs && (message.isCascaded || (!separateToolHistory && (hasText || hasMedia || !message.incomplete)))) candidates.add(message);
             return true;
         });
-        if (!candidates.size) return [...retained, response];
+        if (!candidates.size) {
+            const insertion = target ? originalTurn.slice(0, originalTurn.indexOf(target)).filter(message => retained.includes(message)).length : retained.length;
+            retained.splice(insertion, 0, response);
+            return retained;
+        }
         const siblingGroupId = retained.find(message => candidates.has(message) && message.siblingGroupId)?.siblingGroupId ||
             `gid-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-        const cascade = (message, isSelected) => ({ ...message, isCascaded: true, isSelected, siblingGroupId });
+        const cascade = (message, isSelected) => {
+            const candidate = { ...message, isCascaded: true, isSelected, siblingGroupId };
+            if (sourceIndices?.has(message)) sourceIndices.set(candidate, sourceIndices.get(message));
+            return candidate;
+        };
+        if (target) {
+            const lastCandidate = retained.findLastIndex(message => candidates.has(message));
+            const turn = retained.map(message => candidates.has(message) ? cascade(message, false) : message);
+            turn.splice(lastCandidate + 1, 0, cascade(response, true));
+            return turn;
+        }
         return [...retained.map(message => candidates.has(message) ? cascade(message, false) : message), cascade(response, true)];
+    },
+    canRegenerateAnswerV137(messages, index) {
+        const message = messages[index];
+        if (message?.role !== 'model' || message.isHidden || (message.isCascaded && !message.isSelected) ||
+            state.sendJobsV136.get(messages)?.placeholder === message || this.hasSeparateToolHistoryV137(message, messages[index + 1])) return false;
+        const user = messages.slice(0, index).findLast(entry => entry.role === 'user');
+        return Boolean(user && !user.isHidden && (!message.incomplete || message.content?.trim() || message.error));
+    },
+
+    getAnswerRetryUserIndexV137(index) {
+        const messages = state.currentMessages;
+        if (!this.canRegenerateAnswerV137(messages, index)) return -1;
+        const userIndex = messages.slice(0, index).findLastIndex(message => message.role === 'user');
+        return userIndex < (state.currentSummarizedContext?.summaryRange?.end ?? 0) ? -1 : userIndex;
+    },
+
+
+    async regenerateAnswerV137(index, target = state.currentMessages[index]) {
+        if (state.isApplyingChangeHistory || state.chatReplacePreview.isExecuting) return;
+        const preparation = this.beginSendPreparationV136();
+        if (!preparation) return;
+        try {
+            if (await this.guardGenerationMutableAction() || state.editingMessageIndex !== null || state.isEditingSystemPrompt) return;
+            const { messages } = preparation;
+            if (preparation.chatId == null || messages[index] !== target || !this.canRegenerateAnswerV137(messages, index)) return;
+            await state.executionSettingsReady;
+            this.assertSendPreparationV136(preparation);
+            preparation.execution = structuredClone(state.currentExecutionSettings);
+            await this.refreshExecutionApiConfigsV136();
+            this.assertSendPreparationV136(preparation);
+            if (messages[index] !== target || !this.canRegenerateAnswerV137(messages, index)) return;
+            try { this.freezeExecutionSettings(); }
+            catch (error) {
+                if (error.name !== 'AbortError') await uiUtils.showCustomAlert(error.message);
+                return;
+            }
+            const start = messages.slice(0, index).findLastIndex(message => message.role === 'user') + 1;
+            const user = messages[start - 1];
+            const next = messages.findIndex((message, i) => i > index && message.role === 'user');
+            const end = next === -1 ? messages.length : next;
+            const originalTurn = messages.slice(start, end);
+            preparation.answerOnly = true;
+            preparation.regenerationUserMessage = user;
+            this.startSendExecutionV136(preparation);
+            try {
+                let response, requestStarted = false;
+                try {
+                    const instruction = await this.buildSendSystemInstruction(preparation,
+                        user.content || user.attachments?.map(attachment => attachment.name).join(' ') || '');
+                    const { historyForApi, systemInstruction } = await this.prepareSendHistory(messages.slice(0, start), instruction, preparation);
+                    this.assertSendExecutionV136(preparation);
+                    requestStarted = true;
+                    response = await this.generateRegeneratedResponseV137(preparation, historyForApi, systemInstruction);
+                } catch (error) {
+                    if (!this.ownsSendExecutionV136(preparation)) return;
+                    if (!requestStarted) {
+                        if (error.name !== 'AbortError' && this.showsSendExecutionV136(preparation)) await uiUtils.showCustomAlert(error.message);
+                        return;
+                    }
+                    response = this.getIncompleteStreamMessageV136(preparation, error, { includeEmptyError: true });
+                    if (!response?.content && !response?.error) return;
+                }
+                if (!this.ownsSendExecutionV136(preparation)) return;
+                const sourceIndices = new Map(originalTurn.map((message, offset) => [message, start + offset]));
+                const turn = this.buildRegeneratedTurnV137(originalTurn, response, { target, sourceIndices });
+                try {
+                    await dbUtils.saveChat(null, null, { sendSession: preparation,
+                        answerReplacement: { start, end, messages: turn, sourceIndices } });
+                } catch (error) {
+                    preparation.saveFailed = true;
+                    if (this.showsSendExecutionV136(preparation)) void uiUtils.showCustomAlert('再生成した回答を保存できませんでした。');
+                    console.error('再生成した回答の保存に失敗しました:', error);
+                    return;
+                }
+                if (!this.ownsSendExecutionV136(preparation)) return;
+                messages.splice(start, end - start, ...turn);
+                if (this.showsSendExecutionV136(preparation)) uiUtils.renderChatMessages();
+            } finally {
+                this.finishSendExecutionV136(preparation);
+            }
+        } catch (error) {
+            if (error.name !== 'AbortError') throw error;
+        } finally {
+            if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136();
+        }
+    },
+    async generateRegeneratedResponseV137(preparation, historyForApi, systemInstruction) {
+        const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
+        const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
+        this.assertSendExecutionV136(preparation);
+        const newAggregatedMessage = this._aggregateMessages(newMessages);
+        window.DocumentRag?.attach(newAggregatedMessage, preparation);
+        await this.translateThoughtSummary(newAggregatedMessage, preparation);
+        this.assertSendExecutionV136(preparation);
+        this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
+            newAggregatedMessage.incomplete ? this.resolveExecutionMetadata(preparation.executionMetadata, newAggregatedMessage) :
+                this.completeExecutionMetadata(preparation.executionMetadata, newAggregatedMessage, { signal: preparation.controller.signal }));
+
+        // 最終結果のexecutedFunctionsを初期化
+        newAggregatedMessage.executedFunctions = newAggregatedMessage.executedFunctions || [];
+
+        // 再生成中に実行された関数呼び出しがあれば、それらも新しいメッセージのexecutedFunctionsに追加する
+        newMessages.forEach(msg => {
+            if (msg.executedFunctions && Array.isArray(msg.executedFunctions)) {
+                 msg.executedFunctions.forEach(funcName => {
+                     if (!newAggregatedMessage.executedFunctions.includes(funcName)) {
+                         newAggregatedMessage.executedFunctions.push(funcName);
+                     }
+                 });
+            }
+            // ツール実行結果からも復元
+             if (msg.role === 'tool' && msg.name) {
+                 if (!newAggregatedMessage.executedFunctions.includes(msg.name)) {
+                     newAggregatedMessage.executedFunctions.push(msg.name);
+                 }
+             }
+        });
+
+        return newAggregatedMessage;
     },
     async _retryFromMessagePreparedV136(index, preparation) {
         if (await this.guardGenerationMutableAction()) return;
@@ -20507,6 +20905,7 @@ const appLogic = {
                 if (error.name !== 'AbortError') await uiUtils.showCustomAlert(error.message);
                 return;
             }
+            preparation.regenerationUserMessage = userMessage;
             this.startSendExecutionV136(preparation);
             const originalSuffix = preparation.originalMessages.slice(index + 1);
             const nextTurn = originalSuffix.findIndex(message => message.role === 'user');
@@ -20547,40 +20946,7 @@ const appLogic = {
                         else if (!preparation.streaming) this.scrollToBottom();
                     }
 
-                    const generationConfig = this.getChatGenerationConfig(preparation.generationParameters);
-
-
-                    const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
-                    this.assertSendExecutionV136(preparation);
-                    const newAggregatedMessage = this._aggregateMessages(newMessages);
-                    window.DocumentRag?.attach(newAggregatedMessage, preparation);
-                    await this.translateThoughtSummary(newAggregatedMessage, preparation);
-                    this.assertSendExecutionV136(preparation);
-                    this.attachExecutionMetadataToModelMessage(newAggregatedMessage,
-                        newAggregatedMessage.incomplete ? this.resolveExecutionMetadata(preparation.executionMetadata, newAggregatedMessage) :
-                            this.completeExecutionMetadata(preparation.executionMetadata, newAggregatedMessage, { signal: preparation.controller.signal }));
-
-                    // 最終結果のexecutedFunctionsを初期化
-                    newAggregatedMessage.executedFunctions = newAggregatedMessage.executedFunctions || [];
-
-                    // 再生成中に実行された関数呼び出しがあれば、それらも新しいメッセージのexecutedFunctionsに追加する
-                    newMessages.forEach(msg => {
-                        if (msg.executedFunctions && Array.isArray(msg.executedFunctions)) {
-                             msg.executedFunctions.forEach(funcName => {
-                                 if (!newAggregatedMessage.executedFunctions.includes(funcName)) {
-                                     newAggregatedMessage.executedFunctions.push(funcName);
-                                 }
-                             });
-                        }
-                        // ツール実行結果からも復元
-                         if (msg.role === 'tool' && msg.name) {
-                             if (!newAggregatedMessage.executedFunctions.includes(msg.name)) {
-                                 newAggregatedMessage.executedFunctions.push(msg.name);
-                             }
-                         }
-                    });
-
-                    response = newAggregatedMessage;
+                    response = await this.generateRegeneratedResponseV137(preparation, historyForApi, systemInstruction);
                 } catch (error) {
                     if (!this.ownsSendExecutionV136(preparation)) return;
                     if (error.name !== 'AbortError') {
@@ -20658,7 +21024,9 @@ const appLogic = {
 
     async navigateCascade(currentIndex, direction) {
         if (await this.guardGenerationMutableAction()) return;
-        const currentMsg = state.currentMessages[currentIndex];
+        const messages = state.currentMessages;
+        const chatId = state.currentChatId;
+        const currentMsg = messages[currentIndex];
         if (!currentMsg || !currentMsg.isCascaded || !currentMsg.siblingGroupId) return;
 
         const groupId = currentMsg.siblingGroupId;
@@ -20680,8 +21048,11 @@ const appLogic = {
         }
 
         if (targetPosition !== -1) {
+            const end = siblingsWithIndices.at(-1).originalIndex + 1;
+            const preserveSavedTail = chatId != null && end < messages.length;
             appLogic.ensureHistoryWorkerV136();
-        await SettingsV136.rememberHistoryContextsAsyncV136(state.currentMessages, state.currentSystemPrompt);
+            await SettingsV136.rememberHistoryContextsAsyncV136(preserveSavedTail ? messages.slice(0, end) : messages, state.currentSystemPrompt);
+            if (state.currentMessages !== messages || state.currentChatId !== chatId || state.isSending) return;
             siblingsWithIndices.forEach(item => {
                 item.msg.isSelected = false;
             });
@@ -20708,7 +21079,14 @@ const appLogic = {
                 }
             });
 
-            await dbUtils.saveChat();
+            if (preserveSavedTail) {
+                const start = siblingsWithIndices[0].originalIndex;
+                const turn = messages.slice(start, end);
+                const sourceIndices = new Map(turn.map((message, offset) => [message, start + offset]));
+                await dbUtils.saveChat(null, null, { answerReplacement: { start, end, messages: turn, sourceIndices, selectionGroupId: groupId } });
+            } else {
+                await dbUtils.saveChat();
+            }
         }
     },
 

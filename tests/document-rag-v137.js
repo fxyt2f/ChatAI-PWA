@@ -98,10 +98,17 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             eq(pdfReference.documentId, pdf.id);
             eq(pdfReference.location.page, 2);
             assert(!JSON.stringify(saved.rag).includes('３０日以内') && !JSON.stringify(saved.rag).includes('"text"'));
-            const references = el.messageContainer.querySelector('.rag-references');
-            assert(references.closest('.message-info').hidden);
+            const row = el.messageContainer.querySelector('.message.model:last-child');
+            assert(!row.querySelector('.tm-message-info-btn, .rag-references'));
+            row.querySelector('.tm-message-menu-btn').click();
+            document.querySelector('#message-action-menu button:last-child').click();
+            const dialog = document.getElementById('message-sources-dialog');
+            assert(dialog.matches(':modal'));
+            const references = dialog.querySelector('.rag-references');
             assert(!references.textContent.includes('検索してモデルへ渡した'));
-            eq(el.messageContainer.querySelector('.rag-references button').textContent, 'ページ 2');
+            eq(references.querySelector('h4').textContent, pdfReference.fileName);
+            eq(references.querySelector('button').textContent, 'ページ 2');
+            dialog.close();
         });
 
         await test('No linked documents retain the ordinary API request and no reference UI', async () => {
@@ -605,7 +612,9 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 await send(query);
                 eq(calls.length, before);
                 eq(scopeReads, 1);
-                assert((await db.getChat(chatA)).messages.at(-1).content.includes('送信するプロジェクトと資料の情報を取得できませんでした'));
+                const failedResponse = (await db.getChat(chatA)).messages.at(-1);
+                eq([failedResponse.role, failedResponse.content, failedResponse.incomplete, failedResponse.error],
+                    ['model', '', true, '送信するプロジェクトと資料の情報を取得できませんでした。']);
                 db.getChatRagDocuments = async (...args) => ({ ...await capture.apply(db, args), documents: null });
                 const { prompt, saved } = await projectAnswer(chatA, [], ['固有資料の印', '両方で共有する印', instructionB]);
                 eq(saved.rag.status, 'failed');
