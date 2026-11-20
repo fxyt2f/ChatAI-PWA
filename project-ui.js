@@ -154,13 +154,15 @@ window.ProjectUI = (() => {
         if (restoreFocus && anchor.isConnected) anchor.focus({ preventScroll: true });
     }
 
-    function openMenu(anchor, id, actions = ['edit', 'delete'], documentId) {
+    function openMenu(anchor, id, actions = ['edit', 'delete'], entry) {
         if (menu?.anchor === anchor) return closeMenu(true);
         closeMenu();
         ui().closeHistoryItemMenu();
         const element = byId('menu');
-        menu = { anchor, id, documentId };
+        menu = { anchor, id, documentId: entry?.id, referenceMode: entry?.referenceMode };
         for (const item of element.children) item.hidden = !actions.includes(item.dataset.projectAction);
+        if (entry) element.querySelector('[data-project-action="reference-mode"] span:last-child').textContent =
+            window.DocumentLibraryUI.modeLabel(entry.referenceMode === 'full' ? 'rag' : 'full') + 'に変更';
         element.setAttribute('aria-label', actions.includes('edit') ? 'プロジェクトの操作' : '共有ファイルの操作');
         anchor.setAttribute('aria-expanded', 'true');
         anchor.closest('.chat-sidebar-item')?.classList.add('menu-active');
@@ -537,13 +539,13 @@ window.ProjectUI = (() => {
     function drawDocuments(owner, entries) {
         const list = byId('documents');
         entries.sort(window.DocumentLibraryUI.byName);
-        const signature = JSON.stringify(entries.map(({ id, fileName, versionId }) => [id, fileName, versionId]));
+        const signature = JSON.stringify(entries.map(({ id, fileName, versionId, referenceMode }) => [id, fileName, versionId, referenceMode]));
         if (owner.documentSignature === signature) return;
         owner.documentSignature = signature;
         if (!entries.length) return emptyList(list, '共有ファイルはありません。');
         window.DocumentLibraryUI.renderRows({ kind: 'project' }, list, entries,
             entry => window.DocumentLibraryUI.openProjectPreview(entry, owner.id), 'project-menu',
-            (_, anchor, entry) => openMenu(anchor, owner.id, ['unlink-file'], entry.id));
+            (_, anchor, entry) => openMenu(anchor, owner.id, ['reference-mode', 'unlink-file'], entry));
     }
 
     function finishDialog(context) {
@@ -707,7 +709,7 @@ window.ProjectUI = (() => {
         byId('menu').addEventListener('click', async event => {
             const action = event.target.closest('[data-project-action]')?.dataset.projectAction;
             if (!action || !menu) return;
-            const { id, documentId } = menu;
+            const { id, documentId, referenceMode } = menu;
             const owner = view;
             const generation = dataGeneration;
             closeMenu(true);
@@ -717,6 +719,14 @@ window.ProjectUI = (() => {
                     return;
                 }
                 if (action === 'upload') { if (owner?.id === id) chooseUpload(owner); return; }
+                if (action === 'reference-mode') {
+                    const mode = referenceMode === 'full' ? 'rag' : 'full';
+                    if (owner?.id === id && await window.DocumentLibraryUI.confirmReferenceMode(mode) &&
+                        view === owner && dataGeneration === generation) {
+                        await db().setProjectDocumentReferenceMode(id, documentId, mode);
+                    }
+                    return;
+                }
                 if (action === 'unlink-file') {
                     if (owner?.id === id) {
                         try {

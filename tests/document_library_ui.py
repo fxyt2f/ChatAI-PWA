@@ -433,9 +433,19 @@ def run(client, url, screenshots=None):
     pointer(file_more, True)
     wait("!document.querySelector('#document-library-picker-menu').hidden", 'Unlink menu opens')
     assert ev(f"""(async()=> (await dbUtils.getChatDocuments({chat1}))[0].id==={json.dumps(first)} &&
-        document.querySelector('#document-library-picker-menu').childElementCount===1 &&
+        document.querySelector('#document-library-picker-menu').childElementCount===2 &&
+        document.querySelector('#document-library-picker-menu').textContent.includes('常に全文参照に変更') &&
         document.querySelector('#document-library-picker-menu').textContent.includes('このチャットから解除'))()""")
-    pointer(prefix + 'picker-menu [role=menuitem]', True)
+    pointer(prefix + 'picker-menu [role=menuitem]:first-child', True)
+    wait("document.querySelector('#confirmDialog').open", 'Full reference consent opens')
+    pointer('#confirmDialog button[value=ok]', True)
+    wait("document.querySelector('#document-library-picker-list').textContent.includes('常に全文参照')", 'Full reference mode appears in chat')
+    assert ev(f"(async()=> (await dbUtils.getChatDocuments({chat1}))[0].referenceMode==='full')()")
+    pointer(file_more, True)
+    pointer(prefix + 'picker-menu [role=menuitem]:first-child', True)
+    wait("document.querySelector('#document-library-picker-list').textContent.includes('RAG（標準）')", 'RAG mode is restored')
+    pointer(file_more, True)
+    pointer(prefix + 'picker-menu [role=menuitem]:last-child', True)
     wait("document.querySelector('#document-library-picker-count').textContent==='0件' && !document.querySelector('#document-library-picker-list li')",
          'Unlink is immediately reflected in the count')
     assert ev(f"""(async()=> (await dbUtils.getLibraryOriginal({json.dumps(first)},1)).blob.size>0 &&

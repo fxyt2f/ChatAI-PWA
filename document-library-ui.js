@@ -118,6 +118,14 @@ window.DocumentLibraryUI = (() => {
         if (restoreFocus && anchor.isConnected) anchor.focus({ preventScroll: true });
     }
 
+    const modeLabel = mode => mode === 'full' ? '常に全文参照' : 'RAG（標準）';
+
+    async function confirmReferenceMode(mode) {
+        return mode === 'rag' || window.uiUtilsV136.showCustomConfirm(
+            '抽出した全文を毎回、選択したAIの接続先に送ります。容量は分かる範囲で確認し、APIが容量超過で拒否することがあります。' +
+            '画像・注釈・レイアウトなどは含まれません。資料を読み取れない場合は送信を停止します。変更しますか？');
+    }
+
     function openMenu(view, anchor, entry) {
         if (view.mutating || !owns(view)) return;
         if (rowMenu?.anchor === anchor) { closeMenu(true); return; }
@@ -126,7 +134,14 @@ window.DocumentLibraryUI = (() => {
         const menu = linked ? controls.pickerMenu : controls.menu;
         const container = linked ? controls.picker : controls.workspace;
         const actions = linked
-            ? [['unlink', 'このチャットから解除', () => setLinked(view, entry, false)]]
+            ? [['article', modeLabel(entry.referenceMode === 'full' ? 'rag' : 'full') + 'に変更',
+                async () => {
+                    const mode = entry.referenceMode === 'full' ? 'rag' : 'full';
+                    if (await confirmReferenceMode(mode) && ownsPicker(view)) {
+                        await mutate(view, () => window.dbUtils.setChatDocumentReferenceMode(view.chatId, entry.id, mode, chatOwner(view)));
+                    }
+                }],
+                ['unlink', 'このチャットから解除', () => setLinked(view, entry, false)]]
             : [['replace', '差し替え', () => chooseReplacement(view, entry)],
                 ['delete', '削除', () => deleteDocument(view, entry)]];
         menu.replaceChildren(...actions.map(([symbol, label, action]) => {
@@ -161,9 +176,10 @@ window.DocumentLibraryUI = (() => {
             const linked = view.kind === 'picker' && !view.selecting;
             main.title = linked ? `${entry.fileName} · 版 ${entry.version}` : entry.fileName;
             const size = fileSize(entry.size);
+            const mode = linked || view.kind === 'project' ? ' · ' + modeLabel(entry.referenceMode) : '';
             main.append(icon(fileIcons[entry.format] || 'text'),
                 node('span', entry.fileName, 'document-library-file-name'),
-                node('span', linked ? `版 ${entry.version} · ${size}` : size, 'document-library-file-size'));
+                node('span', (linked ? `版 ${entry.version} · ${size}` : size) + mode, 'document-library-file-size'));
             const match = view.matches?.get(entry.id);
             if (match) main.append(node('span', window.DocumentSearch.formatLocation(match.location) +
                 ' · ' + match.excerpt, 'document-library-file-excerpt'));
@@ -208,7 +224,7 @@ window.DocumentLibraryUI = (() => {
         return previous.length === next.length && previous.every((entry, i) => {
             const current = next[i];
             return entry.id === current.id && entry.versionId === current.versionId &&
-                entry.fileName === current.fileName && entry.size === current.size;
+                entry.fileName === current.fileName && entry.size === current.size && entry.referenceMode === current.referenceMode;
         });
     }
 
@@ -600,7 +616,7 @@ window.DocumentLibraryUI = (() => {
             else history.pushState({ ...history.state, documentLibraryDetail: detail }, '', '#chat');
         }
         if (narrow || reference) (narrow ? controls.title : controls.previewTitle).focus({ preventScroll: true });
-        setPreviewMode(view, !controls.showOriginal.disabled && !chunkId && !retry ? 'original' : 'extracted');
+        setPreviewMode(view, !controls.showOriginal.disabled && !reference && !chunkId && !retry ? 'original' : 'extracted');
         try {
             const result = reference
                 ? await window.DocumentSearch.previewReference(reference, { signal: controller.signal })
@@ -1135,6 +1151,6 @@ window.DocumentLibraryUI = (() => {
     }
 
     return { install, openWorkspace, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
-        closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows,
+        closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows, modeLabel, confirmReferenceMode,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
 })();

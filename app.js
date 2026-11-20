@@ -9,7 +9,7 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-const DB_VERSION = 17;
+const DB_VERSION = 18;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -179,6 +179,8 @@ const DEFAULT_SEND_BUTTON_COLOR = '#1976d2';
 const DEFAULT_OTHER_BUTTON_COLOR = '#1976d2';
 const DEFAULT_USER_MESSAGE_COLOR = '#1976d2';
 const DEFAULT_GLOBAL_OTHER_SETTINGS = {
+    documentEmbeddingEnabled: false,
+    documentEmbeddingModel: 'embeddinggemma-2',
     additionalModels: '',
     additionalOpenRouterModels: ''
 };
@@ -195,8 +197,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.3";
-const APP_CACHE_VERSION = "v1.37.3";
+const APP_VERSION = "1.37.4";
+const APP_CACHE_VERSION = "v1.37.4";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -1320,6 +1322,7 @@ function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = fal
     }
     if (value instanceof Uint8Array) return value;
     if (!value || typeof value !== 'object') return value;
+    if (value.contentTrust === 'untrusted-document') return '[document references omitted]';
     if (value.thought === true || ['thinking', 'redacted_thinking'].includes(value.type)) return '[redacted thinking]';
     if (value instanceof Error) return { name: value.name, message: sanitizeApiRequestBodyForLog(value.message) };
 
@@ -1768,6 +1771,10 @@ const dbUtils = {
                 if (event.oldVersion < 15) DocumentLibrary.upgrade(db);
                 if (event.oldVersion < 16) db.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
                 if (event.oldVersion < 17) ProjectStore.upgrade(db);
+                if (event.oldVersion < 18) {
+                    const embeddings = db.createObjectStore(DocumentLibrary.embeddingStore, { keyPath: 'key' });
+                    embeddings.createIndex('specId', 'specId');
+                }
                 if (event.oldVersion === 0) {
                     transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
                 }
@@ -2324,7 +2331,7 @@ const dbUtils = {
         const snapshot = db => DocumentLibrary.transaction(db, stores, 'readonly', async tx => {
             const [chat, chatDocuments, membership] = await Promise.all([
                 read(tx.objectStore(CHATS_STORE).get(chatId)),
-                DocumentLibrary.readChatDocumentIds(tx, chatId),
+                DocumentLibrary.readChatDocumentLinks(tx, chatId),
                 read(tx.objectStore(ProjectStore.chats).get(chatId))
             ]);
             if (!chat || (owner && (chat.recordGenerationId ?? null) !== owner.recordGenerationId)) {
@@ -2337,15 +2344,20 @@ const dbUtils = {
                 const project = await ProjectStore.requireProject(tx, projectId);
                 projectInstruction = project.systemInstruction ?? '';
                 const shares = await read(tx.objectStore(ProjectStore.documents).index('projectId').getAll(projectId));
-                sharedDocuments = shares.map(share => share.documentId);
+                sharedDocuments = shares;
             }
             // Both relationships resolve to the current immutable version of each library entry in this transaction.
-            const ids = new Set([...chatDocuments, ...sharedDocuments]);
+            const links = new Map();
+            for (const link of [...chatDocuments, ...sharedDocuments]) {
+                if (!links.has(link.documentId) || DocumentLibrary.referenceMode(link) === 'full') links.set(link.documentId, link);
+            }
             const library = tx.objectStore(DocumentLibrary.documents);
-            const documents = await Promise.all([...ids].map(id => read(library.get(id))));
+            const documents = await Promise.all([...links.values()].map(async link =>
+                DocumentLibrary.linkedDocument(await read(library.get(link.documentId)), link)));
+            const fullConfigured = [...links.values()].some(link => DocumentLibrary.referenceMode(link) === 'full');
             const validDocuments = documents.every(entry => entry && DocumentLibrary.isId(entry.versionId) &&
                 Number.isSafeInteger(entry.version) && entry.version >= 1);
-            return { projectId, projectInstruction, documents: validDocuments ? documents : null };
+            return { projectId, projectInstruction, documents: validDocuments ? documents : null, fullConfigured };
         });
         return state.db ? snapshot(state.db) : this.openDB().then(snapshot);
     },
@@ -2469,11 +2481,29 @@ const dbUtils = {
             this._readProjectTargets(tx, range, linkStore, targetStore, targetKey));
     },
 
+    async setChatDocumentReferenceMode(chatId, documentId, mode, expectedChat) {
+        if (state.chatDataChangesV136.has(undefined)) throw new Error('会話データを更新中です。');
+        const db = await this.openDB();
+        const changed = await DocumentLibrary.transaction(db, [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.links], 'readwrite', async tx => {
+            const chat = await DocumentLibrary.request(tx.objectStore(CHATS_STORE).get(chatId));
+            if (!chat || (expectedChat && SettingsV136.chatContentVersion(chat).recordGenerationId !== expectedChat.recordGenerationId)) {
+                throw new Error('チャットが変更または削除されました。');
+            }
+            const updated = await DocumentLibrary.setReferenceMode(tx.objectStore(DocumentLibrary.links), [chatId, documentId], mode);
+            if (updated) await DocumentLibrary.markChanged(tx.objectStore(SETTINGS_STORE));
+            return updated;
+        });
+        if (changed) appLogic.markAsDirtyAndSchedulePush(true);
+    },
+
     async _readProjectTargets(tx, range, linkStore, targetStore, targetKey) {
         const read = DocumentLibrary.request;
         const links = await read(tx.objectStore(linkStore).index('projectId').getAll(range));
         const targets = tx.objectStore(targetStore);
-        return Promise.all(links.map(link => read(targets.get(link[targetKey]))));
+        return Promise.all(links.map(async link => {
+            const target = await read(targets.get(link[targetKey]));
+            return linkStore === ProjectStore.documents ? DocumentLibrary.linkedDocument(target, link) : target;
+        }));
     },
 
     async getProjectWorkspaceSnapshot(projectId) {
@@ -2526,6 +2556,13 @@ const dbUtils = {
             if (await read(store.getKey([projectId, documentId])) !== undefined) return false;
             store.add({ projectId, documentId });
             return true;
+        });
+    },
+
+    setProjectDocumentReferenceMode(projectId, documentId, mode) {
+        return this._writeProjectData([ProjectStore.projects, ProjectStore.documents], async tx => {
+            await ProjectStore.requireProject(tx, projectId);
+            return DocumentLibrary.setReferenceMode(tx.objectStore(ProjectStore.documents), [projectId, documentId], mode);
         });
     },
 
@@ -3263,7 +3300,7 @@ const dbUtils = {
         const names = new Set([...records.keys(), ...DocumentLibrary.stores]);
         const db = await this.openDB();
         const { libraryPending, projectPending } = await DocumentLibrary.transaction(db,
-            [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore], 'readwrite', async tx => {
+            [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore, DocumentLibrary.embeddingStore], 'readwrite', async tx => {
                 const read = DocumentLibrary.request;
                 const localSettings = tx.objectStore(SETTINGS_STORE);
                 const [preserved, linkCount, projectCount] = await Promise.all([
@@ -8667,6 +8704,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 }; // uiUtilsオブジェクトの末尾
 
+const sendToolDeclarations = session => window.DocumentRag?.declarations(session, window.functionDeclarations) ?? window.functionDeclarations ?? [];
+
 // --- APIユーティリティ (apiUtils) ---
 const THOUGHT_JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
 const THOUGHT_LITERALS = new RegExp([
@@ -9323,7 +9362,7 @@ const apiUtils = {
 
             let finalTools = [];
             if (settings.geminiEnableFunctionCalling) {
-                finalTools = window.functionDeclarations || [];
+                finalTools = sendToolDeclarations(session);
                 console.log("Function Calling を有効にしてAPIを呼び出します。");
             } 
             else if (settings.geminiEnableGrounding) {
@@ -9348,6 +9387,10 @@ const apiUtils = {
         console.log("Geminiへの送信データ:", JSON.stringify(sanitizeApiRequestBodyForLog(requestBody), null, 2));
         console.log("Geminiリクエストモデル:", model);
 
+        if (session?.fullDocuments?.length) {
+            await window.DocumentRag.prepareFullRequest(requestBody, session,
+                { modelUrl: geminiBaseUrl === GEMINI_API_BASE_URL ? geminiBaseUrl + model : null, model, apiKey, signal });
+        }
         const thinking = finalGenerationConfig.thinkingConfig;
         try {
             signal.throwIfAborted();
@@ -9863,11 +9906,11 @@ const apiUtils = {
         }
 
         // Function Callingの処理
-        if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
+        if (settings.geminiEnableFunctionCalling) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
             const openAITools = [];
             
-            for (const geminiTool of window.functionDeclarations) {
+            for (const geminiTool of sendToolDeclarations(session)) {
                 if (geminiTool.function_declarations && Array.isArray(geminiTool.function_declarations)) {
                     // Gemini形式: { function_declarations: [{ name, description, parameters }] }
                     for (const funcDecl of geminiTool.function_declarations) {
@@ -9940,6 +9983,10 @@ const apiUtils = {
         try {
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to Z.ai API...`);
+            if (session?.fullDocuments?.length) {
+                await window.DocumentRag.prepareFullRequest(requestBody, session, { signal });
+                signal.throwIfAborted();
+            }
 
             const response = await fetch(zaiEndpoint, {
                 method: 'POST',
@@ -9977,6 +10024,11 @@ const apiUtils = {
             // レスポンスを取得してGemini形式に変換
             const openAIResponse = await response.json();
             
+            if (session?.fullDocuments?.length && openAIResponse.error) {
+                throw Object.assign(new Error(openAIResponse.error.message || 'APIエラー'), { data: openAIResponse });
+            }
+            window.DocumentRag?.throwOnProviderCapacity({ finishReason: openAIResponse.choices?.[0]?.native_finish_reason,
+                code: openAIResponse.choices?.[0]?.finish_reason }, session);
             // デバッグ用：Z.ai APIからのレスポンス構造を確認
             if (openAIResponse.choices && openAIResponse.choices[0]) {
                 const choice = openAIResponse.choices[0];
@@ -10064,11 +10116,11 @@ const apiUtils = {
         }
 
         // Function Callingの処理
-        if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
+        if (settings.geminiEnableFunctionCalling) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
             const openAITools = [];
             
-            for (const geminiTool of window.functionDeclarations) {
+            for (const geminiTool of sendToolDeclarations(session)) {
                 if (geminiTool.function_declarations && Array.isArray(geminiTool.function_declarations)) {
                     // Gemini形式: { function_declarations: [{ name, description, parameters }] }
                     for (const funcDecl of geminiTool.function_declarations) {
@@ -10141,6 +10193,10 @@ const apiUtils = {
             signal.throwIfAborted();
             const timestamp = new Date().toLocaleTimeString();
             console.log(`[API_DEBUG ${timestamp}] Sending fetch request to OpenRouter API...`);
+            if (session?.fullDocuments?.length) {
+                await window.DocumentRag.prepareFullRequest(requestBody, session, { signal, endpoint: openRouterEndpoint });
+                signal.throwIfAborted();
+            }
 
             const response = await fetch(openRouterEndpoint, {
                 method: 'POST',
@@ -10197,8 +10253,10 @@ const apiUtils = {
             const openAIResponse = stream && !response.headers?.get('content-type')?.includes('application/json')
                 ? await StreamingV136.collectResponse('openrouter', response.body, signal, onStream.progress, onStream.reportMetadata)
                 : await response.json();
-            if (openAIResponse.error) throw new Error(openAIResponse.error.message || 'OpenRouter APIエラー');
+            if (openAIResponse.error) throw Object.assign(new Error(openAIResponse.error.message || 'OpenRouter APIエラー'), { data: openAIResponse });
             
+            window.DocumentRag?.throwOnProviderCapacity({ finishReason: openAIResponse.choices?.[0]?.native_finish_reason,
+                code: openAIResponse.choices?.[0]?.finish_reason }, session);
             // デバッグ用：OpenRouter APIからのレスポンス構造を確認
             if (openAIResponse.choices && openAIResponse.choices[0]) {
                 const choice = openAIResponse.choices[0];
@@ -10331,8 +10389,8 @@ const apiUtils = {
             }
 
             // Function Callingの処理
-            if (settings.geminiEnableFunctionCalling && window.functionDeclarations) {
-                const bedrockTools = this.convertGeminiToolsToBedrock(window.functionDeclarations);
+            if (settings.geminiEnableFunctionCalling) {
+                const bedrockTools = this.convertGeminiToolsToBedrock(sendToolDeclarations(session));
                 if (bedrockTools.length > 0) {
                     requestBody.toolConfig = {
                         tools: bedrockTools
@@ -10357,10 +10415,15 @@ const apiUtils = {
             }, 2));
 
             // Converse APIコマンドを実行
+            if (session?.fullDocuments?.length) {
+                await window.DocumentRag.prepareFullRequest(requestBody, session, { signal });
+                signal.throwIfAborted();
+            }
             const command = new window.ConverseCommand(requestBody);
             const response = await client.send(command, { abortSignal: signal });
             
             console.log("Amazon Bedrock応答受信:", response.stopReason);
+            window.DocumentRag?.throwOnProviderCapacity({ finishReason: response.stopReason }, session);
 
             // レスポンスをGemini形式に変換
             const geminiFormatResponse = this.convertConverseToGeminiFormat(response);
@@ -10374,6 +10437,7 @@ const apiUtils = {
 
         } catch (error) {
             console.error("Amazon Bedrock API呼び出しエラー:", error);
+            if (session?.fullDocuments?.length) throw error;
             throw new Error(`Bedrock APIエラー: ${error.message}`);
         }
     },
@@ -10381,6 +10445,7 @@ const apiUtils = {
     // プロバイダーに応じて適切なAPIを呼び出すラッパー関数
     async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null, session = null) {
         const provider = session?.apiConfig.provider ?? appLogic.getExecutionProvider();
+        if (session?.additionalSourceVersions?.size) await window.DocumentRag.assertAdditionalSources(session, signal);
         
         if (provider === 'zai') {
             return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
@@ -13012,6 +13077,8 @@ const appLogic = {
 
     normalizeGlobalOtherSettings(settings = {}) {
         const normalized = { ...DEFAULT_GLOBAL_OTHER_SETTINGS };
+        normalized.documentEmbeddingEnabled = settings.documentEmbeddingEnabled === true;
+        normalized.documentEmbeddingModel = window.DocumentEmbedding?.modelSetting(settings.documentEmbeddingModel) ?? normalized.documentEmbeddingModel;
         normalized.additionalModels = typeof settings.additionalModels === 'string' ? settings.additionalModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalModels;
         normalized.additionalOpenRouterModels = typeof settings.additionalOpenRouterModels === 'string' ? settings.additionalOpenRouterModels : DEFAULT_GLOBAL_OTHER_SETTINGS.additionalOpenRouterModels;
         return normalized;
@@ -13071,6 +13138,7 @@ const appLogic = {
         GLOBAL_OTHER_SETTING_KEYS.forEach(key => {
             state.settings[key] = state.globalOtherSettings[key];
         });
+        void window.DocumentEmbedding?.refresh();
     },
 
     applyThemeScopeToEffectiveSettings(profileSettings = {}) {
@@ -14232,10 +14300,15 @@ const appLogic = {
                         previous.turn === baseline.turn;
                 }
             }
-            const invalidContinuation = edited || (dependentPrefixChanged && (provider === 'bedrock' || opaqueRouter))
+            // Full text exists only in the outgoing request. A replay cannot reproduce a signed prefix that contained it.
+            const fullPrefixChanged = msg.role === 'model' && (provider === 'bedrock' || opaqueRouter) &&
+                (session?.fullDocuments?.length || msg.rag?.sources?.some(source => source.referenceMode === 'full'));
+            const invalidContinuation = edited || fullPrefixChanged || (dependentPrefixChanged && (provider === 'bedrock' || opaqueRouter))
                 || (dependentTurnChanged && ['gemini', 'zai'].includes(provider));
             prefixChanged ||= prefixMismatch;
-            if (invalidContinuation && ragSystemChangedOnly && (historyToProcess[index + 1]?.role === 'tool' ||
+            const canProjectFullHistory = fullPrefixChanged && !edited && !dependentTurnChanged &&
+                !msg.unverifiedPrefixV137 && !continuation?.historyPrefixInvalidV136;
+            if (invalidContinuation && (ragSystemChangedOnly || canProjectFullHistory) && (historyToProcess[index + 1]?.role === 'tool' ||
                 !msg.content?.trim() && continuation?.turns?.some(turn => turn.parts?.some(part => part.functionCall || part.functionResponse)))) {
                 const tools = [];
                 let following = index + 1;
@@ -15785,6 +15858,7 @@ const appLogic = {
         this._setupEventListenersCallCount++;
         uiUtils.installDialogDismissal();
         window.DocumentLibraryUI?.install();
+        window.DocumentEmbedding?.install();
         window.ProjectUI?.install();
         this.setupSwipeNavigation();
     
@@ -18534,7 +18608,7 @@ const appLogic = {
                 const functionName = toolCall.functionCall.name;
                 const functionArgs = toolCall.functionCall.args;
                 
-                console.log(`[Function Calling] 実行: ${functionName}`, functionArgs);
+                console.log(`[Function Calling] 実行: ${functionName}`, functionName === 'search_documents' ? undefined : functionArgs);
                 
                 if (functionName === 'generate_image_stable_diffusion') {
                     this.setSendProgressV136(session, 'SDで画像生成中...');
@@ -18550,7 +18624,9 @@ const appLogic = {
                         throw new Error('この送信で許可されていないツールです。');
                     }
                     const argsWithContext = { ...functionArgs, _responseTextForQc: responseTextForQc };
-                    toolResult = await waitForToolV136(window.functionCallingTools[functionName](argsWithContext, {
+                    toolResult = await waitForToolV136(functionName === 'search_documents'
+                        ? window.DocumentRag.searchToolDocuments(functionArgs, session)
+                        : window.functionCallingTools[functionName](argsWithContext, {
                         messages: historyForFunctions.filter(m => m.role !== 'tool'),
                         persistentMemory: session ? session.persistentMemory : state.currentPersistentMemory,
                         settings,
@@ -18728,7 +18804,9 @@ const appLogic = {
         const thoughtSummary = messages.filter(msg => msg.role === 'model' && msg.thoughtSummary)
             .map(msg => msg.thoughtSummary).join('\n\n');
         if (thoughtSummary) finalAggregatedMessage.thoughtSummary = thoughtSummary;
-        if (finalAggregatedMessage.continuation) {
+        if (messages.some(message => message.role === 'tool' && message.name === 'search_documents')) {
+            delete finalAggregatedMessage.continuation;
+        } else if (finalAggregatedMessage.continuation) {
             finalAggregatedMessage.continuation.turns = messages.map(msg => {
                 if (msg.role === 'model' && msg.continuation) return { role: 'model',
                     parts: msg.continuation.parts, tmContinuation: msg.continuation.openai,
@@ -19010,7 +19088,7 @@ const appLogic = {
         window.DocumentRag?.capture(session);
     },
 
-    async buildSendSystemInstruction(session, question) {
+    async buildSendSystemInstruction(session, question, history) {
         if (session.documentSnapshot) {
             // The prompt and RAG must consume the same readonly transaction.
             try {
@@ -19044,7 +19122,7 @@ const appLogic = {
         session.baseSystemInstruction = base;
         if (!window.DocumentRag) return base;
         if (session.documentSnapshot?.chatId != null) this.setSendProgressV136(session, 'ファイルを検索中...');
-        const instruction = await window.DocumentRag.build(session, question, base);
+        const instruction = await window.DocumentRag.build(session, question, base, history);
         this.assertSendExecutionV136(session);
         if (session.rag && session.apiConfig.provider === 'gemini' && session.apiConfig.modelName === 'gemini-2.5-flash-image-preview') {
             // This adapter omits system instructions for the image preview model.
@@ -19071,7 +19149,10 @@ const appLogic = {
             // Keep the original wire format when adding references would make
             // the historical tool conversation unsafe to reconstruct.
             const historyForApi = await this._prepareApiHistory(baseHistory, base, session);
-            session.rag = { schemaVersion: 1, status: 'history-unavailable', sources: [], unavailable: [] };
+            const fullSources = session.rag.sources.filter(source => source.referenceMode === 'full');
+            session.rag = fullSources.length
+                ? { schemaVersion: 1, status: 'partial', sources: fullSources, unavailable: [] }
+                : { schemaVersion: 1, status: 'history-unavailable', sources: [], unavailable: [] };
             return { historyForApi, systemInstruction: base };
         }
     },
@@ -19152,7 +19233,7 @@ const appLogic = {
 
 
             const instruction = await this.buildSendSystemInstruction(preparation,
-                text || attachmentsToSend.map(attachment => attachment.name).join(' '));
+                text || attachmentsToSend.map(attachment => attachment.name).join(' '), baseHistory);
 
             const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
             this.assertSendExecutionV136(preparation);
@@ -19454,9 +19535,11 @@ const appLogic = {
         while ((match = blockRegex.exec(remainingText)) !== null) {
             const role = match[1];
             const attributesString = match[2].trim();
-            const content = match[3].trim();
+            const content = match[3]
+                .replace(/^\r?\n/, '')
+                .replace(/\r?\n$/, '');
     
-            if (role === 'system' && content) {
+            if (role === 'system' && content && (content.trim() || !systemPrompt.trim())) {
                 systemPrompt = content;
             } else if ((role === 'user' || role === 'model')) {
                 const messageData = {
@@ -20804,7 +20887,7 @@ const appLogic = {
                 let response, requestStarted = false;
                 try {
                     const instruction = await this.buildSendSystemInstruction(preparation,
-                        user.content || user.attachments?.map(attachment => attachment.name).join(' ') || '');
+                        user.content || user.attachments?.map(attachment => attachment.name).join(' ') || '', messages.slice(0, start));
                     const { historyForApi, systemInstruction } = await this.prepareSendHistory(messages.slice(0, start), instruction, preparation);
                     this.assertSendExecutionV136(preparation);
                     requestStarted = true;
@@ -20928,9 +21011,9 @@ const appLogic = {
                         else uiUtils.renderChatMessages();
                     }
 
-                    const instruction = await this.buildSendSystemInstruction(preparation,
-                        userMessage.content || userMessage.attachments?.map(attachment => attachment.name).join(' ') || '');
                     const baseHistory = preparation.messages.filter(msg => !msg.isCascaded || msg.isSelected);
+                    const instruction = await this.buildSendSystemInstruction(preparation,
+                        userMessage.content || userMessage.attachments?.map(attachment => attachment.name).join(' ') || '', baseHistory);
                     const { historyForApi, systemInstruction } = await this.prepareSendHistory(baseHistory, instruction, preparation);
                     this.assertSendExecutionV136(preparation);
 
@@ -21423,7 +21506,7 @@ const appLogic = {
                     console.log(`[API Call] レスポンス取得成功 (所要時間: ${elapsed}ms)`);
                 }
                 
-                if (responseData.error) throw new Error(responseData.error.message || 'APIエラー');
+                if (responseData.error) throw Object.assign(new Error(responseData.error.message || 'APIエラー'), { data: responseData });
                 if (responseData.promptFeedback?.blockReason || (responseData.promptFeedback && !responseData.candidates?.length)) {
                     const blockReason = responseData.promptFeedback.blockReason || 'SAFETY';
                     const error = new Error(`APIが応答をブロックしました (理由: ${blockReason})`);
@@ -21435,6 +21518,9 @@ const appLogic = {
                 }
                 
                 const candidate = responseData.candidates[0];
+                window.DocumentRag?.throwOnProviderCapacity({ finishReason: candidate.finishReason }, session);
+                if (session?.fullDocuments?.length) session.fullRequestAccepted = true;
+                window.DocumentRag?.acknowledgeSearchResults(session);
                 const finishReasonError = getFinishReasonError(candidate);
                 if (finishReasonError) {
                     if (session && !receivedStreamData && Array.isArray(candidate.content?.parts)) {
@@ -21526,12 +21612,14 @@ const appLogic = {
                 };
 
             } catch (error) {
-                rememberInterruptedMetadata(true);
                 // タイマークリーンアップ
                 if (timeoutId) {
                     clearTimeout(timeoutId);
                     timeoutId = null;
                 }
+                if (['full-reference', 'document-search-version'].includes(error.code)) throw error;
+                if (!userSignal.aborted) window.DocumentRag?.throwOnProviderCapacity(error, session);
+                rememberInterruptedMetadata(true);
 
                 lastError = error;
                 

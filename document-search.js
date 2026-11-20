@@ -92,7 +92,7 @@ window.DocumentSearch = (() => {
         });
     }
 
-    async function pdfBlocks(blob, signal) {
+    async function pdfBlocks(blob, signal, full = false) {
         const task = await openPdf(blob, signal);
         const abort = () => { void task.destroy().catch(() => {}); };
         signal.addEventListener('abort', abort, { once: true });
@@ -113,7 +113,10 @@ window.DocumentSearch = (() => {
                     if (total + text.length > 800000) throw failure('content-limit', '抽出できる本文量の上限を超えました。');
                 }
                 source.cleanup();
-                text = text.replace(/[\u0000\uFFFD]/g, '').trim();
+                if (full && (!text.trim() || /[\u0000\uFFFD]/.test(text))) {
+                    throw failure('partial-pdf-text', 'PDFの' + page + 'ページから完全なテキストを取得できません。画像ページにはOCRが必要です。');
+                }
+                if (!full) text = text.replace(/[\u0000\uFFFD]/g, '').trim();
                 if (!text) continue;
                 total += text.length;
                 blocks.push({ text, location: { type: 'pdf', page } });
@@ -311,10 +314,48 @@ window.DocumentSearch = (() => {
         const scope = snapshot ? await readChatSnapshot(snapshot) : null;
         const documents = snapshot ? scope.documents : await window.dbUtils.getChatDocuments(chatId);
         if (documents === null) throw new Error('資料の紐づけまたは版を取得できません。');
-        return { chatId, ...await searchDocuments(documents, query, { limit, signal, useCapturedVersions: scope?.projectId != null }) };
+        return { chatId, ...await searchDocuments(snapshot ? documents.filter(entry => entry.referenceMode !== 'full') : documents,
+            query, { limit, signal, useCapturedVersions: scope?.projectId != null, semantic: Boolean(snapshot) }) };
     }
 
-    async function searchDocuments(documents, question, { limit = 6, signal, useCapturedVersions = false } = {}) {
+    function rankHybrid(lexical, semantic, query, limit) {
+        if (!semantic?.length) return lexical.slice(0, limit);
+        const normalize = text => text.normalize('NFKC').toLocaleLowerCase('ja').replace(/\s+/g, ' ').trim();
+        const phrase = normalize(query);
+        const identifierPattern = /\b[a-z][\w]*[_-][\w-]+\b|\d+(?:[./:-]\d+)*[年月日]?/g;
+        const identifiers = phrase.match(identifierPattern) || [];
+        const names = phrase.match(/\p{Script=Han}{3,12}/gu) || [];
+        const exact = text => {
+            const content = normalize(text);
+            if (phrase.length >= 2 && content.includes(phrase)) return true;
+            const tokens = content.match(identifierPattern) || [];
+            return (identifiers.length > 0 && identifiers.every(value => tokens.includes(value))) ||
+                (!identifiers.length && names.some(name => content.includes(name)));
+        };
+        const candidates = new Map(lexical.map((entry, position) => [entry.chunkId, {
+            ...entry, score: exact(entry.text) ? 1.2 - position * 0.005 : 0.54 + 0.14 / (position + 1)
+        }]));
+        const strongest = semantic[0].similarity;
+        const other = semantic.find(entry => entry.documentId !== semantic[0].documentId)?.similarity ?? 0;
+        for (const entry of semantic) {
+            const keyword = candidates.get(entry.chunkId);
+            // Cosine and lexical scores are not comparable. Require independent evidence
+            // unless the semantic result clears both the score and separation gates.
+            const confident = entry.similarity >= 0.68 && strongest - other >= 0.025 &&
+                strongest - entry.similarity <= 0.08;
+            if (keyword || confident) {
+                candidates.set(entry.chunkId, { ...(keyword || entry), score: Math.max(keyword?.score || 0, entry.similarity) });
+            }
+        }
+        const perDocument = new Map();
+        return [...candidates.values()].sort((a, b) => b.score - a.score).filter(entry => {
+            const count = perDocument.get(entry.documentId) || 0;
+            perDocument.set(entry.documentId, count + 1);
+            return count < 2;
+        }).slice(0, limit);
+    }
+
+    async function searchDocuments(documents, question, { limit = 6, signal, useCapturedVersions = false, semantic = false } = {}) {
         signal?.throwIfAborted();
         const query = question.trim().slice(0, 512);
         if (!query || !documents.length) return { documentCount: documents.length, results: [], unavailable: [] };
@@ -352,8 +393,12 @@ window.DocumentSearch = (() => {
         }
         if (!indexes.length) return { documentCount: documents.length, results: [], unavailable };
         const count = Number.isSafeInteger(limit) ? Math.max(1, Math.min(20, limit)) : 6;
-        const matches = await withDeadline(signal, 15000, deadline =>
+        const lexical = await withDeadline(signal, 15000, deadline =>
             runWorker({ operation: 'search', indexes, query, terms, limit: count }, deadline));
+        const vectors = semantic && window.DocumentEmbedding ? await withDeadline(signal, 7500, deadline =>
+            window.DocumentEmbedding.score(indexes, query, sources, deadline)).catch(() => null) : null;
+        signal?.throwIfAborted();
+        const matches = rankHybrid(lexical, vectors, query, count);
         return { documentCount: documents.length, unavailable, results: matches.map(match => ({
             ...sources.get(match.documentId), ...match, contentTrust: 'untrusted-document'
         })) };
@@ -386,6 +431,32 @@ window.DocumentSearch = (() => {
         return { matches, unavailable };
     }
 
+    async function assertFullVersions(entries, signal) {
+        const current = await Promise.all(entries.map(entry => window.dbUtils.getLibraryDocument(entry.documentId)));
+        signal?.throwIfAborted();
+        const obsolete = entries.find((entry, i) => !sameVersion(current[i], entry));
+        if (obsolete) throw failure('version-changed', obsolete.fileName + '：' + changed().message);
+    }
+
+    async function extractFullDocument(entry, { signal } = {}) {
+        return withDeadline(signal, 45000, async deadline => {
+            const maximum = maxBytes[entry.format] || 8 * MB;
+            if (entry.size > maximum) throw failure('size-limit', 'この形式の解析上限は ' + maximum / MB + ' MiB です。');
+            const original = await window.dbUtils.getLibraryOriginal(entry.id, entry.version, entry.versionId);
+            if (!(original?.blob instanceof Blob) || !sameVersion(original, entry) || original.blob.size !== entry.size) {
+                throw failure('source-unavailable', '指定された版の原本を取得できません。');
+            }
+            if (await DocumentLibrary.digest(original.blob) !== entry.hash) {
+                throw failure('source-corrupt', '原本の整合性を確認できません。');
+            }
+            deadline.throwIfAborted();
+            const blocks = entry.format === 'pdf' ? await pdfBlocks(original.blob, deadline, true) :
+                await runWorker({ operation: 'extract-full', entry, blob: original.blob }, deadline);
+            if (!blocks.length) throw failure('empty', '抽出可能な本文がありません。');
+            return { ...descriptor(entry), blocks };
+        });
+    }
+
     async function previewReference(reference, { signal } = {}) {
         const db = await window.dbUtils.openDB();
         signal?.throwIfAborted();
@@ -394,6 +465,12 @@ window.DocumentSearch = (() => {
             return { status: 'failed', code: 'source-unavailable', message: '参照元の版を利用できません。', chunks: [] };
         }
         const entry = { ...original, id: reference.documentId, name: reference.documentName };
+        if (reference.referenceMode === 'full') {
+            const { blocks } = await extractFullDocument(entry, { signal });
+            return { status: 'ready', chunks: blocks.map(({ text, location }, i) => ({
+                text, location, id: entry.versionId + ':full:' + i
+            })) };
+        }
         const status = await getRecord(db, entry, 'state');
         let index = currentCache(status, entry) && status.status === 'ready' ? await getRecord(db, entry, 'index') : null;
         signal?.throwIfAborted();
@@ -431,5 +508,5 @@ window.DocumentSearch = (() => {
     }
 
     return { captureChat, captureSendChat, readChatSnapshot, searchChat, searchDocuments, analyzeDocument, previewDocument, previewReference, getStatus,
-        getStatuses, cancelAnalysis, formatLocation, openPdf, findInChunks, findLibraryText };
+        getStatuses, cancelAnalysis, formatLocation, openPdf, findInChunks, findLibraryText, extractFullDocument, assertFullVersions, rankHybrid };
 })();

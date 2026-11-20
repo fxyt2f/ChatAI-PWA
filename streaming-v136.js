@@ -417,6 +417,7 @@
                 const info = chunk.error || chunk;
                 const error = new Error(info.message || 'APIストリームの途中でエラーが発生しました。');
                 if (Number.isInteger(info.code)) error.status = info.code;
+                error.data = info;
                 throw error;
             }
             const candidates = (provider === 'gemini' ? chunk.candidates : chunk.choices) ?? [];

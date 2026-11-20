@@ -4,6 +4,7 @@ const DocumentLibrary = (() => {
     const originals = 'library_originals';
     const links = 'chat_documents';
     const indexStore = 'library_search_indexes';
+    const embeddingStore = 'library_embedding_vectors';
     const stores = [documents, originals, links];
     const syncKey = 'documentLibrarySync';
     const formats = new Set(['pdf', 'docx', 'txt', 'md', 'csv', 'tsv', 'json', 'yaml', 'xml', 'html']);
@@ -38,6 +39,7 @@ const DocumentLibrary = (() => {
         const store = tx.objectStore(indexStore);
         store.delete([id, 'state']);
         store.delete([id, 'index']);
+        tx.objectStore(embeddingStore).delete(IDBKeyRange.bound([id], [id, []]));
     }
 
     async function discardChangedIndexes(tx, incoming) {
@@ -100,7 +102,7 @@ const DocumentLibrary = (() => {
     async function writeDocument(db, settingsName, id, file, options = {}) {
         const versionData = await prepareFile(file, options);
         const names = [documents, originals, settingsName];
-        if (id != null) names.push(indexStore);
+        if (id != null) names.push(indexStore, embeddingStore);
         return transaction(db, names, 'readwrite', async tx => {
             const metadata = tx.objectStore(documents);
             const previous = id == null ? null : await request(metadata.get(id));
@@ -125,7 +127,7 @@ const DocumentLibrary = (() => {
     }
 
     async function deleteDocument(db, settingsName, id, options) {
-        return transaction(db, [...stores, settingsName, indexStore, ProjectStore.documents], 'readwrite', async tx => {
+        return transaction(db, [...stores, settingsName, indexStore, embeddingStore, ProjectStore.documents], 'readwrite', async tx => {
             const metadata = tx.objectStore(documents);
             const previous = await request(metadata.get(id));
             if (!previous) return false;
@@ -175,6 +177,22 @@ const DocumentLibrary = (() => {
         return [...new Set(ids)];
     }
 
+    const referenceMode = link => link?.referenceMode === 'full' ? 'full' : 'rag';
+    const validReferenceMode = link => !Object.hasOwn(link, 'referenceMode') || ['rag', 'full'].includes(link.referenceMode);
+    const linkedDocument = (entry, link) => entry && (referenceMode(link) === 'full'
+        ? { ...entry, referenceMode: 'full' } : entry);
+
+    async function setReferenceMode(store, key, mode) {
+        if (!['rag', 'full'].includes(mode)) throw new TypeError('参照モードが無効です。');
+        const link = await request(store.get(key));
+        if (!link) throw new Error('資料の紐づけが見つかりません。');
+        if (referenceMode(link) === mode) return false;
+        if (mode === 'full') link.referenceMode = mode;
+        else delete link.referenceMode;
+        store.put(link);
+        return true;
+    }
+
     async function getChatDocuments(db, chatId, owner) {
         if (chatId == null) return [];
         const stores = owner ? [links, documents, owner.store] : [links, documents];
@@ -185,14 +203,14 @@ const DocumentLibrary = (() => {
                     throw new DOMException('チャットが別のデータに置き換わりました。', 'ChatContentConflict');
                 }
             }
-            const ids = await readChatDocumentIds(tx, chatId);
-            return Promise.all(ids.map(id => request(tx.objectStore(documents).get(id))));
+            const relations = await readChatDocumentLinks(tx, chatId);
+            const library = tx.objectStore(documents);
+            return Promise.all(relations.map(async link => linkedDocument(await request(library.get(link.documentId)), link)));
         });
     }
 
-    async function readChatDocumentIds(tx, chatId) {
-        const relations = await request(tx.objectStore(links).index('chatId').getAll(chatId));
-        return relations.map(link => link.documentId);
+    function readChatDocumentLinks(tx, chatId) {
+        return request(tx.objectStore(links).index('chatId').getAll(chatId));
     }
 
     function checkFileInfo(entry) {
@@ -238,7 +256,7 @@ const DocumentLibrary = (() => {
         const chatIds = new Set(chats.map(chat => chat.id));
         const linkKeys = new Set();
         for (const link of manifest.links) {
-            if (!link || !isChatId(link.chatId) || !chatIds.has(link.chatId) || !byId.has(link.documentId)) throw invalid();
+            if (!link || !isChatId(link.chatId) || !chatIds.has(link.chatId) || !byId.has(link.documentId) || !validReferenceMode(link)) throw invalid();
             const key = JSON.stringify([link.chatId, link.documentId]);
             if (linkKeys.has(key)) throw invalid();
             linkKeys.add(key);
@@ -277,7 +295,8 @@ const DocumentLibrary = (() => {
         });
     }
 
-    return { documents, originals, links, indexStore, stores, syncKey, isId, isChatId, isHash, uniqueId, digest, upgrade, request, discardChangedIndexes,
+    return { documents, originals, links, indexStore, embeddingStore, stores, syncKey, isId, isChatId, isHash, uniqueId, digest, upgrade, request, discardChangedIndexes,
         transaction, syncState, markChanged, writeDocument, deleteDocument, replaceLinks, normalizeIds,
-        getChatDocuments, readChatDocumentIds, validateManifest, exportSnapshot, restoreOriginals };
+        getChatDocuments, readChatDocumentLinks, referenceMode, validReferenceMode, linkedDocument, setReferenceMode,
+        validateManifest, exportSnapshot, restoreOriginals };
 })();
