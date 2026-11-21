@@ -169,12 +169,15 @@ window.dropboxApi = {
      * @returns {Promise<any>} APIからのレスポンス
      */
     async _request(domain, endpoint, options = {}, retryCount = 0, hasRefreshedToken = false) {
+        const { historyProbe, signal } = options;
+        signal?.throwIfAborted();
         let tokens = await this._getTokens();
         if (!tokens || !tokens.access_token) {
             throw new Error("Dropbox is not connected.");
         }
 
         if (Date.now() >= tokens.expires_at) {
+            if (historyProbe) throw new Error('Dropbox history connection expired.');
             if (!tokens.refresh_token) {
                 await this._saveTokens(null);
                 throw new Error("Session expired. Please reconnect to Dropbox.");
@@ -189,11 +192,12 @@ window.dropboxApi = {
         };
 
         try {
-            const { withMetadata, ...fetchOptions } = options;
+            const { withMetadata, historyProbe: _historyProbe, ...fetchOptions } = options;
+            signal?.throwIfAborted();
             const response = await fetch(url, { ...fetchOptions, headers });
 
             if (!response.ok) {
-                if (response.status === 401 && !hasRefreshedToken) {
+                if (response.status === 401 && !hasRefreshedToken && !historyProbe) {
                     if (!tokens.refresh_token) {
                         await this._saveTokens(null);
                         throw new Error("Session expired. Please reconnect to Dropbox.");
@@ -206,7 +210,7 @@ window.dropboxApi = {
                 const errorText = await this._readDropboxErrorText(response);
                 const error = this._createDropboxError({ response, domain, endpoint, errorText });
 
-                if (this._isRetryableStatus(response.status) && retryCount < this.MAX_RETRY_COUNT) {
+                if (!historyProbe && this._isRetryableStatus(response.status) && retryCount < this.MAX_RETRY_COUNT) {
                     const delayMs = this._getRetryDelayMs(response, retryCount);
                     console.warn(`[Dropbox API] Retryable error for ${domain}${endpoint} (status: ${response.status}). Retrying ${retryCount + 1}/${this.MAX_RETRY_COUNT} in ${delayMs}ms.`, error.message);
                     await this._sleep(delayMs);
@@ -228,6 +232,7 @@ window.dropboxApi = {
             return responseText ? JSON.parse(responseText) : {};
 
         } catch (error) {
+            if (historyProbe || signal?.aborted) throw error;
             if (!error.status && retryCount < this.MAX_RETRY_COUNT) {
                 const delayMs = this._getRetryDelayMs(null, retryCount);
                 console.warn(`[Dropbox API] Network error for ${domain}${endpoint}. Retrying ${retryCount + 1}/${this.MAX_RETRY_COUNT} in ${delayMs}ms.`, error);
@@ -276,13 +281,15 @@ window.dropboxApi = {
         });
     },
 
-    async downloadMetadata({ withRevision = false, revision = null } = {}) {
+    async downloadMetadata({ withRevision = false, revision = null, signal } = {}) {
         const args = { path: revision ? 'rev:' + revision : this.METADATA_PATH };
         try {
             const result = await this._request('content', '/files/download', {
                 method: 'POST',
                 headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
-                withMetadata: withRevision
+                withMetadata: withRevision,
+                historyProbe: Boolean(revision),
+                signal
             });
             const content = await (withRevision ? result.blob : result).text();
             if (!revision) {
@@ -305,28 +312,68 @@ window.dropboxApi = {
     },
 
     async findMetadataRevision(head, syncId) {
-        if (!head.fileId) return null;
-        const limit = 20;
-        const result = await this._request('api', '/files/list_revisions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: head.fileId, mode: 'id', limit })
-        });
-        const entries = result.entries?.filter(entry => entry.id === head.fileId && entry.rev !== head.rev);
-        if (!entries) return null;
-        for (let offset = 0; offset < Math.min(limit, entries.length); offset += 4) {
-            const revisions = await Promise.all(entries.slice(offset, offset + 4).map(async entry => {
-                if (!/^[a-z0-9]+$/i.test(entry.rev)) return null;
-                const snapshot = await this.downloadMetadata({ withRevision: true, revision: entry.rev });
-                if (!snapshot || snapshot.rev !== entry.rev || snapshot.fileId !== head.fileId) return null;
-                let data;
-                try { data = JSON.parse(snapshot.content); } catch { return null; }
-                return data.syncId === syncId ? data : null;
-            }));
-            const match = revisions.find(Boolean);
-            if (match) return match;
+        const counts = { pages: 0, listed: 0, checked: 0, foreign: 0, unreadable: 0 };
+        const finish = (reason, snapshot = null) => ({ reason, snapshot, counts });
+        if (!head.fileId) return finish('history-file-id-missing');
+        const signal = AbortSignal.timeout(45_000);
+        const validRev = rev => typeof rev === 'string' && /^[0-9a-f]{9,}$/i.test(rev);
+        const seen = new Set([head.rev]);
+        const cursors = new Set();
+        let mode = 'path';
+        let beforeRev;
+        try {
+            for (let page = 0; page < 3; page++) {
+                // before_rev works only in path mode. The path can include an
+                // older file that used the same name, so verify IDs separately.
+                const result = await this._request('api', '/files/list_revisions', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, historyProbe: true, signal,
+                    body: JSON.stringify({ path: mode === 'path' ? this.METADATA_PATH : head.fileId, mode, limit: 100,
+                        ...(beforeRev && { before_rev: beforeRev }) })
+                });
+                counts.pages++;
+                if (!Array.isArray(result.entries)) return finish('history-invalid-response');
+                const entries = result.entries.slice(0, 100);
+                counts.listed += entries.length;
+                const candidates = entries.filter(entry => {
+                    if (entry?.id !== head.fileId) { counts.foreign++; return false; }
+                    if (!validRev(entry.rev)) { counts.unreadable++; return false; }
+                    if (seen.has(entry.rev)) return false;
+                    seen.add(entry.rev);
+                    return true;
+                });
+                for (let offset = 0; offset < candidates.length; offset += 4) {
+                    const revisions = await Promise.all(candidates.slice(offset, offset + 4).map(async ({ rev }) => {
+                        counts.checked++;
+                        const download = await this.downloadMetadata({ withRevision: true, revision: rev, signal });
+                        if (!download || download.rev !== rev) { counts.unreadable++; return null; }
+                        if (download.fileId !== head.fileId) { counts.foreign++; return null; }
+                        let snapshot;
+                        try { snapshot = JSON.parse(download.content); } catch { counts.unreadable++; return null; }
+                        if (!snapshot || typeof snapshot.syncId !== 'string') { counts.unreadable++; return null; }
+                        return snapshot.syncId === syncId ? snapshot : null;
+                    }));
+                    const match = revisions.find(Boolean);
+                    if (match) return finish('history-match', match);
+                }
+                if (!result.has_more) {
+                    // A move can hide same-file revisions from the current path.
+                    if (mode === 'path' && page < 2) {
+                        mode = 'id';
+                        beforeRev = undefined;
+                        continue;
+                    }
+                    return finish(counts.foreign ? 'history-file-id-mismatch' :
+                        counts.unreadable ? 'history-incomplete' : 'history-snapshot-not-found');
+                }
+                if (mode === 'id') return finish('history-limit-reached');
+                beforeRev = entries.at(-1)?.rev;
+                if (!validRev(beforeRev) || cursors.has(beforeRev)) return finish('history-pagination-invalid');
+                cursors.add(beforeRev);
+            }
+        } catch {
+            return finish(signal.aborted ? 'history-timeout' : 'history-unavailable');
         }
-        return null;
+        return finish('history-limit-reached');
     },
 
     libraryOriginalPath(hash) {
