@@ -144,10 +144,10 @@ class Handler(SimpleHTTPRequestHandler):
             if fault=='network' and pathname=='/settings-v136.js':self.send_error(503);return
             file=root/('index.html' if pathname=='/' else pathname[1:])
             body=file.read_bytes()
-            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.37.4',b'1.36.1')
-            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.37.4',b'1.36.1')
+            if fault=='html' and pathname in ['/','/index.html']:body=body.replace(b'1.37.5',b'1.36.1')
+            if fault=='javascript' and pathname=='/app.js':body=body.replace(b'1.37.5',b'1.36.1')
             if fault=='css' and pathname=='/style.css':body=b'/* stale stylesheet */'+body
-            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.37.4',b'./unlisted.js?v=1.37.4')
+            if fault=='reference' and pathname in ['/','/index.html']:body=body.replace(b'./app.js?v=1.37.5',b'./unlisted.js?v=1.37.5')
             self.send_response(200);self.send_header('Content-Type','text/html' if file.suffix=='.html' else 'text/css' if file.suffix=='.css' else 'text/javascript');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
         elif self.path=='/legacy-sw-fixture.js':
             legacy=subprocess.check_output(['git','show','198c8d5b3ff130034edd1250a965febe3d2aa6b9:sw.js'],cwd=root)
@@ -162,8 +162,8 @@ class BrowserTestServer(ThreadingHTTPServer):
 
 
 def check_previous_release_upgrade(client, url):
-    """Exercise the real update coordinator against the exact v1.37.3 shell."""
-    revision='cf842ae0b3583ac26cbb1c6dcf001dc215600df8'
+    """Exercise the real update coordinator against the exact v1.37.4 shell."""
+    revision='2a47d4084b15e91941f02b6264314c57cd3d035a'
 
     def read_previous(name):
         return subprocess.check_output(['git','show',f'{revision}:{name}'],cwd=root)
@@ -204,35 +204,37 @@ def check_previous_release_upgrade(client, url):
     Handler.exact_worker=True
     try:
         client.call('Page.navigate',{'url':url})
-        wait_for_version('1.37.3')
+        wait_for_version('1.37.4')
         evaluate('''(async()=>{
             const deadline=Date.now()+10000;
             while(Date.now()<deadline){
                 const notice=document.querySelector('#releaseNotesDialog[open] .dialog-ok-btn');
                 if(notice)notice.click();
-                if(window.state.localUiSettings?.lastSeenReleaseVersion==='1.37.3' &&
+                if(window.state.localUiSettings?.lastSeenReleaseVersion==='1.37.4' &&
                     !document.querySelector('dialog[open]'))return;
                 await new Promise(resolve=>setTimeout(resolve,50));
             }
-            throw Error('Could not acknowledge the v1.37.3 release notice');
+            throw Error('Could not acknowledge the v1.37.4 release notice');
         })()''')
         chat=evaluate('''(async()=>{
-            if(window.state.db.version!==17 || !(await caches.keys()).includes('chatai-pwa-cache-v1.37.3'))
-                throw Error('Expected the published v1.37.3 database and shell');
+            if(window.state.db.version!==18 || !(await caches.keys()).includes('chatai-pwa-cache-v1.37.4'))
+                throw Error('Expected the published v1.37.4 database and shell');
             return window.dbUtils.saveChat(null,{title:'Upgrade fixture',messages:[{role:'user',content:'  保持する本文  '}]},{skipPush:true});
         })()''')
         Handler.previous_release=None
         evaluate('navigator.serviceWorker.getRegistration().then(reg=>void reg.update().catch(console.error)); true')
-        wait_for_version('1.37.4')
+        wait_for_version('1.37.5')
         migrated=evaluate('''(async()=>{
             const chat=await window.dbUtils.getChat('''+json.dumps(chat)+''');
             const keys=await caches.keys();
-            return window.state.db.version===18 && chat.messages[0].content==='  保持する本文  ' &&
-                !keys.includes('chatai-pwa-cache-v1.37.3') && keys.includes('chatai-pwa-cache-v1.37.4') &&
-                (await window.appLogic.formatReleaseNotes())?.startsWith('## v1.37.4');
+            return window.state.db.version===18 && typeof window.ContextReference?.capture==='function' &&
+                Boolean(window.informationUi) && Boolean(await caches.match('./context-reference.js?v=1.37.5')) &&
+                chat.messages[0].content==='  保持する本文  ' &&
+                !keys.includes('chatai-pwa-cache-v1.37.4') && keys.includes('chatai-pwa-cache-v1.37.5') &&
+                (await window.appLogic.formatReleaseNotes())?.startsWith('## v1.37.5');
         })()''')
-        assert migrated,'Update did not retain chat, migrate IndexedDB, or load the final shell and release notes'
-        return 'ALL PASSED (published v1.37.3 to v1.37.4: real Worker update, app reload, IndexedDB v17 to v18 and saved chat)'
+        assert migrated,'Update did not retain the saved chat, load context-reference.js, or load the final shell and release notes'
+        return 'ALL PASSED (published v1.37.4 to v1.37.5: real Worker update, app reload, IndexedDB v18 saved chat and context-reference.js)'
     finally:
         Handler.previous_release=None
         Handler.exact_worker=False
@@ -580,14 +582,14 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                     }
                     await controlledBy('/sw.js');
                     const names=await caches.keys();
-                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.37.4')||!names.includes('unrelated-cache')){
+                    if(names.includes('chatai-pwa-cache-v1.35.1')||!names.includes('chatai-pwa-cache-v1.37.5')||!names.includes('unrelated-cache')){
                         throw new Error('cache upgrade mismatch: '+JSON.stringify(names));
                     }
-                    const primary=await caches.open('chatai-pwa-cache-v1.37.4');
+                    const primary=await caches.open('chatai-pwa-cache-v1.37.5');
                     const pointer=await primary.match(new URL('/.__active_app_shell__',location.href));
                     const shell=pointer?await caches.open(await pointer.text()):primary;
-                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.37.4'))throw new Error('missing versioned asset '+asset);
-                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.37.4'});
+                    for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js'])if(!await shell.match('/'+asset+'?v=1.37.5'))throw new Error('missing versioned asset '+asset);
+                    await dbUtils.saveSetting('localUiSettings',{...state.localUiSettings,lastSeenReleaseVersion:'1.37.5'});
                     await dbUtils.saveSetting('dropboxTokens',null);sessionStorage.removeItem('pendingVersionNotice');
                     return true;
                 })()''','awaitPromise':True,'returnByValue':True})
@@ -624,7 +626,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                         const deadline=Date.now()+15000;
                         while(Date.now()<deadline){
                             const win=frame.contentWindow;
-                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.37.4'))return true;
+                            if(win?.state?.activeProfile&&win.appLogic?._setupEventListenersCallCount&&win.document.getElementById('app-version')?.textContent.includes('1.37.5'))return true;
                             await new Promise(r=>setTimeout(r,50));
                         }
                         throw new Error('previous shell failed offline after rejected updates');
@@ -636,8 +638,8 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 concurrent=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const peer=window.open('about:blank','sw-fetch-peer');
                     try {
-                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.37.4',{cache:'no-store'}).then(async response=>{
-                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.37.4";'))throw new Error('concurrent shell read failed');
+                        const reads=Array.from({length:12},(_,i)=>(i%2?peer:window).fetch(location.origin+'/app.js?v=1.37.5',{cache:'no-store'}).then(async response=>{
+                            if(!response.ok||!(await response.text()).includes('const APP_VERSION = "1.37.5";'))throw new Error('concurrent shell read failed');
                         }));
                         const channel=new MessageChannel(),updated=new Promise((resolve,reject)=>{
                             const timer=setTimeout(()=>reject(new Error('concurrent rebuild timeout')),15000);
@@ -667,7 +669,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 boot_expression='''(async()=>{
                     const deadline=Date.now()+15000;
                     while(Date.now()<deadline){
-                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.37.4')){
+                        if(window.state?.activeProfile&&window.settingsUiV136&&appLogic._setupEventListenersCallCount&&document.getElementById('app-version')?.textContent.includes('1.37.5')){
                             if(!document.getElementById('chat-model-button'))throw new Error('picker missing');
                             if(typeof window.DOMPurify?.sanitize!=='function')throw new Error('offline sanitizer missing');
                             if(typeof window.StreamingV136?.collectResponse!=='function')throw new Error('offline SSE module missing');
@@ -705,7 +707,7 @@ with tempfile.TemporaryDirectory(prefix='chatai-v136-test-',ignore_cleanup_error
                 time.sleep(.3)
                 offline=client.call('Runtime.evaluate',{'expression':boot_expression,'awaitPromise':True,'returnByValue':True})
                 if 'exceptionDetails' in offline:raise RuntimeError(offline['exceptionDetails'])
-                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.37.4 boot with SSE module and DOMPurify sanitization)'
+                output+='\nALL PASSED (legacy worker upgrade; R07 manual clear, online reboot, HTTP cache disabled/cleared, server and worker stopped, offline 1.37.5 boot with SSE module and DOMPurify sanitization)'
                 offline_search=client.call('Runtime.evaluate',{'expression':'''(async()=>{
                     const result=await DocumentSearch.searchChat(908173,'返金申請の期限は購入日から何日以内？');
                     const match=result.results[0];

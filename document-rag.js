@@ -268,14 +268,20 @@ window.DocumentRag = (() => {
         }
     }
 
-    function referenceBudget(session, history, instruction) {
+    function inputBudget(session, knownModelOnly = false) {
         const config = session.apiConfig;
         const limits = window.appLogic.getModelMetadataV136(config?.ref) || {};
         const context = positiveLimit(limits.contextLength);
         const input = positiveLimit(limits.inputTokenLimit);
         const output = positiveLimit(session.generationParameters?.maxTokens) ?? 2048;
         const modelBudget = Math.min(input ?? Infinity, context ? context - output : Infinity);
+        if (knownModelOnly && !Number.isFinite(modelBudget)) return Infinity;
         const entireInput = Number.isFinite(modelBudget) ? modelBudget : 12000;
+        const overhead = Math.max(768, Math.ceil(entireInput * 0.08));
+        return entireInput - output * (Number.isFinite(modelBudget) ? 0 : 1) - overhead;
+    }
+
+    function availableReferenceTokens(session, history, instruction, { knownModelOnly = false } = {}) {
         const summary = !session.answerOnly && session.summarizedContext?.summaryText;
         const messages = history.filter(message => !message.isCascaded || message.isSelected);
         const effective = summary && messages.length > 20 ? [...messages.slice(0, 5), ...messages.slice(-15)] : messages;
@@ -283,10 +289,23 @@ window.DocumentRag = (() => {
             instruction, summary, session.settings?.dummyUser, session.settings?.dummyModel,
             effective.map(message => [message.content, message.attachments, message.generated_images, message.continuation?.turns]),
             session.fullDocuments?.map(entry => entry.text),
-            session.settings?.geminiEnableFunctionCalling ? window.functionDeclarations : null
+            session.settings?.geminiEnableFunctionCalling && session.toolCallingSupported !== false ? window.functionDeclarations : null,
+            window.ContextReference?.declaration(session)
         ]);
-        const overhead = Math.max(768, Math.ceil(entireInput * 0.08));
-        return Math.min(maximumReferenceTokens, Math.max(0, entireInput - output * (Number.isFinite(modelBudget) ? 0 : 1) - overhead - reserved));
+        return Math.max(0, inputBudget(session, knownModelOnly) - reserved);
+    }
+
+    function contextReferenceBudget(session, history, instruction, hasSearchDocuments) {
+        const primary = availableReferenceTokens(session, history, instruction, { knownModelOnly: true });
+        const fallback = hasSearchDocuments && Number.isFinite(primary)
+            ? primary - Math.min(maximumReferenceTokens, Math.floor(primary / 2)) : primary;
+        return { primary, fallback };
+    }
+
+    function remainingToolTokens(session, history, instruction, tools) {
+        return Math.max(0, inputBudget(session) - estimateTokens([
+            history, instruction, tools, session.fullDocuments?.map(entry => entry.text)
+        ]));
     }
 
     async function selectReferences(results, session, budget, fromTool = false) {
@@ -332,12 +351,13 @@ window.DocumentRag = (() => {
 
     function canSearch(session) {
         return Boolean(session?.searchScope && !session.answerOnly && session.settings?.geminiEnableFunctionCalling &&
+            session.toolCallingSupported !== false &&
             !session.controller.signal.aborted && session.rag?.status !== 'unsupported' &&
             (session.additionalSearchCount || 0) < maximumAdditionalSearches && session.referenceBudget > 128);
     }
 
     function declarations(session, existing) {
-        const safe = session?.recoveredDocuments ? [] : existing || [];
+        const safe = session?.recoveredDocuments || session?.recoveredContext ? [] : existing || [];
         // Converse still needs toolConfig when the outgoing history contains toolUse/toolResult.
         const keepConverseSchema = session?.apiConfig?.provider === 'bedrock' && session.additionalSearchCount > 0;
         if (!canSearch(session) && !keepConverseSchema) return safe;
@@ -397,16 +417,21 @@ window.DocumentRag = (() => {
         session.pendingSearchSources = [];
     }
 
-    async function build(session, question, baseInstruction, history = []) {
-        session.baseSystemInstruction = baseInstruction;
+    async function build(session, question, baseInstruction, history = [], finalizeBase) {
         session.controller.signal.throwIfAborted();
         // An unlinked draft gets its ID when the first user message is saved.
-        if (session.documentSnapshot && session.documentSnapshot.chatId == null) return baseInstruction;
+        if (session.documentSnapshot?.chatId === null) {
+            session.baseSystemInstruction = finalizeBase ? finalizeBase(null) : baseInstruction;
+            return session.baseSystemInstruction;
+        }
         const scope = session.documentSnapshot && await window.DocumentSearch.readChatSnapshot(session.documentSnapshot);
         const fullSources = await prepareFull(session, scope);
-        if (scope?.documents?.some(entry => entry.referenceMode !== 'full')) {
+        const hasSearchDocuments = scope?.documents?.some(entry => entry.referenceMode !== 'full');
+        if (finalizeBase) baseInstruction = finalizeBase(hasSearchDocuments);
+        session.baseSystemInstruction = baseInstruction;
+        if (hasSearchDocuments) {
             session.searchScope = scope;
-            session.referenceBudget = referenceBudget(session, history, baseInstruction);
+            session.referenceBudget = Math.min(maximumReferenceTokens, availableReferenceTokens(session, history, baseInstruction));
         }
         if (scope?.documents?.length === 0) return baseInstruction;
         if (fullSources.length) {
@@ -463,7 +488,7 @@ window.DocumentRag = (() => {
 
     function canExecuteTool(session, name) {
         if (name === searchTool.name) return canSearch(session);
-        if (session?.recoveredDocuments) return false;
+        if (session?.recoveredDocuments || session?.recoveredContext) return false;
         return !session?.rag || Boolean(session.settings.geminiEnableFunctionCalling &&
             session.documentToolNames.has(name) && Object.hasOwn(window.functionCallingTools || {}, name));
     }
@@ -530,5 +555,5 @@ window.DocumentRag = (() => {
         return [message.content || '', text ? '【過去のツール実行結果】\n' + text : '【過去のツール実行】'].filter(Boolean).join('\n');
     }
 
-    return { capture, build, normalize, attach, render, safeJson, historicalToolText, canExecuteTool, prepareFullRequest, throwOnProviderCapacity, declarations, searchToolDocuments, assertAdditionalSources, acknowledgeSearchResults };
+    return { capture, build, contextReferenceBudget, remainingToolTokens, estimateTokens, normalize, attach, render, safeJson, historicalToolText, canExecuteTool, prepareFullRequest, throwOnProviderCapacity, declarations, searchToolDocuments, assertAdditionalSources, acknowledgeSearchResults };
 })();
