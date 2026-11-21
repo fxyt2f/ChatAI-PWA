@@ -1610,12 +1610,15 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 if (state.isSending || state.currentExecutionApiConfig) throw new Error('応答生成中はモデル・Thinkingを変更できません。');
                 if (state.currentChatId) {
                     const id = state.currentChatId;
-                    await transaction(['chats', 'settings'], tx => {
+                    await transaction(['chats', 'settings', dbUtils.chatJournal.store], tx => {
                         const removed = tx.objectStore('settings').get(REMOVED_MODELS_KEY);
                         removed.onsuccess = () => {
                             if (matchesRemovedModel(ref, removed.result?.value)) { tx.abort(); return; }
                             const store = tx.objectStore('chats'); const req = store.get(id);
-                            req.onsuccess = () => { if (!req.result) { tx.abort(); return; } store.put({ ...req.result, executionSettings: next }); };
+                            req.onsuccess = () => {
+                                if (!req.result) { tx.abort(); return; }
+                                dbUtils.chatJournal.writeChat(store, { ...req.result, executionSettings: next }, req.result);
+                            };
                         };
                     });
                 } else {
@@ -1739,7 +1742,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                 const nextNames = this.getApiConfigModelCandidates(nextConfig);
                 const removed = this.removedApiModelsForEditV136(nextConfig, baseline);
                 const preview = confirmedImpact === null;
-                const scopes = removed.length ? ['settings', 'profiles', 'chats'] : ['settings'];
+                const scopes = removed.length ? ['settings', 'profiles', 'chats', dbUtils.chatJournal.store] : ['settings'];
                 let result, failure;
                 await transaction(scopes, tx => {
                     const settings = tx.objectStore('settings');
@@ -1780,7 +1783,8 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
                                         const ref = modelRef(chat.defaultModelRef) || modelRef(chat);
                                         if (matchesRemovedModel(ref, removed)) add(ref.modelName, 'defaultModelRef', 'chat', chat.id);
                                     }
-                                    if (Object.keys(patch).length) writes.push(() => tx.objectStore('chats').put({ ...chat, ...patch }));
+                                    if (Object.keys(patch).length) writes.push(() =>
+                                        dbUtils.chatJournal.writeChat(tx.objectStore('chats'), { ...chat, ...patch }, chat));
                                 }
                                 const currentRef = this.getCurrentChatModelRef();
                                 if (matchesRemovedModel(currentRef, removed) && !impact.some(item => item.scope === 'chat'

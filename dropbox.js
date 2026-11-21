@@ -335,9 +335,10 @@ window.dropboxApi = {
     },
 
 
-    async uploadAsset(assetBlob, assetId) {
+    async uploadAsset(assetBlob, assetId, { ifMissing = false } = {}) {
         const path = `${this.ASSETS_DIR_PATH}/${assetId}`;
-        const args = { path: path, mode: 'overwrite', mute: true };
+        const args = { path, mode: ifMissing ? 'add' : 'overwrite', mute: true,
+            ...(ifMissing && { autorename: false, strict_conflict: true }) };
         return this._request('content', '/files/upload', {
             method: 'POST',
             headers: {
@@ -412,33 +413,43 @@ window.dropboxApi = {
             throw new Error('Invalid input draft record.');
         }
         await this.ensureDraftsFolder();
-        const args = {
-            path: this.getInputDraftPath(draftRecord.contextKey),
-            mode: 'overwrite',
-            mute: true
-        };
-        return this._request('content', '/files/upload', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/octet-stream',
-                'Dropbox-API-Arg': JSON.stringify(args),
-            },
-            body: JSON.stringify(draftRecord),
-        });
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const current = await this.downloadInputDraftFromDropbox(draftRecord.contextKey, { withRevision: true });
+            if (current) {
+                const previous = current.record;
+                if (previous?.kind !== 'inputDraft' || previous.contextKey !== draftRecord.contextKey ||
+                    !Number.isFinite(previous.updatedAt)) throw new Error('Dropboxの下書き形式を確認できません。');
+                const order = draftRecord.updatedAt - previous.updatedAt;
+                if (order < 0 || order === 0 && (previous.deleted && !draftRecord.deleted ||
+                    Boolean(previous.deleted) === Boolean(draftRecord.deleted) &&
+                    (previous.clientId ?? '') >= draftRecord.clientId)) return;
+            }
+            const args = { path: this.getInputDraftPath(draftRecord.contextKey),
+                mode: current ? { '.tag': 'update', update: current.rev } : 'add',
+                strict_conflict: true, autorename: false, mute: true };
+            try {
+                return await this._request('content', '/files/upload', { method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': JSON.stringify(args) },
+                    body: JSON.stringify(draftRecord) });
+            } catch (error) {
+                if (attempt === 2 || error.status !== 409 || !error.message?.includes('path/conflict')) throw error;
+            }
+        }
     },
 
-    async downloadInputDraftFromDropbox(contextKey) {
-        const args = { path: this.getInputDraftPath(contextKey) };
+    async downloadInputDraftFromDropbox(contextKey, { withRevision = false } = {}) {
         try {
-            const blob = await this._request('content', '/files/download', {
+            const result = await this._request('content', '/files/download', {
                 method: 'POST',
-                headers: { 'Dropbox-API-Arg': JSON.stringify(args) },
+                headers: { 'Dropbox-API-Arg': JSON.stringify({ path: this.getInputDraftPath(contextKey) }) },
+                withMetadata: withRevision
             });
-            return JSON.parse(await blob.text());
+            if (!withRevision) return JSON.parse(await result.text());
+            const rev = result.metadata?.rev;
+            if (typeof rev !== 'string' || !rev) throw new Error('Dropboxの下書きのリビジョンを確認できません。');
+            return { rev, record: JSON.parse(await result.blob.text()) };
         } catch (error) {
-            if (error.message && error.message.includes('path/not_found')) {
-                return null;
-            }
+            if (error.message?.includes('path/not_found')) return null;
             throw error;
         }
     },

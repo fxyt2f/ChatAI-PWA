@@ -479,15 +479,27 @@ window.ProjectUI = (() => {
         };
     }
 
-    async function refresh(owner) {
+    async function refresh(owner, syncMerge = false) {
         const version = ++owner.version;
         try {
             const [project, chats, documents] = await db().getProjectWorkspaceSnapshot(owner.id);
             if (view !== owner || owner.version !== version) return;
-            if (!project) return close({ restoreFocus: true });
+            if (!project) {
+                if (syncMerge && owner.project && Object.entries(settingsFields).some(([key, name]) =>
+                    byId('settings-' + name).value !== (owner.project[key] ?? ''))) {
+                    setNotice(owner, 'このプロジェクトは同期で削除されました。編集中の内容を表示しています。');
+                    return;
+                }
+                return close({ restoreFocus: true });
+            }
+            owner.settingsBases ??= new Map();
             for (const [key, name] of Object.entries(settingsFields)) {
                 const control = byId('settings-' + name);
-                if (!owner.project || control.value === (owner.project[key] ?? '')) control.value = project[key] ?? '';
+                const before = owner.project?.[key] ?? '';
+                if (!owner.project || control.value === before || control.value === (project[key] ?? '')) {
+                    owner.settingsBases.delete(key);
+                    control.value = project[key] ?? '';
+                } else if (!owner.settingsBases.has(key)) owner.settingsBases.set(key, before);
             }
             owner.project = project;
             settingsSizing?.syncPromptSizes();
@@ -613,8 +625,10 @@ window.ProjectUI = (() => {
         setViewReady(true);
         status.textContent = '';
         try {
-            await db().updateProject(owner.id, changed);
+            const expected = Object.fromEntries(Object.keys(changed).map(key => [key, owner.settingsBases?.get(key) ?? owner.project[key] ?? '']));
+            await db().updateProject(owner.id, changed, expected);
             if (view !== owner) return;
+            for (const key of Object.keys(changed)) owner.settingsBases?.delete(key);
             const name = byId('settings-name');
             if (name.value === fields.name) name.value = fields.name.trim();
             await refresh(owner);
@@ -691,8 +705,10 @@ window.ProjectUI = (() => {
             if (dialog) byId('dialog').close();
             closeMenu();
         }
-        if (view) void refresh(view);
-        window.DocumentLibraryUI?.refreshProjectPicker();
+        if (view && (detail.type !== 'sync-merge' || detail.projects || detail.library)) {
+            void refresh(view, detail.type === 'sync-merge');
+        }
+        if (detail.type !== 'sync-merge') window.DocumentLibraryUI?.refreshProjectPicker();
     }
 
     function install() {

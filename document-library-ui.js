@@ -400,13 +400,18 @@ window.DocumentLibraryUI = (() => {
             const entries = await window.dbUtils.listLibraryDocuments();
             if (!ownsWorkspace(view) || request !== view.refreshVersion) return;
             const sorted = entries.sort(byName);
+            if (view.selected && !view.reference && !entries.some(entry => entry.versionId === view.selected.versionId)) {
+                const selected = view.selected;
+                const original = await window.dbUtils.getLibraryOriginal(selected.id, selected.version);
+                if (!ownsWorkspace(view) || request !== view.refreshVersion) return;
+                if (view.selected === selected && original?.versionId !== selected.versionId) {
+                    closePreview(view);
+                    notice(view, '表示していたファイルは更新または削除されました。');
+                }
+            }
             const changed = !view.loaded || !sameRows(view.entries, sorted);
             view.loaded = true;
             view.entries = sorted;
-            if (view.selected && !view.reference && !entries.some(entry => entry.versionId === view.selected.versionId)) {
-                closePreview(view);
-                notice(view, '表示していたファイルは更新または削除されました。');
-            }
             if (changed) queueSearch(view);
         } catch {
             if (request === view.refreshVersion) notice(view, 'ファイルの一覧を読み取れませんでした。');
@@ -1152,5 +1157,9 @@ window.DocumentLibraryUI = (() => {
 
     return { install, openWorkspace, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
         closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows, modeLabel, confirmReferenceMode,
-        refreshProjectPicker: () => { if (picker) void refreshPicker(picker); } };
+        refreshProjectPicker: () => { if (picker) void refreshPicker(picker); },
+        refreshDropboxChanges: () => {
+            if (picker) void refreshPicker(picker);
+            if (workspace) void refreshWorkspace(workspace);
+        } };
 })();
