@@ -276,8 +276,8 @@ window.dropboxApi = {
         });
     },
 
-    async downloadMetadata({ withRevision = false } = {}) {
-        const args = { path: this.METADATA_PATH };
+    async downloadMetadata({ withRevision = false, revision = null } = {}) {
+        const args = { path: revision ? 'rev:' + revision : this.METADATA_PATH };
         try {
             const result = await this._request('content', '/files/download', {
                 method: 'POST',
@@ -285,13 +285,15 @@ window.dropboxApi = {
                 withMetadata: withRevision
             });
             const content = await (withRevision ? result.blob : result).text();
-            const envelope = JSON.parse(content);
-            window.SettingsV136.assertCompatible(envelope);
-            if (Object.hasOwn(envelope, 'backupSchemaVersion')) throw new Error('Dropbox同期ファイルの形式が無効です。');
+            if (!revision) {
+                const envelope = JSON.parse(content);
+                window.SettingsV136.assertCompatible(envelope);
+                if (Object.hasOwn(envelope, 'backupSchemaVersion')) throw new Error('Dropbox同期ファイルの形式が無効です。');
+            }
             if (!withRevision) return content;
             const rev = result.metadata?.rev;
             if (typeof rev !== 'string' || !rev) throw new Error('Dropboxのリビジョンを取得できませんでした。');
-            return { content, rev };
+            return { content, rev, fileId: result.metadata.id };
         } catch (error) {
             // "path/not_found" という文字列を含むエラーの場合のみ、ファイルなし(null)として扱う
             if (error && error.message && error.message.includes('path/not_found')) {
@@ -300,6 +302,31 @@ window.dropboxApi = {
             // それ以外のエラーは、一時的なネットワークエラーの可能性があるので、そのままスローする
             throw error;
         }
+    },
+
+    async findMetadataRevision(head, syncId) {
+        if (!head.fileId) return null;
+        const limit = 20;
+        const result = await this._request('api', '/files/list_revisions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: head.fileId, mode: 'id', limit })
+        });
+        const entries = result.entries?.filter(entry => entry.id === head.fileId && entry.rev !== head.rev);
+        if (!entries) return null;
+        for (let offset = 0; offset < Math.min(limit, entries.length); offset += 4) {
+            const revisions = await Promise.all(entries.slice(offset, offset + 4).map(async entry => {
+                if (!/^[a-z0-9]+$/i.test(entry.rev)) return null;
+                const snapshot = await this.downloadMetadata({ withRevision: true, revision: entry.rev });
+                if (!snapshot || snapshot.rev !== entry.rev || snapshot.fileId !== head.fileId) return null;
+                let data;
+                try { data = JSON.parse(snapshot.content); } catch { return null; }
+                return data.syncId === syncId ? data : null;
+            }));
+            const match = revisions.find(Boolean);
+            if (match) return match;
+        }
+        return null;
     },
 
     libraryOriginalPath(hash) {

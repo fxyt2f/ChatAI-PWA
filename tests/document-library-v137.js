@@ -605,6 +605,8 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         const progress = ui.showProgressDialog;
         const retries = api.MAX_RETRY_COUNT;
         const files = new Map();
+        const history = new Map();
+        const metadataFileId = 'id:fixture-metadata';
         const folders = new Set();
         const commits = [];
         const statuses = [];
@@ -626,9 +628,14 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 if (!request.hostname.endsWith('.dropboxapi.com')) return previousFetch(url, options);
                 const args = JSON.parse(options.headers['Dropbox-API-Arg'] || options.body);
                 const path = args.path;
-                const entry = files.get(path);
+                const entry = path?.startsWith('rev:') ? history.get(path.slice(4)) : files.get(path);
+                if (request.pathname.endsWith('/list_revisions')) {
+                    eq(args, { path: metadataFileId, mode: 'id', limit: 20 });
+                    return Response.json({ entries: [...history].map(([rev, row]) => ({ rev, id: row.id })) });
+                }
                 if (request.pathname.endsWith('/download')) {
-                    return entry ? new Response(entry.blob, { headers: { 'Dropbox-API-Result': JSON.stringify({ rev: entry.rev }) } }) : notFound();
+                    const id = path === api.METADATA_PATH ? metadataFileId : entry?.id;
+                    return entry ? new Response(entry.blob, { headers: { 'Dropbox-API-Result': JSON.stringify({ rev: entry.rev, id }) } }) : notFound();
                 }
                 if (request.pathname.endsWith('/upload')) {
                     if (path.startsWith(api.DRAFTS_DIR_PATH + '/')) {
@@ -1126,6 +1133,79 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 assert(remoteDraft.deleted && remoteDraft.text === '');
                 eq(remoteDraft.updatedAt, 11);
             }));
+            await test('A real v18 migration recovers a proven Dropbox revision without discarding either device', async () => {
+                const earlier = 'legacy-base-sync', later = 'legacy-mobile-sync';
+                const chat = (id, title) => ({ id, title, createdAt: id * 100, updatedAt: id * 100,
+                    messages: [{ role: 'user', timestamp: id * 100 + 1, content: 'anchor ' + title }] });
+                const shared = chat(1, 'shared'), removed = chat(2, 'shared to delete');
+                const pc = chat(3, 'PC'), mobile = { ...chat(3, 'Mobile'), createdAt: 340 };
+                const project = { id: DocumentLibrary.uniqueId(), name: 'Legacy project', createdAt: 1, updatedAt: 1 };
+                const baseProjectRevision = DocumentLibrary.uniqueId(), mobileProjectRevision = DocumentLibrary.uniqueId();
+                const envelope = (syncId, chats, members, revision) => ({ version: '2.0', settingsSchemaVersion: 136,
+                    minimumReaderVersion: 138, syncId, exportedAt: new Date().toISOString(), data: {
+                        chats, settings: [], profiles: [], assets: [], memories: [], projectData: { schemaVersion: 1, revision,
+                            projects: [project], chats: members.map(chatId => ({ chatId, projectId: project.id })), documents: [] }
+                    } });
+                const baseJson = JSON.stringify(envelope(earlier, [shared, removed], [1], baseProjectRevision));
+                const remoteJson = JSON.stringify(envelope(later, [{ ...shared, title: 'Mobile edit' }, mobile], [1, 3], mobileProjectRevision));
+                files.set(api.METADATA_PATH, { blob: new Blob([remoteJson]), rev: 'legacy2' });
+                await withDatabase(async () => {
+                    await connect();
+                    eq(st.db.version, 19);
+                    eq(await read(db.chatJournal.store, db.chatJournal.snapshotKey), undefined);
+                    const previousIdentity = (await db.getChat(1)).syncIdentity;
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).message.includes('直近20版'));
+                    eq(await metadata(), remoteJson);
+                    eq((await db.getChat(1)).syncIdentity, previousIdentity);
+                    // Same syncId from another Dropbox file is insufficient.
+                    history.set('legacy0', { id: 'id:other-file', rev: 'legacy0', blob: new Blob([baseJson]) });
+                    history.set('legacy1', { id: metadataFileId, rev: 'legacy1', blob: new Blob([baseJson]) });
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                    const synced = JSON.parse(await metadata());
+                    const chats = await db.getAllChats();
+                    eq((await db.getChat(1)).title, 'Mobile edit');
+                    eq((await db.getChat(1)).systemPrompt, 'PC prompt');
+                    eq((await db.getChat(1)).syncDraftSource, previousIdentity);
+                    eq(await db.getChat(2), undefined);
+                    assert(chats.some(row => row.syncConflictOf && row.title.includes('PC recovered edit')));
+                    assert(synced.syncProtection.deletedChats.includes(db.chatJournal.legacyIdentity(earlier, 2)));
+                    const imported = chats.find(row => row.title === 'Mobile');
+                    assert(imported && imported.id !== pc.id);
+                    eq((await db.getChat(3)).title, 'PC');
+                    eq((await db.getChatProject(3)).id, project.id);
+                    eq((await db.getChatProject(imported.id)).id, project.id);
+                    eq((await checkpoint()).syncId, synced.syncId);
+                    await app.handleManualDropboxSync();
+                    eq(JSON.parse(await metadata()).syncId, synced.syncId);
+                }, async name => {
+                    const request = indexedDB.open(name, 18);
+                    request.onupgradeneeded = () => {
+                        const db = request.result;
+                        for (const [store, keyPath] of [['chats', 'id'], ['settings', 'key'], ['profiles', 'id'],
+                            ['image_store', 'id'], ['image_assets', 'name'], ['memory_store', 'profileId']]) {
+                            db.createObjectStore(store, { keyPath, autoIncrement: store === 'chats' || store === 'profiles' });
+                            db.createObjectStore(store + '_temp', { keyPath });
+                        }
+                        DocumentLibrary.upgrade(db);
+                        db.createObjectStore(DocumentLibrary.indexStore, { keyPath: ['documentId', 'kind'] });
+                        db.createObjectStore(DocumentLibrary.embeddingStore, { keyPath: 'key' }).createIndex('specId', 'specId');
+                        ProjectStore.upgrade(db);
+                        const tx = request.transaction;
+                        tx.objectStore('settings').put({ key: 'lastSyncId', value: earlier });
+                        tx.objectStore('settings').put({ key: ProjectStore.syncKey,
+                            value: { revision: DocumentLibrary.uniqueId(), syncedRevision: baseProjectRevision } });
+                        for (const row of [{ ...shared, systemPrompt: 'PC prompt' }, { ...removed, title: 'PC recovered edit' }, pc]) {
+                            tx.objectStore('chats').put(row);
+                        }
+                        tx.objectStore(ProjectStore.projects).put(project);
+                        for (const chatId of [1, 3]) tx.objectStore(ProjectStore.chats).put({ chatId, projectId: project.id });
+                    };
+                    (await DocumentLibrary.request(request)).close();
+                });
+                history.clear();
+            });
         } finally {
             Object.assign(app, { updateSyncStatusUI: previousStatus, updateDropboxUIState: previousUpdate });
             Object.assign(ui, { showCustomConfirm: confirm, showCustomAlert: alert, showProgressDialog: progress });
