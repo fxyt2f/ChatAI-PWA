@@ -22,6 +22,7 @@
 /tests/fixtures/document-analysis/*.pdf binary
 /tests/fixtures/document-analysis/*.docx binary
 /function-calling.js text eol=lf
+/context-reference.js text eol=lf
 /marked.js text eol=lf
 /purify.min.js text eol=lf
 /prism.js text eol=lf

@@ -18,6 +18,7 @@
     const sceneFields = {
         scene_id: 'シーンID', location: '場所', time_of_day: '時間帯', mood: '雰囲気', pov: '視点', notes: '補足'
     };
+    const { characterSources } = window.ContextReference;
     const memoryPath = ['persistentMemory'];
     const memoryRecord = 'character_memory_';
     const statusRecord = 'character_';
@@ -54,45 +55,6 @@
         }
         if (value === undefined) delete target[last];
         else Object.defineProperty(target, last, { value, enumerable: true, configurable: true, writable: true });
-    }
-
-    function characterSources(memory) {
-        const sources = new Map();
-        const add = (name, kind, path) => {
-            const exact = sources.get(name) || { name, paths: {} };
-            exact.paths[kind] = [...memoryPath, ...path];
-            sources.set(name, exact);
-        };
-        for (const [key, value] of pairs(memory)) {
-            if (key.startsWith(memoryRecord) && key.length > memoryRecord.length) add(key.slice(memoryRecord.length), 'memory', [key]);
-            else if (key.startsWith(statusRecord) && key.length > statusRecord.length && isRecord(value))
-                add(key.slice(statusRecord.length), 'status', [key]);
-        }
-        for (const [name] of pairs(memory.inventories)) add(name, 'inventory', ['inventories', name]);
-        for (const [name] of pairs(memory.style_profiles))
-            if (normalizeCharacterName(name) !== narration) add(name, 'style', ['style_profiles', name]);
-
-        // Exact names are grouped first. Only combine spelling variants when
-        // each store has at most one candidate for the normalized name.
-        const byName = new Map();
-        for (const source of sources.values()) {
-            const normalized = normalizeCharacterName(source.name) || source.name;
-            const group = byName.get(normalized) || [];
-            group.push(source);
-            byName.set(normalized, group);
-        }
-        const characters = [];
-        for (const [normalized, group] of byName) {
-            const entries = group.flatMap(entry => Object.entries(entry.paths));
-            if (new Set(entries.map(([kind]) => kind)).size === entries.length) {
-                characters.push({ id: JSON.stringify([normalized]), name: normalized, paths: Object.fromEntries(entries) });
-            } else {
-                for (const entry of group) {
-                    characters.push({ ...entry, label: '「' + entry.name + '」', id: JSON.stringify([normalized, entry.name]) });
-                }
-            }
-        }
-        return characters;
     }
 
     class InformationUI extends CategoryPane {

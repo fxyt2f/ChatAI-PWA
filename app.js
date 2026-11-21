@@ -197,8 +197,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.4";
-const APP_CACHE_VERSION = "v1.37.4";
+const APP_VERSION = "1.37.5";
+const APP_CACHE_VERSION = "v1.37.5";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -1301,6 +1301,7 @@ function formatFileSize(bytes) {
 
 function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = false) {
     if (typeof value === 'string') {
+        if (/"contentTrust"\s*:\s*"untrusted-context"/.test(value)) return '[context references omitted]';
         if (/^\s*[\[{]/.test(value)) {
             try { return JSON.stringify(sanitizeApiRequestBodyForLog(JSON.parse(value))); } catch { /* ordinary text */ }
         }
@@ -1323,6 +1324,7 @@ function sanitizeApiRequestBodyForLog(value, parentKey = '', inSystemField = fal
     if (value instanceof Uint8Array) return value;
     if (!value || typeof value !== 'object') return value;
     if (value.contentTrust === 'untrusted-document') return '[document references omitted]';
+    if (value.contentTrust === 'untrusted-context') return '[context references omitted]';
     if (value.thought === true || ['thinking', 'redacted_thinking'].includes(value.type)) return '[redacted thinking]';
     if (value instanceof Error) return { name: value.name, message: sanitizeApiRequestBodyForLog(value.message) };
 
@@ -8704,7 +8706,12 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
 }; // uiUtilsオブジェクトの末尾
 
-const sendToolDeclarations = session => window.DocumentRag?.declarations(session, window.functionDeclarations) ?? window.functionDeclarations ?? [];
+const sendToolDeclarations = session => {
+    if (session?.toolCallingSupported === false) return [];
+    const tools = window.DocumentRag?.declarations(session, window.functionDeclarations) ?? window.functionDeclarations ?? [];
+    const lookup = window.ContextReference?.declaration(session);
+    return lookup ? [...tools, { function_declarations: [lookup] }] : tools;
+};
 
 // --- APIユーティリティ (apiUtils) ---
 const THOUGHT_JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
@@ -14290,9 +14297,12 @@ const appLogic = {
                 if ((provider === 'bedrock' || opaqueRouter) && dependentPrefixChanged &&
                     session?.baseSystemInstruction !== undefined && !edited &&
                     !continuation.historyPrefixInvalidV136 && !continuation.historyTurnInvalidV136 &&
-                    (session.rag || msg.rag) && (historyToProcess[index + 1]?.role === 'tool' || !msg.content?.trim())) {
+                    (session.rag || msg.rag || (!session.answerOnly &&
+                        (session.getLegacyContextInstruction || continuation.historyBaseWireV137))) &&
+                    (historyToProcess[index + 1]?.role === 'tool' || !msg.content?.trim())) {
                     const baseline = await SettingsV136.historyTaskV136('wire', {
-                        provider, messages: prepared, model, system: session.baseSystemInstruction
+                        provider, messages: prepared, model, system: session.getLegacyContextInstruction
+                            ? session.getLegacyContextInstruction() : session.baseSystemInstruction
                     });
                     assertOwner();
                     const previous = continuation.historyBaseWireV137 || continuation.historyWireV136;
@@ -14716,7 +14726,7 @@ const appLogic = {
         // 2. シーン
         if (memory.scene_stack && memory.scene_stack.length > 0) {
             const currentScene = memory.scene_stack[memory.scene_stack.length - 1];
-            let content = Object.entries(currentScene)
+            let content = Object.entries(currentScene ?? {})
                 .map(([key, value]) => `- ${key}: ${value}`)
                 .join('\n');
             sections.push(`## シーン (manage_scene)\n${content}`);
@@ -14732,7 +14742,7 @@ const appLogic = {
         if (statusEntries.length > 0) {
             let content = statusEntries.map(([key, value]) => {
                 const charName = key.replace('character_', '');
-                const statuses = Object.entries(value).map(([sKey, sValue]) => `${sKey}: ${sValue}`).join(', ');
+                const statuses = Object.entries(value ?? {}).map(([sKey, sValue]) => `${sKey}: ${sValue}`).join(', ');
                 return `- ${charName}: ${statuses}`;
             }).join('\n');
             sections.push(`## 主要ステータス (manage_character_status)\n${content}`);
@@ -14741,7 +14751,7 @@ const appLogic = {
         // 5. 所持品
         if (memory.inventories && Object.keys(memory.inventories).length > 0) {
             let content = Object.entries(memory.inventories).map(([charName, items]) => {
-                const itemList = Object.entries(items).map(([itemName, qty]) => `${itemName}(${qty})`).join(', ');
+                const itemList = Object.entries(items ?? {}).map(([itemName, qty]) => `${itemName}(${qty})`).join(', ');
                 return `- ${charName}: ${itemList}`;
             }).join('\n');
             sections.push(`## 所持品 (manage_inventory)\n${content}`);
@@ -14750,7 +14760,7 @@ const appLogic = {
         // 6. 口調
         if (memory.style_profiles && Object.keys(memory.style_profiles).length > 0) {
             let content = Object.entries(memory.style_profiles).map(([charName, profile]) => {
-                const profileDetails = Object.entries(profile).map(([key, value]) => `${key}: ${value}`).join(', ');
+                const profileDetails = Object.entries(profile ?? {}).map(([key, value]) => `${key}: ${value}`).join(', ');
                 return `- ${charName}: ${profileDetails}`;
             }).join('\n');
             sections.push(`## 口調設定 (manage_style_profile)\n${content}`);
@@ -18522,10 +18532,11 @@ const appLogic = {
         const requestOwner = session || {messages:state.currentMessages,chatId:state.currentChatId,profileId:state.activeProfileId,signal:state.abortController?.signal};
         const wasAborted = requestOwner.signal?.aborted;
         const requestContext = await SettingsV136.historyTaskV136('wire',{provider:session?.apiConfig.provider ?? this.getExecutionProvider(),messages:messagesForApi,model:session?.apiConfig.modelName ?? this.getExecutionModelName(),system:systemInstruction});
-        const baseRequestContext = session?.rag && ['openrouter', 'bedrock'].includes(session.apiConfig.provider) &&
-            systemInstruction !== session.baseSystemInstruction ? await SettingsV136.historyTaskV136('wire', {
+        const needsBaseWire = session?.getLegacyContextInstruction || (session?.rag &&
+            ['openrouter', 'bedrock'].includes(session.apiConfig.provider) && systemInstruction !== session.baseSystemInstruction);
+        const baseRequestContext = needsBaseWire ? await SettingsV136.historyTaskV136('wire', {
             provider: session.apiConfig.provider, messages: messagesForApi, model: session.apiConfig.modelName,
-            system: session.baseSystemInstruction
+            system: session.getLegacyContextInstruction ? session.getLegacyContextInstruction() : session.baseSystemInstruction
         }) : null;
 
         const assertOwner = () => {
@@ -18543,6 +18554,7 @@ const appLogic = {
         // Z.ai API(OpenAI互換)は1回のレスポンスで1つのtool_callしか返さないため、
         // Gemini APIよりも多くのループが必要
         const MAX_LOOPS = 20;
+        const loopLimitMessage = 'AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。';
         const terminalTools = new Set(['generate_image', 'generate_image_stable_diffusion', 'generate_video', 'edit_image', 'display_layered_image']);
         const finalTurnResults = [];
         let currentTurnHistory = [...messagesForApi];
@@ -18554,6 +18566,11 @@ const appLogic = {
             loopCount++;
 
             if (session?.rag) session.ragRequested = true;
+            const declarations = sendToolDeclarations(session);
+            const advertised = new Set(declarations.flatMap(tool => tool.function_declarations || []).map(tool => tool.name));
+            const canExecuteTool = name => advertised.has(name) && (name === 'lookup_context'
+                ? window.ContextReference?.canLookup(session)
+                : !window.DocumentRag || window.DocumentRag.canExecuteTool(session, name));
             const result = await this.callApiWithRetry({
                 messagesForApi: currentTurnHistory,
                 generationConfig,
@@ -18565,8 +18582,8 @@ const appLogic = {
 
             assertOwner();
             rememberRequest(result);
-            if (result.toolCalls?.length && (session?.answerOnly || (session?.rag &&
-                (!session.settings.geminiEnableFunctionCalling || session.rag.status === 'unsupported')))) {
+            if (result.toolCalls?.length && session && (session.answerOnly ||
+                !settings.geminiEnableFunctionCalling || session.toolCallingSupported === false || session.rag?.status === 'unsupported')) {
                 if (session.answerOnly && !result.content?.trim()) throw new Error('再生成中に実行できないツール呼び出しが返されました。');
                 result.toolCalls = session.answerOnly ? null : [];
                 // An unexecuted call must not survive in the provider history.
@@ -18592,9 +18609,9 @@ const appLogic = {
                 console.log("[_internalHandleSend] ツール呼び出しがないため、ループを終了します。");
                 break;
             }
-            const containsTerminalAction = result.toolCalls.some(({ functionCall }) => terminalTools.has(functionCall.name));
-            if (loopCount === MAX_LOOPS && !(containsTerminalAction && result.content)) {
-                throw new Error('AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。');
+            if (loopCount === MAX_LOOPS && (!result.content || !result.toolCalls.some(({ functionCall: { name } }) =>
+                terminalTools.has(name) && canExecuteTool(name)))) {
+                throw new Error(loopLimitMessage);
             }
             this.validateToolCallIdsV136(result.toolCalls);
             
@@ -18602,13 +18619,15 @@ const appLogic = {
             const responseTextForQc = result.content || '';
             
             const toolResults = [];
+            let executedTerminalAction = false;
             
             for (const toolCall of result.toolCalls) {
                 assertOwner();
                 const functionName = toolCall.functionCall.name;
                 const functionArgs = toolCall.functionCall.args;
+                const lookup = functionName === 'lookup_context';
                 
-                console.log(`[Function Calling] 実行: ${functionName}`, functionName === 'search_documents' ? undefined : functionArgs);
+                console.log(`[Function Calling] 実行: ${functionName}`, lookup || functionName === 'search_documents' ? undefined : functionArgs);
                 
                 if (functionName === 'generate_image_stable_diffusion') {
                     this.setSendProgressV136(session, 'SDで画像生成中...');
@@ -18620,11 +18639,24 @@ const appLogic = {
 
                 let toolResult;
                 try {
-                    if (window.DocumentRag && !window.DocumentRag.canExecuteTool(session, functionName)) {
+                    if (!canExecuteTool(functionName)) {
                         throw new Error('この送信で許可されていないツールです。');
                     }
+                    executedTerminalAction ||= terminalTools.has(functionName);
                     const argsWithContext = { ...functionArgs, _responseTextForQc: responseTextForQc };
-                    toolResult = await waitForToolV136(functionName === 'search_documents'
+                    if (lookup) {
+                        const rag = window.DocumentRag;
+                        const available = rag.remainingToolTokens(session,
+                            [...currentTurnHistory, result.continuation?.parts, ...toolResults], systemInstruction, declarations);
+                        const documentBudget = session.referenceBudget || 0;
+                        const reserve = rag.canExecuteTool(session, 'search_documents') ? Math.min(documentBudget, Math.floor(available / 2)) : 0;
+                        toolResult = await waitForToolV136(window.ContextReference.lookup(functionArgs, session,
+                            available - reserve, rag.estimateTokens), signal);
+                        assertOwner();
+                        if (toolResult.results.length) session.recoveredContext = true;
+                        if (documentBudget) session.referenceBudget = Math.min(documentBudget,
+                            Math.max(0, available - rag.estimateTokens(toolResult) - 32));
+                    } else toolResult = await waitForToolV136(functionName === 'search_documents'
                         ? window.DocumentRag.searchToolDocuments(functionArgs, session)
                         : window.functionCallingTools[functionName](argsWithContext, {
                         messages: historyForFunctions.filter(m => m.role !== 'tool'),
@@ -18641,7 +18673,8 @@ const appLogic = {
                 } catch (toolError) {
                     assertOwner();
                     console.error(`[_internalHandleSend] ${functionName}の実行中に予期せぬエラー:`, toolError);
-                    toolResult = { error: { message: `ツール実行中に予期せぬエラーが発生しました: ${toolError.message}` } };
+                    toolResult = lookup ? { status: 'error', results: [], issues: ['この送信で参照情報を取得できませんでした。'] } :
+                        { error: { message: `ツール実行中に予期せぬエラーが発生しました: ${toolError.message}` } };
                 }
                 assertOwner();
 
@@ -18674,7 +18707,7 @@ const appLogic = {
             
             finalTurnResults.push(...toolResults);
             
-            if (containsTerminalAction) {
+            if (executedTerminalAction) {
                 console.log("終端アクションが検出されたため、Function Callingループを終了します。");
                 if (!result.content) {
                     console.log("[_internalHandleSend] テキスト応答がなかったため、ツール結果を基に最終応答を生成します。");
@@ -18718,6 +18751,7 @@ const appLogic = {
                 }
                 break;
             }
+            if (loopCount === MAX_LOOPS) throw new Error(loopLimitMessage);
 
                 const partsForApi = result.continuation.parts;
                 const modelMessageForApi = { role: 'model', parts: partsForApi,
@@ -18804,7 +18838,7 @@ const appLogic = {
         const thoughtSummary = messages.filter(msg => msg.role === 'model' && msg.thoughtSummary)
             .map(msg => msg.thoughtSummary).join('\n\n');
         if (thoughtSummary) finalAggregatedMessage.thoughtSummary = thoughtSummary;
-        if (messages.some(message => message.role === 'tool' && message.name === 'search_documents')) {
+        if (messages.some(message => message.role === 'tool' && ['search_documents', 'lookup_context'].includes(message.name))) {
             delete finalAggregatedMessage.continuation;
         } else if (finalAggregatedMessage.continuation) {
             finalAggregatedMessage.continuation.turns = messages.map(msg => {
@@ -18912,7 +18946,7 @@ const appLogic = {
             throw new DOMException('送信準備の対象が変更されました。', 'AbortError');
         preparation.controller.signal.throwIfAborted();
     },
-    startSendExecutionV136(session, { captureDocumentsAfterSave = false } = {}) {
+    startSendExecutionV136(session, { captureDocumentsAfterSave = false, autoReference = false } = {}) {
         session.id = crypto.getRandomValues(new Uint32Array(4)).join('-');
         session.originalMessages = session.messages.slice();
         session.imageIds = new Set();
@@ -18931,6 +18965,16 @@ const appLogic = {
         session.persistentMemory = session.answerOnly ? state.currentPersistentMemory : structuredClone(state.currentPersistentMemory || {});
         session.summarizedContext = session.answerOnly ? state.currentSummarizedContext : structuredClone(state.currentSummarizedContext || null);
         session.memoryEnabled = state.isMemoryEnabledForChat;
+        session.autoReference = autoReference;
+        if (!session.answerOnly && session.settings.geminiEnableFunctionCalling) {
+            const model = session.apiConfig.modelName?.replace(/^models\//, '');
+            const parameters = this.getModelMetadataV136(session.apiConfig.ref)?.supportedParameters;
+            session.toolCallingSupported = model !== 'gemini-2.5-flash-image-preview' &&
+                (session.apiConfig.provider !== 'openrouter' || !Array.isArray(parameters) || parameters.includes('tools'));
+        }
+        if (autoReference || session.toolCallingSupported) {
+            session.contextReference = window.ContextReference.capture(session, profileId => dbUtils.getMemory(profileId));
+        }
         session.pinState = { isPinned: state.currentChatIsPinned, pinnedAt: state.currentChatPinnedAt,
             pinStateUpdatedAt: state.currentChatPinStateUpdatedAt };
         if (!captureDocumentsAfterSave) this.captureSendScopeV136(session);
@@ -19107,27 +19151,50 @@ const appLogic = {
         }
         const project = session.projectInstruction?.trim() ? session.projectInstruction : '';
         const prompt = session.systemPrompt?.trim() ? session.systemPrompt : '';
-        let text = project && prompt ? '[チャット個別のシステムプロンプト]\n' + prompt : prompt.trim();
-        const summary = session.answerOnly ? null : this._buildSummaryForPrompt(session.persistentMemory);
-        if (summary) text += '\n\n' + summary;
-        if (!session.answerOnly && session.settings.enableMemory && session.memoryEnabled && session.profileId) {
-            const memory = await dbUtils.getMemory(session.profileId);
+        const promptText = project && prompt ? '[チャット個別のシステムプロンプト]\n' + prompt : prompt.trim();
+        let memory, chatReference;
+        if (!session.answerOnly && session.contextReference) {
+            const reference = await waitForToolV136(session.contextReference.read(), session.controller.signal);
             this.assertSendExecutionV136(session);
-            if (memory?.items?.length) text = '[長期記憶]\n- ' + memory.items.join('\n- ') + '\n---\n\n' + text;
+            if (reference.profileMemory.status === 'unavailable' && !session.toolCallingSupported)
+                throw new Error('プロファイル長期記憶を取得できませんでした。', { cause: reference.profileMemory.error });
+            memory = reference.profileMemory.value;
+            if (session.autoReference) chatReference = reference.chat.value;
+        } else if (!session.answerOnly && session.settings.enableMemory && session.memoryEnabled && session.profileId) {
+            memory = await dbUtils.getMemory(session.profileId);
+            this.assertSendExecutionV136(session);
         }
-        const parts = [];
-        if (project) parts.push({ text: '[プロジェクト共通指示]\n' + project });
-        if (text) parts.push({ text });
-        const base = parts.length ? { role: 'system', parts } : null;
-        session.baseSystemInstruction = base;
-        if (!window.DocumentRag) return base;
+
+        const longTerm = memory?.items?.length ? '[長期記憶]\n- ' + memory.items.join('\n- ') + '\n---\n\n' : '';
+        const makeInstruction = summary => {
+            const text = longTerm + promptText + (summary ? '\n\n' + summary : '');
+            const parts = [];
+            if (project) parts.push({ text: '[プロジェクト共通指示]\n' + project });
+            if (text) parts.push({ text });
+            return parts.length ? { role: 'system', parts } : null;
+        };
+        const legacyInstruction = () => makeInstruction(this._buildSummaryForPrompt(session.persistentMemory));
+        // Signed history uses the previous all-record prompt as its comparison baseline.
+        if ((chatReference?.characters.length || chatReference?.scenario.length) &&
+            ['openrouter', 'bedrock'].includes(session.apiConfig.provider)) {
+            let baseline;
+            session.getLegacyContextInstruction = () => baseline === undefined ? baseline = legacyInstruction() : baseline;
+        }
+        const rag = window.DocumentRag;
+        const base = session.autoReference || session.answerOnly ? makeInstruction() : legacyInstruction();
+        const finalizeBase = session.autoReference ? hasSearchDocuments => {
+            const budget = rag?.contextReferenceBudget(session, history, base, hasSearchDocuments);
+            return makeInstruction(window.ContextReference.buildPrompt(chatReference, history.at(-1)?.content, history,
+                { ...budget, estimate: rag?.estimateTokens }));
+        } : undefined;
+        if (!rag) return session.baseSystemInstruction = finalizeBase ? finalizeBase(false) : base;
         if (session.documentSnapshot?.chatId != null) this.setSendProgressV136(session, 'ファイルを検索中...');
-        const instruction = await window.DocumentRag.build(session, question, base, history);
+        const instruction = await rag.build(session, question, base, history, finalizeBase);
         this.assertSendExecutionV136(session);
         if (session.rag && session.apiConfig.provider === 'gemini' && session.apiConfig.modelName === 'gemini-2.5-flash-image-preview') {
             // This adapter omits system instructions for the image preview model.
             session.rag = { schemaVersion: 1, status: 'unsupported', sources: [], unavailable: [] };
-            return base;
+            return session.baseSystemInstruction;
         }
         return instruction;
     },
@@ -19143,17 +19210,32 @@ const appLogic = {
         try {
             return { historyForApi: await this._prepareApiHistory(baseHistory, systemInstruction, session), systemInstruction };
         } catch (error) {
-            const base = session.baseSystemInstruction;
-            if (error.code !== 'unsafe-history-continuation' || !session.rag || systemInstruction === base) throw error;
-            this.assertSendExecutionV136(session);
-            // Keep the original wire format when adding references would make
-            // the historical tool conversation unsafe to reconstruct.
-            const historyForApi = await this._prepareApiHistory(baseHistory, base, session);
-            const fullSources = session.rag.sources.filter(source => source.referenceMode === 'full');
-            session.rag = fullSources.length
-                ? { schemaVersion: 1, status: 'partial', sources: fullSources, unavailable: [] }
-                : { schemaVersion: 1, status: 'history-unavailable', sources: [], unavailable: [] };
-            return { historyForApi, systemInstruction: base };
+            if (error.code !== 'unsafe-history-continuation') throw error;
+            // Replay a signed tool history with its original instruction if the new references cannot be added safely.
+            const candidates = new Set();
+            if (session.rag) candidates.add(session.baseSystemInstruction);
+            if (session.getLegacyContextInstruction) candidates.add(session.getLegacyContextInstruction());
+            candidates.delete(systemInstruction);
+            let failure = error;
+            for (const candidate of candidates) {
+                this.assertSendExecutionV136(session);
+                let historyForApi;
+                try { historyForApi = await this._prepareApiHistory(baseHistory, candidate, session); }
+                catch (retryError) {
+                    if (retryError.code !== 'unsafe-history-continuation') throw retryError;
+                    failure = retryError;
+                    continue;
+                }
+                session.baseSystemInstruction = candidate;
+                if (session.rag) {
+                    const fullSources = session.rag.sources.filter(source => source.referenceMode === 'full');
+                    session.rag = fullSources.length
+                        ? { schemaVersion: 1, status: 'partial', sources: fullSources, unavailable: [] }
+                        : { schemaVersion: 1, status: 'history-unavailable', sources: [], unavailable: [] };
+                }
+                return { historyForApi, systemInstruction: candidate };
+            }
+            throw failure;
         }
     },
     async _handleSendPreparedV136(preparation, { onInitialSave } = {}) {
@@ -19192,7 +19274,7 @@ const appLogic = {
             return;
         }
         const captureDocumentsAfterSave = preparation.chatId == null && dbUtils.projectDrafts?.has(preparation.messages);
-        this.startSendExecutionV136(preparation, { captureDocumentsAfterSave });
+        this.startSendExecutionV136(preparation, { captureDocumentsAfterSave, autoReference: true });
         const scrollTarget = preparation.streaming && uiUtils.getStreamingScrollTarget();
         
         const userMessage = { role: 'user', content: text, timestamp: Date.now(), attachments: attachmentsToSend };
