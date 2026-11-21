@@ -309,6 +309,72 @@ const DropboxSync = (() => {
         }) } };
     }
 
+    function baseError(reason, detail = '') {
+        const error = new Error(missingBase + (detail ? ' ' + detail : ''));
+        error.syncDiagnostic = reason;
+        return error;
+    }
+
+    function legacyRecovery(snapshot, local, remote, origins, priorSyncId, identify, isIdentity) {
+        validate(snapshot, isIdentity, { legacy: true });
+        validate(remote, isIdentity, { legacy: true });
+        if (snapshot.syncId !== priorSyncId) throw baseError('sync-id-mismatch');
+        if (snapshot.syncProtection && remote.syncProtection &&
+            snapshot.syncProtection.lineage !== remote.syncProtection.lineage) throw baseError('lineage-mismatch');
+        const baseChats = identify(snapshot.data.chats, snapshot.syncId);
+        const byInternalId = by(baseChats, chat => chat.id);
+        const originalRows = by(snapshot.data.chats, chat => chat.id);
+        const aliases = new Map(), remoteIds = new Map();
+        const anchor = message => [message.role, message.timestamp, message.content];
+        const anchors = chat => new Set((chat.messages ?? []).filter(message =>
+            message.timestamp != null && typeof message.content === 'string' && message.content.length &&
+            ['model', 'user'].includes(message.role)).map(message => signature(anchor(message))));
+        const matches = (before, after) => {
+            if ((before.createdAt ?? null) !== (after.createdAt ?? null) || after.syncConflictOf) return false;
+            const content = row => {
+                const { id, syncIdentity, stats, updatedAt, ...rest } = applyNormalizedChatPinState(row);
+                return rest;
+            };
+            if (same(content(before), content(after))) return true;
+            if (!Number.isFinite(before.createdAt)) return false;
+            const original = anchors(before);
+            return [...anchors(after)].some(key => original.has(key));
+        };
+        const remoteChats = identify(remote.data.chats, remote.syncId).map((chat, index) => {
+            const incoming = remote.data.chats[index];
+            const before = byInternalId.get(chat.id);
+            if (!before) return chat;
+            const assigned = isIdentity(incoming.syncIdentity);
+            if (assigned && incoming.syncIdentity === before.syncIdentity) return chat;
+            if (!matches(before, chat)) throw baseError('legacy-chat-identity-unproven', '旧チャットの対応を確認できません。');
+            if (assigned && isIdentity(originalRows.get(chat.id)?.syncIdentity)) {
+                throw baseError('legacy-chat-identity-unproven');
+            }
+            if (assigned) remoteIds.set(before.syncIdentity, chat.syncIdentity);
+            return assigned ? chat : { ...chat, syncIdentity: before.syncIdentity };
+        });
+        const localChats = local.data.chats.map(chat => {
+            const before = byInternalId.get(chat.id);
+            if (!before) return chat;
+            const origin = origins.get(chat.syncIdentity);
+            if (!origin || origin.syncId !== priorSyncId || origin.id !== chat.id) {
+                if (chat.syncIdentity === before.syncIdentity) return chat;
+                throw baseError('legacy-chat-identity-unproven', '旧チャットの対応を確認できません。');
+            }
+            if (origin.createdAt !== (before.createdAt ?? null) || !matches(before, chat)) {
+                throw baseError('legacy-chat-identity-unproven', '旧チャットの対応を確認できません。');
+            }
+            const syncIdentity = remoteIds.get(before.syncIdentity) ?? before.syncIdentity;
+            if (syncIdentity !== chat.syncIdentity) aliases.set(syncIdentity, chat.syncIdentity);
+            return { ...chat, syncIdentity };
+        });
+        const replace = (envelope, chats) => ({ ...envelope, data: { ...envelope.data, chats } });
+        const resolvedBase = replace(snapshot, baseChats.map(chat => ({
+            ...chat, syncIdentity: remoteIds.get(chat.syncIdentity) ?? chat.syncIdentity
+        })));
+        return { base: resolvedBase, local: replace(local, localChats), remote: replace(remote, remoteChats), aliases };
+    }
+
     async function plan({ base, local, remote, priorSyncId, fresh, legacyIds, deletes, identify, isIdentity }) {
         const knownIds = new Set(local.data.chats.map(chat => chat.syncIdentity));
         const pendingDeletes = deletes.filter(id => !knownIds.has(id));
@@ -320,7 +386,7 @@ const DropboxSync = (() => {
         validate(remote, isIdentity, { legacy: true });
         if (!base) {
             const exact = same(legacyContents(local), legacyContents(remote));
-            if (!exact && (priorSyncId || !fresh)) throw new Error(missingBase);
+            if (!exact && (priorSyncId || !fresh)) throw baseError('missing-snapshot');
             const localById = new Map(local.data.chats.map(chat => [chat.id, chat.syncIdentity]));
             const aliases = new Map();
             const chats = identify(remote.data.chats, remote.syncId).map(chat => {
@@ -330,15 +396,15 @@ const DropboxSync = (() => {
                     if (exact && identity !== chat.syncIdentity) aliases.set(chat.syncIdentity, identity);
                     return chat;
                 }
-                if (chat.syncIdentity !== identity) throw new Error(missingBase);
+                if (chat.syncIdentity !== identity) throw baseError('legacy-chat-identity-unproven');
                 return chat;
             });
             return { data: { ...remote.data, chats }, deleted: remote.syncProtection?.deletedChats ?? [], lineage, aliases };
         }
         validate(base, isIdentity);
-        if (base.syncId !== priorSyncId) throw new Error(missingBase);
+        if (base.syncId !== priorSyncId) throw baseError('sync-id-mismatch');
         const baseProtection = base.syncProtection;
-        if (baseProtection && remote.syncProtection && baseProtection.lineage !== lineage) throw new Error(missingBase);
+        if (baseProtection && remote.syncProtection && baseProtection.lineage !== lineage) throw baseError('lineage-mismatch');
         if (base.data.documentLibrary && !remote.data.documentLibrary || base.data.projectData && !remote.data.projectData) {
             throw new Error(oldWriter);
         }
@@ -399,5 +465,5 @@ const DropboxSync = (() => {
         });
     }
 
-    return { validate, plan, logical, same, signature, concurrentLocal, assertCapture };
+    return { validate, plan, legacyRecovery, baseError, logical, same, signature, concurrentLocal, assertCapture };
 })();
