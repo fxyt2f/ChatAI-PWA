@@ -199,8 +199,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.38.0.1";
-const APP_CACHE_VERSION = "v1.38.0.1";
+const APP_VERSION = "1.38.0.2";
+const APP_CACHE_VERSION = "v1.38.0.2";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -15643,6 +15643,7 @@ const appLogic = {
     async runDropboxMerge(operation, updateProgress) {
         const api = window.dropboxApi;
         const isIdentity = id => SyncJournal.isChatIdentity(id);
+        let verifiedHistory;
         // A Dropbox revision rejected after upload (including a lost response)
         // is resolved by downloading the new head and recomputing the merge.
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -15657,26 +15658,46 @@ const appLogic = {
                 chatSync.intent.epoch === chatSync.epoch && await chatSync.intent.content.text() === head.content;
             const base = recovered ? remote : chatSync.snapshot && JSON.parse(await chatSync.snapshot.text());
             const priorSyncId = recovered ? remote.syncId : projectSync.lastSyncId;
+            const deletes = chatSync.operations.filter(row => row.entityType === 'chat' && row.operation === 'delete')
+                .map(row => row.entityId);
             const origins = new Map(capture.captured.get(CHATS_STORE).filter(chat => chat.syncLegacyOrigin)
                 .map(chat => [chat.syncIdentity, chat.syncLegacyOrigin]));
             const identify = (chats, syncId) => SyncJournal.identifySnapshotChats(chats, syncId);
             let recovery;
             if (!base && priorSyncId && head && chatSync.checkpoint?.source === 'migration') {
                 if (chatSync.checkpoint.syncId !== priorSyncId) throw DropboxSync.baseError('sync-id-mismatch');
-                updateProgress('旧Dropbox同期の基準を履歴から確認中...');
-                let historical;
-                try {
-                    historical = remote.syncId === priorSyncId ? remote : await api.findMetadataRevision(head, priorSyncId);
-                } catch {
-                    throw DropboxSync.baseError('history-unavailable', 'Dropboxの変更履歴にアクセスできませんでした。接続と権限を確認してください。');
+                DropboxSync.validate(remote, isIdentity, { legacy: true });
+                if (!deletes.length && DropboxSync.sameLegacyContents(local, remote)) {
+                    console.info('[Dropbox Sync]', 'current-snapshot-equal', { pages: 0, checked: 0 });
+                } else {
+                    updateProgress('旧Dropbox同期の基準を履歴から確認中...');
+                    let historical;
+                    if (remote.syncId === priorSyncId) {
+                        historical = remote;
+                        console.info('[Dropbox Sync]', 'current-sync-id-match', { pages: 0, checked: 0 });
+                    } else if (verifiedHistory?.fileId === head.fileId && verifiedHistory?.syncId === priorSyncId) {
+                        historical = verifiedHistory.snapshot;
+                    } else {
+                        const result = await api.findMetadataRevision(head, priorSyncId);
+                        console.info('[Dropbox Sync]', result.reason, result.counts);
+                        historical = result.snapshot;
+                        if (!historical) {
+                            const guidance = result.reason === 'history-unavailable'
+                                ? 'Dropboxの変更履歴にアクセスできませんでした。接続と権限を確認してください。'
+                                : result.reason === 'history-limit-reached' || result.reason === 'history-timeout'
+                                    ? '探索上限内に旧同期の基準を確認できませんでした。'
+                                    : '取得できたDropboxの変更履歴で旧同期の基準を確認できませんでした。';
+                            throw DropboxSync.baseError(result.reason, guidance +
+                                ' 端末の全体バックアップとDropbox側のファイルを別々に保管してください。');
+                        }
+                        verifiedHistory = { fileId: head.fileId, syncId: priorSyncId, snapshot: historical };
+                    }
+                    if (librarySync.syncedRevision && historical.data?.documentLibrary?.revision !== librarySync.syncedRevision ||
+                        projectSync.syncedRevision && historical.data?.projectData?.revision !== projectSync.syncedRevision) {
+                        throw DropboxSync.baseError('legacy-revision-mismatch');
+                    }
+                    recovery = DropboxSync.legacyRecovery(historical, local, remote, origins, priorSyncId, identify, isIdentity);
                 }
-                if (!historical) throw DropboxSync.baseError('history-snapshot-not-found',
-                    'Dropboxの直近20版に旧同期の基準が見つかりません。端末の全体バックアップとDropbox側のファイルを別々に保管してください。');
-                if (librarySync.syncedRevision && historical.data?.documentLibrary?.revision !== librarySync.syncedRevision ||
-                    projectSync.syncedRevision && historical.data?.projectData?.revision !== projectSync.syncedRevision) {
-                    throw DropboxSync.baseError('legacy-revision-mismatch');
-                }
-                recovery = DropboxSync.legacyRecovery(historical, local, remote, origins, priorSyncId, identify, isIdentity);
             }
             const empty = ['chats', 'profiles', 'assets', 'memories'].every(key => !local.data[key].length) &&
                 !local.data.documentLibrary && !local.data.projectData.projects.length &&
@@ -15689,8 +15710,12 @@ const appLogic = {
             const plan = await DropboxSync.plan({
                 base: recovery?.base ?? base, local: recovery?.local ?? local, remote: recovery?.remote ?? remote,
                 priorSyncId, fresh: isFresh,
-                legacyIds: new Set(origins.keys()),
-                deletes: chatSync.operations.filter(row => row.entityType === 'chat' && row.operation === 'delete').map(row => row.entityId),
+                legacyIds: new Set(local.data.chats.filter(chat => {
+                    const origin = origins.get(chat.syncIdentity);
+                    return origin && origin.syncId === priorSyncId && origin.id === chat.id &&
+                        origin.createdAt === (chat.createdAt ?? null);
+                }).map(chat => chat.syncIdentity)),
+                deletes,
                 identify, isIdentity
             });
             const envelope = { ...local, data: plan.data };
@@ -15735,6 +15760,13 @@ const appLogic = {
             const metadata = publish ? envelope : remote;
             const metadataJson = publish ? JSON.stringify(envelope) : head.content;
             let rev = head?.rev;
+            if (!publish && !base && priorSyncId) {
+                const latest = await api.downloadMetadata({ withRevision: true });
+                if (latest?.rev !== head.rev || latest?.fileId !== head.fileId) {
+                    if (attempt === 2) throw DropboxSync.baseError('history-head-changed', 'Dropboxの更新が続いたため、再度同期してください。');
+                    continue;
+                }
+            }
             await verifyConnection();
             if (apply && this.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
             if (publish) {

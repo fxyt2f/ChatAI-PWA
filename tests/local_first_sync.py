@@ -75,7 +75,7 @@ def run(client, url):
         wait(ready('seed'))
         ev("""(async () => {
             document.querySelector('#releaseNotesDialog[open] .dialog-ok-btn')?.click();
-            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.0.1');
+            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.0.2');
             const executionSettings = { schemaVersion:1, modelRef:null, thinkingEffort:null };
             const id = await dbUtils.saveChat(null,{title:'Local startup chat',executionSettings,messages:[{role:'user',content:'local history'}]}, {skipPush:true});
             await dbUtils.saveChat(null,{title:'Second chat',createdAt:1,updatedAt:1,executionSettings,messages:[{role:'user',content:'second history'}]}, {skipPush:true});

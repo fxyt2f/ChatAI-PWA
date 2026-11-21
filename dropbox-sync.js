@@ -301,6 +301,8 @@ const DropboxSync = (() => {
         return logical({ data: { ...data, chats: data.chats.map(chat => ({ ...chat, syncIdentity: JSON.stringify(chat.id) })) } });
     }
 
+    const sameLegacyContents = (local, remote) => same(legacyContents(local), legacyContents(remote));
+
     function applyLegacyIdentities(reference, incoming, isIdentity) {
         const ids = new Map(reference.data.chats.map(chat => [chat.id, chat.syncIdentity]));
         return { ...incoming, data: { ...incoming.data, chats: incoming.data.chats.map(chat => {
@@ -385,7 +387,8 @@ const DropboxSync = (() => {
         }
         validate(remote, isIdentity, { legacy: true });
         if (!base) {
-            const exact = same(legacyContents(local), legacyContents(remote));
+            const exact = sameLegacyContents(local, remote);
+            if (exact && pendingDeletes.length) throw baseError('unverified-local-deletions');
             if (!exact && (priorSyncId || !fresh)) throw baseError('missing-snapshot');
             const localById = new Map(local.data.chats.map(chat => [chat.id, chat.syncIdentity]));
             const aliases = new Map();
@@ -465,5 +468,5 @@ const DropboxSync = (() => {
         });
     }
 
-    return { validate, plan, legacyRecovery, baseError, logical, same, signature, concurrentLocal, assertCapture };
+    return { validate, plan, legacyRecovery, baseError, logical, same, sameLegacyContents, signature, concurrentLocal, assertCapture };
 })();

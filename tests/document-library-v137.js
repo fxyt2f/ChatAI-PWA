@@ -606,12 +606,15 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         const retries = api.MAX_RETRY_COUNT;
         const files = new Map();
         const history = new Map();
+        const movedHistory = new Map();
         const metadataFileId = 'id:fixture-metadata';
         const folders = new Set();
         const commits = [];
         const statuses = [];
         const originalUploads = [];
-        let counter = 0, failOriginal = false, beforeCommit, beforeDraftCommit, metadataAttempts = 0, loseUploadResponse = false;
+        let counter = 0, failOriginal = false, beforeCommit, beforeDraftCommit, metadataAttempts = 0,
+            loseUploadResponse = false, historyRequests = [];
+        const historyRev = index => index.toString(16).padStart(9, '0');
         const conflict = () => Response.json({ error_summary: 'path/conflict/file/' }, { status: 409 });
         const notFound = () => Response.json({ error_summary: 'path/not_found/' }, { status: 409 });
         const remote = () => files.get(api.METADATA_PATH);
@@ -628,10 +631,20 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 if (!request.hostname.endsWith('.dropboxapi.com')) return previousFetch(url, options);
                 const args = JSON.parse(options.headers['Dropbox-API-Arg'] || options.body);
                 const path = args.path;
-                const entry = path?.startsWith('rev:') ? history.get(path.slice(4)) : files.get(path);
+                const entry = path?.startsWith('rev:') ? history.get(path.slice(4)) ?? movedHistory.get(path.slice(4)) : files.get(path);
                 if (request.pathname.endsWith('/list_revisions')) {
-                    eq(args, { path: metadataFileId, mode: 'id', limit: 20 });
-                    return Response.json({ entries: [...history].map(([rev, row]) => ({ rev, id: row.id })) });
+                    if (args.mode === 'id') {
+                        eq([path, args.limit, args.before_rev], [metadataFileId, 100, undefined]);
+                        historyRequests.push('id');
+                    } else {
+                        eq([path, args.mode, args.limit], [api.METADATA_PATH, 'path', 100]);
+                        historyRequests.push(args.before_rev ?? null);
+                    }
+                    const all = args.mode === 'id' ? [...movedHistory.values()] : [...history.values()];
+                    const offset = args.before_rev ? all.findIndex(row => row.rev === args.before_rev) + 1 : 0;
+                    if (args.before_rev) assert(offset > 0, 'unknown history cursor');
+                    return Response.json({ entries: all.slice(offset, offset + 100).map(row => ({ rev: row.rev, id: row.listedId ?? row.id })),
+                        has_more: all.length > offset + 100 });
                 }
                 if (request.pathname.endsWith('/download')) {
                     const id = path === api.METADATA_PATH ? metadataFileId : entry?.id;
@@ -1133,6 +1146,38 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 assert(remoteDraft.deleted && remoteDraft.text === '');
                 eq(remoteDraft.updatedAt, 11);
             }));
+            await test('Dropbox finds an older revision in the first 100 and verifies its file ID at download', () => withDatabase(async () => {
+                await connect();
+                const add = (i, id, syncId) => {
+                    const rev = historyRev(i);
+                    history.set(rev, { id, listedId: metadataFileId, rev, blob: new Blob([JSON.stringify({ syncId })]) });
+                };
+                add(0, 'id:other-file', 'same-test-sync');
+                for (let i = 1; i < 35; i++) add(i, metadataFileId, 'unrelated-test-sync');
+                add(35, metadataFileId, 'same-test-sync');
+                const head = { fileId: metadataFileId, rev: historyRev(999) };
+                try {
+                    const result = await api.findMetadataRevision(head, 'same-test-sync');
+                    eq(result.reason, 'history-match');
+                    eq(result.counts, { pages: 1, listed: 36, checked: 36, foreign: 1, unreadable: 0 });
+                    history.delete(historyRev(35));
+                    eq((await api.findMetadataRevision(head, 'same-test-sync')).reason, 'history-file-id-mismatch');
+                    const movedRev = historyRev(700);
+                    movedHistory.set(movedRev, { id: metadataFileId, rev: movedRev,
+                        blob: new Blob([JSON.stringify({ syncId: 'same-test-sync' })]) });
+                    const moved = await api.findMetadataRevision(head, 'same-test-sync');
+                    eq(moved.reason, 'history-match');
+                    eq(moved.counts.pages, 2);
+                    eq(historyRequests.at(-1), 'id');
+                    movedHistory.clear();
+                    history.clear();
+                    for (let i = 0; i < 301; i++) add(i, metadataFileId, 'unrelated-test-sync');
+                    add(301, metadataFileId, 'same-test-sync');
+                    const bounded = await api.findMetadataRevision(head, 'same-test-sync');
+                    eq(bounded.reason, 'history-limit-reached');
+                    eq(bounded.counts.checked, 300);
+                } finally { history.clear(); movedHistory.clear(); }
+            }));
             await test('A real v18 migration recovers a proven Dropbox revision without discarding either device', async () => {
                 const earlier = 'legacy-base-sync', later = 'legacy-mobile-sync';
                 const chat = (id, title) => ({ id, title, createdAt: id * 100, updatedAt: id * 100,
@@ -1149,37 +1194,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 const baseJson = JSON.stringify(envelope(earlier, [shared, removed], [1], baseProjectRevision));
                 const remoteJson = JSON.stringify(envelope(later, [{ ...shared, title: 'Mobile edit' }, mobile], [1, 3], mobileProjectRevision));
                 files.set(api.METADATA_PATH, { blob: new Blob([remoteJson]), rev: 'legacy2' });
-                await withDatabase(async () => {
-                    await connect();
-                    eq(st.db.version, 19);
-                    eq(await read(db.chatJournal.store, db.chatJournal.snapshotKey), undefined);
-                    const previousIdentity = (await db.getChat(1)).syncIdentity;
-                    await app.handleManualDropboxSync();
-                    assert(statuses.at(-1).message.includes('直近20版'));
-                    eq(await metadata(), remoteJson);
-                    eq((await db.getChat(1)).syncIdentity, previousIdentity);
-                    // Same syncId from another Dropbox file is insufficient.
-                    history.set('legacy0', { id: 'id:other-file', rev: 'legacy0', blob: new Blob([baseJson]) });
-                    history.set('legacy1', { id: metadataFileId, rev: 'legacy1', blob: new Blob([baseJson]) });
-                    await app.handleManualDropboxSync();
-                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
-                    const synced = JSON.parse(await metadata());
-                    const chats = await db.getAllChats();
-                    eq((await db.getChat(1)).title, 'Mobile edit');
-                    eq((await db.getChat(1)).systemPrompt, 'PC prompt');
-                    eq((await db.getChat(1)).syncDraftSource, previousIdentity);
-                    eq(await db.getChat(2), undefined);
-                    assert(chats.some(row => row.syncConflictOf && row.title.includes('PC recovered edit')));
-                    assert(synced.syncProtection.deletedChats.includes(db.chatJournal.legacyIdentity(earlier, 2)));
-                    const imported = chats.find(row => row.title === 'Mobile');
-                    assert(imported && imported.id !== pc.id);
-                    eq((await db.getChat(3)).title, 'PC');
-                    eq((await db.getChatProject(3)).id, project.id);
-                    eq((await db.getChatProject(imported.id)).id, project.id);
-                    eq((await checkpoint()).syncId, synced.syncId);
-                    await app.handleManualDropboxSync();
-                    eq(JSON.parse(await metadata()).syncId, synced.syncId);
-                }, async name => {
+                const seed = (chats, members) => async name => {
                     const request = indexedDB.open(name, 18);
                     request.onupgradeneeded = () => {
                         const db = request.result;
@@ -1196,15 +1211,68 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                         tx.objectStore('settings').put({ key: 'lastSyncId', value: earlier });
                         tx.objectStore('settings').put({ key: ProjectStore.syncKey,
                             value: { revision: DocumentLibrary.uniqueId(), syncedRevision: baseProjectRevision } });
-                        for (const row of [{ ...shared, systemPrompt: 'PC prompt' }, { ...removed, title: 'PC recovered edit' }, pc]) {
-                            tx.objectStore('chats').put(row);
-                        }
+                        for (const row of chats) tx.objectStore('chats').put(row);
                         tx.objectStore(ProjectStore.projects).put(project);
-                        for (const chatId of [1, 3]) tx.objectStore(ProjectStore.chats).put({ chatId, projectId: project.id });
+                        for (const chatId of members) tx.objectStore(ProjectStore.chats).put({ chatId, projectId: project.id });
                     };
                     (await DocumentLibrary.request(request)).close();
-                });
+                };
+                await withDatabase(async () => {
+                    await connect();
+                    eq(st.db.version, 19);
+                    eq(await read(db.chatJournal.store, db.chatJournal.snapshotKey), undefined);
+                    const previousIdentity = (await db.getChat(1)).syncIdentity;
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).message.includes('取得できたDropboxの変更履歴'));
+                    eq(await metadata(), remoteJson);
+                    eq((await db.getChat(1)).syncIdentity, previousIdentity);
+                    historyRequests = [];
+                    history.set(historyRev(0), { id: 'id:other-file', rev: historyRev(0), blob: new Blob([baseJson]) });
+                    for (let i = 1; i < 130; i++) {
+                        history.set(historyRev(i), { id: metadataFileId, rev: historyRev(i), blob: new Blob([remoteJson]) });
+                    }
+                    history.set(historyRev(130), { id: metadataFileId, rev: historyRev(130), blob: new Blob([baseJson]) });
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                    eq(historyRequests, [null, historyRev(99)]);
+                    const synced = JSON.parse(await metadata());
+                    const chats = await db.getAllChats();
+                    eq((await db.getChat(1)).title, 'Mobile edit');
+                    eq((await db.getChat(1)).systemPrompt, 'PC prompt');
+                    eq((await db.getChat(1)).syncDraftSource, previousIdentity);
+                    eq(await db.getChat(2), undefined);
+                    assert(chats.some(row => row.syncConflictOf && row.title.includes('PC recovered edit')));
+                    assert(synced.syncProtection.deletedChats.includes(db.chatJournal.legacyIdentity(earlier, 2)));
+                    const imported = chats.find(row => row.title === 'Mobile');
+                    assert(imported && imported.id !== pc.id);
+                    eq((await db.getChat(3)).title, 'PC');
+                    eq((await db.getChatProject(3)).id, project.id);
+                    eq((await db.getChatProject(imported.id)).id, project.id);
+                    eq((await checkpoint()).syncId, synced.syncId);
+                    await app.handleManualDropboxSync();
+                    eq(JSON.parse(await metadata()).syncId, synced.syncId);
+                }, seed([{ ...shared, systemPrompt: 'PC prompt' }, { ...removed, title: 'PC recovered edit' }, pc], [1, 3]));
                 history.clear();
+                await withDatabase(async () => {
+                    await connect();
+                    files.set(api.METADATA_PATH, { blob: new Blob([remoteJson]), rev: historyRev(900) });
+                    historyRequests = [];
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                    eq(historyRequests, []);
+                    const synced = JSON.parse(await metadata());
+                    eq((await checkpoint()).syncId, synced.syncId);
+                    const otherLineage = structuredClone(synced);
+                    otherLineage.syncProtection.lineage = DocumentLibrary.uniqueId();
+                    const unrelated = JSON.stringify(otherLineage);
+                    files.set(api.METADATA_PATH, { blob: new Blob([unrelated]), rev: historyRev(901) });
+                    await fails(() => app.runDropboxMerge('push', () => {}).catch(error => {
+                        eq(error.syncDiagnostic, 'lineage-mismatch');
+                        throw error;
+                    }), /共通の同期基準/);
+                    eq((await checkpoint()).syncId, synced.syncId);
+                    eq(await metadata(), unrelated);
+                }, seed([{ ...shared, title: 'Mobile edit' }, mobile], [1, 3]));
             });
         } finally {
             Object.assign(app, { updateSyncStatusUI: previousStatus, updateDropboxUIState: previousUpdate });
