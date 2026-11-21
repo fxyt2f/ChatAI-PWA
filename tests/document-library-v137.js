@@ -33,19 +33,24 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         }
     };
     const saveChat = async (id, content, extra = {}) => db.saveChat(null, {
-        id, title: content, messages: [{ role: 'user', content }], ...extra
+        ...(id !== undefined && { id }), title: content, messages: [{ role: 'user', content }], ...extra
     }, { skipPush: true });
     const ids = async chatId => (await db.getChatDocuments(chatId)).map(document => document.id);
 
-    for (const version of [16, 17]) await test('IndexedDB v' + version + ' upgrades in place with chats, projects, originals and links intact', async () => {
+    for (const version of [16, 17, 18]) await test('IndexedDB v' + version + ' upgrades in place with chats, projects, originals and links intact', async () => {
         const blob = file('legacy original');
         const project = { id: DocumentLibrary.uniqueId(), name: '旧プロジェクト', description: '', createdAt: 1, updatedAt: 1 };
         const entry = { id: DocumentLibrary.uniqueId(), version: 1, versionId: DocumentLibrary.uniqueId(), name: blob.name,
             fileName: blob.name, format: 'md', mimeType: blob.type, size: blob.size, hash: await DocumentLibrary.digest(blob),
             createdAt: 1, updatedAt: 1 };
         await withDatabase(async () => {
-            eq(st.db.version, 18);
-            eq((await db.getChat(42)).title, 'legacy chat');
+            eq(st.db.version, 19);
+            const chat = await db.getChat(42);
+            eq(chat.title, 'legacy chat');
+            assert(DocumentLibrary.isId(chat.syncIdentity));
+            eq(chat.syncLegacyOrigin, { syncId: 'previous-dropbox-sync', id: 42, createdAt: null });
+            eq((await db.getChatSyncContext()).syncId, 'previous-dropbox-sync');
+            eq((await db.getChatSyncContext()).pending, false);
             eq(await db.getLibraryDocument(entry.id), entry);
             eq(await (await db.getLibraryOriginal(entry.id, 1)).blob.text(), 'legacy original');
             eq(await ids(42), [entry.id]);
@@ -68,7 +73,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 open.onupgradeneeded = () => {
                     const legacy = open.result;
                     legacy.createObjectStore('chats', { keyPath: 'id', autoIncrement: true }).add({ id: 42, title: 'legacy chat' });
-                    legacy.createObjectStore('settings', { keyPath: 'key' });
+                    legacy.createObjectStore('settings', { keyPath: 'key' }).put({ key: 'lastSyncId', value: 'previous-dropbox-sync' });
                     legacy.createObjectStore('profiles', { keyPath: 'id' });
                     legacy.createObjectStore('image_store', { keyPath: 'id' });
                     legacy.createObjectStore('image_assets', { keyPath: 'name' });
@@ -88,11 +93,124 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                         open.transaction.objectStore(ProjectStore.chats).add({ chatId: 42, projectId: project.id });
                         open.transaction.objectStore(ProjectStore.documents).add({ projectId: project.id, documentId: entry.id, referenceMode: 'full' });
                     }
+                    if (version >= 18) {
+                        legacy.createObjectStore(DocumentLibrary.embeddingStore, { keyPath: 'key' }).createIndex('specId', 'specId');
+                    }
                 };
                 open.onsuccess = () => resolve(open.result);
             });
             connection.close();
+            if (version !== 18) return;
+
+            const update = IDBCursorWithValue.prototype.update;
+            const open = indexedDB.open;
+            IDBCursorWithValue.prototype.update = function (value) {
+                const request = update.call(this, value);
+                if (this.source.name === 'chats') request.addEventListener('success', () => this.source.transaction.abort());
+                return request;
+            };
+            try {
+                indexedDB.open = (_, version) => open.call(indexedDB, name, version);
+                await fails(() => db.openDB(), /AbortError/);
+            } finally {
+                indexedDB.open = open;
+                IDBCursorWithValue.prototype.update = update;
+            }
+            const unchanged = await DocumentLibrary.request(indexedDB.open(name, 18));
+            try {
+                assert(!unchanged.objectStoreNames.contains(db.chatJournal.store));
+                const chat = await DocumentLibrary.request(unchanged.transaction('chats').objectStore('chats').get(42));
+                eq(chat, { id: 42, title: 'legacy chat' });
+            } finally { unchanged.close(); }
         });
+    });
+
+    const journal = () => DocumentLibrary.request(db._getStore(db.chatJournal.store).getAll(IDBKeyRange.bound(1, Number.MAX_SAFE_INTEGER)));
+    const checkpoint = () => read(db.chatJournal.store, db.chatJournal.checkpointKey);
+    const base = async () => JSON.parse(await (await read(db.chatJournal.store, db.chatJournal.snapshotKey)).text());
+    await test('Chat writes and tombstones are atomic and survive reopening IndexedDB', () => withDatabase(async () => {
+        const chatId = await saveChat(42, 'local');
+        const { syncIdentity } = await db.getChat(chatId);
+        const originalAdd = IDBObjectStore.prototype.add;
+        IDBObjectStore.prototype.add = function (...args) {
+            const result = originalAdd.apply(this, args);
+            if (this.name === db.chatJournal.store) result.addEventListener('success', () => this.transaction.abort());
+            return result;
+        };
+        try {
+            await fails(() => saveChat(43, 'aborted creation'), /中断|AbortError/);
+            await fails(() => db.updateChatTitleDb(chatId, 'aborted edit'), /中断|AbortError/);
+            await fails(() => db.deleteChat(chatId), /中断|AbortError/);
+        } finally { IDBObjectStore.prototype.add = originalAdd; }
+        eq(await db.getChat(43), undefined);
+        eq((await db.getChat(chatId)).title, 'local');
+        eq((await journal()).map(row => row.operation), ['create']);
+        await db.updateChatTitleDb(chatId, 'edited');
+        await db.updateChatPinState(chatId, true);
+        const doc = await db.addLibraryDocument(file('tombstone fixture'));
+        const project = await db.createProject({ name: 'tombstone project' });
+        await db.setChatDocuments(chatId, [doc.id]);
+        await db.setChatProject(chatId, project.id);
+
+        const remove = IDBObjectStore.prototype.delete;
+        IDBObjectStore.prototype.delete = function (key) {
+            const result = remove.call(this, key);
+            if (this.name === ProjectStore.chats) result.addEventListener('success', () => this.transaction.abort());
+            return result;
+        };
+        try {
+            await fails(() => db.deleteChat(chatId), /中断|AbortError/);
+        } finally { IDBObjectStore.prototype.delete = remove; }
+        eq(await ids(chatId), [doc.id]);
+        eq(await db.getChatProject(chatId), project);
+        eq((await journal()).map(row => row.operation), ['create', 'update', 'update']);
+        await db.deleteChat(chatId);
+        const name = st.db.name;
+        st.db.close();
+        st.db = await DocumentLibrary.request(indexedDB.open(name));
+        await app.initializeSyncState();
+        eq(await db.getChat(chatId), undefined);
+        eq(await ids(chatId), []);
+        eq(await db.getChatProject(chatId), undefined);
+        assert(st.sync.isDirty && (await db.getChatSyncContext()).pending);
+        const rows = await journal();
+        eq(rows.map(row => row.operation), ['create', 'update', 'update', 'delete']);
+        assert(rows.every(row => row.entityType === 'chat' && row.entityId === syncIdentity && row.status === 'pending' && row.baseSyncId === null));
+        eq(new Set(rows.map(row => row.operationId)).size, rows.length);
+    }));
+
+    await test('V2 snapshots carry portable identity and legacy imports share identity only within the same snapshot', async () => {
+        let snapshot, identity, firstId;
+        await withDatabase(async () => {
+            firstId = await saveChat(undefined, 'device A');
+            identity = (await db.getChat(firstId)).syncIdentity;
+            snapshot = JSON.parse(await (await app.createFullBackup()).text());
+            eq(snapshot.data.chats[0].syncIdentity, identity);
+            assert(snapshot.data.chats[0].syncLegacyOrigin === undefined);
+            assert(!JSON.stringify(snapshot).includes('sync_journal'));
+        });
+        await withDatabase(async () => {
+            const id = await saveChat(undefined, 'device B');
+            eq(id, firstId);
+            const unrelated = (await db.getChat(id)).syncIdentity;
+            assert(unrelated !== identity);
+            const fence = await db.getChatSyncContext();
+            await db.updateChatTitleDb(id, 'new local edit');
+            await fails(() => app.importDataFromString(JSON.stringify(snapshot), { source: 'file', chatSyncBefore: fence }), /準備中にチャット/);
+            eq((await db.getChat(id)).title, 'new local edit');
+            await app.importDataFromString(JSON.stringify(snapshot), { source: 'file' });
+            eq((await db.getChat(id)).syncIdentity, identity);
+            eq((await journal()).slice(-2).map(row => [row.operation, row.entityId]), [['delete', unrelated], ['create', identity]]);
+        });
+        delete snapshot.data.chats[0].syncIdentity;
+        const restoreLegacy = () => withDatabase(async () => {
+            await app.importDataFromString(JSON.stringify(snapshot), { source: 'file' });
+            return (await db.getChat(firstId)).syncIdentity;
+        });
+        const legacy = await restoreLegacy();
+        eq(await restoreLegacy(), legacy);
+        snapshot.syncId += '_different';
+        assert(await restoreLegacy() !== legacy);
     });
 
     await test('Project CRUD, membership moves, and shared documents keep original records intact', () => withDatabase(async () => {
@@ -491,7 +609,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
         const commits = [];
         const statuses = [];
         const originalUploads = [];
-        let counter = 0, failOriginal = false, beforeCommit;
+        let counter = 0, failOriginal = false, beforeCommit, beforeDraftCommit, metadataAttempts = 0, loseUploadResponse = false;
         const conflict = () => Response.json({ error_summary: 'path/conflict/file/' }, { status: 409 });
         const notFound = () => Response.json({ error_summary: 'path/not_found/' }, { status: 409 });
         const remote = () => files.get(api.METADATA_PATH);
@@ -513,9 +631,15 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     return entry ? new Response(entry.blob, { headers: { 'Dropbox-API-Result': JSON.stringify({ rev: entry.rev }) } }) : notFound();
                 }
                 if (request.pathname.endsWith('/upload')) {
+                    if (path.startsWith(api.DRAFTS_DIR_PATH + '/')) {
+                        await beforeDraftCommit?.(JSON.parse(options.body));
+                        assert(args.strict_conflict && args.autorename === false);
+                        if (args.mode === 'add' ? files.has(path) : args.mode.update !== files.get(path)?.rev) return conflict();
+                    }
                     if (path.startsWith(api.DOCUMENTS_DIR_PATH + '/')) originalUploads.push(path);
                     if (path.startsWith(api.DOCUMENTS_DIR_PATH + '/') && failOriginal) return new Response('', { status: 503 });
                     if (path === api.METADATA_PATH) {
+                        metadataAttempts++;
                         if (beforeCommit) await beforeCommit();
                         assert(args.strict_conflict && args.autorename === false);
                         if (args.mode === 'add' ? remote() : args.mode['.tag'] !== 'update' || args.mode.update !== remote()?.rev) return conflict();
@@ -526,6 +650,10 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                         commits.push(envelope);
                     } else if (args.mode === 'add' && entry) return conflict();
                     files.set(path, { blob: new Blob([options.body]), rev: String(++counter) });
+                    if (path === api.METADATA_PATH && loseUploadResponse) {
+                        loseUploadResponse = false;
+                        throw new TypeError('connection lost after server commit');
+                    }
                     return Response.json({ rev: String(counter) });
                 }
                 if (request.pathname.endsWith('/get_metadata')) return folders.has(path) ? Response.json({ '.tag': 'folder' }) : notFound();
@@ -553,17 +681,25 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 await app._doPush();
                 eq(commits.length, 0);
                 eq((await db.getDocumentLibrarySyncState()).syncedRevision, null);
+                eq((await checkpoint()).source, 'migration');
+                eq((await journal()).map(row => row.status), ['pending']);
                 failOriginal = false;
                 await app._doPush();
                 assert(commits.length === 1, JSON.stringify(statuses.at(-1)));
                 first = await metadata();
+                eq((await checkpoint()).syncId, JSON.parse(first).syncId);
+                eq((await checkpoint()).dropboxRev, remote().rev);
+                eq(await base(), JSON.parse(first));
 
                 await db.replaceLibraryDocument(doc.id, file('cloud v2'));
+                const attempts = metadataAttempts;
                 beforeCommit = async () => { files.set(api.METADATA_PATH, { ...remote(), rev: String(++counter) }); };
                 await app._doPush();
                 eq(await metadata(), first);
                 eq(commits.length, 1);
-                assert(statuses.some(({ status, message }) => status === 'error' && message.includes('保存先が変更')));
+                eq((await checkpoint()).syncId, JSON.parse(first).syncId);
+                eq(metadataAttempts - attempts, 3);
+                assert(statuses.some(({ status, message }) => status === 'error' && message.includes('同時更新が続いた')));
                 const pending = await db.getDocumentLibrarySyncState();
                 assert(pending.revision !== pending.syncedRevision);
                 beforeCommit = undefined;
@@ -577,6 +713,9 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 await app.initializeSyncState();
                 eq(await ids(chatId), [doc.id]);
                 eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'cloud v1');
+                eq((await checkpoint()).source, 'pull');
+                eq((await db.getChat(chatId)).syncIdentity, JSON.parse(first).data.chats[0].syncIdentity);
+                eq(await base(), JSON.parse(first));
                 const newest = commits[1].data.documentLibrary.originals.find(original => original.version === 2);
                 const newestPath = api.libraryOriginalPath(newest.hash);
                 const original = files.get(newestPath);
@@ -592,12 +731,11 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 eq(await metadata(), second);
                 await app.handlePull();
                 eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'local v2');
-                assert(statuses.some(({ status, message }) => status === 'error' && message.includes('未同期のファイル')));
+                assert(statuses.some(({ status, message }) => status === 'error' && message.includes('資料ライブラリの変更が競合')));
 
-                let warning;
-                ui.showCustomConfirm = async message => { warning = message; return false; };
+                ui.showCustomConfirm = async () => { throw Error('unexpected destructive confirmation'); };
                 await app.handlePull(true);
-                assert(warning.includes('未同期のファイル') && warning.includes('バックアップ'));
+                assert(statuses.at(-1).message.includes('資料ライブラリの変更が競合'));
                 eq(await (await db.getLibraryOriginal(doc.id)).blob.text(), 'local v2');
                 await app.importDataFromString(second, { source: 'dropbox', allowLibraryReplace: true });
                 await app.initializeSyncState();
@@ -638,9 +776,9 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 const warnings = [];
                 ui.showCustomConfirm = async message => { warnings.push(message); return true; };
                 await app.handleManualDropboxSync();
-                eq(warnings.length, 1);
-                assert(warnings[0].includes('ファイルや紐づけ'));
-                eq(JSON.parse(await metadata()).data.documentLibrary.links, [{ chatId: linked, documentId: document.id }]);
+                eq(warnings.length, 0);
+                eq(await metadata(), JSON.stringify(legacy));
+                assert(statuses.at(-1).message.includes('共通の同期基準'));
                 eq(await ids(linked), [document.id]);
             });
             await test('Dropbox round-trips projects and empty deletions, retains concurrent changes and blocks old data', async () => {
@@ -663,6 +801,11 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                             tx.objectStore(ProjectStore.projects).put({ ...project, name: 'edited during push' });
                             await ProjectStore.markChanged(tx.objectStore('settings'));
                         });
+                        await DocumentLibrary.transaction(peer, ['chats', db.chatJournal.store], 'readwrite', async tx => {
+                            const store = tx.objectStore('chats');
+                            const current = await DocumentLibrary.request(store.get(member));
+                            db.chatJournal.writeChat(store, { ...current, title: 'chat edited during push' }, current);
+                        });
                     };
                     try { await app._doPush(); }
                     finally { beforeCommit = undefined; peer.close(); }
@@ -670,6 +813,16 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     eq(sent.minimumReaderVersion, 138);
                     eq(sent.data.projectData.revision, before.revision);
                     eq(sent.data.projectData.projects.find(row => row.id === project.id).name, 'shared');
+                    eq((await base()).data.chats.find(chat => chat.id === member).title, 'project member');
+                    const rows = await journal();
+                    eq(rows.map(row => [row.operation, row.status]), [['create', 'synced'], ['update', 'pending']]);
+                    eq(rows[0].settledBy, sent.syncId);
+                    const reopened = await DocumentLibrary.request(indexedDB.open(st.db.name));
+                    st.db.close();
+                    st.db = reopened;
+                    eq((await db.getChat(member)).title, 'chat edited during push');
+                    eq((await checkpoint()).syncId, sent.syncId);
+                    assert((await db.getChatSyncContext()).pending);
                     const pending = await db.getProjectSyncContext();
                     eq(pending.syncedRevision, before.revision);
                     assert(pending.revision !== pending.syncedRevision && st.sync.isDirty);
@@ -680,6 +833,8 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     eq(revision, pending.revision);
                     eq(originalUploads.length - uploadsBefore, 1);
                     eq((await db.getProjectSyncContext()).syncedRevision, revision);
+                    eq((await base()).data.chats.find(chat => chat.id === member).title, 'chat edited during push');
+                    eq((await journal()).map(row => row.status), ['synced', 'synced']);
                     const badRemote = JSON.parse(snapshot);
                     badRemote.data.projectData.chats[0].projectId = 'invalid';
                     await fails(() => app.importDataFromString(JSON.stringify(badRemote), { source: 'dropbox' }), /プロジェクト情報/);
@@ -691,7 +846,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     const saved = remote();
                     files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(oldRemote)]), rev: String(++counter) });
                     await app.handlePull();
-                    assert(statuses.at(-1).message.includes('プロジェクト情報がありません'));
+                    assert(statuses.at(-1).message.includes('旧クライアント'));
                     eq((await db.getChatProject(member)).name, 'edited during push');
                     files.set(api.METADATA_PATH, saved);
                     await db.deleteProject(project.id);
@@ -708,7 +863,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     const newest = remote();
                     files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(oldRemote)]), rev: String(++counter) });
                     await app.handlePull();
-                    assert(statuses.at(-1).message.includes('プロジェクト情報がありません'));
+                    assert(statuses.at(-1).message.includes('旧クライアント'));
                     eq((await db.getProjectSyncContext()).syncedRevision, empty.data.projectData.revision);
                     files.set(api.METADATA_PATH, newest);
                 });
@@ -727,16 +882,13 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     eq((await db.getProjectSyncContext()).syncedRevision, revision);
                     await db.updateProject(project.id, { name: 'second device edit' });
                     await app._doPush();
-                    assert(statuses.at(-1).message.includes('Dropboxに新しいプロジェクト情報'));
+                    assert(statuses.at(-1).message.includes('プロジェクトの変更が競合'));
                     eq(await metadata(), emptySnapshot);
                     await app.handlePull();
-                    assert(statuses.at(-1).message.includes('未同期のプロジェクト'));
+                    assert(statuses.at(-1).message.includes('プロジェクトの変更が競合'));
                     eq((await db.getChatProject(member)).name, 'second device edit');
-                    ui.showCustomConfirm = async message => {
-                        assert(message.includes('未同期のプロジェクト'));
-                        return false;
-                    };
                     await app.handlePull(true);
+                    assert(statuses.at(-1).message.includes('プロジェクトの変更が競合'));
                     eq((await db.getChatProject(member)).name, 'second device edit');
                     const projectsBefore = await db.getProjectSyncContext();
                     const peer = await DocumentLibrary.request(indexedDB.open(st.db.name));
@@ -754,10 +906,226 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     await app.importDataFromString(emptySnapshot, { source: 'dropbox', allowProjectReplace: true });
                     eq(await db.listProjects(), []);
                     eq(await db.getChatProject(member), undefined);
-                    eq((await db.getChat(member)).title, 'project member');
+                    eq((await db.getChat(member)).title, 'chat edited during push');
                     eq(await (await db.getLibraryOriginal(document.id)).blob.text(), 'project-shared original');
                 });
             });
+            await test('Dropbox restore detects later edits and records explicitly replaced work separately', () => withDatabase(async () => {
+                await connect();
+                await app.importDataFromString(first, { source: 'dropbox' });
+                await db.deleteChat(chatId);
+                const fence = await db.getChatSyncContext();
+                const local = await saveChat(50, 'created during download');
+                await fails(() => app.importDataFromString(second, { source: 'dropbox', chatSyncBefore: fence,
+                    allowLibraryReplace: true }), /準備中にチャット/);
+                eq((await checkpoint()).syncId, JSON.parse(first).syncId);
+                eq((await journal()).map(row => row.status), ['pending', 'pending']);
+                eq((await db.getChat(local)).title, 'created during download');
+                await app.importDataFromString(second, { source: 'dropbox', allowLibraryReplace: true });
+                eq((await checkpoint()).syncId, JSON.parse(second).syncId);
+                eq((await journal()).map(row => [row.operation, row.status, row.settledBy]),
+                    [['delete', 'replaced', JSON.parse(second).syncId], ['create', 'replaced', JSON.parse(second).syncId]]);
+                eq((await db.getChatSyncContext()).pending, false);
+            }));
+            await test('Two Dropbox clients merge independent changes, repair references and recover conflicts exactly once', () => withDatabase(async () => {
+                files.delete(api.METADATA_PATH);
+                await connect();
+                const profile = await db.addProfile({ name: 'Shared profile' });
+                for (const id of [1, 2, 3, 4, 5]) await saveChat(id, 'shared-' + id);
+                await db.editProfileMemory(profile, () => ['base memory']);
+                await app._doPush();
+                const initial = await metadata();
+                const edit = async (id, content) => {
+                    const chat = await db.getChat(id);
+                    await db.saveChat(null, { ...chat, messages: [{ role: 'user', content }] }, { skipPush: true, existingSnapshot: true });
+                };
+                const branch = async (label) => {
+                    const imageId = label + '.webp';
+                    await put('image_store', { id: imageId, blob: new Blob([label]) });
+                    const id = await saveChat(undefined, label, { messages: [{ role: 'user', content: label, imageIds: [imageId] }] });
+                    const document = await db.addLibraryDocument(file(label + ' original'));
+                    const project = await db.createProject({ name: label });
+                    await db.setChatProject(id, project.id);
+                    await db.setChatDocuments(id, [document.id]);
+                    await db.addProjectDocument(project.id, document.id);
+                    await db.editProfileMemory(profile, items => [...items, label + ' memory']);
+                    return { id, identity: (await db.getChat(id)).syncIdentity, document, imageId, project };
+                };
+                await db.updateChatTitleDb(1, 'PC title');
+                await edit(3, 'PC conflicting message');
+                await db.deleteChat(4);
+                await db.deleteChat(5);
+                const pc = await branch('PC');
+                const mobile = await withDatabase(async () => {
+                    await connect();
+                    await app.handlePull();
+                    if (!await db.getChat(1)) {
+                        const local = JSON.parse((await app._prepareExportData({ sync: true })).metadataJson);
+                        throw Error(JSON.stringify({ status: statuses.at(-1), profiles: local.data.profiles.length,
+                            settings: local.data.settings.map(row => row.key), context: await db.getChatSyncContext() }));
+                    }
+                    await db.updateChatPinState(1, true);
+                    await db.updateChatTitleDb(2, 'Mobile title');
+                    await edit(3, 'Mobile conflicting message');
+                    await edit(4, 'Mobile edit of deleted chat');
+                    await db.deleteChat(5);
+                    const result = await branch('Mobile');
+                    await app._doPush();
+                    assert(await metadata() !== initial, JSON.stringify(statuses.at(-1)));
+                    return result;
+                });
+                eq(pc.id, mobile.id);
+                let bumped = false;
+                beforeCommit = async () => {
+                    if (bumped) return;
+                    bumped = true;
+                    const winner = JSON.parse(await metadata());
+                    winner.syncId = 'concurrent-device-write';
+                    winner.data.settings.push({ key: 'independent-remote', value: true });
+                    files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(winner)]), rev: String(++counter) });
+                };
+                const attempts = metadataAttempts;
+                try { await app._doPush(); }
+                finally { beforeCommit = undefined; }
+                eq(metadataAttempts - attempts, 2);
+                const merged = JSON.parse(await metadata());
+                eq((await checkpoint()).syncId, merged.syncId);
+                const chats = await db.getAllChats();
+                const byIdentity = new Map(chats.map(chat => [chat.syncIdentity, chat]));
+                eq((await db.getChat(1)).title, 'PC title');
+                eq((await db.getChat(1)).isPinned, true);
+                eq((await db.getChat(2)).title, 'Mobile title');
+                const conflictId = JSON.parse(initial).data.chats.find(row => row.id === 3).syncIdentity;
+                eq(chats.filter(row => row.syncIdentity === conflictId || row.syncConflictOf === conflictId)
+                    .map(row => row.messages[0].content).sort(), ['Mobile conflicting message', 'PC conflicting message']);
+                eq(await db.getChat(4), undefined);
+                eq(await db.getChat(5), undefined);
+                assert(chats.some(row => row.syncConflictOf && row.messages[0].content === 'Mobile edit of deleted chat'));
+                eq(merged.syncProtection.deletedChats.length, 2);
+                eq(byIdentity.get(pc.identity).id, pc.id);
+                assert(byIdentity.get(mobile.identity).id !== pc.id);
+                for (const branch of [pc, mobile]) {
+                    const chat = byIdentity.get(branch.identity);
+                    eq((await db.getChatProject(chat.id)).id, branch.project.id);
+                    eq(await ids(chat.id), [branch.document.id]);
+                    eq((await db.listProjectDocuments(branch.project.id)).map(row => row.id), [branch.document.id]);
+                    eq(await (await db.getLibraryOriginal(branch.document.id, 1)).blob.text(), branch.project.name + ' original');
+                    eq(await (await read('image_store', branch.imageId)).blob.text(), branch.project.name);
+                    assert(merged.syncProtection.assetHashes.some(row => row.id === branch.imageId));
+                }
+                eq((await db.getMemory(profile)).items, ['base memory', 'Mobile memory', 'PC memory']);
+                eq((await db.getSetting('independent-remote')).value, true);
+                const attemptsAfter = metadataAttempts;
+                await app.handlePull();
+                eq(metadataAttempts, attemptsAfter);
+                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 2);
+                assert(!(await db.getChatSyncContext()).pending);
+
+                const changed = JSON.parse(await metadata());
+                changed.syncId = 'later-remote-write';
+                changed.data.chats.find(row => row.id === 2).title = 'Later remote title';
+                files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(changed)]), rev: String(++counter) });
+                await db.updateChatTitleDb(1, 'Later PC title');
+                const peer = await DocumentLibrary.request(indexedDB.open(st.db.name));
+                beforeCommit = () => DocumentLibrary.transaction(peer, ['settings'], 'readwrite', tx => {
+                    tx.objectStore('settings').put({ key: 'written-during-merge', value: 'peer setting' });
+                });
+                try { await app._doPush(); }
+                finally { beforeCommit = undefined; peer.close(); }
+                assert(statuses.at(-1).message.includes('この端末のデータが変わりました'));
+                assert((await db.getChatSyncContext()).pending);
+                eq((await db.getChat(2)).title, 'Mobile title');
+                eq((await checkpoint()).syncId, merged.syncId);
+                await app.handlePull();
+                eq((await db.getChat(1)).title, 'Later PC title');
+                eq((await db.getChat(2)).title, 'Later remote title');
+                eq((await db.getSetting('written-during-merge')).value, 'peer setting');
+                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 2);
+
+                const afterPeer = JSON.parse(await metadata());
+                afterPeer.syncId = 'update-during-editor';
+                afterPeer.data.chats.find(row => row.id === 2).title = 'New while editor is open';
+                files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(afterPeer)]), rev: String(++counter) });
+                const releaseEditor = await app.acquireDropboxEdit();
+                assert(releaseEditor, 'shared editor lock was not acquired');
+                try {
+                    await app.handlePull();
+                    eq((await db.getChat(2)).title, 'Later remote title');
+                    assert(statuses.at(-1).message.includes('この端末のデータが変わりました'));
+                } finally { releaseEditor(); }
+                await app.handlePull();
+                eq((await db.getChat(2)).title, 'New while editor is open');
+
+                const imagePath = api.ASSETS_DIR_PATH + '/' + mobile.imageId;
+                const originalImage = files.get(imagePath);
+                const saved = await checkpoint();
+                files.set(imagePath, { ...originalImage, blob: new Blob(['corrupted bytes']) });
+                try {
+                    await app.handlePull();
+                    assert(statuses.at(-1).message.includes('画像アセットの内容'));
+                    eq((await checkpoint()).syncId, saved.syncId);
+                    eq(await (await read('image_store', mobile.imageId)).blob.text(), 'Mobile');
+                } finally { files.set(imagePath, originalImage); }
+            }));
+
+            await test('Interrupted first upload recovers its exact receipt while subsequent local edits remain safe', () => withDatabase(async () => {
+                files.delete(api.METADATA_PATH);
+                await connect();
+                const id = await saveChat(1, 'first publication');
+                loseUploadResponse = true;
+                await app._doPush();
+                assert(statuses.at(-1).status === 'error');
+                eq((await checkpoint()).syncId, null);
+                eq((await journal()).map(row => row.status), ['pending']);
+                const firstSyncId = JSON.parse(await metadata()).syncId;
+                const name = st.db.name;
+                st.db.close();
+                st.db = await DocumentLibrary.request(indexedDB.open(name));
+                await db.updateChatTitleDb(id, 'edited after restart');
+                await app.handlePull();
+                const current = JSON.parse(await metadata());
+                assert(current.syncId !== firstSyncId, JSON.stringify(statuses.at(-1)));
+                eq(current.data.chats.map(chat => chat.title), ['edited after restart']);
+                eq((await journal()).map(row => row.status), ['synced', 'synced']);
+                const lostId = { ...current, syncId: 'old-format-edit' };
+                delete lostId.syncProtection;
+                delete lostId.data.chats[0].syncIdentity;
+                lostId.data.chats[0].title = 'old client edit';
+                files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(lostId)]), rev: String(++counter) });
+                await db.updateChatTitleDb(id, 'pending local edit');
+                await app.handlePull();
+                assert(statuses.at(-1).message.includes('旧クライアント'));
+                eq((await db.getChat(id)).title, 'pending local edit');
+                assert((await db.getChatSyncContext()).pending);
+                eq(await metadata(), JSON.stringify(lostId));
+                await withDatabase(async () => {
+                    await connect();
+                    await db.saveSetting('lastSyncId', lostId.syncId);
+                    await saveChat(id, 'unverified migrated history');
+                    await app.handlePull();
+                    assert(statuses.at(-1).message.includes('共通の同期基準'));
+                    eq((await db.getChat(id)).title, 'unverified migrated history');
+                    eq(await metadata(), JSON.stringify(lostId));
+                });
+            }));
+            await test('An older draft upload cannot replace a newer deletion after a revision race', () => withDatabase(async () => {
+                await connect();
+                const contextKey = 'chat:sync:' + DocumentLibrary.uniqueId();
+                const draft = { kind: 'inputDraft', contextKey, text: 'old text', updatedAt: 10, clientId: 'PC' };
+                let entered, release;
+                const waiting = new Promise(resolve => { entered = resolve; });
+                const paused = new Promise(resolve => { release = resolve; });
+                beforeDraftCommit = row => { if (!row.deleted) { entered(); return paused; } };
+                const old = api.uploadInputDraftToDropbox(draft);
+                try {
+                    await Promise.race([waiting, old.then(() => { throw Error('draft upload did not reach Dropbox'); })]);
+                    await api.uploadInputDraftToDropbox({ ...draft, text: '', deleted: true, updatedAt: 11, clientId: 'Mobile' });
+                } finally { release(); beforeDraftCommit = undefined; }
+                await old;
+                const remoteDraft = await api.downloadInputDraftFromDropbox(contextKey);
+                assert(remoteDraft.deleted && remoteDraft.text === '');
+                eq(remoteDraft.updatedAt, 11);
+            }));
         } finally {
             Object.assign(app, { updateSyncStatusUI: previousStatus, updateDropboxUIState: previousUpdate });
             Object.assign(ui, { showCustomConfirm: confirm, showCustomAlert: alert, showProgressDialog: progress });

@@ -14,8 +14,12 @@ def run(client, url):
         client.call('Page.reload' if reload else 'Page.navigate', {} if reload else {'url': url + '?f7=1#chat'})
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
-            if ev(f"performance.timeOrigin > {previous} && !!window.appLogic?._setupEventListenersCallCount && window.state?.currentScreen === 'chat'"):
-                return
+            try:
+                if ev(f"performance.timeOrigin > {previous} && !!window.appLogic?._setupEventListenersCallCount && window.state?.currentScreen === 'chat'"):
+                    return
+            except RuntimeError as error:
+                if not any(term in str(error) for term in ('navigated', 'context was destroyed', 'Cannot find context')):
+                    raise
             time.sleep(0.1)
         raise AssertionError('F7 app startup did not complete')
 

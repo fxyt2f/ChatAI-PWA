@@ -9,7 +9,7 @@ import("https://esm.run/@google/genai").then(module => {
 
 // --- 定数 ---
 const DB_NAME = 'GeminiPWA_DB';
-const DB_VERSION = 18;
+const DB_VERSION = 19;
 const SETTINGS_STORE = 'settings';
 const PROFILES_STORE = 'profiles';
 const CHATS_STORE = 'chats';
@@ -62,6 +62,8 @@ const LOCAL_OTHER_SETTING_KEYS = [
     'debugMode'
 ];
 const LOCAL_UI_SETTING_KEYS = Object.keys(DEFAULT_LOCAL_UI_SETTINGS);
+const dropboxLocalSetting = key => ['localUiSettings', 'syncIsDirty', 'syncLastError', 'lastSyncTimestamp'].includes(key)
+    || LOCAL_UI_SETTING_KEYS.includes(key);
 const FLOATING_PANEL_BEHAVIOR_OPTIONS = ['on-click', 'always', 'hidden'];
 const HISTORY_SORT_OPTIONS = ['updatedAt', 'createdAt', 'title'];
 const HISTORY_PIN_FILTER_OPTIONS = ['all', 'pinned'];
@@ -197,8 +199,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.37.5";
-const APP_CACHE_VERSION = "v1.37.5";
+const APP_VERSION = "1.38.0";
+const APP_CACHE_VERSION = "v1.38.0";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -239,7 +241,9 @@ let inputDraftRestoreTimer = 0;
 let inputDraftRestoreSequence = 0;
 let inputDraftRestoring = false;
 let activeInputDraftContextKey = null;
-let pendingInputDraftDropboxRecord = null;
+const pendingInputDraftDropboxRecords = new Map();
+let inputDraftEditVersion = 0;
+const editedInputDraftContexts = new Set();
 let composerResizeFrame = 0;
 let composerResizeObserver = null;
 let messageCollapseFrame = 0;
@@ -1613,8 +1617,130 @@ const htmlUtils = {
     }
 };
 
+// Only portable chat identities travel in V2 exports. Numeric keys in this
+// store order local operations; its string keys hold the checkpoint and base.
+const SyncJournal = {
+    store: 'sync_journal',
+    checkpointKey: 'checkpoint',
+    snapshotKey: 'snapshot',
+
+    upgrade(db, tx, fresh) {
+        const journal = db.createObjectStore(this.store, { autoIncrement: true });
+        journal.createIndex('status', 'status');
+        const settings = tx.objectStore(SETTINGS_STORE);
+        const lastSyncId = settings.get('lastSyncId');
+        lastSyncId.onsuccess = () => {
+            const syncId = lastSyncId.result?.value ?? null;
+            journal.put({ epoch: DocumentLibrary.uniqueId(), syncId, source: 'migration', fresh }, this.checkpointKey);
+            const request = tx.objectStore(CHATS_STORE).openCursor();
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) return;
+                const chat = cursor.value;
+                chat.syncIdentity = DocumentLibrary.uniqueId();
+                // A DB-wide lastSyncId is only a lead, never proof of membership.
+                chat.syncLegacyOrigin = { syncId, id: chat.id, createdAt: chat.createdAt ?? null };
+                cursor.update(chat);
+                cursor.continue();
+            };
+        };
+    },
+
+    isChatIdentity(value) {
+        if (typeof value !== 'string') return false;
+        if (DocumentLibrary.isId(value)) return true;
+        if (!value.startsWith('legacy:')) return false;
+        try {
+            const [syncId, id] = JSON.parse(value.slice('legacy:'.length));
+            return typeof syncId === 'string' && syncId.length > 0 && DocumentLibrary.isChatId(id)
+                && value === this.legacyIdentity(syncId, id);
+        } catch { return false; }
+    },
+
+    legacyIdentity(syncId, id) {
+        return `legacy:${JSON.stringify([syncId, id])}`;
+    },
+
+    identifySnapshotChats(chats, syncId) {
+        const seen = new Set();
+        return chats.map(chat => {
+            const syncIdentity = this.isChatIdentity(chat.syncIdentity) ? chat.syncIdentity :
+                typeof syncId === 'string' && syncId && DocumentLibrary.isChatId(chat.id)
+                    ? this.legacyIdentity(syncId, chat.id) : DocumentLibrary.uniqueId();
+            if (seen.has(syncIdentity)) throw new Error('バックアップまたは同期データに重複したチャット同期IDがあります。');
+            seen.add(syncIdentity);
+            const restored = { ...chat, syncIdentity };
+            delete restored.syncLegacyOrigin;
+            delete restored.syncDraftSource;
+            return restored;
+        });
+    },
+
+    append(tx, entityType, entityId, operation, details) {
+        const journal = tx.objectStore(this.store);
+        const checkpoint = journal.get(this.checkpointKey);
+        const operationId = DocumentLibrary.uniqueId();
+        const changedAt = Date.now();
+        checkpoint.onsuccess = () => {
+            journal.add({ entityType, entityId, operation, operationId, changedAt, status: 'pending',
+                baseSyncId: checkpoint.result?.syncId ?? null, ...details });
+        };
+    },
+
+    writeChat(store, chat, previous = null) {
+        const legacyOrigin = previous?.syncLegacyOrigin;
+        const draftSource = previous?.syncDraftSource;
+        chat.syncIdentity = previous?.syncIdentity ?? DocumentLibrary.uniqueId();
+        delete chat.syncLegacyOrigin;
+        delete chat.syncDraftSource;
+        if (!previous) delete chat.syncConflictOf;
+        if (legacyOrigin) chat.syncLegacyOrigin = legacyOrigin;
+        if (draftSource) chat.syncDraftSource = draftSource;
+        this.append(store.transaction, 'chat', chat.syncIdentity, previous ? 'update' : 'create');
+        return previous || chat.id !== undefined ? store.put(chat) : store.add(chat);
+    },
+
+    async context(tx, withBase = false) {
+        const journal = tx.objectStore(this.store);
+        const read = DocumentLibrary.request;
+        const [checkpoint, latest, pending, snapshot, operations, bootstrap, intent] = await Promise.all([
+            read(journal.get(this.checkpointKey)),
+            read(journal.openKeyCursor(IDBKeyRange.upperBound(Number.MAX_SAFE_INTEGER), 'prev')),
+            read(journal.index('status').getKey('pending')),
+            ...(withBase ? [read(journal.get(this.snapshotKey)), read(journal.index('status').getAll('pending')),
+                read(journal.get('bootstrap')), read(journal.get('firstUpload'))] : [])
+        ]);
+        return { epoch: checkpoint?.epoch ?? null, syncId: checkpoint?.syncId ?? null,
+            sequence: latest?.primaryKey ?? 0, pending: pending !== undefined,
+            ...(withBase && { checkpoint, snapshot, operations, bootstrap, intent }) };
+    },
+
+    async settle(tx, context, baseline, metadataJson, status) {
+        const journal = tx.objectStore(this.store);
+        const pending = journal.index('status').openCursor(IDBKeyRange.only('pending'));
+        await new Promise((resolve, reject) => {
+            pending.onerror = () => reject(pending.error);
+            pending.onsuccess = () => {
+                const cursor = pending.result;
+                if (!cursor || cursor.primaryKey > context.sequence) { resolve(); return; }
+                cursor.update({ ...cursor.value, status, settledBy: baseline.syncId });
+                cursor.continue();
+            };
+        });
+        journal.put({ ...baseline, epoch: context.epoch, sequence: context.sequence }, this.checkpointKey);
+        journal.put(new Blob([metadataJson], { type: 'application/json' }), this.snapshotKey);
+        journal.delete('firstUpload');
+        return (await DocumentLibrary.request(journal.index('status').getKey('pending'))) !== undefined;
+    },
+
+    reset(tx) {
+        tx.objectStore(this.store).put({ epoch: DocumentLibrary.uniqueId(), syncId: null }, this.checkpointKey);
+    }
+};
+
 // --- IndexedDBユーティリティ (dbUtils) ---
 const dbUtils = {
+    chatJournal: SyncJournal,
     openDB() {
         return new Promise((resolve, reject) => {
             if (state.db) {
@@ -1777,6 +1903,7 @@ const dbUtils = {
                     const embeddings = db.createObjectStore(DocumentLibrary.embeddingStore, { keyPath: 'key' });
                     embeddings.createIndex('specId', 'specId');
                 }
+                if (event.oldVersion < 19) SyncJournal.upgrade(db, transaction, event.oldVersion === 0);
                 if (event.oldVersion === 0) {
                     transaction.objectStore(SETTINGS_STORE).put({ key: SettingsV136.GLOBAL_KEY, value: { memoryModelRef: null } });
                 }
@@ -1823,12 +1950,22 @@ const dbUtils = {
     bindChatSaveOwnerV136(messages, chat) {
         this.chatSaveOwners ||= new WeakMap();
         const owner = { id: chat.id, createdAt: chat.createdAt, changeHistoryLayout: chat.changeHistoryLayout,
+            syncIdentity: chat.syncIdentity, syncLegacyOrigin: chat.syncLegacyOrigin, syncDraftSource: chat.syncDraftSource,
             ...SettingsV136.chatContentVersion(chat) };
         this.chatSaveOwners.set(messages, owner);
     },
+    async addLocalChat(chat) {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [CHATS_STORE, SyncJournal.store], 'readwrite',
+            tx => DocumentLibrary.request(SyncJournal.writeChat(tx.objectStore(CHATS_STORE), chat)));
+    },
+    async getChatSyncContext() {
+        const db = await this.openDB();
+        return DocumentLibrary.transaction(db, [SyncJournal.store], 'readonly', tx => SyncJournal.context(tx));
+    },
     commitChatInformation(chatId, expectedVersion, update) {
         return new Promise((resolve, reject) => {
-            const tx = state.db.transaction(CHATS_STORE, 'readwrite');
+            const tx = state.db.transaction([CHATS_STORE, SyncJournal.store], 'readwrite');
             const store = tx.objectStore(CHATS_STORE);
             const request = store.get(chatId);
             let failure, changes, version;
@@ -1839,7 +1976,7 @@ const dbUtils = {
                         throw new DOMException('別の操作で会話が更新されました。編集内容を保持しています。', 'ChatContentConflict');
                     changes = update(chat);
                     version = SettingsV136.nextChatContentVersion(chat);
-                    store.put({ ...chat, ...changes, ...version, updatedAt: Date.now() });
+                    SyncJournal.writeChat(store, { ...chat, ...changes, ...version, updatedAt: Date.now() }, chat);
                 } catch (error) { failure = error; tx.abort(); }
             };
             tx.oncomplete = () => resolve({ changes, version });
@@ -1850,6 +1987,7 @@ const dbUtils = {
         return new Promise((resolve, reject) => {
             const switching = save.profileSwitch;
             const scopes = switching ? [CHATS_STORE, PROFILES_STORE, SETTINGS_STORE] : [CHATS_STORE];
+            scopes.push(SyncJournal.store);
             const tx = state.db.transaction(scopes, 'readwrite');
             const chats = tx.objectStore(CHATS_STORE);
             const chat = chatId ? chats.get(chatId) : null;
@@ -1872,7 +2010,7 @@ const dbUtils = {
                     const snapshot = switching ? appLogic.profileChatParameters(profile.result.settings)
                         : { systemPrompt: save.value, generationParameters: save.parameters };
                     const revision = previous ? (previous.parameterRevision || 0) + 1 : 0;
-                    if (previous) chats.put({ ...previous, ...snapshot, parameterRevision: revision });
+                    if (previous) SyncJournal.writeChat(chats, { ...previous, ...snapshot, parameterRevision: revision }, previous);
                     if (switching) {
                         if (!chatId) {
                             previousDraft = sessionStorage.getItem(draftKey);
@@ -2047,7 +2185,7 @@ const dbUtils = {
 
             return new Promise((resolve, reject) => {
                 try {
-                    const scopes = [CHATS_STORE, SETTINGS_STORE];
+                    const scopes = [CHATS_STORE, SETTINGS_STORE, SyncJournal.store];
                     if (documentIds) scopes.push(DocumentLibrary.documents, DocumentLibrary.links);
                     if (draftProjectId && !targetChatId) scopes.push(ProjectStore.projects, ProjectStore.chats);
                     const transaction = state.db.transaction(scopes, 'readwrite');
@@ -2055,6 +2193,7 @@ const dbUtils = {
                     const settingsStore = transaction.objectStore(SETTINGS_STORE);
                     const removed = settingsStore.get(SettingsV136.REMOVED_MODELS_KEY);
                     let savedSuccessfulExecution = null;
+                    let savedIdentity;
                     let linkError;
                     let historyStorageError, stagedHistory;
                     const now = Date.now();
@@ -2153,7 +2292,7 @@ const dbUtils = {
                             }
                         }
 
-                        const putRequest = store.put(finalChatData);
+                        const putRequest = SyncJournal.writeChat(store, finalChatData, existingChatData);
                         if (options.successfulExecution && !SettingsV136.matchesRemovedModel(options.successfulExecution.modelRef, removedRefs)) {
                             const successRequest = settingsStore.get(SettingsV136.SUCCESS_KEY);
                             successRequest.onsuccess = () => {
@@ -2166,6 +2305,7 @@ const dbUtils = {
                         putRequest.onsuccess = (event) => {
                             const savedId = event.target.result;
                             savedChatId = savedId;
+                            savedIdentity = finalChatData.syncIdentity;
                             savedUiState = { pinState, title: finalChatData.title, createdAt: finalChatData.createdAt,
                                 changeHistoryLayout: finalChatData.changeHistoryLayout };
                             const relatedWrites = [];
@@ -2216,7 +2356,8 @@ const dbUtils = {
                             }
                             return;
                         }
-                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, createdAt: savedUiState?.createdAt,
+                        if (!chatObjectToSave) Object.assign(owner, committedVersion, { id: savedChatId, syncIdentity: savedIdentity,
+                            createdAt: savedUiState?.createdAt,
                             changeHistoryLayout: savedUiState?.changeHistoryLayout });
                         if (session) session.chatId = savedChatId;
                         try {
@@ -2440,10 +2581,14 @@ const dbUtils = {
         });
     },
 
-    updateProject(projectId, fields) {
+    updateProject(projectId, fields, expected = null) {
         return this._writeProjectData([ProjectStore.projects], async tx => {
             const store = tx.objectStore(ProjectStore.projects);
             const previous = await ProjectStore.requireProject(tx, projectId);
+            if (expected && Object.keys(fields).some(key =>
+                (previous[key] ?? '') !== expected[key] && (previous[key] ?? '') !== fields[key])) {
+                throw new Error('編集中にプロジェクト設定が更新されました。入力内容を保持しています。');
+            }
             const next = ProjectStore.projectFields(
                 Object.hasOwn(fields, 'name') ? fields.name : previous.name,
                 Object.hasOwn(fields, 'description') ? fields.description : previous.description);
@@ -2649,7 +2794,8 @@ const dbUtils = {
     async updateChatTitleDb(id, newTitle, generation = null) {
         await this.openDB();
         const updated = await new Promise((resolve, reject) => {
-            const store = this._getStore(CHATS_STORE, 'readwrite');
+            const tx = state.db.transaction([CHATS_STORE, SyncJournal.store], 'readwrite');
+            const store = tx.objectStore(CHATS_STORE);
             let result = null;
             const getRequest = store.get(id);
             getRequest.onsuccess = () => {
@@ -2670,7 +2816,8 @@ const dbUtils = {
                     chat.updatedAt = Date.now();
                     result = { title: chat.title, updatedAt: chat.updatedAt };
                 }
-                store.put(chat);
+                if (newTitle !== null) SyncJournal.writeChat(store, chat, chat);
+                else store.put(chat);
             };
             store.transaction.oncomplete = () => resolve(result);
             store.transaction.onabort = () => reject(store.transaction.error || new Error('タイトル更新が中断されました。'));
@@ -2729,7 +2876,7 @@ const dbUtils = {
     async updateChatPinState(id, shouldPin) {
         await this.openDB();
         return new Promise((resolve, reject) => {
-            const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
+            const transaction = state.db.transaction([CHATS_STORE, SyncJournal.store], 'readwrite');
             const store = transaction.objectStore(CHATS_STORE);
             const request = store.get(id);
             let updatedChat = null;
@@ -2747,7 +2894,7 @@ const dbUtils = {
                     pinnedAt: shouldPin === true ? now : null,
                     pinStateUpdatedAt: now
                 };
-                store.put(updatedChat);
+                SyncJournal.writeChat(store, updatedChat, chat);
             };
             request.onerror = event => reject(event.target.error);
             transaction.oncomplete = () => resolve(updatedChat);
@@ -2757,37 +2904,6 @@ const dbUtils = {
                 reject(transaction.error || new Error('ピン状態の保存を中断しました。'));
             };
         });
-    },
-
-    async mergeChatPinStatesFromRemote(remoteChats = []) {
-        await this.openDB();
-        const remoteById = new Map((Array.isArray(remoteChats) ? remoteChats : []).map(chat => [String(chat.id), chat]));
-        if (remoteById.size === 0) return [];
-        const updates = [];
-        await new Promise((resolve, reject) => {
-            const transaction = state.db.transaction([CHATS_STORE], 'readwrite');
-            const request = transaction.objectStore(CHATS_STORE).openCursor();
-            request.onsuccess = () => {
-                const cursor = request.result;
-                if (!cursor) return;
-                const current = cursor.value;
-                const remote = remoteById.get(String(current.id));
-                if (remote) {
-                    const localPin = normalizeChatPinState(current);
-                    const remotePin = normalizeChatPinState(remote);
-                    if (remotePin.pinStateUpdatedAt && remotePin.pinStateUpdatedAt > (localPin.pinStateUpdatedAt || 0)) {
-                        const updated = applyNormalizedChatPinState(current, remotePin);
-                        cursor.update(updated);
-                        updates.push(updated);
-                    }
-                }
-                cursor.continue();
-            };
-            transaction.oncomplete = resolve;
-            transaction.onerror = event => reject(event.target.error || transaction.error);
-            transaction.onabort = () => reject(transaction.error || new Error('Dropboxピン状態の反映を中断しました。'));
-        });
-        return updates;
     },
 
     // 将来の履歴サイドバー向けに、指定件数へ達した時点でカーソル走査を終了する。
@@ -2870,16 +2986,25 @@ const dbUtils = {
         const finalImageIdsToDelete = [...imageIdsToDelete].filter(id => !String(id).startsWith('background_') && !activeImageIdsInOtherChats.has(id));
 
         // Step 3: トランザクション内でチャットと画像の削除を実行
-        const storeNames = [CHATS_STORE, SETTINGS_STORE, DocumentLibrary.documents, DocumentLibrary.links, ProjectStore.chats];
+        const storeNames = [CHATS_STORE, SETTINGS_STORE, SyncJournal.store,
+            DocumentLibrary.documents, DocumentLibrary.links, ProjectStore.chats];
         if (finalImageIdsToDelete.length > 0) storeNames.push(IMAGE_STORE);
         const linksChanged = await DocumentLibrary.transaction(state.db, storeNames, 'readwrite', async transaction => {
             const chatStore = transaction.objectStore(CHATS_STORE);
-            if (expectedRecord && !this.matchesHistoryDeleteRecord(await DocumentLibrary.request(chatStore.get(id)), expectedRecord)) {
+            const current = await DocumentLibrary.request(chatStore.get(id));
+            if (expectedRecord && !this.matchesHistoryDeleteRecord(current, expectedRecord)) {
+                throw new Error('チャットが変更または削除されました。');
+            }
+            if (current && (!chatToDelete || current.syncIdentity !== chatToDelete.syncIdentity)) {
                 throw new Error('チャットが変更または削除されました。');
             }
 
             // チャットを削除
-            chatStore.delete(id);
+            if (current) {
+                chatStore.delete(id);
+                SyncJournal.append(transaction, 'chat', current.syncIdentity, 'delete',
+                    current.syncLegacyOrigin && { legacyOrigin: current.syncLegacyOrigin });
+            }
 
             // 孤立した画像を削除
             if (finalImageIdsToDelete.length > 0) {
@@ -2943,6 +3068,7 @@ const dbUtils = {
                     console.error(`${storeName} のクリア中にエラー:`, event.target.error);
                 };
             });
+            SyncJournal.reset(transaction);
         });
     },
 
@@ -3197,12 +3323,13 @@ const dbUtils = {
         const { automatic = false } = options;
         if (automatic && state.sendJobsV136.size) return null;
         return this.withChatDataChangeV136(undefined,
-            () => this._clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options));
+            () => this._clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options),
+            { stopGeneration: !options.mergeCapture });
     },
 
     async _clearAndImportData(data, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, options) {
         console.log("[DB Import V2] 安全なデータインポート処理を開始します。");
-        uiUtils.showProgressDialog('データベースを準備中...');
+        if (!options.mergeCapture) uiUtils.showProgressDialog('データベースを準備中...');
 
         const { profiles, chats, memories, assets, settings, documentLibrary, projectData } = data;
         if (projectData) ProjectStore.validateSnapshot(projectData, data);
@@ -3212,6 +3339,8 @@ const dbUtils = {
             const restored = applyNormalizedChatPinState(chat);
             delete restored.titleGenerationId;
             delete restored.titleGenerationEligible;
+            delete restored.syncLegacyOrigin;
+            delete restored.syncDraftSource;
             if (linkedChatIds.has(chat.id) && restored.titleSource === 'fallback' &&
                 !restored.messages?.some(message => message.role === 'user' && !message.isHidden)) {
                 restored.titleGenerationEligible = true;
@@ -3302,7 +3431,8 @@ const dbUtils = {
         const names = new Set([...records.keys(), ...DocumentLibrary.stores]);
         const db = await this.openDB();
         const { libraryPending, projectPending } = await DocumentLibrary.transaction(db,
-            [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore, DocumentLibrary.embeddingStore], 'readwrite', async tx => {
+            [...names, ...[...names].map(name => name + '_temp'), DocumentLibrary.indexStore, DocumentLibrary.embeddingStore,
+                SyncJournal.store], 'readwrite', async tx => {
                 const read = DocumentLibrary.request;
                 const localSettings = tx.objectStore(SETTINGS_STORE);
                 const [preserved, linkCount, projectCount] = await Promise.all([
@@ -3311,6 +3441,26 @@ const dbUtils = {
                     read(tx.objectStore(ProjectStore.projects).count())
                 ]);
                 const getPreserved = key => preserved.find(setting => setting?.key === key);
+                if (options.mergeCapture) {
+                    await DropboxSync.assertCapture(tx, options.mergeCapture, SyncJournal.store, dropboxLocalSetting);
+                    if (appLogic.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
+                    const previous = new Map(options.mergeCapture.get(CHATS_STORE).map(chat => [chat.syncIdentity, chat]));
+                    records.set(CHATS_STORE, normalizedChats.map(chat => {
+                        const existing = previous.get(chat.syncIdentity);
+                        if (!existing) {
+                            const alias = options.aliases?.get(chat.syncIdentity);
+                            const migrated = previous.get(alias);
+                            return migrated ? { ...migrated, syncIdentity: chat.syncIdentity, syncDraftSource: alias } : chat;
+                        }
+                        if (options.unchangedChats.has(chat.syncIdentity)) return existing;
+                        return { ...chat, ...SettingsV136.nextChatContentVersion(existing),
+                            ...(existing.syncLegacyOrigin && { syncLegacyOrigin: existing.syncLegacyOrigin }),
+                            ...(existing.syncDraftSource && { syncDraftSource: existing.syncDraftSource }) };
+                    }));
+                    const incomingImages = new Set(imagesWithBlobs.map(image => image.id));
+                    records.set(IMAGE_STORE, [...imagesWithBlobs,
+                        ...options.mergeCapture.get(IMAGE_STORE).filter(image => !incomingImages.has(image.id))]);
+                }
                 const current = DocumentLibrary.syncState(getPreserved(DocumentLibrary.syncKey));
                 const currentProjects = DocumentLibrary.syncState(getPreserved(ProjectStore.syncKey));
                 const expected = options.libraryBefore;
@@ -3320,7 +3470,7 @@ const dbUtils = {
                 if (!documentLibrary && linkCount && options.source !== 'file') {
                     throw new Error('同期データにファイルの紐づけが含まれていないため、現在のチャットを保持しました。手動同期から、この端末のデータでDropboxを更新できます。');
                 }
-                if (options.source === 'dropbox' && !documentLibrary && current.syncedRevision) {
+                if (!options.mergeCapture && options.source === 'dropbox' && !documentLibrary && current.syncedRevision) {
                     throw new Error('以前同期したファイル情報がDropboxに見つかりません。クラウドとこの端末のデータを確認してください。');
                 }
                 if (options.source === 'dropbox' && documentLibrary && !options.allowLibraryReplace &&
@@ -3338,12 +3488,32 @@ const dbUtils = {
                 if (!projectData && options.source !== 'file' && (projectCount || currentProjects.revision || currentProjects.syncedRevision)) {
                     throw new Error(ProjectStore.legacyConflict);
                 }
-                if (options.source === 'dropbox' && ProjectStore.isRollback(currentProjects, projectData)) {
+                if (!options.mergeCapture && options.source === 'dropbox' && ProjectStore.isRollback(currentProjects, projectData)) {
                     throw new Error(ProjectStore.legacyConflict);
                 }
                 if (options.source === 'dropbox' && ProjectStore.hasLocalConflict(currentProjects, projectData) &&
                     !options.allowProjectReplace) {
                     throw new Error(ProjectStore.localConflict);
+                }
+                const chatSync = await SyncJournal.context(tx);
+                const expectedChats = options.chatSyncBefore;
+                if (expectedChats && (chatSync.epoch !== expectedChats.epoch || chatSync.syncId !== expectedChats.syncId ||
+                    chatSync.sequence !== expectedChats.sequence)) {
+                    throw new Error('復元の準備中にチャットまたは同期状態が変更されました。再度お試しください。');
+                }
+                if (options.source !== 'dropbox') {
+                    const previous = await read(tx.objectStore(CHATS_STORE).getAll());
+                    const previousByIdentity = new Map(previous.map(chat => [chat.syncIdentity, chat]));
+                    const incomingIds = new Set(normalizedChats.map(chat => chat.syncIdentity));
+                    for (const chat of previous) {
+                        if (!incomingIds.has(chat.syncIdentity)) SyncJournal.append(tx, 'chat', chat.syncIdentity, 'delete',
+                            chat.syncLegacyOrigin && { legacyOrigin: chat.syncLegacyOrigin });
+                    }
+                    for (const chat of normalizedChats) {
+                        const previousChat = previousByIdentity.get(chat.syncIdentity);
+                        if (previousChat?.syncLegacyOrigin) chat.syncLegacyOrigin = previousChat.syncLegacyOrigin;
+                        SyncJournal.append(tx, 'chat', chat.syncIdentity, previousChat ? 'update' : 'create');
+                    }
                 }
                 if (documentLibrary) await DocumentLibrary.discardChangedIndexes(tx, documentLibrary.documents);
                 const nextProjects = { ...currentProjects };
@@ -3353,7 +3523,7 @@ const dbUtils = {
                     nextProjects.revision = DocumentLibrary.uniqueId();
                 }
 
-                uiUtils.updateProgressMessage('データを一時領域にインポート中...');
+                if (!options.mergeCapture) uiUtils.updateProgressMessage('データを一時領域にインポート中...');
                 // Stage and promote in the same transaction so another tab cannot replace the staged snapshot.
                 await Promise.all([...names].map(name => read(tx.objectStore(name + '_temp').clear())));
                 for (const [name, items] of records) {
@@ -3362,7 +3532,9 @@ const dbUtils = {
                 }
                 const staged = await Promise.all([...records.keys()].map(name => read(tx.objectStore(name + '_temp').getAll())));
 
-                uiUtils.updateProgressMessage('データベースを更新中...');
+                if (options.mergeCapture) {
+                    if (appLogic.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
+                } else uiUtils.updateProgressMessage('データベースを更新中...');
                 for (const [i, name] of [...records.keys()].entries()) {
                     const store = tx.objectStore(name);
                     store.clear();
@@ -3385,18 +3557,28 @@ const dbUtils = {
                 const projectPending = nextProjects.revision !== nextProjects.syncedRevision;
                 const pending = libraryPending || projectPending;
                 if (options.source === 'dropbox') {
+                    await SyncJournal.settle(tx, chatSync, { source: 'pull', syncId: options.syncId,
+                        dropboxRev: options.dropboxRev ?? null, syncedAt: options.syncTimestamp,
+                        libraryRevision: next.syncedRevision, projectRevision: nextProjects.syncedRevision },
+                    options.syncBaseline, options.mergeCapture ? 'synced' : 'replaced');
+                    for (const identity of options.localPinOverrides) SyncJournal.append(tx, 'chat', identity, 'update');
                     localSettings.put({ key: 'lastSyncId', value: options.syncId });
                     localSettings.put({ key: 'lastSyncTimestamp', value: options.syncTimestamp });
                     localSettings.put({ key: 'syncLastError', value: null });
-                    localSettings.put({ key: 'syncIsDirty', value: pending || state.sync.pendingPush });
+                    localSettings.put({ key: 'syncIsDirty', value: pending || state.sync.pendingPush || options.localPinOverrides.size > 0 });
                 } else if (options.source === 'file' || pending) {
                     localSettings.put({ key: 'syncIsDirty', value: true });
                 }
                 return { libraryPending, projectPending };
             });
 
-        for (const controller of state.chatTitleGenerations.values()) controller.abort();
-        void chatListChangeController.notify({ type: 'restore' });
+        if (options.mergeCapture) {
+            appLogic.dropboxDataGeneration = (appLogic.dropboxDataGeneration ?? 0) + 1;
+            for (const id of options.changes.chatIds) state.chatTitleGenerations.get(String(id))?.abort();
+        } else {
+            for (const controller of state.chatTitleGenerations.values()) controller.abort();
+            void chatListChangeController.notify({ type: 'restore' });
+        }
         return { removedAssetInfo: missingAssetInfo, libraryPending, projectPending };
     },
 };
@@ -4898,7 +5080,10 @@ renderChatMessages(options = {}) {
     if (state.editingMessageIndex !== null) {
         const messageElement = container.querySelector(`.message[data-index="${state.editingMessageIndex}"]`);
         if (messageElement) appLogic.cancelEditMessage(state.editingMessageIndex, messageElement);
-        else state.editingMessageIndex = null;
+        else {
+            state.editingMessageIndex = null;
+            appLogic.releaseDropboxMessageEdit?.();
+        }
     }
 
     this.invalidateChatSearchRun();
@@ -5759,6 +5944,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return;
         }
 
+        const chatId = state.currentChatId;
+        const release = await appLogic.acquireDropboxEdit();
+        if (!release) return;
+        if (chatId !== state.currentChatId || state.isEditingChatTitle) { release(); return; }
+        this.releaseDropboxTitleEdit = release;
         try {
             state.isEditingChatTitle = true;
             const currentTitle = this.normalizeChatTitleText(elements.chatTitle.textContent, this.getChatTitleFallback());
@@ -5789,6 +5979,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             input.addEventListener('blur', () => this.commitChatTitleEdit(input));
         } catch (error) {
             state.isEditingChatTitle = false;
+            release();
             console.error('タイトル編集開始エラー:', error);
             await this.showCustomAlert('タイトル編集を開始できませんでした。');
         }
@@ -5797,6 +5988,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     cancelChatTitleEdit(input) {
         if (input) input.dataset.cancelled = 'true';
         state.isEditingChatTitle = false;
+        this.releaseDropboxTitleEdit?.();
         state.isSavingChatTitle = false;
         if (input?.isConnected) input.remove();
         elements.chatTitle.hidden = false;
@@ -5830,6 +6022,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             input.dataset.cancelled = 'true';
             input.remove();
             state.isEditingChatTitle = false;
+            this.releaseDropboxTitleEdit?.();
             state.isSavingChatTitle = false;
             elements.chatTitle.hidden = false;
             await this.showCustomAlert('タイトルを保存しました。');
@@ -10514,10 +10707,15 @@ function updateCurrentSystemPrompt() {
 
                 console.log(`[BroadcastChannel] 他のタブからメッセージを受信:`, event.data);
 
-                if (type === 'SYNC_COMPLETED' && newSyncId) {
-                    if (state.sync.isSyncing) return;
-                    await appLogic.initializeSyncState();
-                    await appLogic.updateDropboxUIState();
+                if (type === 'SYNC_COMPLETED' && newSyncId && event.data.database === state.db?.name) {
+                    if (event.data.changes) {
+                        appLogic.dropboxDataGeneration = (appLogic.dropboxDataGeneration ?? 0) + 1;
+                        appLogic.finishDropboxMerge(event.data.changes);
+                    }
+                    if (!state.sync.isSyncing) {
+                        await appLogic.initializeSyncState();
+                        await appLogic.updateDropboxUIState();
+                    }
                 }
             };
         } catch (error) {
@@ -13399,6 +13597,8 @@ const appLogic = {
 
     getInputDraftContextKey(chatId = state.currentChatId, profileId = state.activeProfileId) {
         if (chatId !== null && chatId !== undefined) {
+            const owner = dbUtils.chatSaveOwners?.get(state.currentMessages);
+            if (owner?.id === chatId && owner.syncIdentity) return `chat:sync:${owner.syncIdentity}`;
             return `chat:${String(chatId)}`;
         }
         return this.getNewInputDraftContextKey(dbUtils.projectDrafts?.get(state.currentMessages), profileId);
@@ -13431,7 +13631,7 @@ const appLogic = {
             chatId: isChatContext ? contextKey.slice('chat:'.length) : null,
             profileId: String(state.activeProfileId || state.activeProfile?.id || 'default'),
             text: deleted ? '' : String(text ?? ''),
-            updatedAt: Date.now(),
+            updatedAt: Math.max(Date.now(), (this.loadInputDraftLocal(contextKey)?.updatedAt || 0) + 1),
             clientId: this.getInputDraftClientId(),
             deleted: Boolean(deleted)
         };
@@ -13460,7 +13660,9 @@ const appLogic = {
     chooseLatestInputDraftRecord(localRecord, remoteRecord) {
         const localUpdatedAt = Number(localRecord?.updatedAt) || 0;
         const remoteUpdatedAt = Number(remoteRecord?.updatedAt) || 0;
-        if (remoteRecord && remoteUpdatedAt > localUpdatedAt) {
+        if (remoteRecord && (!localRecord || remoteUpdatedAt > localUpdatedAt ||
+            remoteUpdatedAt === localUpdatedAt && (remoteRecord.deleted && !localRecord.deleted ||
+                remoteRecord.deleted === localRecord.deleted && remoteRecord.clientId > localRecord.clientId))) {
             return remoteRecord;
         }
         return localRecord || remoteRecord || null;
@@ -13499,9 +13701,13 @@ const appLogic = {
     persistInputDraft(contextKey, text) {
         if (!contextKey) return;
         const draftText = String(text ?? '');
+        const previous = this.loadInputDraftLocal(contextKey);
+        const edited = editedInputDraftContexts.delete(contextKey);
+        if (!draftText && !edited) return;
+        if (previous?.text === draftText || !draftText && !previous) return;
         const record = this.buildInputDraftRecord(draftText, !draftText, contextKey);
         if (!draftText) {
-            this.deleteInputDraftLocal(contextKey);
+            this.saveInputDraftLocal(record);
             this.scheduleInputDraftDropboxSave(record);
             return;
         }
@@ -13528,26 +13734,31 @@ const appLogic = {
     },
 
     scheduleInputDraftDropboxSave(record) {
-        pendingInputDraftDropboxRecord = record;
+        if (/^chat:(?!sync:)/.test(record.contextKey)) return;
+        pendingInputDraftDropboxRecords.set(record.contextKey, record);
         clearTimeout(inputDraftDropboxSaveTimer);
         inputDraftDropboxSaveTimer = setTimeout(() => {
             this.flushInputDraftDropboxSave();
         }, INPUT_DRAFT_DROPBOX_SAVE_DELAY);
     },
 
-    async flushInputDraftDropboxSave(record = pendingInputDraftDropboxRecord) {
+    async flushInputDraftDropboxSave(record = null) {
+        if (/^chat:(?!sync:)/.test(record?.contextKey ?? '')) return;
         clearTimeout(inputDraftDropboxSaveTimer);
-        pendingInputDraftDropboxRecord = null;
-        if (!record?.contextKey) return;
+        if (record?.contextKey) pendingInputDraftDropboxRecords.set(record.contextKey, record);
+        const records = [...pendingInputDraftDropboxRecords.values()];
+        pendingInputDraftDropboxRecords.clear();
+        if (!records.length) return;
         try {
             if (!(await this.isDropboxConnectedForInputDraft())) return;
-            await window.dropboxApi.uploadInputDraftToDropbox(record);
+            await Promise.all(records.map(value => window.dropboxApi.uploadInputDraftToDropbox(value)));
         } catch (error) {
             console.warn("[InputDraft] Dropboxへの下書き保存に失敗しました。ローカル下書きは保持します:", error);
         }
     },
 
     async loadInputDraftDropbox(contextKey) {
+        if (/^chat:(?!sync:)/.test(contextKey)) return null;
         try {
             if (!(await this.isDropboxConnectedForInputDraft())) return null;
             const remoteRecord = await window.dropboxApi.downloadInputDraftFromDropbox(contextKey);
@@ -13560,12 +13771,15 @@ const appLogic = {
 
     markInputDraftDeletedInDropbox(contextKey) {
         const tombstoneRecord = this.buildInputDraftRecord('', true, contextKey);
+        this.saveInputDraftLocal(tombstoneRecord);
         this.flushInputDraftDropboxSave(tombstoneRecord);
     },
 
     scheduleInputDraftSave() {
         if (inputDraftRestoring || !elements.userInput) return;
+        inputDraftEditVersion++;
         const contextKey = this.getInputDraftContextKey();
+        editedInputDraftContexts.add(contextKey);
         const text = elements.userInput.value;
         clearTimeout(inputDraftSaveTimer);
         inputDraftSaveTimer = setTimeout(() => {
@@ -13605,46 +13819,47 @@ const appLogic = {
 
         activeInputDraftContextKey = contextKey;
         const restoreSequence = ++inputDraftRestoreSequence;
-        const localRecord = this.loadInputDraftLocal(contextKey);
-        const remoteRecord = await this.loadInputDraftDropbox(contextKey);
-        if (restoreSequence !== inputDraftRestoreSequence) return;
-        if (contextKey !== this.getInputDraftContextKey()) return;
-
-        if (textarea.value) {
-            return;
-        }
-
-        const draft = this.chooseLatestInputDraftRecord(localRecord, remoteRecord);
-        if (draft?.deleted) {
-            if (remoteRecord?.deleted && (Number(remoteRecord.updatedAt) || 0) > (Number(localRecord?.updatedAt) || 0)) {
-                this.deleteInputDraftLocal(contextKey);
+        const editVersion = inputDraftEditVersion;
+        let localRecord = this.loadInputDraftLocal(contextKey);
+        const owner = dbUtils.chatSaveOwners?.get(state.currentMessages);
+        if (contextKey.startsWith('chat:sync:') && !localRecord && owner?.syncDraftSource) {
+            const oldKey = 'chat:sync:' + owner.syncDraftSource;
+            const old = this.loadInputDraftLocal(oldKey);
+            if (old) {
+                localRecord = { ...old, contextKey, chatId: contextKey.slice('chat:'.length) };
+                this.saveInputDraftLocal(localRecord);
+                if (this.loadInputDraftLocal(contextKey)?.updatedAt === localRecord.updatedAt) this.deleteInputDraftLocal(oldKey);
             }
-            uiUtils.adjustTextareaHeight();
-            return;
         }
-        if (!draft?.text) {
-            uiUtils.adjustTextareaHeight();
-            return;
-        }
-        if (remoteRecord && draft === remoteRecord) {
-            this.saveInputDraftLocal(remoteRecord);
-        }
-
-        inputDraftRestoring = true;
-        try {
-            textarea.value = draft.text;
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            uiUtils.adjustTextareaHeight();
-        } finally {
-            inputDraftRestoring = false;
-        }
+        const fill = draft => {
+            if (!draft?.text || draft.deleted || textarea.value) return;
+            inputDraftRestoring = true;
+            try {
+                textarea.value = draft.text;
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                uiUtils.adjustTextareaHeight();
+            } finally { inputDraftRestoring = false; }
+        };
+        const existingText = textarea.value;
+        fill(localRecord);
+        const initialText = textarea.value;
+        const remoteRecord = await this.loadInputDraftDropbox(contextKey);
+        if (!remoteRecord || existingText || restoreSequence !== inputDraftRestoreSequence || editVersion !== inputDraftEditVersion ||
+            contextKey !== this.getInputDraftContextKey() || textarea.value !== initialText) return;
+        const latestLocal = this.loadInputDraftLocal(contextKey) ?? localRecord;
+        if (this.chooseLatestInputDraftRecord(latestLocal, remoteRecord) !== remoteRecord) return;
+        this.saveInputDraftLocal(remoteRecord);
+        textarea.value = '';
+        fill(remoteRecord);
+        if (remoteRecord.deleted) uiUtils.adjustTextareaHeight();
     },
 
     clearInputDraftAfterSend(...contextKeys) {
         const uniqueContextKeys = [...new Set(contextKeys.filter(Boolean))];
         clearTimeout(inputDraftSaveTimer);
+        inputDraftEditVersion++;
         uniqueContextKeys.forEach(contextKey => {
-            this.deleteInputDraftLocal(contextKey);
+            editedInputDraftContexts.delete(contextKey);
             this.markInputDraftDeletedInDropbox(contextKey);
         });
         activeInputDraftContextKey = null;
@@ -14928,7 +15143,7 @@ const appLogic = {
             }
         };
         
-        await handleAuthCallback();
+        const oauthCallback = new URLSearchParams(location.search).has('code');
     
         // --- ステップ3: メイン初期化処理 ---
         
@@ -15026,49 +15241,8 @@ const appLogic = {
             await this._checkAndResetApiUsage();
             this.updateApiUsageUI();
             await this.initializeSyncState();
-            await this.updateDropboxUIState();
-    
-            const tokenData = await dbUtils.getSetting('dropboxTokens');
-            let recoveryFlowExecuted = false; // リカバリーフローが実行されたかどうかのフラグ
-            if (tokenData && tokenData.value) {
-                const lockData = await window.dropboxApi.checkLockFile();
-                if (lockData && lockData.operation) {
-                    recoveryFlowExecuted = true;
-                    console.warn(`[Sync Recovery] 同期ロックファイルを検出。中断された操作: ${lockData.operation}`);
-                    this.updateSyncStatusUI('syncing', `中断された${lockData.operation === 'push' ? '同期' : '復元'}を再開中...`);
-    
-                    if (lockData.operation === 'push') {
-                        // isDirtyフラグを強制的に立ててからPushを実行
-                        state.sync.isDirty = true;
-                        await this.handlePush(false);
-                    } else if (lockData.operation === 'pull') {
-                        await this.handlePull(false);
-                    }
-                } else if (lockData) {
-                    // 旧形式のロックファイル、または内容が不正な場合
-                    recoveryFlowExecuted = true;
-                    console.warn("[Sync Recovery] 操作タイプ不明のロックファイルを検出。ユーザーに選択を促します。");
-                    const choice = await this.showRecoveryDialog();
-                    if (choice === 'pull') {
-                        await this.handlePull(true);
-                    } else if (choice === 'push') {
-                        state.sync.isDirty = true;
-                        await this.handlePush(true);
-                    } else {
-                        await window.dropboxApi.deleteLockFile();
-                    }
-                }
-            }
-    
-            // 起動時にPull処理を実行 (OAuthコールバックがなく、リカバリーフローも実行されなかった場合)
-            if (!new URLSearchParams(window.location.search).has('code') && !recoveryFlowExecuted) {
-                console.log("[SYNC_DEBUG] initializeApp: 通常起動のため、handlePull(false)を呼び出します。");
-                await this.handlePull(false);
-            } else {
-                console.log("[SYNC_DEBUG] initializeApp: OAuthコールバックまたは復旧フローが実行されたため、通常のPullはスキップします。");
-            }
-    
-            await this.updateDropboxUIState();
+            await this.rememberFreshDropboxState().catch(error => console.warn('[Dropbox Sync] 初期状態を記録できませんでした。', error));
+            await this.updateDropboxUIState({ fetchAccount: false });
     
             if (await dbUtils.getFirstProfileId() === null) {
                 const oldSettingsArray = await new Promise((resolve, reject) => {
@@ -15103,12 +15277,13 @@ const appLogic = {
     
             if (isSyncReload) uiUtils.updateProgressMessage('チャット履歴を読み込み中...');
     
-            const chats = await dbUtils.getAllChats(state.settings.historySortOrder);
+            let [latestChat] = await dbUtils.getRecentChats(state.settings.historySortOrder, 1);
+            if (!latestChat) [latestChat] = await dbUtils.getAllChats(state.settings.historySortOrder);
             if (this.readExecutionDraft()) {
                 this.startNewChat({ restoreDraft: true });
                 await state.executionSettingsReady;
-            } else if (chats && chats.length > 0) {
-                await this.loadChat(chats[0].id);
+            } else if (latestChat) {
+                await this.loadChat(latestChat.id);
             } else {
                 this.startNewChat();
                 await state.executionSettingsReady;
@@ -15157,6 +15332,9 @@ const appLogic = {
             // finallyブロックで必ずダイアログを閉じる
             uiUtils.hideProgressDialog();
             sessionStorage.removeItem('isSyncReload');
+            setTimeout(() => {
+                void (oauthCallback ? handleAuthCallback() : this.startDropboxInBackground());
+            }, 0);
 
             if (showVersionNotice) {
                 try {
@@ -15171,25 +15349,32 @@ const appLogic = {
     },
 
     
+    async startDropboxInBackground() {
+        try {
+            if (!(await dbUtils.getSetting('dropboxTokens'))?.value) return;
+            void this.updateDropboxUIState();
+            const lock = await window.dropboxApi.checkLockFile();
+            if (lock && !['push', 'pull'].includes(lock.operation)) {
+                const choice = await this.showRecoveryDialog();
+                if (choice === 'cancel') return;
+                await this.synchronizeDropbox(choice, true);
+            } else {
+                await this.synchronizeDropbox(lock?.operation ?? 'pull', false);
+            }
+        } catch (error) {
+            if (!state.sync.isSyncing) this.updateSyncStatusUI('error', error.message || 'Dropboxに接続できません。');
+        }
+    },
+
     // 復旧ダイアログを表示するヘルパー関数
     async showRecoveryDialog() {
         const pullConfirm = await uiUtils.showCustomConfirm(
             "【同期エラーの復旧】\n\n" +
             "前回の同期が正常に完了しなかったようです。\n\n" +
-            "クラウドのデータで現在のブラウザのデータを上書き復元しますか？ (推奨)\n\n" +
-            "※「キャンセル」を押すと、ローカルのデータでクラウドを上書きする選択肢が表示されます。"
+            "Dropboxとこの端末の変更を確認し、安全に統合できる場合に同期を再開しますか？"
         );
         if (pullConfirm) {
             return 'pull';
-        }
-
-        const pushConfirm = await uiUtils.showCustomConfirm(
-            "【同期エラーの復旧】\n\n" +
-            "現在のブラウザのデータで、クラウド上のデータを強制的に上書きしますか？\n\n" +
-            "※ 他のデバイスで行った変更が失われる可能性があります。"
-        );
-        if (pushConfirm) {
-            return 'push';
         }
 
         return 'cancel';
@@ -15199,15 +15384,16 @@ const appLogic = {
      * 同期関連の初期化処理
      */
     async initializeSyncState() {
-        const [projects, isDirtySetting, lastErrorSetting, library] = await Promise.all([
+        const [projects, isDirtySetting, lastErrorSetting, library, chatSync] = await Promise.all([
             dbUtils.getProjectSyncContext(),
             dbUtils.getSetting('syncIsDirty'),
             dbUtils.getSetting('syncLastError'),
-            dbUtils.getDocumentLibrarySyncState()
+            dbUtils.getDocumentLibrarySyncState(),
+            dbUtils.getChatSyncContext()
         ]);
 
         state.sync.lastSyncId = projects.lastSyncId;
-        state.sync.isDirty = Boolean(isDirtySetting?.value || library.revision !== library.syncedRevision ||
+        state.sync.isDirty = Boolean(isDirtySetting?.value || chatSync.pending || library.revision !== library.syncedRevision ||
             projects.revision !== projects.syncedRevision);
         state.sync.lastError = lastErrorSetting ? lastErrorSetting.value : null;
         
@@ -15304,558 +15490,489 @@ const appLogic = {
 
 
 
-    async recordDropboxPush(metadata, librarySync, projectSync) {
+    dropboxMergeBusy() {
+        return state.isSending || state.sendPreparationV136 || state.sendJobsV136.size ||
+            state.editingMessageIndex !== null || state.isEditingSystemPrompt || state.isEditingChatTitle ||
+            this.hasUnsavedSystemPrompt?.() || this.attachmentOperation || this.attachmentPickerMessages ||
+            state.pendingAttachments?.length || this.chatParameterOperation || dbUtils.pendingChatSaves;
+    },
+
+    acquireDropboxEdit() {
+        if (!navigator.locks || !state.db) return Promise.resolve(() => {});
+        return new Promise((resolve, reject) => {
+            navigator.locks.request('chatai-dropbox-apply:' + state.db.name, { mode: 'shared', ifAvailable: true },
+                lock => lock ? new Promise(release => resolve(release)) : resolve(null)).catch(reject);
+        });
+    },
+    dropboxBootstrapContents(envelope) {
+        const data = envelope.data;
+        const settings = data.settings.map(row => {
+            if (row.key !== SettingsV136.GLOBAL_KEY || !row.value) return row;
+            const { dropboxAppKey, revision, ...value } = row.value;
+            return { ...row, value };
+        });
+        return DropboxSync.logical({ data: { ...data, settings } });
+    },
+
+    async rememberFreshDropboxState() {
         const db = await dbUtils.openDB();
-        return DocumentLibrary.transaction(db, [SETTINGS_STORE], 'readwrite', async tx => {
+        const eligible = await DocumentLibrary.transaction(db, [SyncJournal.store], 'readonly', async tx => {
+            const context = await SyncJournal.context(tx, true);
+            return context.checkpoint?.fresh && !context.bootstrap && !context.pending && !context.syncId;
+        });
+        if (!eligible || state.sync.isDirty || state.apiConfigs?.length) return;
+        const capture = await this._prepareExportData({ sync: true });
+        const local = JSON.parse(capture.metadataJson);
+        const data = local.data;
+        if (data.chats.length || data.memories.length || data.assets.length || data.documentLibrary ||
+            data.projectData.projects.length || data.profiles.length > 1 || data.profiles.some(profile =>
+                profile.name !== 'デフォルトプロファイル' || profile.iconAssetId)) return;
+        await DocumentLibrary.transaction(db, [...capture.captured.keys(), SyncJournal.store], 'readwrite', async tx => {
+            const context = await SyncJournal.context(tx, true);
+            if (context.bootstrap || context.epoch !== capture.chatSync.epoch || context.sequence !== capture.chatSync.sequence) return;
+            await DropboxSync.assertCapture(tx, capture.captured, SyncJournal.store, dropboxLocalSetting);
+            tx.objectStore(SyncJournal.store).put(this.dropboxBootstrapContents(local), 'bootstrap');
+        });
+    },
+
+    async recordDropboxPush(metadata, librarySync, projectSync, exportedChats, metadataJson, dropboxRev, captured) {
+        const db = await dbUtils.openDB();
+        return DocumentLibrary.transaction(db, [...captured.keys(), SyncJournal.store], 'readwrite', async tx => {
             const settings = tx.objectStore(SETTINGS_STORE);
-            const [library, projects, lastSyncId] = await Promise.all(
-                [DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId'].map(key => DocumentLibrary.request(settings.get(key))));
+            const [library, projects, lastSyncId, chatSync] = await Promise.all([
+                ...[DocumentLibrary.syncKey, ProjectStore.syncKey, 'lastSyncId'].map(key => DocumentLibrary.request(settings.get(key))),
+                SyncJournal.context(tx)
+            ]);
             const current = DocumentLibrary.syncState(library);
             const currentProjects = DocumentLibrary.syncState(projects);
             if (current.syncedRevision !== librarySync.syncedRevision ||
                 currentProjects.syncedRevision !== projectSync.syncedRevision ||
-                (lastSyncId?.value ?? null) !== projectSync.lastSyncId) {
-                // Another tab has already recorded a later sync state.
+                (lastSyncId?.value ?? null) !== projectSync.lastSyncId ||
+                chatSync.epoch !== exportedChats.epoch || chatSync.syncId !== exportedChats.syncId) {
                 return { acknowledged: false, dirty: true };
             }
-            const next = { ...current, syncedRevision: librarySync.revision };
-            const nextProjects = {
-                revision: currentProjects.revision ?? ProjectStore.initialRevision,
-                syncedRevision: metadata.data.projectData.revision
-            };
-            const dirty = state.sync.pendingPush || next.revision !== next.syncedRevision ||
+            let changed = false;
+            try {
+                await DropboxSync.assertCapture(tx, captured, SyncJournal.store, dropboxLocalSetting);
+            } catch (error) {
+                if (error.message !== DropboxSync.concurrentLocal) throw error;
+                changed = true;
+            }
+            const revision = metadata.data.documentLibrary?.revision ?? null;
+            const projectRevision = metadata.data.projectData?.revision ?? null;
+            const next = { revision: current.revision === librarySync.revision ? revision : current.revision, syncedRevision: revision };
+            const nextProjects = { revision: currentProjects.revision === projectSync.revision ? projectRevision : currentProjects.revision,
+                syncedRevision: projectRevision };
+            const syncedAt = new Date(metadata.exportedAt).getTime();
+            const chatsPending = await SyncJournal.settle(tx, exportedChats, { source: 'push', syncId: metadata.syncId,
+                dropboxRev: dropboxRev ?? null, syncedAt,
+                libraryRevision: next.syncedRevision, projectRevision: nextProjects.syncedRevision }, metadataJson, 'synced');
+            const dirty = changed || chatsPending || state.sync.pendingPush || next.revision !== next.syncedRevision ||
                 nextProjects.revision !== nextProjects.syncedRevision;
             if (next.revision || next.syncedRevision) settings.put({ key: DocumentLibrary.syncKey, value: next });
-            settings.put({ key: ProjectStore.syncKey, value: nextProjects });
+            if (nextProjects.syncedRevision) settings.put({ key: ProjectStore.syncKey, value: nextProjects });
             settings.put({ key: 'lastSyncId', value: metadata.syncId });
-            settings.put({ key: 'lastSyncTimestamp', value: new Date(metadata.exportedAt).getTime() });
+            settings.put({ key: 'lastSyncTimestamp', value: syncedAt });
             settings.put({ key: 'syncLastError', value: null });
             settings.put({ key: 'syncIsDirty', value: dirty });
             return { acknowledged: true, dirty };
         });
     },
 
-    /**
-     * [V2 Core Push] 実際にアップロード処理を行うコア関数
-     * @private
-     */
-     async _doPush(isManual = false) {
-        console.log(`[SYNC_DEBUG] _doPush: 開始。isManual = ${isManual}`);
-
-        if (state.sync.isSyncing) {
-            console.log("[Sync Core Push V2] 既に別の同期処理が実行中のため、今回の要求はスキップします。");
-            return;
+    async prepareDropboxMergeAssets(data, remote, capture, verifyConnection) {
+        const api = window.dropboxApi;
+        const required = this.getRequiredSyncAssetIds(data);
+        const remoteIds = remote ? this.getRequiredSyncAssetIds(remote.data) : new Set();
+        const expected = new Map(remote?.syncProtection?.assetHashes.map(row => [row.id, row.hash]) ?? []);
+        if (remote?.syncProtection && [...remoteIds].some(id => !expected.has(id))) {
+            throw new Error('Dropboxの画像アセットの検証情報が不足しています。');
         }
-        state.sync.isSyncing = true;
-        state.sync.pendingPush = false;
-        let pushCompleted = false;
-        const updateProgress = (message) => {
-            console.log(`[SYNC_DEBUG] updateProgress: isManual=${isManual}, message="${message}"`);
-            this.updateSyncStatusUI('syncing', message);
-            if (isManual) {
-                console.log(`[SYNC_DEBUG] updateProgress: isManual=trueのため、updateProgressMessageを呼び出します。`);
-                uiUtils.updateProgressMessage(message);
+        const blobs = new Map(), hashes = [];
+        let assetFolder;
+        const verifyAsset = async id => {
+            if (typeof id !== 'string' || !id || /[\\/\x00-\x1f]/.test(id) || id === '.' || id === '..') {
+                throw new Error('画像アセットの識別子が無効です。');
             }
+            const local = capture.localAssets.get(id)?.blob;
+            const cloud = remoteIds.has(id) ? await api.downloadAsset(id) : null;
+            const knownHash = expected.get(id);
+            const hash = cloud && await DocumentLibrary.digest(cloud);
+            const localHash = local && await DocumentLibrary.digest(local);
+            if ((cloud && knownHash && hash !== knownHash) || (local && (hash || knownHash) && localHash !== (hash || knownHash))) {
+                throw new Error('画像アセットの内容が端末間で一致しないため、同期を中止しました。');
+            }
+            if (!cloud && !local) throw new Error('必要な画像アセットが不足しているため、同期を中止しました。');
+            if (!cloud) {
+                await (assetFolder ??= api.ensureAssetsFolderExists());
+                await verifyConnection();
+                try {
+                    await api.uploadAsset(local, id, { ifMissing: true });
+                } catch (error) {
+                    if (error.status !== 409 || !error.message.includes('path/conflict')) throw error;
+                    const existing = await api.downloadAsset(id);
+                    if (!existing || await DocumentLibrary.digest(existing) !== localHash) {
+                        throw new Error('同じ識別子の画像アセットがDropboxに存在するため、同期を中止しました。');
+                    }
+                }
+            }
+            return { id, hash: hash || localHash, blob: cloud ?? local };
         };
-
-        updateProgress('同期準備中...');
-
-        try {
-            // 操作タイプ 'push' を渡す
-            await window.dropboxApi.uploadLockFile('push');
-
-            // --- Step 1: 競合検知 ---
-            updateProgress('クラウドの状態を確認中...');
-            const remote = await window.dropboxApi.downloadMetadata({ withRevision: true });
-            const cloudData = remote ? JSON.parse(remote.content) : null;
-            const projectsBefore = await dbUtils.getProjectSyncContext();
-            const cloudProjects = cloudData?.data.projectData;
-            if (cloudData) {
-                SettingsV136.assertCompatible(cloudData);
-                if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
-                ProjectStore.assertPushBase(projectsBefore, cloudProjects);
-                const remoteLibrary = cloudData.data.documentLibrary;
-                const local = await dbUtils.getDocumentLibrarySyncState();
-                if (remoteLibrary) {
-                    DocumentLibrary.validateManifest(remoteLibrary, cloudData.data.chats);
-                    if (remoteLibrary.revision !== local.revision && remoteLibrary.revision !== local.syncedRevision) {
-                        throw new Error('Dropboxに新しいファイル情報があります。先に手動で同期してください。');
-                    }
-                }
-                const recoveringLibrary = !remoteLibrary && local.revision &&
-                    (local.syncedRevision || await dbUtils.hasChatDocumentLinks());
-                const recoveringProjects = ProjectStore.isRollback(projectsBefore, cloudProjects) ||
-                    (!cloudProjects && projectsBefore.revision && cloudData.syncId !== projectsBefore.lastSyncId);
-                if (recoveringProjects && !isManual) throw new Error(ProjectStore.legacyConflict);
-                if (recoveringLibrary || recoveringProjects || cloudData.syncId !== projectsBefore.lastSyncId) {
-                    console.warn(`[Sync Push] 競合を検出！ Local: ${state.sync.lastSyncId}, Cloud: ${cloudData.syncId}`);
-                    if (isManual) uiUtils.hideProgressDialog();
-                    const confirmed = await uiUtils.showCustomConfirm(
-                        "【警告：同期の競合】\n\n" +
-                        (recoveringProjects
-                            ? "Dropboxの同期データに、この端末で同期または編集したプロジェクト情報がありません。\n\n"
-                            : recoveringLibrary
-                            ? "Dropboxの同期データに、この端末のファイルや紐づけの情報がありません。\n\n"
-                            : "クラウド上のデータが、このデバイスが最後に同期した状態から変更されています。（他のデバイスが先に同期した可能性があります）\n\n") +
-                        "このまま同期を実行すると、クラウド上のデータがこのデバイスのデータで完全に上書きされます。\n\n" +
-                        "クラウドのデータを上書きして同期を続行しますか？"
-                    );
-                    if (!confirmed) {
-                        console.log("[Sync Push] ユーザーが上書きをキャンセルしました。Push処理を中断します。");
-                        state.sync.isSyncing = false;
-                        this.updateSyncStatusUI('dirty');
-                        if (isManual) uiUtils.showCustomAlert("同期がキャンセルされました。");
-                        // キャンセル時もロックファイルは削除する
-                        await window.dropboxApi.deleteLockFile();
-                        return;
-                    }
-                    if (isManual) uiUtils.showProgressDialog('同期を再開しています...');
-                    console.log("[Sync Push] ユーザーが上書きを承認しました。Push処理を続行します。");
-                }
-                const mergedPinChats = await dbUtils.mergeChatPinStatesFromRemote(cloudData.data?.chats || []);
-                if (mergedPinChats.length > 0) {
-                    const currentChat = mergedPinChats.find(chat => String(chat.id) === String(state.currentChatId));
-                    if (currentChat) {
-                        const currentPinState = normalizeChatPinState(currentChat);
-                        state.currentChatIsPinned = currentPinState.isPinned;
-                        state.currentChatPinnedAt = currentPinState.isPinned ? currentPinState.pinnedAt : null;
-                        state.currentChatPinStateUpdatedAt = currentPinState.pinStateUpdatedAt;
-                    }
-                    await chatListChangeController.notify({ type: 'sync-pin' });
-                    console.log(`[Sync Push] クラウド側が新しいピン状態を ${mergedPinChats.length}件反映しました。`);
-                }
+        const ids = [...required].sort();
+        for (let offset = 0; offset < ids.length; offset += 3) {
+            const batch = await Promise.allSettled(ids.slice(offset, offset + 3).map(verifyAsset));
+            for (const result of batch) {
+                if (result.status === 'rejected') throw result.reason;
+                const { id, blob, hash } = result.value;
+                blobs.set(id, blob);
+                hashes.push({ id, hash });
             }
-            if (!cloudData && projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
-            if (!cloudData && projectsBefore.syncedRevision) {
-                uiUtils.hideProgressDialog();
-                const confirmed = await uiUtils.showCustomConfirm(
-                    '以前同期したプロジェクト情報がDropboxに見つかりません。この端末のデータをDropboxに保存しますか？');
-                if (!confirmed) {
-                    this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
-                    return;
-                }
-                uiUtils.showProgressDialog('同期を再開しています...');
-            }
-
-            // --- Step 2: データ準備 ---
-            await window.dropboxApi.ensureAssetsFolderExists();
-            
-            updateProgress('ローカルデータを準備中...');
-            const { metadataJson, localAssets, documentBlobs, librarySync, projectSync } = await this._prepareExportData();
-            const parsedMetadata = JSON.parse(metadataJson);
-            if (projectsBefore.lastSyncId !== projectSync.lastSyncId || projectsBefore.syncedRevision !== projectSync.syncedRevision ||
-                (!cloudProjects && !ProjectStore.sameSyncState(projectsBefore, projectSync))) {
-                throw new Error('プロジェクトの同期状態が変わったため、上書きを中止しました。');
-            }
-            ProjectStore.assertPushBase(projectSync, cloudProjects);
-            const remoteLibraryRevision = cloudData?.data.documentLibrary?.revision;
-            if (remoteLibraryRevision && remoteLibraryRevision !== librarySync.revision &&
-                remoteLibraryRevision !== librarySync.syncedRevision) {
-                throw new Error('ファイルの同期状態が変わったため、上書きを中止しました。');
-            }
-
-            const cloudAssetsList = await window.dropboxApi.listAssets();
-            const cloudAssetIds = new Set(cloudAssetsList.map(asset => asset.name));
-            for (const id of this.getRequiredSyncAssetIds(parsedMetadata.data)) {
-                if (!localAssets.has(id) && !cloudAssetIds.has(id)) {
-                    throw new Error('必要な画像アセットが不足しているため、同期を中止しました。');
-                }
-            }
-
-            const assetsToUploadArray = Array.from(localAssets.entries())
-                .filter(([assetId]) => !cloudAssetIds.has(assetId))
-                .map(([assetId, asset]) => ({ assetId, asset }));
-                
-            // --- Step 3: アセットのアップロード（バッチ処理） ---
-            if (assetsToUploadArray.length > 0) {
-                console.log(`[Sync Core Push V2] ${assetsToUploadArray.length}個のアセットをバッチアップロードします。`);
-                const progressCallback = (current, total) => {
-                    updateProgress(`アセットをアップロード中 (${current}/${total})`);
-                };
-                await window.dropboxApi.uploadAssetsInBatches(assetsToUploadArray, progressCallback);
-            } else {
-                console.log("[Sync Core Push V2] アップロードする新規アセットはありません。");
-            }
-
-            // Originals are immutable and live outside the old clients' image cleanup directory.
-            if (documentBlobs.size) {
-                const path = window.dropboxApi.DOCUMENTS_DIR_PATH;
-                await window.dropboxApi.ensureAssetsFolderExists(path);
-                const existing = new Map((await window.dropboxApi.listAssets(path))
-                    .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size]));
-                let count = 0;
-                for (const [hash, blob] of documentBlobs) {
-                    updateProgress(`ファイル原本を確認中 (${++count}/${documentBlobs.size})`);
-                    if (existing.get(hash) !== blob.size) await window.dropboxApi.uploadLibraryOriginal(hash, blob);
-                }
-            }
-
-            // A concurrent publisher or a previous revision may still need assets that this snapshot omits.
-            updateProgress('最終データを保存中...');
-            await window.dropboxApi.uploadMetadata(metadataJson, remote?.rev ?? null);
-
-            // --- Step 6: 状態の更新 ---
-            const result = await this.recordDropboxPush(parsedMetadata, librarySync, projectSync);
-            if (result.acknowledged) {
-                state.sync.lastSyncId = parsedMetadata.syncId;
-                state.sync.lastError = null;
-            } else await this.initializeSyncState();
-            const hasQueuedChanges = result.dirty || state.sync.pendingPush;
-            state.sync.isDirty = hasQueuedChanges;
-
-            if (broadcastChannel) {
-                broadcastChannel.postMessage({
-                    type: 'SYNC_COMPLETED',
-                    newSyncId: state.sync.lastSyncId,
-                    sourceTabId: state.tabId
-                });
-            }
-            
-            this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
-            await this.updateDropboxUIState();
-            console.log(`[Sync Core Push V2] Push成功。新しいsyncId: ${parsedMetadata.syncId}`);
-            pushCompleted = true;
-            if (isManual) {
-                uiUtils.hideProgressDialog();
-            }
-
-        } catch (error) {
-            const errorMessage = error.status === 409 && error.endpoint === '/files/upload' && error.message.includes('path/conflict')
-                ? '同期中にDropboxの保存先が変更されたため、上書きを中止しました。再度同期してください。'
-                : error.message || '不明なアップロードエラーが発生しました。';
-            this.updateSyncStatusUI('error', errorMessage);
-            console.error("[Sync Core Push V2] Push処理中にエラーが発生しました:", error);
-            if (isManual) {
-                uiUtils.hideProgressDialog();
-                uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
-            }
-        } finally {
-            const shouldRunPendingPush = pushCompleted && state.sync.pendingPush && state.sync.isDirty;
-            state.sync.isSyncing = false;
-            try {
-                await window.dropboxApi.deleteLockFile();
-            } catch (lockError) {
-                console.warn("[Sync Core Push V2] ロックファイル削除に失敗しました。次回起動時に復旧処理が走る可能性があります。", lockError);
-            }
-            if (shouldRunPendingPush) {
-                console.log("[Sync Core Push V2] 同期中の追加変更を検出したため、追加Pushを開始します。");
-                state.sync.pendingPush = false;
-                setTimeout(() => this.handlePush(false), 0);
-            }
-            console.log(`[SYNC_DEBUG] _doPush: 終了。`);
         }
-    },
-
-    /**
-     * [Push Gatekeeper] ローカルの変更をDropboxにアップロードする処理の呼び出しを管理する
-     */
-    handlePush(isManual = false) {
-        if (state.sync.isSyncing || !state.sync.isDirty) {
-            return;
-        }
-        dbUtils.getSetting('dropboxTokens').then(tokenData => {
-            if (!tokenData || !tokenData.value) {
-                return;
-            }
-            // 手動実行の場合はプログレスダイアログを表示
-            if (isManual) {
-                uiUtils.showProgressDialog('同期を開始しています...');
-            }
-            this._doPush(isManual).catch(error => { // isManualフラグを渡す
-                console.error("[Sync Push] バックグラウンドPush処理でエラー:", error);
-                if (isManual) {
-                    uiUtils.hideProgressDialog();
-                    uiUtils.showCustomAlert(`同期に失敗しました: ${error.message}`);
-                }
+        let originals;
+        if (data.documentLibrary) {
+            const remoteHashes = new Set(remote?.data.documentLibrary?.originals.map(row => row.hash));
+            originals = await DocumentLibrary.restoreOriginals(data.documentLibrary, async hash => {
+                if (remoteHashes.has(hash)) return api.downloadLibraryOriginal(hash);
+                const blob = capture.documentBlobs.get(hash);
+                if (!blob || await DocumentLibrary.digest(blob) !== hash) throw new Error('ファイル原本が不足または破損しています。');
+                await api.ensureAssetsFolderExists(api.DOCUMENTS_DIR_PATH);
+                await verifyConnection();
+                await api.uploadLibraryOriginal(hash, blob);
+                return blob;
             });
-        });
+        }
+        return { required, blobs, hashes, originals };
     },
 
-    async handleManualDropboxSync() {
-        console.log("手動同期が実行されました。");
-
-        if (state.sync.isSyncing) {
-            uiUtils.showCustomAlert("現在、別の同期処理が実行中です。");
-            return;
-        }
-
-        const tokenData = await dbUtils.getSetting('dropboxTokens');
-        if (!tokenData || !tokenData.value) {
-            await uiUtils.showCustomAlert("Dropboxと連携してから同期してください。");
-            return;
-        }
-
-        state.sync.isSyncing = true;
-        this.updateSyncStatusUI('syncing', 'クラウドの状態を確認中...');
-        uiUtils.showProgressDialog('クラウドの状態を確認中...');
-
-        try {
-            const cloudMetadataString = await window.dropboxApi.downloadMetadata();
-
-            if (!cloudMetadataString) {
-                console.log("[Manual Sync] クラウドにデータがありません。Push処理を実行します。");
-                uiUtils.updateProgressMessage('初回データをクラウドに保存中...');
-                state.sync.isSyncing = false;
-                await this._doPush(true);
-                return;
+    async runDropboxMerge(operation, updateProgress) {
+        const api = window.dropboxApi;
+        const isIdentity = id => SyncJournal.isChatIdentity(id);
+        // A Dropbox revision rejected after upload (including a lost response)
+        // is resolved by downloading the new head and recomputing the merge.
+        for (let attempt = 0; attempt < 3; attempt++) {
+            updateProgress(attempt ? 'Dropboxの最新データで同期を再試行中...' : 'Dropboxとこの端末の変更を確認中...');
+            const capture = await this._prepareExportData({ sync: true });
+            const { chatSync, librarySync, projectSync } = capture;
+            const local = JSON.parse(capture.metadataJson);
+            DropboxSync.validate(local, isIdentity);
+            const head = await api.downloadMetadata({ withRevision: true });
+            const remote = head && JSON.parse(head.content);
+            const recovered = !chatSync.snapshot && head && chatSync.intent?.syncId === remote.syncId &&
+                chatSync.intent.epoch === chatSync.epoch && await chatSync.intent.content.text() === head.content;
+            const base = recovered ? remote : chatSync.snapshot && JSON.parse(await chatSync.snapshot.text());
+            const empty = ['chats', 'profiles', 'assets', 'memories'].every(key => !local.data[key].length) &&
+                !local.data.documentLibrary && !local.data.projectData.projects.length &&
+                local.data.settings.every(row =>
+                    (row.key === SettingsV136.GLOBAL_KEY && DropboxSync.same(row.value, { memoryModelRef: null })) ||
+                    (['v11_migration_complete', 'imageStoreCleanup_v1_complete'].includes(row.key) && row.value === true));
+            const isFresh = !chatSync.pending && (empty || chatSync.bootstrap &&
+                DropboxSync.same(chatSync.bootstrap, this.dropboxBootstrapContents(local)));
+            if (!remote && !base && !projectSync.lastSyncId && isFresh && operation === 'pull' && !state.sync.isDirty) return {};
+            const plan = await DropboxSync.plan({
+                base, local, remote, priorSyncId: recovered ? remote.syncId : projectSync.lastSyncId, fresh: isFresh,
+                legacyIds: new Set(capture.captured.get(CHATS_STORE).filter(chat => chat.syncLegacyOrigin).map(chat => chat.syncIdentity)),
+                deletes: chatSync.operations.filter(row => row.entityType === 'chat' && row.operation === 'delete').map(row => row.entityId),
+                identify: (chats, syncId) => SyncJournal.identifySnapshotChats(chats, syncId), isIdentity
+            });
+            const envelope = { ...local, data: plan.data };
+            if (!envelope.data.projectData) {
+                envelope.data.projectData = ProjectStore.exportSnapshot(null, [[], [], []], envelope.data);
             }
-
-            const cloudData = JSON.parse(cloudMetadataString);
-            SettingsV136.assertCompatible(cloudData);
-            const cloudSyncId = cloudData.syncId;
-            const [library, projects] = await Promise.all([dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()]);
-            const localSyncId = projects.lastSyncId;
-            const cloudProjects = cloudData.data.projectData;
-            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
-            const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
-            if ((!cloudProjects && projects.revision) || ProjectStore.isRollback(projects, cloudProjects) ||
-                (!cloudLibraryRevision && library.revision && (library.syncedRevision || await dbUtils.hasChatDocumentLinks()))) {
-                state.sync.isSyncing = false;
-                await this._doPush(true);
-                return;
-            }
-
-            console.log(`[Manual Sync] Cloud syncId: ${cloudSyncId}, Local syncId: ${localSyncId}`);
-
-            if (cloudSyncId !== localSyncId || cloudLibraryRevision !== library.syncedRevision ||
-                (cloudProjects?.revision ?? null) !== projects.syncedRevision) {
-                console.log("[Manual Sync] syncIdが異なります。Pull処理を実行します。");
-                uiUtils.updateProgressMessage('他のブラウザのデータの変更を同期中...');
-                state.sync.isSyncing = false;
-                await this.handlePull(true);
-                return;
-            }
-
-            console.log("[Manual Sync] syncIdは一致しています。アセットの整合性を確認します。");
-            uiUtils.updateProgressMessage('アセットの整合性を確認中...');
-
-            const { localAssets, documentBlobs } = await this._prepareExportData({ backup: true });
-            const cloudAssetsList = await window.dropboxApi.listAssets();
-            const cloudAssets = new Set(cloudAssetsList.map(asset => asset.name));
-            const missingImages = [...localAssets.keys()].some(id => !cloudAssets.has(id));
-            const cloudOriginals = documentBlobs.size ? new Map((await window.dropboxApi.listAssets(window.dropboxApi.DOCUMENTS_DIR_PATH))
-                .filter(file => file['.tag'] === 'file').map(file => [file.name, file.size])) : new Map();
-            const missingOriginals = [...documentBlobs].some(([hash, blob]) => cloudOriginals.get(hash) !== blob.size);
-            const dirty = state.sync.isDirty || library.revision !== library.syncedRevision ||
-                projects.revision !== projects.syncedRevision;
-            if (missingImages || missingOriginals || dirty) {
-                if (dirty) {
-                    console.log("[Manual Sync] ローカルに変更（isDirty=true）があるため、Push処理を実行します。");
-                    uiUtils.updateProgressMessage('ローカルの変更を同期中...');
-                } else {
-                    console.log("[Manual Sync] クラウドに不足するアセットを補います。");
-                    uiUtils.updateProgressMessage('クラウドの状態を調整中...');
-                }
-                state.sync.isSyncing = false;
-                await this._doPush(true);
-                return;
-            }
-
-            console.log("[Manual Sync] 同期対象に差分はありません。");
-            this.updateSyncStatusUI('idle');
-            uiUtils.hideProgressDialog();
-            await uiUtils.showCustomAlert("データは既に最新の状態です。");
-
-        } catch (error) {
-            const errorMessage = error.message || '不明なエラーが発生しました。';
-            this.updateSyncStatusUI('error', errorMessage);
-            console.error("[Manual Sync] 手動同期処理中にエラーが発生しました:", error);
-            uiUtils.hideProgressDialog();
-            await uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
-        } finally {
-            state.sync.isSyncing = false;
-        }
-    },
-
-    /**
-     * [V2 Pull] Dropboxからデータをダウンロードして同期する
-     */
-     async handlePull(isManual = false) {
-        console.log(`[SYNC_DEBUG] handlePull: 開始。isManual = ${isManual}`);
-
-        if (state.sync.isSyncing) {
-            console.log(`[Sync Pull] スキップしました (isSyncing: ${state.sync.isSyncing})`);
-            return;
-        }
-
-        const tokenData = await dbUtils.getSetting('dropboxTokens');
-        if (!tokenData || !tokenData.value) {
-            console.log("[Sync Pull] Dropbox未連携のためスキップしました。");
-            return;
-        }
-
-        console.log("[Sync Pull V2] Pull処理を開始します。");
-        state.sync.isSyncing = true;
-        let pullCompleted = false;
-        this.updateSyncStatusUI('syncing', 'クラウドと通信中...');
-        if (isManual) {
-            console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、showProgressDialogを呼び出します。");
-            uiUtils.showProgressDialog('クラウドと通信中...');
-        }
-
-        try {
-            await window.dropboxApi.uploadLockFile('pull');
-
-            const [libraryBefore, projectsBefore] = await Promise.all([
-                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
-            ]);
-            const cloudMetadataString = await window.dropboxApi.downloadMetadata();
-
-            if (cloudMetadataString === null) {
-                if (projectsBefore.syncedRevision && !isManual) throw new Error(ProjectStore.legacyConflict);
-                console.log("[Sync Pull V2] クラウドにファイルが見つかりません。");
-                const localChats = await dbUtils.getAllChats();
-                if (localChats.length > 0 || state.sync.isDirty || libraryBefore.revision || projectsBefore.revision) {
-                    console.log("[Sync Pull V2] ローカルにデータが存在するため、初回Pushを実行します。");
-                    if (isManual) {
-                        console.log("[SYNC_DEBUG] handlePull: isManual=trueのため、updateProgressMessageを呼び出します。");
-                        uiUtils.updateProgressMessage('初回データをクラウドに保存中...');
+            if (!base && remote && isFresh) {
+                const configured = local.data.settings.find(row => row.key === SettingsV136.GLOBAL_KEY)?.value?.dropboxAppKey;
+                if (configured) {
+                    const global = envelope.data.settings.find(row => row.key === SettingsV136.GLOBAL_KEY);
+                    if (global?.value?.dropboxAppKey && global.value.dropboxAppKey !== configured) {
+                        throw new Error('Dropbox App Keyの設定が競合しているため、両方のデータを保持しました。');
                     }
-                    
-                    state.sync.isSyncing = false; 
-
-                    await window.dropboxApi.deleteLockFile();
-                    console.log(`[SYNC_DEBUG] handlePull: _doPushを呼び出します。isManual = ${isManual}`);
-                    await this._doPush(isManual);
-                } else {
-                    console.log("[Sync Pull V2] ローカルもクラウドも空のため、同期処理は不要です。");
-                    this.updateSyncStatusUI('idle');
-                    if (isManual) uiUtils.hideProgressDialog();
+                    envelope.data = { ...envelope.data, settings: [
+                        ...envelope.data.settings.filter(row => row.key !== SettingsV136.GLOBAL_KEY),
+                        { key: SettingsV136.GLOBAL_KEY, value: { ...global?.value, dropboxAppKey: configured } }
+                    ] };
                 }
-                return;
             }
-
-            const cloudData = JSON.parse(cloudMetadataString);
-            SettingsV136.assertCompatible(cloudData);
-            const cloudProjects = cloudData.data.projectData;
-            if (cloudProjects) ProjectStore.validateSnapshot(cloudProjects, cloudData.data);
-            if (ProjectStore.isRollback(projectsBefore, cloudProjects) || (!cloudProjects && projectsBefore.revision)) {
-                throw new Error(ProjectStore.legacyConflict);
+            DropboxSync.validate(envelope, isIdentity);
+            if (envelope.data.profiles.length > MAX_PROFILES) throw new Error(PROFILE_LIMIT_MESSAGE);
+            const activeId = envelope.data.settings.find(row => row.key === 'activeProfileId')?.value;
+            if (activeId && !envelope.data.profiles.some(profile => profile.id === activeId)) {
+                throw new Error('選択中のプロファイルと同期データの参照が一致しません。');
             }
-            const projectConflict = ProjectStore.hasLocalConflict(projectsBefore, cloudProjects);
-
-            const cloudSyncId = cloudData.syncId;
-            const cloudLibraryRevision = cloudData.data.documentLibrary?.revision ?? null;
-            const libraryConflict = cloudLibraryRevision && libraryBefore.revision !== libraryBefore.syncedRevision &&
-                cloudLibraryRevision !== libraryBefore.revision;
-            if (!cloudLibraryRevision && libraryBefore.syncedRevision) {
-                throw new Error('以前同期したファイル情報がDropboxに見つかりません。手動同期でクラウドの状態を確認してください。');
-            }
-            if (libraryConflict && !isManual) {
-                throw new Error('未同期のファイル変更があります。バックアップを作成してから手動で同期してください。');
-            }
-
-            console.log(`[Sync Pull V2] Cloud syncId: ${cloudSyncId}, Local lastSyncId: ${state.sync.lastSyncId}`);
-
-            if (cloudSyncId !== projectsBefore.lastSyncId || cloudLibraryRevision !== libraryBefore.syncedRevision ||
-                (cloudProjects?.revision ?? null) !== projectsBefore.syncedRevision) {
-                if (projectConflict && !isManual) throw new Error(ProjectStore.localConflict);
-                if (state.sync.isDirty || libraryConflict || projectConflict) {
-                    if (isManual) uiUtils.hideProgressDialog();
-                    const confirmed = await uiUtils.showCustomConfirm(
-                        "【警告：データの同期に関する重要な確認】\n\n" +
-                        "クラウド上に、このデバイスとは異なるデータが見つかりました。\n\n" +
-                        "同期を実行すると、このデバイスのチャット、画像、設定などがDropboxのデータで置き換わります。\n" +
-                        (libraryConflict ? "未同期のファイル・原本の版・チャットとの紐づけもDropboxのデータで置き換わります。\n" : "") +
-                        (projectConflict ? "未同期のプロジェクト・チャットの所属・共有ファイルの関連付けもDropboxのデータで置き換わります。\n" : "") +
-                        "現在のデータを残すには、キャンセルして設定画面から全データのバックアップを作成してください。\n\n" +
-                        "クラウドのデータで同期を開始してもよろしいですか？"
-                    );
-                    if (!confirmed) {
-                        console.log("[Sync Pull] ユーザーが上書きをキャンセルしました。");
-                        this.updateSyncStatusUI('dirty');
-                        if (isManual) uiUtils.showCustomAlert("同期がキャンセルされました。");
-                        state.sync.isSyncing = false;
-                        await window.dropboxApi.deleteLockFile();
-                        return;
-                    }
-                    if (isManual) uiUtils.showProgressDialog('同期を再開しています...');
+            const localView = DropboxSync.logical(local), mergedView = DropboxSync.logical(envelope);
+            const apply = !DropboxSync.same(localView, mergedView);
+            if (apply && this.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
+            const capturedToken = capture.captured.get(SETTINGS_STORE).find(row => row.key === 'dropboxTokens')?.value;
+            const tokenIdentity = token => token?.account_id ?? token?.refresh_token ?? token?.access_token;
+            const verifyConnection = async () => {
+                if (tokenIdentity(capturedToken) !== tokenIdentity((await dbUtils.getSetting('dropboxTokens'))?.value)) {
+                    throw new Error(DropboxSync.concurrentLocal);
                 }
-
-                const importResult = await this.importDataFromString(cloudMetadataString, {
-                    automatic: !isManual, source: 'dropbox', libraryBefore, projectsBefore,
-                    allowLibraryReplace: Boolean(libraryConflict && isManual), allowProjectReplace: Boolean(projectConflict && isManual)
-                });
-                if (!importResult) {
-                    this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
-                    return;
-                }
-                const removedAssetInfo = importResult.removedAssetInfo;
-
-                if (importResult.localPinStateWon) {
-                    state.sync.pendingPush = true;
-                    console.log('[Sync Pull] ローカル側が新しいピン状態を保持したため、追加Pushを予約しました。');
-                }
-
-                state.sync.lastSyncId = importResult.syncId;
-                const hasQueuedChanges = state.sync.pendingPush || importResult.libraryPending || importResult.projectPending;
-                state.sync.isDirty = hasQueuedChanges;
-                state.sync.lastError = null;
-                
-                if (importResult.localPinStateWon) await dbUtils.saveSetting('syncIsDirty', true);
-
-                if (broadcastChannel) {
-                    broadcastChannel.postMessage({
-                        type: 'SYNC_COMPLETED',
-                        newSyncId: importResult.syncId,
-                        sourceTabId: state.tabId
+            };
+            await verifyConnection();
+            updateProgress('画像とファイル原本を検証中...');
+            const binary = await this.prepareDropboxMergeAssets(envelope.data, remote, capture, verifyConnection);
+            envelope.syncProtection = { version: 1, lineage: plan.lineage, deletedChats: plan.deleted, assetHashes: binary.hashes };
+            const publish = !remote?.syncProtection || !DropboxSync.same(remote.syncProtection, envelope.syncProtection) ||
+                !DropboxSync.same(DropboxSync.logical(remote), mergedView);
+            const metadata = publish ? envelope : remote;
+            const metadataJson = publish ? JSON.stringify(envelope) : head.content;
+            let rev = head?.rev;
+            await verifyConnection();
+            if (apply && this.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
+            if (publish) {
+                updateProgress('統合データをDropboxに保存中...');
+                if (!base && !remote) {
+                    await DocumentLibrary.transaction(state.db, [SyncJournal.store], 'readwrite', async tx => {
+                        const current = await SyncJournal.context(tx);
+                        if (current.epoch !== chatSync.epoch || current.syncId !== chatSync.syncId) throw new Error(DropboxSync.concurrentLocal);
+                        tx.objectStore(SyncJournal.store).put({ epoch: chatSync.epoch, syncId: metadata.syncId,
+                            content: new Blob([metadataJson]) }, 'firstUpload');
                     });
                 }
-
-                this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
-                if (isManual) uiUtils.hideProgressDialog();
-                pullCompleted = true;
-
-                let finalMessage = "クラウドからデータを同期しました。アプリを再起動します。";
-                if (removedAssetInfo && Object.keys(removedAssetInfo).length > 0) {
-                    let cleanupDetails = "\n\n【通知】\nクラウド上で実体が見つからなかったため、以下のチャットから画像添付の記録を削除しました：\n";
-                    for (const chatTitle in removedAssetInfo) {
-                        cleanupDetails += `・「${chatTitle}」から ${removedAssetInfo[chatTitle].length} 件\n`;
-                    }
-                    finalMessage += cleanupDetails;
+                try {
+                    rev = (await api.uploadMetadata(metadataJson, rev ?? null))?.rev;
+                } catch (error) {
+                    if (error.status !== 409 || !error.message.includes('path/conflict')) throw error;
+                    if (attempt === 2) throw new Error('Dropboxの同時更新が続いたため、変更を保持して同期を中断しました。');
+                    continue;
                 }
+            }
+            if (!apply) {
+                const result = await this.recordDropboxPush(metadata, librarySync, projectSync, chatSync, metadataJson, rev, capture.captured);
+                return { ...result, syncId: metadata.syncId };
+            }
+            const localChats = new Map(localView.chats);
+            const unchangedChats = new Set(mergedView.chats.filter(([id, value]) => DropboxSync.same(value, localChats.get(id))).map(([id]) => id));
+            const changedIds = new Set();
+            for (const chat of local.data.chats) {
+                if (!unchangedChats.has(chat.syncIdentity)) changedIds.add(chat.id);
+            }
+            for (const chat of envelope.data.chats) {
+                if (!unchangedChats.has(chat.syncIdentity)) changedIds.add(chat.id);
+            }
+            const changed = key => !DropboxSync.same(localView[key], mergedView[key]);
+            const chatLinks = view => view.chats.filter(([, value]) => value.links.length)
+                .map(([id, value]) => [id, value.links]);
+            const changes = { chatIds: [...changedIds], settings: changed('settings') || changed('profiles'),
+                memory: changed('memories'), projects: changed('projects') || changed('shares') || Boolean(changedIds.size),
+                library: changed('documents') || changed('shares') || !DropboxSync.same(chatLinks(localView), chatLinks(mergedView)) };
+            if (this.dropboxMergeBusy()) throw new Error(DropboxSync.concurrentLocal);
+            const importMerge = () => dbUtils.clearAndImportData(envelope.data, new Map(), binary.blobs, binary.required, {
+                source: 'dropbox', automatic: true, mergeCapture: capture.captured, unchangedChats,
+                aliases: plan.aliases, changes,
+                chatSyncBefore: chatSync, libraryBefore: librarySync, projectsBefore: projectSync,
+                syncId: metadata.syncId, syncTimestamp: Date.parse(metadata.exportedAt), dropboxRev: rev,
+                syncBaseline: metadataJson, localPinOverrides: new Set(), originals: binary.originals,
+                allowLibraryReplace: true, allowProjectReplace: true
+            });
+            const imported = navigator.locks
+                ? await navigator.locks.request('chatai-dropbox-apply:' + state.db.name, { ifAvailable: true },
+                    lock => lock && importMerge())
+                : await importMerge();
+            if (!imported) throw new Error(DropboxSync.concurrentLocal);
+            return { acknowledged: true, dirty: state.sync.pendingPush || imported.libraryPending || imported.projectPending,
+                syncId: metadata.syncId, changes };
+        }
+    },
 
-                await uiUtils.showCustomAlert(finalMessage);
-                sessionStorage.setItem('isSyncReload', 'true'); // リロード後の処理のためにフラグを立てる
-                window.location.reload();
-
-            } else {
-                console.log("[Sync Pull V2] ローカルは既に最新です。同期は不要です。");
-                await this.initializeSyncState();
-                const hasQueuedChanges = state.sync.pendingPush || state.sync.isDirty;
-                state.sync.isDirty = hasQueuedChanges;
-                await dbUtils.saveSetting('lastSyncTimestamp', Date.now());
-                this.updateSyncStatusUI(hasQueuedChanges ? 'dirty' : 'idle');
+    async synchronizeDropbox(operation, isManual, retryDeferred = true) {
+        if (state.sync.isSyncing) return;
+        const token = (await dbUtils.getSetting('dropboxTokens'))?.value;
+        if (!token || state.sync.isSyncing) return;
+        const run = async () => {
+            state.sync.isSyncing = true;
+            state.sync.pendingPush = false;
+            let result;
+            const progress = message => {
+                this.updateSyncStatusUI('syncing', message);
+                if (isManual) uiUtils.updateProgressMessage(message);
+            };
+            if (isManual) uiUtils.showProgressDialog('同期を開始しています...');
+            try {
+                await window.dropboxApi.uploadLockFile(operation);
+                result = await this.runDropboxMerge(operation, progress);
+                if (result.acknowledged) {
+                    state.sync.lastSyncId = result.syncId;
+                    state.sync.lastError = null;
+                    state.sync.isDirty = Boolean(result.dirty || state.sync.pendingPush);
+                    if (result.changes) this.finishDropboxMerge(result.changes);
+                    broadcastChannel?.postMessage({ type: 'SYNC_COMPLETED', newSyncId: result.syncId,
+                        sourceTabId: state.tabId, database: state.db.name, changes: result.changes });
+                } else await this.initializeSyncState();
+                this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
                 await this.updateDropboxUIState();
-                pullCompleted = true;
+            } catch (error) {
+                const message = error.message || '不明な同期エラーが発生しました。';
+                if (!isManual && this._setupEventListenersCallCount && message === DropboxSync.concurrentLocal && retryDeferred) {
+                    this.updateSyncStatusUI('dirty', '操作が終わってからDropbox同期を再開します。');
+                    this.deferDropboxSync(operation);
+                } else this.updateSyncStatusUI('error', message);
+                console.error('[Dropbox Sync]', error);
                 if (isManual) {
                     uiUtils.hideProgressDialog();
+                    await uiUtils.showCustomAlert('同期に失敗しました: ' + message);
                 }
+            } finally {
+                state.sync.isSyncing = false;
+                if (isManual) uiUtils.hideProgressDialog();
+                try { await window.dropboxApi.deleteLockFile(); }
+                catch (error) { console.warn('[Dropbox Sync] ロックファイルの削除に失敗しました。', error); }
             }
-
-        } catch (error) {
-            const errorMessage = error.message || '不明な同期エラーが発生しました。';
-            this.updateSyncStatusUI('error', errorMessage);
-            console.error("[Sync Pull V2] Pull処理中にエラーが発生しました:", error);
-            if (isManual) {
-                uiUtils.hideProgressDialog();
-                await uiUtils.showCustomAlert(`同期に失敗しました: ${errorMessage}`);
-            }
-        } finally {
-            const shouldRunPendingPush = pullCompleted && state.sync.pendingPush && state.sync.isDirty;
-            state.sync.isSyncing = false;
-            try {
-                await window.dropboxApi.deleteLockFile();
-            } catch (lockError) {
-                console.warn("[Sync Pull V2] ロックファイル削除に失敗しました。次回起動時に復旧処理が走る可能性があります。", lockError);
-            }
-            if (shouldRunPendingPush) {
-                console.log("[Sync Pull V2] 同期中の追加変更を検出したため、追加Pushを開始します。");
+            if (result?.acknowledged && state.sync.pendingPush && state.sync.isDirty) {
                 state.sync.pendingPush = false;
-                setTimeout(() => this.handlePush(false), 0);
+                setTimeout(() => this.handlePush(), 0);
             }
-            console.log(`[SYNC_DEBUG] handlePull: 終了。`);
+        };
+        if (navigator.locks) {
+            return navigator.locks.request('chatai-dropbox-sync:' + state.db.name, { ifAvailable: true }, lock => lock && run());
         }
+        return run();
+    },
+
+    deferDropboxSync(operation) {
+        if (this.deferredDropboxTimer != null) return;
+        const db = state.db;
+        const resume = () => {
+            this.deferredDropboxTimer = null;
+            if (db !== state.db) return;
+            if (this.dropboxMergeBusy() || state.sync.isSyncing) {
+                this.deferredDropboxTimer = setTimeout(resume, 600);
+                return;
+            }
+            const retry = () => {
+                if (db === state.db) void this.synchronizeDropbox(operation, false, false);
+            };
+            if (navigator.locks) {
+                void navigator.locks.request('chatai-dropbox-apply:' + db.name, () => setTimeout(retry, 0));
+            } else retry();
+        };
+        this.deferredDropboxTimer = setTimeout(resume, 600);
+    },
+    finishDropboxMerge(changes) {
+        if (!this._setupEventListenersCallCount) return;
+        void chatListChangeController.notify({ type: 'sync-merge', ...changes }, { broadcast: false });
+        if (changes.library) window.DocumentLibraryUI?.refreshDropboxChanges();
+        if (changes.memory || changes.library || changes.projects) window.informationUi?.refresh();
+        if (this.pendingDropboxView?.db !== state.db) {
+            this.pendingDropboxView = { db: state.db, chatIds: new Set(), settings: false };
+        }
+        const pending = this.pendingDropboxView;
+        for (const id of changes.chatIds) pending.chatIds.add(id);
+        pending.settings ||= changes.settings;
+        this.scheduleDropboxViewRefresh();
+    },
+
+    scheduleDropboxViewRefresh(delay = 0) {
+        if (this.dropboxViewTimer != null || this.refreshingDropboxView) return;
+        this.dropboxViewTimer = setTimeout(async () => {
+            this.dropboxViewTimer = null;
+            const pending = this.pendingDropboxView;
+            if (!pending || pending.db !== state.db) return;
+            this.refreshingDropboxView = true;
+            try {
+                if (!this.dropboxMergeBusy()) {
+                    const id = state.currentChatId;
+                    const refreshChat = pending.chatIds.has(id);
+                    if (refreshChat) pending.chatIds.delete(id);
+                    if (refreshChat && !await this.refreshDropboxChat(id)) pending.chatIds.add(id);
+                    const settingsEditing = state.currentScreen === 'settings' &&
+                        document.activeElement?.matches('input, textarea, select, [contenteditable]');
+                    const newChatDraft = state.currentChatId == null && elements.userInput?.value;
+                    if (pending.settings && !settingsEditing && !newChatDraft && !this.dropboxMergeBusy() &&
+                        !document.querySelector('dialog[open]')) {
+                        pending.settings = false;
+                        await this.loadGlobalSettings();
+                        await this.loadProfiles();
+                        window.informationUi?.refresh();
+                    }
+                    for (const changedId of pending.chatIds) {
+                        if (changedId !== state.currentChatId) pending.chatIds.delete(changedId);
+                    }
+                }
+            } catch (error) {
+                console.error('[Dropbox View]', error);
+            } finally {
+                this.refreshingDropboxView = false;
+                if (this.pendingDropboxView !== pending || pending.settings || pending.chatIds.size) this.scheduleDropboxViewRefresh(350);
+            }
+        }, delay);
+    },
+
+    async refreshDropboxChat(id) {
+        const navigation = this.chatNavigationV136;
+        const messages = state.currentMessages;
+        const identity = dbUtils.chatSaveOwners?.get(messages)?.syncIdentity;
+        const chat = await dbUtils.getChat(id);
+        if (id !== state.currentChatId || navigation !== this.chatNavigationV136) return true;
+        if (messages !== state.currentMessages || this.dropboxMergeBusy()) return false;
+        // Keep the open view and draft if its saved chat was deleted. The save
+        // owner's version check still prevents a stale view from recreating it.
+        if (!chat || identity && chat.syncIdentity !== identity && chat.syncDraftSource !== identity) {
+            this.dropboxRemovedChatView = messages;
+            return true;
+        }
+        const pin = normalizeChatPinState(chat);
+        state.currentChatIsPinned = pin.isPinned;
+        state.currentChatPinnedAt = pin.pinnedAt;
+        state.currentChatPinStateUpdatedAt = pin.pinStateUpdatedAt;
+        uiUtils.updateChatTitle(chat.title);
+        const execution = this.getChatExecutionSettingsV136(chat);
+        if (!DropboxSync.same(state.currentExecutionSettings, execution)) {
+            state.currentExecutionSettings = execution;
+            this.syncChatExecutionToLegacySettings();
+            window.settingsUiV136?.renderExecution();
+            void this.ensureModelThinkingCapabilities();
+        }
+        this.applyChatParameterSnapshot({ systemPrompt: chat.systemPrompt ?? '',
+            generationParameters: SettingsV136.normalizeChatNumbers(chat.generationParameters, state.settings) }, chat.parameterRevision || 0);
+        state.isMemoryEnabledForChat = chat.isMemoryEnabledForChat !== false;
+        state.currentPersistentMemory = chat.persistentMemory ?? {};
+        const nextMessages = (chat.messages ?? []).map(message => ({ ...message, attachments: message.attachments ?? [] }));
+        if (!DropboxSync.same(messages, nextMessages) || !DropboxSync.same(state.currentSummarizedContext, chat.summarizedContext ?? null)) {
+            const scroller = uiUtils.getChatScrollContainer();
+            const top = scroller?.scrollTop;
+            const anchor = uiUtils.captureTopVisibleMessageAnchor();
+            const index = Number(anchor?.index);
+            const stableAnchor = anchor && messages[index]?.role === nextMessages[index]?.role &&
+                (messages[index]?.timestamp != null ? messages[index].timestamp === nextMessages[index]?.timestamp :
+                    messages[index]?.content === nextMessages[index]?.content);
+            const scrollOperation = uiUtils.beginCollapseScrollAdjustment();
+            let restoredTop;
+            state.currentMessages = nextMessages;
+            state.currentSummarizedContext = chat.summarizedContext ?? null;
+            dbUtils.bindChatSaveOwnerV136(nextMessages, chat);
+            uiUtils.renderChatMessages({ suppressMessageAnimation: true, afterRender: () => {
+                try {
+                    if (stableAnchor && navigation === this.chatNavigationV136 && state.currentMessages === nextMessages &&
+                        scroller?.scrollTop === restoredTop) {
+                        uiUtils.restoreElementScrollAnchor(anchor, () => uiUtils.resolveMessageAnchorElement(anchor));
+                    }
+                } finally { uiUtils.finishCollapseScrollAdjustment(scrollOperation); }
+            } });
+            if (scroller) {
+                scroller.scrollTop = top;
+                restoredTop = scroller.scrollTop;
+            }
+        } else dbUtils.bindChatSaveOwnerV136(messages, chat);
+        uiUtils.updateSystemPromptUI();
+        this.toggleMemoryIconVisibility();
+        window.informationUi?.refresh();
+        return true;
+    },
+
+    _doPush(isManual = false) {
+        return this.synchronizeDropbox('push', isManual);
+    },
+
+    handlePush(isManual = false) {
+        if (state.sync.isSyncing || !state.sync.isDirty) return;
+        return this._doPush(isManual);
+    },
+
+    handleManualDropboxSync() {
+        return this.synchronizeDropbox('push', true);
+    },
+
+    handlePull(isManual = false) {
+        return this.synchronizeDropbox('pull', isManual);
     },
 
     // イベントリスナーを設定
@@ -16226,6 +16343,7 @@ const appLogic = {
             uiUtils.adjustTextareaHeight();
             this.scheduleInputDraftSave();
         });
+        elements.userInput.addEventListener('compositionstart', () => { inputDraftEditVersion++; });
         elements.userInput.addEventListener('focusout', () => this.flushInputDraft());
         elements.userInput.addEventListener('keydown', (e) => {
             if (e.isComposing || e.keyCode === 229) return;
@@ -17761,6 +17879,7 @@ const appLogic = {
 
         let chat;
         const completionBeforeRead = this.sendCompletionGenerationV136;
+        const dropboxBeforeRead = this.dropboxDataGeneration;
         try {
             if (!isCurrent()) return { ok: false, cancelled: true };
             chat = await readChat();
@@ -17793,7 +17912,8 @@ const appLogic = {
             if (!confirmed) return { ok: false, cancelled: true, reason: 'attachments' };
         }
         if (!isCurrent()) return { ok: false, cancelled: true };
-        if (shouldCloseSystemPrompt || hasNewAttachments || completionBeforeRead !== this.sendCompletionGenerationV136) {
+        if (shouldCloseSystemPrompt || hasNewAttachments || completionBeforeRead !== this.sendCompletionGenerationV136 ||
+            dropboxBeforeRead !== this.dropboxDataGeneration) {
             try { chat = await readChat(); }
             catch (error) {
                 if (isCurrent()) await uiUtils.showCustomAlert(`チャットの読み込みエラー: ${error}`);
@@ -17951,12 +18071,7 @@ const appLogic = {
                     pinStateUpdatedAt: null
                 };
                 // 新しいチャットとしてDBに追加
-                const newChatId = await new Promise((resolve, reject) => {
-                    const store = dbUtils._getStore(CHATS_STORE, 'readwrite');
-                    const request = store.add(newChatData);
-                    store.transaction.oncomplete = () => resolve(request.result);
-                    store.transaction.onabort = () => reject(store.transaction.error);
-                });
+                const newChatId = await dbUtils.addLocalChat(newChatData);
                 this.markAsDirtyAndSchedulePush(true);
                 console.log("チャット複製完了:", id, "->", newChatId);
                 return { ok: true, chatId: newChatId, title: newTitle };
@@ -18911,9 +19026,14 @@ const appLogic = {
     
     cancelSendPreparationV136() {
         state.sendPreparationV136?.controller?.abort();
+        state.sendPreparationV136?.releaseDropboxEdit?.();
         state.sendPreparationV136 = null;
     },
-    beginSendPreparationV136() {
+    async beginSendPreparationV136() {
+        if (this.dropboxRemovedChatView === state.currentMessages) {
+            await uiUtils.showCustomAlert('このチャットはDropbox同期で削除されました。入力内容は保持しています。');
+            return null;
+        }
         if (state.isSending || this.getSendJobV136(state.currentChatId) || state.sendPreparationV136
             || this.chatParameterOperation || this.attachmentOperation
             || state.chatDataChangesV136.has(undefined) || state.chatDataChangesV136.has(state.currentChatId)) return null;
@@ -18928,6 +19048,13 @@ const appLogic = {
             attachments: [...state.pendingAttachments]
         };
         state.sendPreparationV136 = preparation;
+        const release = await this.acquireDropboxEdit();
+        if (!release || state.sendPreparationV136 !== preparation) {
+            release?.();
+            if (state.sendPreparationV136 === preparation) this.cancelSendPreparationV136();
+            return null;
+        }
+        preparation.releaseDropboxEdit = release;
         this.flushInputDraft();
         return preparation;
     },
@@ -19079,6 +19206,7 @@ const appLogic = {
         cancelAnimationFrame(session.streamFrame);
         if (state.sendJobsV136.get(session.messages) !== session) return;
         state.sendJobsV136.delete(session.messages);
+        session.releaseDropboxEdit?.();
         this.sendCompletionGenerationV136 = (this.sendCompletionGenerationV136 || 0) + 1;
         const visible = this.showsSendExecutionV136(session);
         try {
@@ -19112,7 +19240,7 @@ const appLogic = {
     async handleSend(options) {
         const fromProject = !elements.projectWorkspace.hidden;
         if (fromProject && !window.ProjectUI.isReady()) return;
-        const preparation = this.beginSendPreparationV136();
+        const preparation = await this.beginSendPreparationV136();
         if (!preparation) return;
         try {
             if (fromProject) {
@@ -19533,12 +19661,7 @@ const appLogic = {
                     pinStateUpdatedAt: importedPinState.pinStateUpdatedAt
                 };
 
-                const newChatId = await new Promise((resolve, reject) => {
-                    const store = dbUtils._getStore(CHATS_STORE, 'readwrite');
-                    const request = store.add(newChatData);
-                    store.transaction.oncomplete = () => resolve(request.result);
-                    store.transaction.onabort = () => reject(store.transaction.error);
-                });
+                const newChatId = await dbUtils.addLocalChat(newChatData);
 
                 this.markAsDirtyAndSchedulePush(true);
 
@@ -20011,6 +20134,10 @@ const appLogic = {
             throw error;
         }
         if (!isCurrent()) return false;
+        const release = await this.acquireDropboxEdit();
+        if (!release) return false;
+        if (!isCurrent()) { release(); return false; }
+        this.releaseDropboxPromptEdit = release;
         uiUtils.closeChatSearch?.({ restoreFocus: false });
         this.getSystemPromptSaveSession();
         clearTimeout(state.systemPromptSaveTimer);
@@ -20181,6 +20308,7 @@ const appLogic = {
             clearTimeout(state.systemPromptSaveTimer);
             state.systemPromptSaveTimer = 0;
             state.isEditingSystemPrompt = false;
+            this.releaseDropboxPromptEdit?.();
             this.closeChatParameterMenu();
             if (elements.systemPromptDialog?.open) elements.systemPromptDialog.close('close');
             uiUtils.updateSystemPromptButtonState();
@@ -20548,8 +20676,16 @@ const appLogic = {
             return;
         }
 
-        const message = state.currentMessages[index];
+        const messages = state.currentMessages;
+        const message = messages[index];
         if (!message) return;
+        const release = await this.acquireDropboxEdit();
+        if (!release) return;
+        if (messages !== state.currentMessages || messages[index] !== message || state.editingMessageIndex !== null || state.isSending) {
+            release();
+            return;
+        }
+        this.releaseDropboxMessageEdit = release;
 
         const rawContent = message.content;
         state.editingMessageIndex = index;
@@ -20745,6 +20881,7 @@ const appLogic = {
               this.finishEditing(messageElement);
           } else if (state.editingMessageIndex === index) {
               state.editingMessageIndex = null;
+              this.releaseDropboxMessageEdit?.();
               console.log("編集キャンセル: 要素が見つかりませんでしたがインデックスをリセット:", index);
               void this.updateChangeHistoryControls();
           }
@@ -20769,6 +20906,7 @@ const appLogic = {
         const index = parseInt(messageElement.dataset.index, 10);
         if (state.editingMessageIndex === index) {
             state.editingMessageIndex = null;
+            this.releaseDropboxMessageEdit?.();
             console.log("編集終了:", index);
         }
 
@@ -20881,7 +21019,7 @@ const appLogic = {
     },
 
     async retryFromMessage(index) {
-        const preparation = this.beginSendPreparationV136();
+        const preparation = await this.beginSendPreparationV136();
         if (!preparation) return;
         try { await this._retryFromMessagePreparedV136(index, preparation); }
         catch (error) { if (error.name !== 'AbortError') throw error; }
@@ -20940,7 +21078,7 @@ const appLogic = {
 
     async regenerateAnswerV137(index, target = state.currentMessages[index]) {
         if (state.isApplyingChangeHistory || state.chatReplacePreview.isExecuting) return;
-        const preparation = this.beginSendPreparationV136();
+        const preparation = await this.beginSendPreparationV136();
         if (!preparation) return;
         try {
             if (await this.guardGenerationMutableAction() || state.editingMessageIndex !== null || state.isEditingSystemPrompt) return;
@@ -24060,16 +24198,18 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
      * [V2] 同期用にメタデータとアセットリストを分離して準備する
      * Backups read a consistent snapshot without rewriting local attachments.
      */
-     async _prepareExportData({ backup = false } = {}) {
+     async _prepareExportData({ backup = false, sync = false } = {}) {
         try {
             const db = await dbUtils.openDB();
             const names = [PROFILES_STORE, CHATS_STORE, 'memory_store', SETTINGS_STORE, 'image_assets',
                 IMAGE_STORE, ...DocumentLibrary.stores, ...ProjectStore.stores];
-            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...records] =
-                await DocumentLibrary.transaction(db, names, 'readonly', tx => Promise.all(names.map(name => {
-                    const store = tx.objectStore(name);
-                    return DocumentLibrary.request(store.getAll());
-                })));
+            const [chatSync, ...rows] =
+                await DocumentLibrary.transaction(db, [...names, SyncJournal.store], 'readonly', tx => Promise.all([
+                    SyncJournal.context(tx, sync),
+                    ...names.map(name => DocumentLibrary.request(tx.objectStore(name).getAll()))
+                ]));
+            const captured = sync ? new Map(names.map((name, i) => [name, rows[i]])) : null;
+            const [profiles, chats, memories, allSettings, imageAssets, chatImages, ...records] = sync ? structuredClone(rows) : rows;
             chats.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) || indexedDB.cmp(b.id, a.id));
             const getSetting = key => allSettings.find(setting => setting.key === key);
             const librarySync = DocumentLibrary.syncState(getSetting(DocumentLibrary.syncKey));
@@ -24084,7 +24224,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 .filter(setting =>
                     !['dropboxTokens', 'syncIsDirty', 'syncLastError', 'lastSyncId', SettingsV136.BACKUP_KEY,
                         DocumentLibrary.syncKey, ProjectStore.syncKey, 'backgroundImageBlob'].includes(setting.key)
-                    && !localUiSettingKeysForExport.has(setting.key)
+                    && !localUiSettingKeysForExport.has(setting.key) && (!sync || setting.key !== 'lastSyncTimestamp')
                 )
                 .map(setting => {
                     if (setting.key !== 'globalOtherSettings') return setting;
@@ -24105,10 +24245,10 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                     profile.settings = this.getSharedProfileSettings(profile.settings);
                 }
                 if (profile.icon instanceof Blob) {
-                    const assetId = `profile_${profile.id}_icon.webp`;
+                    const assetId = sync ? `profile_${await DocumentLibrary.digest(profile.icon)}.webp` : `profile_${profile.id}_icon.webp`;
                     addAsset(assetId, profile.icon);
                     profile.iconAssetId = assetId;
-                }
+                } else if (sync) delete profile.iconAssetId;
                 delete profile.icon;
             }
             for (const asset of imageAssets) {
@@ -24131,7 +24271,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             const chatAssets = new Map();
             for (const chat of chats) {
                 // Keep inline attachments while the editor owns this snapshot.
-                if (backup || chat.id === state.currentChatId) continue;
+                if (backup || sync || chat.id === state.currentChatId) continue;
                 if (chat.messages) {
                     for (const message of chat.messages) {
                         if (message.imageIds && Array.isArray(message.imageIds)) {
@@ -24173,7 +24313,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             console.log("[Data Export V2] アセット化とクレンジングが完了しました。");
 
             const assetsToUpdate = imageAssets.filter(a => a._needsUpdate);
-            if (!backup && assetsToUpdate.length > 0) {
+            if (!backup && !sync && assetsToUpdate.length > 0) {
                 console.log(`[Data Export V2] ${assetsToUpdate.length}件のimage_assetsにassetIdを永続化します。`);
                 const tx = state.db.transaction('image_assets', 'readwrite');
                 const store = tx.objectStore('image_assets');
@@ -24240,6 +24380,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 delete chat.titleGenerationEligible;
                 delete chat.recordGenerationId;
                 delete chat.contentRevision;
+                delete chat.syncLegacyOrigin;
+                delete chat.syncDraftSource;
             }
             const metadata = {
                 version: "2.0",
@@ -24266,7 +24408,9 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 localAssets,
                 documentBlobs: library.blobs,
                 librarySync,
-                projectSync
+                projectSync,
+                chatSync,
+                captured
             };
 
         } catch (error) {
@@ -24363,8 +24507,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         }
         state.sync.isSyncing = true;
         try {
-            const [libraryBefore, projectsBefore] = await Promise.all([
-                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext()
+            const [libraryBefore, projectsBefore, chatSyncBefore] = await Promise.all([
+                dbUtils.getDocumentLibrarySyncState(), dbUtils.getProjectSyncContext(), dbUtils.getChatSyncContext()
             ]);
             const json = await file.text();
             const envelope = JSON.parse(json);
@@ -24377,7 +24521,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 ? 'このバックアップにはプロジェクト情報がありません。復元すると現在のプロジェクト、チャットの所属、共有ファイルの関連付けが失われます。'
                 : 'プロジェクト、チャットの所属、共有ファイルの関連付けもバックアップの内容で置き換えます。';
             if (!await uiUtils.showCustomConfirm(`${message}\n\n${projectWarning}\n\n必要なデータは先にバックアップしてください。復元しますか？`)) return;
-            await this.importDataFromString(json, { source: 'file', libraryBefore, projectsBefore, allowLegacyProjectClear: legacy });
+            await this.importDataFromString(json, { source: 'file', libraryBefore, projectsBefore, chatSyncBefore,
+                allowLegacyProjectClear: legacy });
             uiUtils.hideProgressDialog();
             state.sync.isDirty = true;
             await uiUtils.showCustomAlert('バックアップを復元しました。アプリを再起動します。');
@@ -24397,6 +24542,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
         try {
             const libraryBefore = options.libraryBefore ?? await dbUtils.getDocumentLibrarySyncState();
             const projectsBefore = options.projectsBefore ?? await dbUtils.getProjectSyncContext();
+            const chatSyncBefore = options.chatSyncBefore ?? await dbUtils.getChatSyncContext();
             const parsedData = JSON.parse(jsonString);
             SettingsV136.assertCompatible(parsedData);
             const portableBackup = parsedData.backupSchemaVersion === 1;
@@ -24418,18 +24564,23 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 throw new Error(PROFILE_LIMIT_MESSAGE);
             }
             if (cloudData.projectData) ProjectStore.validateSnapshot(cloudData.projectData, cloudData);
+            const incomingChats = Array.isArray(cloudData.chats) ? cloudData.chats : [];
+            cloudData.chats = SyncJournal.identifySnapshotChats(incomingChats, parsedData.syncId);
+            const syncBaseline = options.source === 'dropbox' ? JSON.stringify(parsedData) : null;
             const localChatsForPinMerge = options.source === 'file' ? [] : await dbUtils.getAllChats('updatedAt');
             const localChatsById = new Map(localChatsForPinMerge.map(chat => [String(chat.id), chat]));
-            let localPinStateWon = false;
-            cloudData.chats = (Array.isArray(cloudData.chats) ? cloudData.chats : []).map(remoteChat => {
-                const localChat = localChatsById.get(String(remoteChat.id));
+            const localChatsByIdentity = new Map(localChatsForPinMerge.map(chat => [chat.syncIdentity, chat]));
+            const localPinOverrides = new Set();
+            cloudData.chats = cloudData.chats.map((remoteChat, index) => {
+                const localChat = localChatsByIdentity.get(remoteChat.syncIdentity) ??
+                    (SyncJournal.isChatIdentity(incomingChats[index].syncIdentity) ? null : localChatsById.get(String(remoteChat.id)));
                 if (!localChat) return applyNormalizedChatPinState(remoteChat);
                 const remotePin = normalizeChatPinState(remoteChat);
                 const localPin = normalizeChatPinState(localChat);
                 const selectedPin = chooseNewerChatPinState(remoteChat, localChat);
                 if (selectedPin.pinStateUpdatedAt && selectedPin.pinStateUpdatedAt === localPin.pinStateUpdatedAt
                     && selectedPin.pinStateUpdatedAt !== remotePin.pinStateUpdatedAt) {
-                    localPinStateWon = true;
+                    localPinOverrides.add(remoteChat.syncIdentity);
                 }
                 return applyNormalizedChatPinState(remoteChat, selectedPin);
             });
@@ -24492,7 +24643,8 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
 
             // clearAndImportDataからの戻り値を受け取る
             const result = await dbUtils.clearAndImportData(cloudData, localAssetsBeforeClear, downloadedAssets, requiredAssetIds, {
-                ...options, libraryBefore, projectsBefore, originals, syncId: parsedData.syncId,
+                ...options, libraryBefore, projectsBefore, chatSyncBefore, syncBaseline, localPinOverrides,
+                originals, syncId: parsedData.syncId,
                 syncTimestamp: new Date(parsedData.exportedAt).getTime()
             });
             if (!result) return null;
@@ -24510,7 +24662,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             // 戻り値にクレンジング情報とメタデータを両方含める
             return {
                 syncId: parsedData.syncId, exportedAt: parsedData.exportedAt,
-                removedAssetInfo, localPinStateWon, libraryPending, projectPending
+                removedAssetInfo, localPinStateWon: localPinOverrides.size > 0, libraryPending, projectPending
             };
     
         } catch (error) {
@@ -24560,7 +24712,7 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
             .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     },
     
-    async updateDropboxUIState() {
+    async updateDropboxUIState({ fetchAccount = true } = {}) {
         const tokenData = await dbUtils.getSetting('dropboxTokens');
         const isAuthenticated = tokenData && tokenData.value && tokenData.value.access_token;
 
@@ -24580,16 +24732,24 @@ ${SettingsV136.MEMORY_EXTRACTION_OUTPUT_FORMAT}
                 elements.lastSyncTimeDisplay.textContent = `最終同期: なし`;
             }
 
-            try {
-                const accountInfo = await window.dropboxApi.testConnection();
-                elements.dropboxUserName.textContent = accountInfo.name.display_name;
-                this.updateSyncStatusUI(state.sync.isDirty ? 'dirty' : 'idle');
-            } catch (error) {
-                console.error("Dropboxユーザー情報の取得に失敗:", error);
-                elements.dropboxUserName.textContent = '不明なユーザー';
-                this.updateSyncStatusUI('error', 'アカウント情報取得失敗');
+            const token = tokenData.value;
+            const accountKey = token.account_id ?? token.refresh_token ?? token.access_token;
+            if (fetchAccount && this.dropboxAccountKey !== accountKey) {
+                this.dropboxAccountKey = accountKey;
+                elements.dropboxUserName.textContent = '確認中…';
+                void window.dropboxApi.testConnection().then(accountInfo => {
+                    if (this.dropboxAccountKey === accountKey) elements.dropboxUserName.textContent = accountInfo.name.display_name;
+                }).catch(error => {
+                    console.warn('Dropboxユーザー情報を取得できませんでした:', error);
+                    if (this.dropboxAccountKey === accountKey) {
+                        this.dropboxAccountKey = null;
+                        elements.dropboxUserName.textContent = '不明なユーザー';
+                    }
+                });
             }
+            if (!state.sync.isSyncing) this.updateSyncStatusUI(state.sync.lastError ? 'error' : state.sync.isDirty ? 'dirty' : 'idle');
         } else {
+            this.dropboxAccountKey = null;
             document.body.classList.remove('dropbox-connected');
             elements.dropboxAuthState.classList.remove('hidden');
             elements.dropboxConnectedState.classList.add('hidden');
