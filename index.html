@@ -14,21 +14,21 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <!-- CSSファイルを外部から読み込む -->
-    <link rel="stylesheet" href="./style.css?v=1.38.0.2">
+    <link rel="stylesheet" href="./style.css?v=1.38.1">
     <link rel="stylesheet" href="./prism.css" />
     <script src="./marked.js" defer></script>
     <script src="./purify.min.js" defer></script>
-    <script src="./function-calling.js?v=1.38.0.2" defer></script>
-    <script src="./context-reference.js?v=1.38.0.2" defer></script>
-    <script src="./document-library.js?v=1.38.0.2" defer></script>
-    <script src="./project-store.js?v=1.38.0.2" defer></script>
-    <script src="./dropbox-sync.js?v=1.38.0.2" defer></script>
-    <script src="./document-embedding.js?v=1.38.0.2" defer></script>
-    <script src="./document-search.js?v=1.38.0.2" defer></script>
-    <script src="./document-rag.js?v=1.38.0.2" defer></script>
-    <script src="./document-library-ui.js?v=1.38.0.2" defer></script>
-    <script src="./project-ui.js?v=1.38.0.2" defer></script>
-    <script src="./dropbox.js?v=1.38.0.2" defer></script>
+    <script src="./function-calling.js?v=1.38.1" defer></script>
+    <script src="./context-reference.js?v=1.38.1" defer></script>
+    <script src="./document-library.js?v=1.38.1" defer></script>
+    <script src="./project-store.js?v=1.38.1" defer></script>
+    <script src="./dropbox-sync.js?v=1.38.1" defer></script>
+    <script src="./document-embedding.js?v=1.38.1" defer></script>
+    <script src="./document-search.js?v=1.38.1" defer></script>
+    <script src="./document-rag.js?v=1.38.1" defer></script>
+    <script src="./document-library-ui.js?v=1.38.1" defer></script>
+    <script src="./project-ui.js?v=1.38.1" defer></script>
+    <script src="./dropbox.js?v=1.38.1" defer></script>
     <!-- AWS SDK for Bedrock Runtime (ESM形式で読み込み) -->
     <script type="module">
         // AWS SDK v3のBedrock Runtimeクライアントを動的にインポート
@@ -42,11 +42,11 @@
                 console.error("AWS Bedrock Runtime SDKの読み込みに失敗しました:", err);
             });
     </script>
-    <script src="./settings-v136.js?v=1.38.0.2" defer></script>
-    <script src="./streaming-v136.js?v=1.38.0.2" defer></script>
-    <script src="./app.js?v=1.38.0.2" defer></script>
-    <script src="./settings-ui-v136.js?v=1.38.0.2" defer></script>
-    <script src="./information-ui.js?v=1.38.0.2" defer></script>
+    <script src="./settings-v136.js?v=1.38.1" defer></script>
+    <script src="./streaming-v136.js?v=1.38.1" defer></script>
+    <script src="./app.js?v=1.38.1" defer></script>
+    <script src="./settings-ui-v136.js?v=1.38.1" defer></script>
+    <script src="./information-ui.js?v=1.38.1" defer></script>
 </head>
 <body>
     <div class="app-container">
@@ -943,21 +943,10 @@
 
                         <p id="last-sync-time-display" class="last-sync-time-display"></p>
 
-                        <div class="sync-setting-row">
-                            <label for="dropbox-sync-frequency">セッションの自動同期のタイミング:</label>
-                            <select id="dropbox-sync-frequency">
-                                <option value="instant">メッセージ送信後すぐ (即時)</option>
-                                <option value="5">5メッセージごと</option>
-                                <option value="10">10メッセージごと</option>
-                                <option value="30">30メッセージごと</option>
-                                <option value="manual">手動同期のみ</option>
-                            </select>
-                        </div>
-
                         <div id="sync-error-display" class="sync-error-display hidden">
                             <div class="sync-error-header">
                                 <span class="material-symbols-outlined">error</span>
-                                <span>同期エラー</span>
+                                <span id="sync-error-title">同期エラー</span>
                             </div>
                             <p id="sync-error-message" class="sync-error-message"></p>
                             <span id="sync-error-timestamp" class="sync-error-timestamp"></span>
@@ -975,6 +964,7 @@
                             </button>
                         </div>
                     </div>
+                    <button id="dropbox-conflict-backups" type="button">同期競合のバックアップを取り出す</button>
                 </div><section class="settings-group" id="google-search-settings"><h2>Google Custom Search</h2>
 <p style="font-size: 11px; color: var(--text-secondary); margin-top: 8px; margin-bottom: 10px;">
                             AIがFunction Callingを使用して外部情報を検索するために使用します。<a href="https://developers.google.com/custom-search/v1/overview" target="_blank" rel="noopener">Google Custom Search API</a>を利用し、1日100回まで無料です。<br>
@@ -1293,6 +1283,25 @@
             <button value="cancel" class="dialog-cancel-btn">キャンセル</button>
             <button value="ok" class="dialog-ok-btn">OK</button>
         </div>
+    </dialog>
+
+    <dialog id="dropboxConflictDialog" class="custom-dialog" aria-labelledby="dropbox-conflict-title" aria-describedby="dropbox-conflict-description dropbox-conflict-backup-note">
+        <h3 id="dropbox-conflict-title" class="dialog-title"></h3>
+        <p id="dropbox-conflict-chat" class="dialog-message"></p>
+        <p id="dropbox-conflict-description" class="dialog-message"></p>
+        <form method="dialog" class="dialog-actions">
+            <button value="local" class="dialog-button dropbox-conflict-choice" aria-labelledby="dropbox-conflict-local-label" aria-describedby="dropbox-conflict-local-note">
+                <span id="dropbox-conflict-local-label">この端末のチャットを保存</span>
+                <small id="dropbox-conflict-local-note">この端末の内容でDropboxを更新します。</small>
+            </button>
+            <button value="remote" class="dialog-button dropbox-conflict-choice" aria-labelledby="dropbox-conflict-remote-label" aria-describedby="dropbox-conflict-remote-note">
+                <span id="dropbox-conflict-remote-label">Dropboxのチャットを保存</span>
+                <small id="dropbox-conflict-remote-note">Dropboxの内容をこの端末に反映します。</small>
+            </button>
+            <button value="delete" class="dialog-button dropbox-conflict-choice" hidden>削除を確定</button>
+            <p id="dropbox-conflict-backup-note" class="dialog-message">選ばなかったチャットもバックアップに保存されます。</p>
+            <button value="cancel" class="dialog-cancel-btn" autofocus>あとで決める</button>
+        </form>
     </dialog>
 
     <dialog id="promptDialog" class="custom-dialog">

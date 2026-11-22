@@ -7,7 +7,7 @@ assert.deepEqual(removed.sort(),[
     'api-config-default-model','api-config-id','cancel-api-config-btn','cancel-attach-btn','confirm-attach-btn',
     'file-upload-notice','fileUploadDialog','header-profile-menu','header-profile-menu-settings','hide-system-prompt-toggle','save-api-config-btn',
     'scroll-to-top-btn','sd-prompt-improve-user-models','sd-qc-user-models','select-files-btn','selected-files-list',
-    'system-prompt-save-status','theme-settings-profile-scoped-toggle','thinking-budget',
+    'system-prompt-save-status','theme-settings-profile-scoped-toggle','thinking-budget','dropbox-sync-frequency',
     'back-to-chat-from-history','chat-sidebar-all-history-btn','chat-sidebar-close-btn',
     'character-detail-pane','character-list-pane','character-profile-btn','characterProfileDialog',
     'close-profile-dialog-btn','profile-back-btn',
@@ -31,18 +31,18 @@ const profile=html.slice(html.indexOf('id="settings-panel-profile"'),html.indexO
 assert(profile.includes('id="profile-card-header-wrapper-settings"'));
 assert(!html.slice(html.indexOf('id="settings-screen"'),html.indexOf('id="settings-panel-profile"')).includes('id="profile-card-header-wrapper-settings"'));
 console.log('PASS settings profile switcher belongs only to the profile category');
-assert(read('app.js').includes('const APP_VERSION = "1.38.0.2";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.38.0.2";'));
+assert(read('app.js').includes('const APP_VERSION = "1.38.1";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.38.1";'));
 assert(read('app.js').includes('const DB_VERSION = 19;'));
 const worker=read('sw.js');
-assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.38.0.2';"));
+assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.38.1';"));
 const shell=[...worker.split('const urlsToCache = [')[1].split('];')[0].matchAll(/'([^']+)'/g)].map(m=>m[1]);
 assert.equal(shell.length,33);assert.equal(new Set(shell).size,shell.length);
-assert(shell.includes('./dropbox-sync.js?v=1.38.0.2'));
+assert(shell.includes('./dropbox-sync.js?v=1.38.1'));
 assert(shell.includes('./document-embedding-worker.js'));
 assert(!shell.some(asset => /^https?:/.test(asset)));
 for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js','information-ui.js','streaming-v136.js','dropbox.js','function-calling.js','context-reference.js','document-library.js','project-store.js','project-ui.js','document-embedding.js','document-search.js','document-library-ui.js']){
-    assert(html.includes(`./${asset}?v=1.38.0.2`),asset);
-    assert(shell.includes(`./${asset}?v=1.38.0.2`),asset);
+    assert(html.includes(`./${asset}?v=1.38.1`),asset);
+    assert(shell.includes(`./${asset}?v=1.38.1`),asset);
 }
 assert(html.indexOf('./settings-v136.js?v=')<html.indexOf('./streaming-v136.js?v='));
 assert(html.indexOf('./streaming-v136.js?v=')<html.indexOf('./app.js?v='));
@@ -53,6 +53,6 @@ assert(html.indexOf('./context-reference.js?v=')<html.indexOf('./information-ui.
 assert(html.indexOf('./document-library.js?v=')<html.indexOf('./project-store.js?v='));
 assert(html.indexOf('./project-store.js?v=')<html.indexOf('./app.js?v='));
 assert(html.indexOf('./project-ui.js?v=')<html.indexOf('./app.js?v='));
-assert(read('CHANGELOG.md').includes('## v1.38.0.2'));
-console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.38.0.2');
+assert(read('CHANGELOG.md').includes('## v1.38.1'));
+console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.38.1');
 console.log('4 UI/static tests passed');
