@@ -281,6 +281,22 @@ window.dropboxApi = {
         });
     },
 
+    async getMetadataRevision() {
+        try {
+            const metadata = await this._request('api', '/files/get_metadata', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: this.METADATA_PATH }), signal: AbortSignal.timeout(12000)
+            });
+            if (metadata?.['.tag'] !== 'file' || typeof metadata.rev !== 'string' || !metadata.rev) {
+                throw new Error('Dropboxのリビジョンを取得できませんでした。');
+            }
+            return metadata.rev;
+        } catch (error) {
+            if (error.status === 409 && error.message.includes('path/not_found')) return null;
+            throw error;
+        }
+    },
+
     async downloadMetadata({ withRevision = false, revision = null, signal } = {}) {
         const args = { path: revision ? 'rev:' + revision : this.METADATA_PATH };
         try {
@@ -763,7 +779,8 @@ window.dropboxApi = {
             });
         } catch (error) {
             console.error('Lock file upload failed:', error);
-            throw new Error('ロックファイルのアップロードに失敗しました。');
+            throw Object.assign(new Error('ロックファイルのアップロードに失敗しました。', { cause: error }),
+                { status: error.status, retryAfter: error.retryAfter });
         }
     },
 

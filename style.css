@@ -1758,6 +1758,39 @@ body.dark-mode #settings-screen a:where(:not(.app-info-action)):hover {
     gap: var(--spacing-unit);
     margin-top: calc(var(--spacing-unit) * 2);
 }
+#dropboxConflictDialog {
+    width: min(480px, calc(100vw - 32px));
+    min-width: 0;
+    max-height: calc(100dvh - 32px);
+    overflow-wrap: anywhere;
+}
+#dropboxConflictDialog .dialog-actions {
+    flex-direction: column;
+}
+#dropboxConflictDialog .dropbox-conflict-choice {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    color: var(--text-primary);
+    min-height: 44px;
+    text-align: start;
+    text-transform: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+}
+#dropboxConflictDialog .dropbox-conflict-choice:hover {
+    background-color: var(--bg-tertiary);
+}
+#dropboxConflictDialog .dropbox-conflict-choice[hidden] {
+    display: none;
+}
+#dropboxConflictDialog .dialog-actions .dialog-message {
+    margin: 4px 0;
+}
+#dropboxConflictDialog .dialog-cancel-btn {
+    align-self: flex-end;
+    min-height: 44px;
+}
 .custom-dialog.release-notes-dialog {
     width: min(720px, calc(100vw - 32px));
     max-height: min(720px, calc(100dvh - 32px));

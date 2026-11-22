@@ -797,10 +797,93 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 ui.showCustomConfirm = async message => { warnings.push(message); return true; };
                 await app.handleManualDropboxSync();
                 eq(warnings.length, 0);
-                eq(await metadata(), JSON.stringify(legacy));
-                assert(statuses.at(-1).message.includes('共通の同期基準'));
+                assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                assert((await db.getAllChats()).some(row => row.id === chatId));
                 eq(await ids(linked), [document.id]);
             });
+            await test('First join preserves both sets of chats through CAS and a lost upload response', () => withDatabase(async () => {
+                files.delete(api.METADATA_PATH);
+                const addChats = async (prefix) => {
+                    const a = await saveChat(1, prefix + '1');
+                    await saveChat(2, prefix + '2');
+                    const document = await db.addLibraryDocument(file(prefix + ' original'));
+                    const project = await db.createProject({ name: prefix });
+                    await db.setChatProject(a, project.id);
+                    await db.setChatDocuments(a, [document.id]);
+                    return { identity: (await db.getChat(a)).syncIdentity, project, document };
+                };
+                await connect();
+                const pc = await addChats('PC');
+                await app._doPush();
+                await withDatabase(async () => {
+                    await connect();
+                    const phone = await addChats('Phone');
+                    let bumped = false;
+                    beforeCommit = async () => {
+                        if (bumped) return;
+                        bumped = true;
+                        const rival = JSON.parse(await metadata());
+                        rival.syncId = 'join-cas-concurrent';
+                        rival.data.settings.push({ key: 'join-rival-setting', value: true });
+                        files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(rival)]), rev: String(++counter) });
+                    };
+                    const attempted = metadataAttempts;
+                    loseUploadResponse = true;
+                    try { await app.handleManualDropboxSync(); }
+                    finally { beforeCommit = undefined; }
+                    eq(metadataAttempts - attempted, 2);
+                    eq(statuses.at(-1).status, 'error');
+                    eq((await db.getAllChats()).length, 2);
+                    eq((await checkpoint()).syncId, null);
+                    eq(JSON.parse(await metadata()).data.chats.length, 4);
+                    const connection = st.db;
+                    const name = connection.name;
+                    connection.close();
+                    st.db = await DocumentLibrary.request(indexedDB.open(name));
+                    await db.updateChatTitleDb(1, 'Phone edited after upload');
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                    const chats = await db.getAllChats();
+                    eq(chats.map(chat => chat.title).sort(), ['PC1', 'PC2', 'Phone edited after upload', 'Phone2']);
+                    eq((await db.getSetting('join-rival-setting')).value, true);
+                    eq(chats.find(chat => chat.syncIdentity === phone.identity).id, 1);
+                    for (const row of [pc, phone]) {
+                        const chat = chats.find(chat => chat.syncIdentity === row.identity);
+                        eq((await db.getChatProject(chat.id)).id, row.project.id);
+                        eq(await ids(chat.id), [row.document.id]);
+                    }
+                    assert(chats.every(chat => !chat.syncConflictOf));
+                    const final = await metadata();
+                    await app.handleManualDropboxSync();
+                    eq(await metadata(), final);
+                    eq((await db.getAllChats()).length, 4);
+                });
+                const committed = await metadata();
+                const publishes = metadataAttempts;
+                await withDatabase(async () => {
+                    await connect();
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
+                    eq((await db.getAllChats()).length, 4);
+                    eq((await checkpoint()).syncId, JSON.parse(committed).syncId);
+                });
+                eq(metadataAttempts, publishes);
+                await withDatabase(async () => {
+                    await connect();
+                    const id = await saveChat(1, 'Local chat with a remote tombstone');
+                    const chat = await db.getChat(id);
+                    const head = JSON.parse(committed);
+                    head.syncProtection.deletedChats.push(chat.syncIdentity);
+                    const tombstoned = JSON.stringify(head);
+                    files.set(api.METADATA_PATH, { blob: new Blob([tombstoned]), rev: String(++counter) });
+                    await app.handleManualDropboxSync();
+                    eq(statuses.at(-1).status, 'error');
+                    eq(await metadata(), tombstoned);
+                    eq((await db.getChat(id)).syncIdentity, chat.syncIdentity);
+                    eq((await checkpoint()).syncId, null);
+                });
+                eq(metadataAttempts, publishes);
+            }));
             await test('Dropbox round-trips projects and empty deletions, retains concurrent changes and blocks old data', async () => {
                 const uploadsBefore = originalUploads.length;
                 files.delete(api.METADATA_PATH);
@@ -947,7 +1030,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     [['delete', 'replaced', JSON.parse(second).syncId], ['create', 'replaced', JSON.parse(second).syncId]]);
                 eq((await db.getChatSyncContext()).pending, false);
             }));
-            await test('Two Dropbox clients merge independent changes, repair references and recover conflicts exactly once', () => withDatabase(async () => {
+            await test('Joined clients merge independent changes, keep references and hold chat conflicts', () => withDatabase(async () => {
                 files.delete(api.METADATA_PATH);
                 await connect();
                 const profile = await db.addProfile({ name: 'Shared profile' });
@@ -972,7 +1055,6 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     return { id, identity: (await db.getChat(id)).syncIdentity, document, imageId, project };
                 };
                 await db.updateChatTitleDb(1, 'PC title');
-                await edit(3, 'PC conflicting message');
                 await db.deleteChat(4);
                 await db.deleteChat(5);
                 const pc = await branch('PC');
@@ -986,8 +1068,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     }
                     await db.updateChatPinState(1, true);
                     await db.updateChatTitleDb(2, 'Mobile title');
-                    await edit(3, 'Mobile conflicting message');
-                    await edit(4, 'Mobile edit of deleted chat');
+                    await db.deleteChat(4);
                     await db.deleteChat(5);
                     const result = await branch('Mobile');
                     await app._doPush();
@@ -1015,12 +1096,9 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 eq((await db.getChat(1)).title, 'PC title');
                 eq((await db.getChat(1)).isPinned, true);
                 eq((await db.getChat(2)).title, 'Mobile title');
-                const conflictId = JSON.parse(initial).data.chats.find(row => row.id === 3).syncIdentity;
-                eq(chats.filter(row => row.syncIdentity === conflictId || row.syncConflictOf === conflictId)
-                    .map(row => row.messages[0].content).sort(), ['Mobile conflicting message', 'PC conflicting message']);
+                assert(chats.every(row => !row.syncConflictOf));
                 eq(await db.getChat(4), undefined);
                 eq(await db.getChat(5), undefined);
-                assert(chats.some(row => row.syncConflictOf && row.messages[0].content === 'Mobile edit of deleted chat'));
                 eq(merged.syncProtection.deletedChats.length, 2);
                 eq(byIdentity.get(pc.identity).id, pc.id);
                 assert(byIdentity.get(mobile.identity).id !== pc.id);
@@ -1038,8 +1116,23 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 const attemptsAfter = metadataAttempts;
                 await app.handlePull();
                 eq(metadataAttempts, attemptsAfter);
-                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 2);
+                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 0);
                 assert(!(await db.getChatSyncContext()).pending);
+                const originalHead = remote();
+                const originalChat = await db.getChat(3);
+                await edit(3, 'PC conflicting message');
+                const rival = JSON.parse(await metadata());
+                rival.syncId = 'joined-chat-conflict';
+                rival.data.chats.find(row => row.id === 3).messages[0].content = 'Mobile conflicting message';
+                const rivalJson = JSON.stringify(rival);
+                files.set(api.METADATA_PATH, { blob: new Blob([rivalJson]), rev: String(++counter) });
+                await app._doPush();
+                assert(statuses.at(-1).message.includes('チャットの変更が競合'));
+                eq(await metadata(), rivalJson);
+                eq((await db.getChat(3)).messages[0].content, 'PC conflicting message');
+                eq((await db.getAllChats()).length, chats.length);
+                files.set(api.METADATA_PATH, originalHead);
+                await put('chats', originalChat);
 
                 const changed = JSON.parse(await metadata());
                 changed.syncId = 'later-remote-write';
@@ -1060,7 +1153,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                 eq((await db.getChat(1)).title, 'Later PC title');
                 eq((await db.getChat(2)).title, 'Later remote title');
                 eq((await db.getSetting('written-during-merge')).value, 'peer setting');
-                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 2);
+                eq((await db.getAllChats()).filter(row => row.syncConflictOf).length, 0);
 
                 const afterPeer = JSON.parse(await metadata());
                 afterPeer.syncId = 'update-during-editor';
@@ -1086,6 +1179,86 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     eq((await checkpoint()).syncId, saved.syncId);
                     eq(await (await read('image_store', mobile.imageId)).blob.text(), 'Mobile');
                 } finally { files.set(imagePath, originalImage); }
+            }));
+
+            await test('Conflict backups survive reopening, fence the choice by CAS and recover a lost response', () => withDatabase(async () => {
+                files.delete(api.METADATA_PATH);
+                await connect();
+                const id = await saveChat(1, 'Common title');
+                await app._doPush();
+                let current = JSON.parse(await metadata());
+                const publishRemote = title => {
+                    current.syncId = 'peer-' + counter;
+                    current.data.chats.find(row => row.id === id).title = title;
+                    files.set(api.METADATA_PATH, { blob: new Blob([JSON.stringify(current)]), rev: String(++counter) });
+                };
+                publishRemote('Shared first edit');
+                await db.updateChatTitleDb(id, 'Device edit');
+                await saveChat(2, 'Independent new chat');
+                const backups = () => DocumentLibrary.transaction(st.db, [db.chatJournal.store], 'readonly', tx =>
+                    DocumentLibrary.request(tx.objectStore(db.chatJournal.store).getAll(IDBKeyRange.bound('conflict-backup:', 'conflict-backup:\uffff'))));
+                const attempts = metadataAttempts;
+                await app._doPush();
+                eq(metadataAttempts, attempts);
+                const name = st.db.name;
+                st.db.close();
+                st.db = await DocumentLibrary.request(indexedDB.open(name));
+                const [archive] = await backups();
+                eq(JSON.parse(await archive.deviceBackup.text()).data.chats.find(row => row.id === id).title, 'Device edit');
+                eq(JSON.parse(await archive.cloudBackup.text()).data.chats[0].title, 'Shared first edit');
+                await app._doPush();
+                eq((await backups()).length, 1);
+                const prompt = ui.showDropboxConflictChoice;
+                ui.showDropboxConflictChoice = async () => null;
+                try {
+                    await app.handleManualDropboxSync();
+                    eq(metadataAttempts, attempts);
+                    eq((await backups()).length, 1);
+                    eq((await db.getChat(id)).title, 'Device edit');
+                    ui.showDropboxConflictChoice = async () => 'remote';
+                    beforeCommit = () => publishRemote('Shared second edit');
+                    await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).message.includes('選び直してください'));
+                    eq((await db.getChat(id)).title, 'Device edit');
+                    eq(JSON.parse(await metadata()).data.chats[0].title, 'Shared second edit');
+                    beforeCommit = undefined;
+                    loseUploadResponse = true;
+                    await app.handleManualDropboxSync();
+                    eq((await db.getChat(id)).title, 'Device edit');
+                    const settled = await metadata();
+                    await app._doPush();
+                    eq(await metadata(), settled);
+                    eq((await db.getAllChats()).map(row => row.title).sort(), ['Independent new chat', 'Shared second edit']);
+                    assert(!(await db.getChatSyncContext()).pending);
+                    const backup = await archive.deviceBackup.text();
+                    await withDatabase(async () => {
+                        const restored = await app.importDataFromString(backup, { source:'file', allowLibraryReplace:true, allowProjectReplace:true });
+                        assert(restored);
+                        eq((await db.getChat(id)).title, 'Device edit');
+                    });
+                    current = JSON.parse(await metadata());
+                    publishRemote('Another Dropbox edit');
+                    await db.updateChatTitleDb(id, 'Keep this device edit');
+                    ui.showDropboxConflictChoice = async () => 'local';
+                    await app.handleManualDropboxSync();
+                    current = JSON.parse(await metadata());
+                    eq(current.data.chats.find(row => row.id === id).title, 'Keep this device edit');
+                    const cloudVersions = await Promise.all((await backups()).map(async row => JSON.parse(await row.cloudBackup.text())));
+                    assert(cloudVersions.some(row => row.data.chats.some(chat => chat.title === 'Another Dropbox edit')));
+                    const identity = (await db.getChat(id)).syncIdentity;
+                    publishRemote('Edited before deletion');
+                    await db.deleteChat(id);
+                    ui.showDropboxConflictChoice = async options => options.deletion ? 'delete' : null;
+                    await app.handleManualDropboxSync();
+                    const deletion = JSON.parse(await metadata());
+                    assert(deletion.syncProtection.deletedChats.includes(identity));
+                    eq(deletion.data.chats.map(row => row.title), ['Independent new chat']);
+                    const kept = await Promise.all((await backups()).map(async row => JSON.parse(await row.cloudBackup.text())));
+                    assert(kept.some(row => row.data.chats.some(chat => chat.title === 'Edited before deletion')));
+                } finally {
+                    beforeCommit = undefined;
+                    ui.showDropboxConflictChoice = prompt;
+                }
             }));
 
             await test('Interrupted first upload recovers its exact receipt while subsequent local edits remain safe', () => withDatabase(async () => {
@@ -1233,6 +1406,14 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     }
                     history.set(historyRev(130), { id: metadataFileId, rev: historyRev(130), blob: new Blob([baseJson]) });
                     await app.handleManualDropboxSync();
+                    assert(statuses.at(-1).message.includes('チャットの削除と編集'));
+                    eq(await metadata(), remoteJson);
+                    eq((await db.getChat(2)).title, 'PC recovered edit');
+                    eq((await db.getAllChats()).length, 3);
+                    // Resolve the fixture's edit explicitly before retrying.
+                    await put('chats', { ...await db.getChat(2), title: removed.title });
+                    historyRequests = [];
+                    await app.handleManualDropboxSync();
                     assert(statuses.at(-1).status !== 'error', JSON.stringify(statuses.at(-1)));
                     eq(historyRequests, [null, historyRev(99)]);
                     const synced = JSON.parse(await metadata());
@@ -1241,7 +1422,7 @@ async function runDocumentLibraryTests({ app, db, st, ui, el, test, assert, eq }
                     eq((await db.getChat(1)).systemPrompt, 'PC prompt');
                     eq((await db.getChat(1)).syncDraftSource, previousIdentity);
                     eq(await db.getChat(2), undefined);
-                    assert(chats.some(row => row.syncConflictOf && row.title.includes('PC recovered edit')));
+                    assert(chats.every(row => !row.syncConflictOf));
                     assert(synced.syncProtection.deletedChats.includes(db.chatJournal.legacyIdentity(earlier, 2)));
                     const imported = chats.find(row => row.title === 'Mobile');
                     assert(imported && imported.id !== pc.id);

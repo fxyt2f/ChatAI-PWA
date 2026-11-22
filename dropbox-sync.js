@@ -22,8 +22,20 @@ const DropboxSync = (() => {
         const x = key(a), y = key(b);
         return x < y ? -1 : x > y ? 1 : 0;
     });
-    const conflict = label => new Error(`${label}の変更が競合しています。両方のデータを保持しました。`);
+    const conflict = (label, chatId, deletion) => Object.assign(
+        new Error(`${label}の変更が競合しています。両方のデータを保持しました。`),
+        { syncConflict: { label, chatId, deletion } });
     const undecided = Symbol('conflict');
+    const deletedApiConfigIdsKey = 'apiConfigDeletedIdsV1318';
+
+    function joinSettingConflict(key, field) {
+        const knownKeys = ['apiConfigs', SettingsV136.GLOBAL_KEY, SettingsV136.SUCCESS_KEY,
+            SettingsV136.REMOVED_MODELS_KEY, deletedApiConfigIdsKey, 'activeProfileId', 'legacyInitialModelRefV136',
+            'globalOtherSettings', 'globalThemeSettings', 'themeSettingsProfileScoped', 'textFormattingSettings'];
+        const error = conflict('設定');
+        error.syncDiagnostic = 'join-setting-conflict:' + (knownKeys.includes(key) ? key : 'other') + (field ? '.' + field : '');
+        return error;
+    }
 
     function choose(base, local, remote) {
         if (same(local, remote) || same(base, remote)) return local;
@@ -77,6 +89,63 @@ const DropboxSync = (() => {
             revision: (_, a, b) => Number.isSafeInteger(a) && Number.isSafeInteger(b) ? Math.max(a, b) : undecided
         });
         return value === undecided ? value : { key: local.key, value };
+    }
+
+    function joinApiConfigs(local, remote) {
+        const configMap = configs => new Map(configs.map(config => [config?.id, config]));
+        const left = configMap(local.value), right = configMap(remote.value);
+        if (left.size !== local.value.length || right.size !== remote.value.length ||
+            [...union(left, right)].some(id => typeof id !== 'string' || !id.trim() || id !== id.trim())) return undecided;
+        // Keep the shared order and preserve config IDs used by chat and profile model references.
+        const value = [...right.values()];
+        for (const [id, config] of left) {
+            if (!right.has(id)) value.push(config);
+            else if (!same(config, right.get(id))) return undecided;
+        }
+        return { ...remote, value };
+    }
+
+    function joinPreferences(key, local, remote, baseline, defaults, section) {
+        const global = key === SettingsV136.GLOBAL_KEY && !section;
+        const fields = new Set([...Object.keys(local), ...Object.keys(remote)]);
+        const entries = [];
+        // These credentials belong to the configured server. Do not combine a
+        // URL from one device with credentials added for a different URL.
+        const sdConnection = ['sdApiUrl', 'sdApiUser', 'sdApiPassword'];
+        if (global && sdConnection.some(field => fields.has(field))) {
+            const initial = { ...SettingsV136.pick(defaults, sdConnection), ...SettingsV136.pick(baseline, sdConnection) };
+            const connection = side => ({ ...initial, ...SettingsV136.pick(side, sdConnection) });
+            const merged = choose(initial, connection(local), connection(remote));
+            if (merged === undecided) throw joinSettingConflict(key, 'sdApiUrl');
+            for (const field of sdConnection) if (fields.delete(field)) entries.push([field, merged[field]]);
+        }
+        for (const field of fields) {
+            const left = local[field], right = remote[field];
+            let value;
+            if (!own(local, field) || !own(remote, field)) {
+                // These preference records may be sparse in earlier exports.
+                value = own(remote, field) ? right : left;
+            } else if (global && (field === 'theme' || field === 'appearance') && object(left) && object(right)) {
+                value = joinPreferences(key, left, right, object(baseline[field]) ? baseline[field] : {}, defaults[field] ?? {}, field);
+            } else if (global && field === 'dropboxAppKey' && typeof left === 'string' && typeof right === 'string') {
+                // Dropbox authentication trims this value. Keep the shared representation if equivalent.
+                const effective = choose('', left.trim(), right.trim());
+                value = effective === undecided ? undecided : effective === right.trim() ? right : left;
+            } else if (global && field === 'revision' && Number.isSafeInteger(left) && Number.isSafeInteger(right)) {
+                value = Math.max(left, right);
+            } else {
+                const initial = own(baseline, field) ? baseline[field] : own(defaults, field) ? defaults[field] : undefined;
+                value = choose(initial, left, right);
+            }
+            if (value === undecided) {
+                const knownFields = global ? [...SettingsV136.globalKeys, 'schemaVersion', 'revision'] :
+                    section ? SettingsV136[section + 'Keys'] : Object.keys(defaults);
+                const path = knownFields.includes(field) ? (section ? section + '.' + field : field) : undefined;
+                throw joinSettingConflict(key, path);
+            }
+            entries.push([field, value]);
+        }
+        return Object.fromEntries(entries);
     }
 
     function mergeMemory(base, local, remote) {
@@ -193,16 +262,17 @@ const DropboxSync = (() => {
             updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0) };
     }
 
-    async function mergeChats(base, local, remote, deleted) {
+    function mergeChats(base, local, remote, deleted, decisions) {
         const result = new Map();
-        const copies = [];
         for (const id of union(base, local, remote, deleted)) {
             const before = base.get(id), left = local.get(id), right = remote.get(id);
             if (deleted.has(id) || before && (!left || !right)) {
-                if (!before && (left || right)) throw conflict('削除済みチャット');
+                if (!before && (left || right)) throw conflict('削除済みチャット', id, true);
                 deleted.add(id);
                 for (const row of [left, right]) {
-                    if (row && !same(chatValue(row), chatValue(before))) copies.push(row);
+                    if (row && !same(chatValue(row), chatValue(before)) && decisions?.get(id) !== 'delete') {
+                        throw conflict('チャットの削除と編集', id, true);
+                    }
                 }
                 continue;
             }
@@ -216,20 +286,12 @@ const DropboxSync = (() => {
                 result.set(id, combined);
                 continue;
             }
-            const [original, copy] = sorted([left, right], row => signature(chatValue(row)));
-            result.set(id, original);
-            copies.push(copy);
-        }
-        for (const row of copies) {
-            const digest = await DocumentLibrary.digest(new Blob([signature(chatValue(row))]));
-            const identity = digest.slice(0, 32);
-            if (deleted.has(identity)) continue;
-            if (result.has(identity)) {
-                if (result.get(identity).chat.syncConflictOf !== row.identity) throw conflict('チャットの同期ID');
+            const decision = decisions?.get(id);
+            if (before && left && right && ['local', 'remote'].includes(decision)) {
+                result.set(id, decision === 'local' ? left : right);
                 continue;
             }
-            result.set(identity, { ...row, identity, chat: { ...row.chat, syncConflictOf: row.identity,
-                title: `${row.chat.title || '無題のチャット'}（同期競合）` } });
+            throw conflict('チャット', before && left && right ? id : undefined);
         }
         return result;
     }
@@ -262,15 +324,17 @@ const DropboxSync = (() => {
         return DocumentLibrary.uniqueId();
     }
 
-    async function merge(base, local, remote, pendingDeletes) {
+    function merge(base, local, remote, pendingDeletes, joining = null, decisions) {
         const [before, left, right] = [base, local, remote].map(view);
         const rows = (key, label, resolve) => mergeRows(before[key], left[key], right[key], label, resolve);
         const deleted = new Set([...(base.syncProtection?.deletedChats ?? []),
             ...(remote.syncProtection?.deletedChats ?? []), ...pendingDeletes]);
-        const chats = assignIds(await mergeChats(before.chats, left.chats, right.chats, deleted), local, remote);
+        const chats = assignIds(mergeChats(before.chats, left.chats, right.chats, deleted, decisions), local, remote);
         const data = {
-            chats: chats.map(row => row.record), profiles: rows('profiles', 'プロファイル', mergeProfile),
-            settings: rows('settings', '設定', mergeSetting), memories: rows('memories', 'メモリ', mergeMemory),
+            chats: chats.map(row => row.record),
+            profiles: rows('profiles', 'プロファイル', joining?.profile ?? mergeProfile),
+            settings: rows('settings', '設定', joining?.setting ?? mergeSetting),
+            memories: rows('memories', 'メモリ', mergeMemory),
             assets: rows('assets', '画像アセット')
         };
         const documents = rows('documents', '資料ライブラリ');
@@ -302,6 +366,79 @@ const DropboxSync = (() => {
     }
 
     const sameLegacyContents = (local, remote) => same(legacyContents(local), legacyContents(remote));
+
+    function participation({ base, checkpoint, priorSyncId, syncedRevisions, local, bootstrap, deletes }) {
+        if (base) return 'joined';
+        if (checkpoint?.syncId || priorSyncId || syncedRevisions.some(Boolean) ||
+            ['push', 'pull'].includes(checkpoint?.source)) {
+            return checkpoint?.source === 'migration' && priorSyncId && checkpoint.syncId === priorSyncId
+                ? 'legacy' : 'recovery-required';
+        }
+        const data = local.data;
+        const independent = deletes.length || data.chats.length || data.memories.length || data.assets.length ||
+            data.documentLibrary || data.projectData?.projects.length ||
+            !same(logical(local).profiles, bootstrap?.profiles ?? []);
+        return independent ? 'join-local' : 'join-empty';
+    }
+
+    function planJoin({ local, remote, bootstrap, settingDefaults = {}, deletes, identify, isIdentity }) {
+        const checkActiveProfile = data => {
+            const id = data.settings.find(row => row.key === 'activeProfileId')?.value;
+            if (id != null && !data.profiles.some(profile => profile.id === id)) {
+                throw joinSettingConflict('activeProfileId');
+            }
+        };
+        checkActiveProfile(local.data);
+        const lineage = remote?.syncProtection?.lineage ?? DocumentLibrary.uniqueId();
+        const live = new Set(local.data.chats.map(chat => chat.syncIdentity));
+        const pendingDeletes = deletes.filter(id => !live.has(id));
+        if (!remote) return { data: local.data, deleted: sorted(new Set(pendingDeletes), id => id), lineage };
+        validate(remote, isIdentity, { legacy: true });
+        checkActiveProfile(remote.data);
+        const identified = { ...remote, data: { ...remote.data,
+            chats: identify(remote.data.chats, remote.syncId) } };
+        // Bootstrap records describe generated defaults on this device. They
+        // can resolve overlapping settings but are never a shared deletion base.
+        const defaults = new Map(bootstrap?.settings ?? []);
+        const generatedProfiles = new Map(bootstrap?.profiles ?? []);
+        const profile = (_, left, right) => {
+            const generated = generatedProfiles.get(left?.id);
+            return generated && same(generated, left) &&
+                !local.data.memories.some(row => row.profileId === left.id) ? right : undecided;
+        };
+        const apiConfigs = envelope => envelope.data.settings.find(row => row.key === 'apiConfigs')?.value ?? [];
+        for (const [incoming, other] of [[local, remote], [remote, local]]) {
+            const configs = apiConfigs(incoming), existing = apiConfigs(other);
+            const deletedIds = other.data.settings.find(row => row.key === deletedApiConfigIdsKey)?.value;
+            if (Array.isArray(deletedIds) && Array.isArray(configs) && Array.isArray(existing) &&
+                configs.some(config => deletedIds.includes(config?.id) && !existing.some(row => row?.id === config.id))) {
+                throw joinSettingConflict('apiConfigs');
+            }
+        }
+        const setting = (_, left, right) => {
+            // This is a selection among the merged profiles. Preserve an existing
+            // shared selection when explicitly set, while retaining both profiles.
+            if (left.key === 'activeProfileId') return right.value != null ? right : left;
+            const baseline = defaults.get(left?.key);
+            if (own(settingDefaults, left.key) && object(left.value) && object(right.value)) {
+                return { ...right, value: joinPreferences(left.key, left.value, right.value,
+                    object(baseline?.value) ? baseline.value : {}, settingDefaults[left.key]) };
+            }
+            if (left.key === deletedApiConfigIdsKey && [left.value, right.value].every(ids =>
+                Array.isArray(ids) && ids.every(id => typeof id === 'string' && id.trim()))) {
+                return { ...right, value: [...new Set([...right.value, ...left.value])] };
+            }
+            if (baseline && same(baseline, left)) return right;
+            const resolved = left.key === 'apiConfigs' && Array.isArray(left.value) && Array.isArray(right.value)
+                ? joinApiConfigs(left, right) : mergeSetting(undefined, left, right);
+            if (resolved === undecided) throw joinSettingConflict(left.key);
+            return resolved;
+        };
+        const empty = { data: { chats: [], profiles: [], settings: [], memories: [], assets: [] } };
+        const result = merge(empty, local, identified, pendingDeletes, { profile, setting });
+        checkActiveProfile(result.data);
+        return { ...result, lineage };
+    }
 
     function applyLegacyIdentities(reference, incoming, isIdentity) {
         const ids = new Map(reference.data.chats.map(chat => [chat.id, chat.syncIdentity]));
@@ -377,7 +514,7 @@ const DropboxSync = (() => {
         return { base: resolvedBase, local: replace(local, localChats), remote: replace(remote, remoteChats), aliases };
     }
 
-    async function plan({ base, local, remote, priorSyncId, fresh, legacyIds, deletes, identify, isIdentity }) {
+    function plan({ base, local, remote, priorSyncId, legacyIds, deletes, identify, isIdentity, decisions }) {
         const knownIds = new Set(local.data.chats.map(chat => chat.syncIdentity));
         const pendingDeletes = deletes.filter(id => !knownIds.has(id));
         const lineage = remote?.syncProtection?.lineage ?? base?.syncProtection?.lineage ?? DocumentLibrary.uniqueId();
@@ -389,7 +526,7 @@ const DropboxSync = (() => {
         if (!base) {
             const exact = sameLegacyContents(local, remote);
             if (exact && pendingDeletes.length) throw baseError('unverified-local-deletions');
-            if (!exact && (priorSyncId || !fresh)) throw baseError('missing-snapshot');
+            if (!exact) throw baseError('missing-snapshot');
             const localById = new Map(local.data.chats.map(chat => [chat.id, chat.syncIdentity]));
             const aliases = new Map();
             const chats = identify(remote.data.chats, remote.syncId).map(chat => {
@@ -420,7 +557,7 @@ const DropboxSync = (() => {
             const retainedDeletes = new Set(remote.syncProtection.deletedChats);
             if (baseProtection.deletedChats.some(id => !retainedDeletes.has(id))) throw new Error(oldWriter);
         }
-        return { ...await merge(base, local, remote, pendingDeletes), lineage };
+        return { ...merge(base, local, remote, pendingDeletes, null, decisions), lineage };
     }
 
     function equalBytes(a, b, pairs) {
@@ -468,5 +605,6 @@ const DropboxSync = (() => {
         });
     }
 
-    return { validate, plan, legacyRecovery, baseError, logical, same, sameLegacyContents, signature, concurrentLocal, assertCapture };
+    return { validate, participation, planJoin, plan, legacyRecovery, baseError, logical, same, sameLegacyContents,
+        signature, concurrentLocal, assertCapture };
 })();
