@@ -76,7 +76,8 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
         'googleSearchApiKey', 'googleSearchEngineId', 'sdApiUrl', 'sdApiUser', 'sdApiPassword',
         'memoryModelRef', 'memoryExtractionPrompt', 'sdQcModelRef', 'sdPromptImproveModelRef',
         'sdEnableQualityChecker', 'sdQcModel', 'sdQcPrompt', 'sdQcRetries', 'sdPromptImproveModel',
-        'sdPromptImproveSystemPrompt', 'theme', 'appearance', 'enableStreamingOutput', ...Object.keys(chatTitleDefaults)];
+        'sdPromptImproveSystemPrompt', 'theme', 'appearance', 'enableStreamingOutput', 'useLegacyFunctionCalling',
+        ...Object.keys(chatTitleDefaults)];
     const pick = (source = {}, keys = []) => Object.fromEntries(keys.filter(key =>
         Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, structuredClone(source[key])]));
     function normalizeChatNumbers(source, fallback = {}) {
@@ -975,6 +976,7 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             applyGlobalSettingsV136() {
                 if (!state.globalSettingsV136) return;
                 Object.assign(state.settings, chatTitleDefaults, { enableStreamingOutput: false }, pick(state.globalSettingsV136, globalKeys));
+                state.settings.useLegacyFunctionCalling = state.globalSettingsV136.useLegacyFunctionCalling === true;
                 state.settings.includeThoughts = state.globalSettingsV136.showThoughtProcess === true;
                 this.applyProfileAppearanceV136();
             },

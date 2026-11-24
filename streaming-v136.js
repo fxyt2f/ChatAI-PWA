@@ -439,7 +439,135 @@
         return accumulator.finish(done);
     }
 
-    const api = { canStream, collectResponse, readSse, reasoningText, openAIUsageMetadata };
+    function interactionsAccumulator() {
+        const records = new Map();
+        const thoughtSignatureEvents = [];
+        const hasSignature = value => typeof value === 'string' && Boolean(value.trim());
+        const noteSignature = (event, index, signature) => {
+            if (thoughtSignatureEvents.length < 64)
+                thoughtSignatureEvents.push({ event, index, hasSignature: hasSignature(signature) });
+        };
+        let content = '', summary = '';
+        const malformed = () => new Error('Gemini Interactions のストリームステップが不正です。');
+        return (event, progress) => {
+            const { index, step, delta } = event;
+            switch (event.event_type) {
+                case 'step.start':
+                    if (!Number.isSafeInteger(index) || index < 0 || records.has(index) || !step?.type) throw malformed();
+                    records.set(index, { step, argumentChunks: [] });
+                    if (step.type === 'thought') noteSignature('step.start', index, step.signature);
+                    break;
+                case 'step.delta': {
+                    const record = records.get(index);
+                    if (!record || record.closed || !delta?.type) throw malformed();
+                    const target = record.step;
+                    if (delta.type === 'text' && target.type === 'model_output' && typeof delta.text === 'string') {
+                        const parts = target.content ||= [];
+                        if (parts.at(-1)?.type === 'text') parts.at(-1).text += delta.text;
+                        else parts.push({ type: 'text', text: delta.text });
+                        content += delta.text;
+                        progress({ content, thoughtSummary: summary });
+                    } else if (delta.type === 'thought_summary' && target.type === 'thought' && delta.content) {
+                        (target.summary ||= []).push(delta.content);
+                        if (delta.content.type === 'text' && typeof delta.content.text === 'string') {
+                            summary += delta.content.text;
+                            progress({ content, thoughtSummary: summary });
+                        }
+                    } else if (delta.type === 'arguments_delta' && target.type === 'function_call' && typeof delta.arguments === 'string') {
+                        record.argumentChunks.push(delta.arguments);
+                    } else if (delta.type === 'thought_signature' && target.type === 'thought') {
+                        noteSignature('step.delta/thought_signature', index, delta.signature);
+                        // An empty delta cannot replace a signature already received for this step.
+                        if (hasSignature(delta.signature)) target.signature = delta.signature;
+                    } else if (delta.type === target.type && ['tool_search_call', 'tool_search_result', 'function_call'].includes(target.type)) {
+                        for (const key of ['id', 'call_id', 'name', 'arguments', 'result', 'signature', 'is_error']) {
+                            if (Object.hasOwn(delta, key)) target[key] = delta[key];
+                        }
+                    } else {
+                        record.unsupported = true;
+                    }
+                    break;
+                }
+                case 'step.stop': {
+                    const record = records.get(index);
+                    if (!record || record.closed) throw malformed();
+                    record.closed = true;
+                    if (record.step.type === 'thought') noteSignature('step.stop', index, record.step.signature);
+                    break;
+                }
+                case 'interaction.completed': {
+                    const result = event.interaction;
+                    if (!result?.status) throw malformed();
+                    const ordered = [...records.entries()].sort(([a], [b]) => a - b);
+                    const mayExecute = ['completed', 'requires_action'].includes(result.status);
+                    const incompleteSteps = mayExecute && ordered.some(([key, record], offset) =>
+                        key !== offset || !record.closed || record.unsupported);
+                    const steps = ordered.map(([, record]) => {
+                        if (mayExecute && record.argumentChunks.length) {
+                            const args = record.argumentChunks.join('');
+                            try { record.step.arguments = JSON.parse(args); }
+                            catch { record.step.arguments = args; } // Use the JSON adapter's validation.
+                        }
+                        return record.step;
+                    });
+                    return { ...result, steps, incompleteSteps, thoughtSignatureEvents };
+                }
+            }
+            return null;
+        };
+    }
+
+    function responsesAccumulator() {
+        let content = '', summary = '';
+        return (event, progress) => {
+            if (['response.completed', 'response.incomplete', 'response.failed', 'response.cancelled'].includes(event.type)) {
+                const status = event.type.split('.')[1];
+                if (event.response?.status !== status || !Array.isArray(event.response.output))
+                    throw new Error('OpenRouter Responses のストリーム終端が不正です。');
+                // The terminal response contains the ordered, complete output items,
+                // including arguments, call IDs, search results and encrypted reasoning.
+                return event.response;
+            }
+            if (typeof event.delta === 'string') {
+                if (event.type === 'response.output_text.delta') content += event.delta;
+                else if (event.type === 'response.reasoning_summary_text.delta') summary += event.delta;
+                else return null;
+                progress({ content, thoughtSummary: summary });
+            }
+            return null;
+        };
+    }
+
+    async function collectToolSearchResponse(provider, body, signal, progress) {
+        const accept = provider === 'gemini' ? interactionsAccumulator() : responsesAccumulator();
+        let result, eventCount = 0;
+        await readSse(body, signal, (payload, event) => {
+            if (event === 'ping' || event === 'keepalive') return false;
+            if (payload.trim() === '[DONE]' && event !== 'error') return true;
+            if (++eventCount > MAX_STREAM_BLOCKS) throw sizeError();
+            let data;
+            try { data = JSON.parse(payload); }
+            catch { throw new Error('APIストリームのイベントを解析できません。'); }
+            if (!data || typeof data !== 'object' || Array.isArray(data))
+                throw new Error('APIストリームの応答形式が不正です。');
+            if (event === 'error' || data.type === 'error' || data.event_type === 'error') {
+                const error = new Error('APIストリームの途中でエラーが発生しました。');
+                error.interruptionReason = 'stream-error';
+                throw error;
+            }
+            result = accept(data, progress);
+            return Boolean(result);
+        });
+        signal?.throwIfAborted();
+        if (!result) {
+            const error = new Error('APIストリームが完了前に切断されました。');
+            error.interruptionReason = 'stream-disconnected';
+            throw error;
+        }
+        return result;
+    }
+
+    const api = { canStream, collectResponse, collectToolSearchResponse, readSse, reasoningText, openAIUsageMetadata };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     else root.StreamingV136 = api;
 })(globalThis);

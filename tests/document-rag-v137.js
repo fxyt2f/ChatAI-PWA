@@ -2,7 +2,15 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
     const originalFetch = window.fetch, originalSearch = DocumentSearch.searchChat;
     const originalTools = window.functionCallingTools, originalDeclarations = window.functionDeclarations;
     const gemini = { apiConfigId: 'rag-gem', modelName: 'gemini-3-flash-preview' };
+    const toolRetrieval = { apiConfigId: 'rag-gem-retrieval', modelName: 'gemini-3.6-flash' };
+    const expandedGemini = { ...toolRetrieval, modelName: 'models/gemini-3.8-flash' };
+    const unknownGemini = { ...toolRetrieval, modelName: 'gemini-3.6-flash-unknown' };
     const router = { apiConfigId: 'rag-or', modelName: 'anthropic/claude-sonnet-4.5' };
+    const toolSearch = { apiConfigId: 'rag-or-responses', modelName: 'openai/gpt-6-luna' };
+    const deepInfraRouter = { ...toolSearch, modelName: 'deepseek/deepseek-v4.1-flash-1017' };
+    const haiku = { ...toolSearch, modelName: 'anthropic/claude-haiku-5.5' };
+    const sonnet = { ...toolSearch, modelName: 'anthropic/claude-sonnet-5.5' };
+    const unknownRouter = { ...toolSearch, modelName: 'fixture/unknown-tool-model' };
     const fullRouter = { apiConfigId: 'full-router', modelName: 'deepseek/deepseek-v4-pro' };
     const deepseek = { apiConfigId: 'full-deepseek', modelName: 'deepseek-v4-pro' };
     const bedrock = { apiConfigId: 'full-bedrock', modelName: 'anthropic.claude-sonnet-4-6' };
@@ -78,8 +86,13 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
         const configurations = [
             { id: gemini.apiConfigId, provider: 'gemini', apiKey: 'mock', enabled: true,
                 modelCandidates: [gemini.modelName, 'gemini-2.5-flash-image-preview'], defaultModel: gemini.modelName },
+            { id: toolRetrieval.apiConfigId, provider: 'gemini', apiKey: 'mock', enabled: true, geminiToolRetrieval: false, useLegacyFunctionCalling: true,
+                modelCandidates: [toolRetrieval.modelName, expandedGemini.modelName, unknownGemini.modelName, gemini.modelName],
+                defaultModel: toolRetrieval.modelName },
             { id: router.apiConfigId, provider: 'openrouter', apiKey: 'mock', enabled: true, baseUrl: 'https://rag-router.invalid/v1',
                 modelCandidates: [router.modelName], defaultModel: router.modelName },
+            { id: toolSearch.apiConfigId, provider: 'openrouter', apiKey: 'mock', enabled: true, openRouterToolSearch: false, useLegacyFunctionCalling: true,
+                modelCandidates: [toolSearch.modelName, deepInfraRouter.modelName, haiku.modelName, sonnet.modelName, unknownRouter.modelName], defaultModel: toolSearch.modelName },
             { id: fullRouter.apiConfigId, provider: 'openrouter', apiKey: 'mock', enabled: true,
                 modelCandidates: [fullRouter.modelName], defaultModel: fullRouter.modelName },
             { id: deepseek.apiConfigId, provider: 'zai', apiKey: 'mock', enabled: true, baseUrl: 'https://api.deepseek.com',
@@ -105,13 +118,14 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                     return Response.json({ name: 'models/' + gemini.modelName, inputTokenLimit: 100000, outputTokenLimit: 8192 });
                 }
                 if (String(url).startsWith('https://rag-router.invalid')) return Response.json({ data: [routerMetadata] });
-                if (String(url).startsWith('https://openrouter.ai/')) return Response.json({ data: [{
-                    ...routerMetadata, id: fullRouter.modelName }] });
+                if (String(url).startsWith('https://openrouter.ai/')) return Response.json({ data:
+                    [fullRouter, toolSearch, deepInfraRouter, haiku, sonnet, unknownRouter].map(ref => ({ ...routerMetadata, id: ref.modelName,
+                        context_length: 128000, supported_parameters: ['tools', 'reasoning'] })) });
                 if (String(url).startsWith('https://gemini-proxy.invalid/')) return Response.json({}, { status: 503 });
                 return originalFetch(url, options);
             }
             if (!isOpenAI(String(url)) && !/generativelanguage\.googleapis\.com|gemini-proxy\.invalid/.test(String(url))) return originalFetch(url, options);
-            const call = { url: String(url), body: JSON.parse(options.body), signal: options.signal };
+            const call = { url: String(url), body: JSON.parse(options.body), signal: options.signal, headers: options.headers };
             calls.push(call);
             return reply(call);
         };
@@ -346,6 +360,795 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
             reply = defaultReply;
             window.functionCallingTools = originalTools;
             window.functionDeclarations = originalDeclarations;
+        });
+
+        await test('OpenRouter Tool Search replays items once, saves portable history, and never falls back after execution', async () => {
+            const searchItems = [
+                { type: 'openrouter:tool_search', status: 'completed', query: 'calculate' },
+                { type: 'reasoning', encrypted_content: 'responses-opaque-fixture', summary: [{ type: 'summary_text', text: '計算を確認する。' }] },
+                { type: 'function_call', id: 'item-id', call_id: 'calculate-call', status: 'completed',
+                    name: 'calculate', arguments: '{"expression":"17*23+5"}' }
+            ];
+            const response = (output, input) => Response.json({ status: 'completed', model: toolSearch.modelName, output,
+                usage: { input_tokens: input, output_tokens: 4, total_tokens: input + 4, cost: input / 1000,
+                    cost_details: { server_tool_cost: 0.5 }, deferred_tools_details: { prompt_tokens: input + 10 } } });
+            const finalItems = [{ type: 'message', content: [{ type: 'output_text', text: '396' }] }];
+            const unavailable = () => Response.json({ error: { message: 'Responses API is not supported' } }, { status: 404 });
+            const doc = await file('calculation-context.txt', '計算メモ：資料には乗算式が記載されています。');
+            let executions = 0;
+            window.functionCallingTools = { ...originalTools, calculate: async (...args) => {
+                executions++;
+                return originalTools.calculate(...args);
+            } };
+            const begin = async (documents = []) => {
+                const id = await start({ ref: toolSearch, documents });
+                st.settings.geminiEnableFunctionCalling = true;
+                return id;
+            };
+            try {
+                await begin([doc]);
+                const before = calls.length;
+                reply = call => {
+                    if (calls.length === before + 1) return response(searchItems, 100);
+                    return response(finalItems, 120);
+                };
+                await send('計算メモを参考に、17*23+5を計算して。');
+                const [initial, continued] = calls.slice(before);
+                eq(calls.length - before, 2);
+                assert(initial.url.endsWith('/responses') && continued.url === initial.url);
+                eq(initial.body.store, false);
+                eq(initial.body.provider, undefined);
+                assert(initial.body.session_id);
+                eq(continued.body.session_id, initial.body.session_id);
+                eq(initial.body.tools.filter(tool => tool.type === 'function').length, 26);
+                assert(initial.body.tools.slice(1).every(tool => tool.defer_loading));
+                eq(JSON.stringify(continued.body.tools), JSON.stringify(initial.body.tools));
+                eq(JSON.stringify(continued.body.input.slice(-4, -1)), JSON.stringify(searchItems));
+                const result = continued.body.input.at(-1);
+                eq(result.type, 'function_call_output');
+                eq(result.call_id, 'calculate-call');
+                eq(JSON.parse(result.output).result, 396);
+                const saved = await answer(st.currentChatId);
+                eq(saved.content, '396');
+                eq(saved.usageMetadata.promptTokenCount, 220);
+                eq(saved.usageMetadata.totalTokenCount, 228);
+                eq(saved.usageMetadata.openRouterCostUsd, 0.22);
+                eq(saved.usageMetadata.openRouterCachedTokenCount, undefined);
+                eq(saved.continuation.toolResults, [{ name: 'calculate', response: { result: 396 } }]);
+                assert(!saved.tool_calls && !JSON.stringify(saved).includes('responses-opaque-fixture'));
+                assert((await app.loadChat(st.currentChatId)).ok);
+                reply = () => response(finalItems, 80);
+                await send('前の答えを確認して。');
+                assert(calls.at(-1).body.input.some(item => item.role === 'assistant' && item.content.startsWith('396') &&
+                    item.content.includes('calculate')));
+                assert(!JSON.stringify(calls.at(-1).body.input).includes('responses-opaque-fixture'));
+
+                await begin();
+                Object.assign(st.settings, { enableAutoRetry: true, maxRetries: 1, useFixedRetryDelay: true, fixedRetryDelaySeconds: 0 });
+                const failedAt = calls.length;
+                reply = () => calls.length === failedAt + 1 ? response(searchItems, 100) :
+                    Response.json({ error: { message: 'Temporary failure' } }, { status: 503 });
+                await send('17*23+5を計算して。');
+                eq(calls.length - failedAt, 2);
+                assert(calls.slice(failedAt).every(call => call.url.endsWith('/responses')));
+                eq(executions, 2);
+                assert((await db.getChat(st.currentChatId)).messages.some(message => message.role === 'error' || message.error));
+                eq((await answer(st.currentChatId)).usageMetadata.openRouterCostUsd, 0.1);
+
+                await begin();
+                Object.assign(st.settings, { enableAutoRetry: true, maxRetries: 1, useFixedRetryDelay: true, fixedRetryDelaySeconds: 0 });
+                const duplicateAt = calls.length;
+                reply = () => response(searchItems, 100);
+                await send('17*23+5を計算して。');
+                eq(calls.length - duplicateAt, 2);
+                eq(executions, 3);
+
+                await begin();
+                const abortAt = calls.length;
+                const continuing = gate();
+                reply = call => {
+                    if (calls.length === abortAt + 1) return response(searchItems, 100);
+                    return new Promise((resolve, reject) => {
+                        call.signal.addEventListener('abort', () => reject(call.signal.reason), { once: true });
+                        continuing.resolve(call.signal);
+                    });
+                };
+                const pending = send('17*23+5を計算して。');
+                const continuationSignal = await continuing.promise;
+                app.abortRequest();
+                await pending;
+                assert(continuationSignal.aborted);
+                eq(calls.length - abortAt, 2);
+                eq(executions, 4);
+
+                await begin();
+                const fallbackAt = calls.length;
+                reply = call => call.url.endsWith('/responses') ? unavailable() : routerResponse();
+                await send('こんにちは');
+                eq(calls.length - fallbackAt, 2);
+                assert(calls.at(-1).url.endsWith('/chat/completions'));
+                eq(executions, 4);
+                const regenerator = await answer(st.currentChatId);
+                const regenIndex = st.currentMessages.findLastIndex(message => message.content === regenerator.content);
+                reply = defaultReply;
+                await app.regenerateAnswerV137(regenIndex);
+                assert(calls.at(-1).url.endsWith('/chat/completions'));
+            } finally {
+                reply = defaultReply;
+                window.functionCallingTools = originalTools;
+            }
+        });
+
+        await test('Tool Search uses confirmed model and routing support and invalidates replay on route changes', async () => {
+            const use = async ref => {
+                await start({ ref });
+                st.settings.geminiEnableFunctionCalling = true;
+            };
+            const gemText = () => Response.json({ status: 'completed', steps: [
+                { type: 'model_output', content: [{ type: 'text', text: '確認しました。' }] }
+            ] });
+            const routerText = [{ type: 'message', content: [{ type: 'output_text', text: '確認しました。' }] }];
+            const routed = (provider, output = routerText, { model = deepInfraRouter.modelName, metadata = false } = {}) =>
+                Response.json({
+                    status: 'completed', model, output,
+                    ...(metadata && { openrouter_metadata: { endpoints: { available: [{ provider, selected: true }] } } })
+                }, { headers: provider && !metadata ? { 'X-Provider-Name': provider } : {} });
+            const setRouting = async openRouterRouting => {
+                await db.saveSetting('apiConfigs', configurations.map(config =>
+                    config.id === toolSearch.apiConfigId ? { ...config, openRouterRouting } : config));
+            };
+            try {
+                reply = request => request.url.endsWith('/interactions') ? gemText() :
+                    request.url.endsWith('/responses') ? routed('DeepInfra') : defaultReply(request);
+                for (const [ref, endpoint] of [
+                    [expandedGemini, '/interactions'], [unknownGemini, ':generateContent'],
+                    [deepInfraRouter, '/chat/completions'], [haiku, '/chat/completions'], [sonnet, '/chat/completions'],
+                    [unknownRouter, '/chat/completions']
+                ]) {
+                    await use(ref);
+                    const before = calls.length;
+                    await send('こんにちは。');
+                    eq(calls.length - before, 1);
+                    assert(calls.at(-1).url.includes(endpoint), calls.at(-1).url);
+                    if (ref === expandedGemini) eq(calls.at(-1).body.model, 'gemini-3.8-flash');
+                }
+
+                const preferences = { only: ['deepinfra'], order: ['deepinfra'], allow_fallbacks: false, data_collection: 'deny' };
+                await setRouting(preferences);
+                await app.saveGlobalSettingsV136({ useLegacyFunctionCalling: true });
+                for (const [ref, endpoint] of [[toolRetrieval, ':generateContent'], [deepInfraRouter, '/chat/completions']]) {
+                    await use(ref);
+                    await send('互換モードで送信してください。');
+                    const request = calls.at(-1);
+                    assert(request.url.includes(endpoint), request.url);
+                    assert(ref === toolRetrieval ? geminiToolNames(request).includes('calculate') :
+                        request.body.tools.some(tool => tool.function?.name === 'calculate'));
+                    if (ref === deepInfraRouter) eq(request.body.provider, preferences);
+                }
+                await app.saveGlobalSettingsV136({ useLegacyFunctionCalling: false });
+                await use(deepInfraRouter);
+                await send('優先順位を確認してください。');
+                assert(calls.at(-1).url.endsWith('/responses'));
+                eq(calls.at(-1).body.provider, preferences);
+                eq([...new Headers(calls.at(-1).headers).keys()].sort(), ['authorization', 'content-type', 'http-referer', 'x-title']);
+
+                for (const routing of [
+                    { only: ['deepinfra'], allow_fallbacks: true },
+                    { only: ['deepinfra'] },
+                    { only: ['deepseek'], allow_fallbacks: false },
+                    { only: ['deepinfra', 'deepseek'], allow_fallbacks: false }
+                ]) {
+                    await setRouting(routing);
+                    await use(deepInfraRouter);
+                    await send('従来経路で送信してください。');
+                    assert(calls.at(-1).url.endsWith('/chat/completions'));
+                    eq(calls.at(-1).body.provider, routing);
+                    assert(calls.at(-1).body.tools.length > 0);
+                }
+
+                await setRouting(preferences);
+                await use(deepInfraRouter);
+                st.settings.geminiEnableFunctionCalling = false;
+                await send('ツールなしで送信してください。');
+                assert(calls.at(-1).url.endsWith('/chat/completions'));
+                eq(calls.at(-1).body.tools, undefined);
+                st.settings.geminiEnableFunctionCalling = true;
+
+                let executions = 0;
+                window.functionCallingTools = { ...originalTools, calculate: async (...args) => {
+                    executions++;
+                    return originalTools.calculate(...args);
+                } };
+                const privateThinking = 'step8-raw-thinking-never-store';
+                const toolOutput = id => [
+                    { type: 'reasoning', encrypted_content: 'step7-opaque-route' },
+                    { type: 'reasoning', id: 'reasoning-' + id, content: [{ type: 'reasoning_text', text: privateThinking }] },
+                    { type: 'function_call', id: 'item-' + id, call_id: id, name: 'calculate', arguments: '{"expression":"17*23+5"}' }
+                ];
+                let before = calls.length;
+                const initialItems = toolOutput('first-route');
+                reply = () => calls.length === before + 1 ? routed('DeepInfra', initialItems) :
+                    routed('deepinfra', routerText, { metadata: true });
+                await send('計算してください。');
+                eq(executions, 1);
+                assert(!JSON.stringify(await db.getChat(st.currentChatId)).includes(privateThinking));
+                assert(!(await app._prepareExportData({ sync: true })).metadataJson.includes(privateThinking));
+                eq(calls[before + 1].body.input.slice(-4, -1), initialItems);
+                reply = () => routed('DeepInfra');
+                await send('同じ配信先で続けてください。');
+                const replay = calls.at(-1);
+                eq(replay.body.input.slice(0, -1), [...calls[before + 1].body.input, ...routerText]);
+                eq(replay.body.session_id, calls[before].body.session_id);
+
+                const unsupported = { only: ['deepseek'], allow_fallbacks: false };
+                await setRouting(unsupported);
+                reply = defaultReply;
+                await send('配信先を変えて続けてください。');
+                const switched = calls.at(-1);
+                assert(switched.url.endsWith('/chat/completions'));
+                eq(switched.body.provider, unsupported);
+                assert(!JSON.stringify(switched.body).includes(privateThinking));
+                eq(executions, 1);
+
+                await setRouting(preferences);
+                for (const [nextProvider, nextModel] of [['DeepSeek', deepInfraRouter.modelName], ['DeepInfra', unknownRouter.modelName]]) {
+                    await use(deepInfraRouter);
+                    before = calls.length;
+                    const previousExecutions = executions;
+                    reply = () => calls.length === before + 1 ? routed('DeepInfra', toolOutput('valid')) :
+                        routed(nextProvider, toolOutput('different'), { model: nextModel });
+                    await send('配信先またはモデルが途中で変わる送信。');
+                    eq(calls.length - before, 2);
+                    eq(executions, previousExecutions + 1);
+                    assert((await answer(st.currentChatId)).error?.includes('配信先またはモデルが変更されました'));
+                }
+
+                await use(deepInfraRouter);
+                before = calls.length;
+                reply = () => calls.length === before + 1 ? routed(null, toolOutput('unreported-provider')) : routed('DeepInfra');
+                await send('配信先が報告されない場合もこのターンの計算は完了してください。');
+                eq(executions, 4);
+                eq(calls.length - before, 2);
+                const unconfirmedTurn = calls[before].body.session_id;
+                assert(JSON.stringify(calls[before + 1].body.input).includes(privateThinking));
+                await send('前回の計算結果を確認してください。');
+                const portable = calls.at(-1).body;
+                assert(portable.session_id !== unconfirmedTurn);
+                assert(JSON.stringify(portable.input).includes('396') && !JSON.stringify(portable.input).includes(privateThinking));
+                eq(executions, 4);
+
+                await use(toolRetrieval);
+                before = calls.length;
+                reply = () => calls.length === before + 1 ? Response.json({ status: 'requires_action', steps: [
+                    { type: 'thought', signature: 'step7-gemini-model-signature' },
+                    { type: 'tool_search_call', id: 'gem-search-step7', signature: 'step7-search', arguments: { function_names: ['calculate'] } },
+                    { type: 'tool_search_result', call_id: 'gem-search-step7', signature: 'step7-result', result: [{ name: 'calculate' }] },
+                    { type: 'function_call', id: 'gem-calculate-step7', name: 'calculate', arguments: { expression: '17*23+5' } }
+                ] }) : gemText();
+                await send('計算してください。');
+                assert(JSON.stringify(calls.at(-1).body.input).includes('step7-gemini-model-signature'));
+                await app.setCurrentChatModelRef(expandedGemini);
+                reply = gemText;
+                await send('モデルを変更して続けてください。');
+                const newModel = calls.at(-1).body;
+                eq(newModel.model, 'gemini-3.8-flash');
+                assert(JSON.stringify(newModel.input).includes('396') && !JSON.stringify(newModel.input).includes('step7-gemini-model-signature'));
+                eq(executions, 5);
+            } finally {
+                reply = defaultReply;
+                window.functionCallingTools = originalTools;
+                await setRouting(undefined);
+                await app.saveGlobalSettingsV136({ useLegacyFunctionCalling: false });
+            }
+        });
+
+        await test('Gemini Tool Retrieval saves portable answers and replays signed steps without repeating tool execution', async () => {
+            const output = text => [{ type: 'model_output', content: [{ type: 'text', text }] }];
+            const response = (steps, status = 'completed') => Response.json({ status, steps, model: toolRetrieval.modelName,
+                usage: { total_input_tokens: 100, total_output_tokens: 4, total_tool_use_tokens: 8, total_tokens: 112 } });
+            const search = [
+                { type: 'thought', signature: 'gem-thought-fixture', summary: [{ type: 'text', text: '計算を確認する。' }] },
+                { type: 'tool_search_call', id: 'search-id', signature: 'gem-search-fixture', arguments: { query: '計算' } },
+                { type: 'tool_search_result', call_id: 'search-id', signature: 'gem-result-fixture', result: [{ name: 'default_api:calculate' }] },
+                { type: 'function_call', id: 'calculate-id', signature: 'gem-call-fixture', name: 'calculate', arguments: { expression: '17*23+5' } }
+            ];
+            const begin = async options => {
+                await start({ ref: toolRetrieval, ...options });
+                st.settings.geminiEnableFunctionCalling = true;
+            };
+            const interactions = call => call.url.endsWith('/v1beta/interactions');
+            const doc = await file('retrieval-calculation.txt', '計算メモ：資料には乗算式が記載されています。');
+            let executions = 0;
+            window.functionCallingTools = { ...originalTools, calculate: async (...args) => {
+                executions++;
+                return originalTools.calculate(...args);
+            } };
+            try {
+                await begin();
+                reply = () => response(output('こんにちは！'));
+                let before = calls.length;
+                await send('こんにちは');
+                eq(calls.length - before, 1);
+                const greeting = calls.at(-1);
+                assert(interactions(greeting));
+                eq(new Headers(greeting.headers).get('x-goog-api-key'), 'mock');
+                eq(greeting.body.store, false);
+                eq(greeting.body.stream, false);
+                eq(greeting.body.previous_interaction_id, undefined);
+                eq(greeting.body.input, [{ type: 'user_input', content: [{ type: 'text', text: 'こんにちは' }] }]);
+                eq(greeting.body.tools[0], { type: 'tool_search' });
+                eq(greeting.body.tools.filter(tool => tool.defer_loading).length, 24);
+                assert(greeting.body.tools.slice(1).filter(tool => tool.defer_loading).every(tool => tool.short_description));
+                assert(greeting.body.tools.some(tool => tool.name === 'lookup_context' && !tool.defer_loading));
+                assert(!greeting.body.tools.some(tool => tool.name === 'search_documents'));
+                eq((await answer(st.currentChatId)).content, 'こんにちは！');
+
+                await begin({ documents: [doc], prompt: '簡潔に回答してください。' });
+                before = calls.length;
+                reply = () => calls.length === before + 1 ? response(search, 'completed') : response(output('396'));
+                await send('計算メモを参考に、17*23+5を計算してください。');
+                eq(calls.length - before, 2);
+                const [initial, continued] = calls.slice(before);
+                assert(interactions(initial) && interactions(continued));
+                assert(initial.body.system_instruction.includes('簡潔に回答してください。'));
+                assert(initial.body.tools.some(tool => tool.name === 'search_documents' && !tool.defer_loading));
+                eq(continued.body.tools, initial.body.tools);
+                eq(continued.body.input.slice(0, -1), [...initial.body.input, ...search]);
+                const result = continued.body.input.at(-1);
+                eq([result.type, result.name, result.call_id], ['function_result', 'calculate', 'calculate-id']);
+                eq(JSON.parse(result.result[0].text).result, 396);
+                eq(executions, 1);
+                const id = st.currentChatId;
+                const saved = await answer(id);
+                eq(saved.content, '396');
+                eq(saved.executedFunctions, ['calculate']);
+                eq(saved.usageMetadata.geminiToolSearchCalls, 1);
+                eq(saved.usageMetadata.promptTokenCount, 200);
+                eq(saved.usageMetadata.toolUsePromptTokenCount, 16);
+                eq(saved.usageMetadata.totalTokenCount, 224);
+                eq(saved.usageMetadata.cachedContentTokenCount, undefined);
+                eq(saved.continuation.toolResults, [{ name: 'calculate', response: { result: 396 } }]);
+                assert(!saved.tool_calls && !JSON.stringify(saved).includes('-fixture'));
+
+                assert((await app.loadChat(id)).ok);
+                const index = st.currentMessages.findIndex(message => message.content === '396');
+                const row = el.messageContainer.querySelector(`.message[data-index="${index}"]`);
+                await app.saveEditMessage(index, row, { value: '答えは396です。' });
+                reply = () => response(output('確認しました。'));
+                await send('前の答えを確認してください。');
+                const followup = calls.at(-1);
+                assert(interactions(followup));
+                assert(followup.body.input.some(step => step.type === 'model_output' && step.content[0].text === '答えは396です。'));
+                assert(!JSON.stringify(followup.body.input).includes('-fixture'));
+                reply = defaultReply;
+                await app.regenerateAnswerV137(st.currentMessages.findLastIndex(message => message.content === '確認しました。'));
+                assert(calls.at(-1).url.includes(':generateContent'));
+
+                for (const failure of [
+                    Response.json({ error: { message: 'Unavailable' } }, { status: 503 }),
+                    Response.json({ error: { message: 'Tool Retrieval not supported' } }, { status: 404 }),
+                    response(search, 'requires_action')
+                ]) {
+                    await begin();
+                    Object.assign(st.settings, { enableAutoRetry: true, maxRetries: 1, useFixedRetryDelay: true, fixedRetryDelaySeconds: 0 });
+                    before = calls.length;
+                    reply = () => calls.length === before + 1 ? response(search, 'requires_action') : failure.clone();
+                    await send('17*23+5を計算してください。');
+                    eq(calls.length - before, 2);
+                    assert(calls.slice(before).every(interactions));
+                    assert((await db.getChat(st.currentChatId)).messages.some(message => message.role === 'error' || message.error));
+                }
+                eq(executions, 4);
+
+                await begin();
+                before = calls.length;
+                reply = call => interactions(call) ? Response.json({}, { status: 404 }) : defaultReply(call);
+                await send('こんにちは');
+                eq(calls.length - before, 2);
+                assert(interactions(calls[before]) && calls.at(-1).url.includes(':generateContent'));
+                eq(executions, 4);
+
+                reply = defaultReply;
+                for (const prepare of [
+                    () => { st.settings.geminiEnableFunctionCalling = false; },
+                    () => { st.settings.forceFunctionCalling = true; },
+                    () => { st.currentChatGenerationParameters = { topP: 0.8 }; },
+                    () => {
+                        const attachment = new File(['hello'], 'hello.txt', { type: 'text/plain' });
+                        return app.addComposerFiles([attachment], st.pendingAttachments, { current: () => true, onAdd() {} });
+                    }
+                ]) {
+                    await begin();
+                    await prepare();
+                    before = calls.length;
+                    await send('こんにちは');
+                    eq(calls.length - before, 1);
+                    assert(calls.at(-1).url.includes(':generateContent'));
+                }
+                assert(calls.at(-1).body.contents.some(message => message.parts.some(part => part.inlineData?.data === 'aGVsbG8=')));
+
+                await begin({ prompt: '必要に応じて calculate を使ってください。' });
+                reply = () => response(output('回答しました。'));
+                await send('こんにちは');
+                assert(interactions(calls.at(-1)));
+                const namedTools = calls.at(-1).body.tools;
+                assert(!namedTools.find(tool => tool.name === 'calculate').defer_loading);
+                eq(namedTools.filter(tool => tool.defer_loading).length, 23);
+
+                await begin();
+                st.settings.enableStreamingOutput = true;
+                st.settings.forceFunctionCalling = true;
+                reply = () => new Response('data: ' + JSON.stringify({
+                    candidates: [{ content: { parts: [{ text: 'ストリーミング回答' }] }, finishReason: 'STOP' }]
+                }) + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+                await send('こんにちは');
+                assert(calls.at(-1).url.includes(':streamGenerateContent'));
+                eq((await answer(st.currentChatId)).content, 'ストリーミング回答');
+            } finally {
+                reply = defaultReply;
+                st.settings.enableStreamingOutput = false;
+                window.functionCallingTools = originalTools;
+            }
+        });
+
+        await test('Experimental JSON validates entire tool batches and stops tools after terminal actions', async () => {
+            const ran = [];
+            const firstName = 'calculate', terminalName = 'generate_image';
+            window.functionCallingTools = { ...originalTools,
+                [firstName]: async () => { ran.push(firstName); return { result: 396 }; },
+                [terminalName]: async () => { ran.push(terminalName); return { message: '画像が生成されました。' }; }
+            };
+            try {
+                for (const ref of [toolRetrieval, toolSearch]) {
+                    const direct = ref === toolRetrieval;
+                    const call = (name, id) => direct
+                        ? { type: 'function_call', id, name, arguments: {} }
+                        : { type: 'function_call', id: 'item-' + id, call_id: id, name, arguments: '{}', status: 'completed' };
+                    const text = value => direct
+                        ? { type: 'model_output', content: [{ type: 'text', text: value }] }
+                        : { type: 'message', content: [{ type: 'output_text', text: value }] };
+                    const response = (items, status = 'completed', usage = undefined) => Response.json({
+                        status, ...(direct ? { steps: items } : { output: items }),
+                        ...(status === 'incomplete' && { incomplete_details: { reason: 'max_output_tokens' } }), usage
+                    });
+                    const metadata = direct ? [
+                        { type: 'thought', signature: 'thought-signature' },
+                        { type: 'tool_search_call', id: 'search-id', signature: 'search-signature' },
+                        { type: 'tool_search_result', call_id: 'search-id', signature: 'result-signature',
+                            result: [{ name: firstName }, { name: terminalName }] }
+                    ] : [
+                        { type: 'openrouter:tool_search', status: 'completed' },
+                        { type: 'reasoning', encrypted_content: 'opaque-continuation' }
+                    ];
+                    const begin = async () => {
+                        await start({ ref });
+                        Object.assign(st.settings, { geminiEnableFunctionCalling: true, enableAutoRetry: true,
+                            maxRetries: 1, useFixedRetryDelay: true, fixedRetryDelaySeconds: 0 });
+                        ran.length = 0;
+                        return calls.length;
+                    };
+                    const first = call(firstName, 'first');
+                    const second = call(terminalName, 'second');
+                    for (const [status, invalid] of [
+                        ['incomplete', [...metadata, first, text('途中の回答')]],
+                        ['in_progress', [...metadata, first]],
+                        ['completed', [...metadata, first, { ...second, name: 'unknown_tool' }]],
+                        ['completed', [...metadata, first, { ...second, arguments: direct ? [] : '{' }]],
+                        ['completed', [...metadata, first, { ...second, ...(direct ? { id: 'first' } : { call_id: 'first' }) }]],
+                        ['completed', [...metadata.map(item => direct
+                            ? (item.type === 'tool_search_result' ? { ...item, signature: '' } : item)
+                            : (item.type === 'reasoning' ? { type: 'reasoning', summary: [] } : item)), first]],
+                        ...(!direct ? [
+                            ['completed', [...metadata, { type: 'reasoning', content: [{ type: 'summary_text', text: '要約' }] }, first]],
+                            ['completed', [...metadata, { type: 'reasoning', encrypted_content: 'opaque',
+                                content: [{ type: 'reasoning_text', text: 7 }] }, first]]
+                        ] : [])
+                    ]) {
+                        await begin();
+                        st.settings.enableAutoRetry = false;
+                        reply = () => response(invalid, status);
+                        await send('ツールを実行してください。');
+                        eq(ran, []);
+                        if (status === 'incomplete') {
+                            const saved = await answer(st.currentChatId);
+                            eq(saved.content, '途中の回答');
+                            assert(saved.incomplete);
+                        }
+                    }
+
+                    let before = await begin();
+                    reply = () => calls.length === before + 1 ? response([...metadata, first, second]) : response([text('完了しました。')]);
+                    await send('計算して画像を生成してください。');
+                    eq(ran, [firstName, terminalName]);
+                    eq(calls.length - before, 2);
+                    const [initial, final] = calls.slice(before).map(request => request.body);
+                    eq(final.store, false);
+                    if (direct) {
+                        eq(final.tools, initial.tools);
+                        eq(final.generation_config.tool_choice, 'none');
+                        eq(final.input.slice(1, -2), [...metadata, first, second]);
+                        eq(final.input.slice(-2).map(item => item.call_id), ['first', 'second']);
+                    } else {
+                        eq(final.tools, []);
+                        eq(final.max_tool_calls, undefined);
+                        assert(final.input.every(item => item.role === 'user' || item.role === 'assistant'));
+                        const projected = JSON.stringify(final.input);
+                        assert(projected.includes('396') && projected.includes('画像が生成されました。') && !projected.includes('opaque-continuation'));
+                    }
+                    eq((await answer(st.currentChatId)).content, '完了しました。');
+
+                    before = await begin();
+                    reply = () => calls.length === before + 1 ? response([...metadata, second]) :
+                        response([...metadata, call(firstName, 'unexpected')]);
+                    await send('画像を生成してください。');
+                    eq(ran, [terminalName]);
+                    eq(calls.length - before, 2);
+
+                    before = await begin();
+                    reply = () => {
+                        if (calls.length === before + 1) return response([...metadata, first]);
+                        throw new TypeError('Fixture network failure after tool execution');
+                    };
+                    await send('計算してください。');
+                    eq(ran, [firstName]);
+                    eq(calls.length - before, 2);
+
+                    before = await begin();
+                    const continuation = gate();
+                    reply = request => {
+                        if (calls.length === before + 1) return response([...metadata, first]);
+                        return new Promise((resolve, reject) => {
+                            request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+                            continuation.resolve();
+                        });
+                    };
+                    const pending = send('計算してください。');
+                    await continuation.promise;
+                    app.abortRequest();
+                    await pending;
+                    eq(ran, [firstName]);
+                    eq(calls.length - before, 2);
+                    eq((await answer(st.currentChatId)).executedFunctions, [firstName]);
+                }
+            } finally {
+                reply = defaultReply;
+                window.functionCallingTools = originalTools;
+            }
+        });
+
+        await test('Experimental SSE waits for completion and continues tool conversations across sends and reloads', async () => {
+            const encoder = new TextEncoder();
+            const ran = [];
+            window.functionCallingTools = { ...originalTools,
+                calculate: async () => { ran.push('calculate'); return { result: 396 }; },
+                get_random_integer: async () => { ran.push('get_random_integer'); return { results: [9] }; },
+                generate_image: async () => { ran.push('generate_image'); return { message: '画像を生成しました。' }; }
+            };
+            const sse = (events, terminalGate = null) => {
+                const emit = controller => frame => {
+                    const bytes = encoder.encode('data: ' + JSON.stringify(frame) + '\r\n\r\n');
+                    for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7));
+                };
+                return new Response(new ReadableStream({
+                    async start(controller) {
+                        const write = emit(controller);
+                        events.forEach(write);
+                        if (terminalGate) {
+                            const terminal = await terminalGate;
+                            if (!terminal) return;
+                            write(terminal);
+                        }
+                        controller.close();
+                    }
+                }), { headers: { 'Content-Type': 'text/event-stream' } });
+            };
+            try {
+                for (const ref of [toolRetrieval, toolSearch]) {
+                    const direct = ref === toolRetrieval;
+                    const rawSignature = direct ? 'stream-search-signature' : 'stream-encrypted-reasoning';
+                    const output = text => direct
+                        ? { type: 'model_output', content: [{ type: 'text', text }] }
+                        : { type: 'message', content: [{ type: 'output_text', text }] };
+                    const complete = (items, tokenCount = 25, status = 'completed') => direct
+                        ? { event_type: 'interaction.completed', interaction: { status, model: ref.modelName,
+                            usage: { total_input_tokens: tokenCount, total_output_tokens: 4, total_tokens: tokenCount + 4 } } }
+                        : { type: 'response.' + status, response: { status, model: ref.modelName, output: items,
+                            ...(status === 'incomplete' && { incomplete_details: { reason: 'max_output_tokens' } }),
+                            usage: { input_tokens: tokenCount, output_tokens: 4, total_tokens: tokenCount + 4 } } };
+                    const frames = steps => steps.flatMap((step, index) => {
+                        const { content, summary, ...start } = step;
+                        const deltas = (content || []).map(part => part).concat(
+                            (summary || []).map(part => ({ type: 'thought_summary', content: part })));
+                        if (step.type === 'thought') {
+                            start.signature = '';
+                            deltas.push({ type: 'thought_signature', signature: step.signature });
+                        }
+                        if (step.type === 'tool_search_call' || step.type === 'tool_search_result') {
+                            for (const key of ['signature', 'arguments', 'result']) delete start[key];
+                            deltas.push(step);
+                        }
+                        if (step.type === 'function_call') {
+                            start.arguments = {};
+                            const args = JSON.stringify(step.arguments);
+                            deltas.push({ type: 'arguments_delta', arguments: args.slice(0, 4) },
+                                { type: 'arguments_delta', arguments: args.slice(4) });
+                        }
+                        return [{ event_type: 'step.start', index, step: start },
+                            ...deltas.map(delta => ({ event_type: 'step.delta', index, delta })),
+                            { event_type: 'step.stop', index }];
+                    });
+                    const textResponse = message => {
+                        const items = [output(message)];
+                        return sse([...(direct ? frames(items) : [{ type: 'response.output_text.delta', delta: message }]), complete(items)]);
+                    };
+                    const turn = (name, id) => {
+                        const args = name === 'calculate' ? { expression: '17*23+5' } : { min: 1, max: 10 };
+                        const items = direct ? [
+                            { type: 'thought', signature: 'thought-' + id, summary: [{ type: 'text', text: '思考中です。' }] },
+                            output('確認しています。'),
+                            { type: 'tool_search_call', id: 'search-' + id, arguments: { function_names: [name] }, signature: rawSignature },
+                            { type: 'tool_search_result', call_id: 'search-' + id, signature: 'result-' + id, result: [{ name }] },
+                            { type: 'function_call', id, name, arguments: args }
+                        ] : [
+                            { type: 'reasoning', encrypted_content: rawSignature, summary: [{ type: 'summary_text', text: '思考中です。' }] },
+                            output('確認しています。'),
+                            { type: 'openrouter:tool_search', status: 'completed' },
+                            { type: 'function_call', id: 'item-' + id, call_id: id, name, arguments: JSON.stringify(args) }
+                        ];
+                        const events = direct ? frames(items) : [
+                            { type: 'response.reasoning_summary_text.delta', delta: '思考中です。' },
+                            { type: 'response.output_text.delta', delta: '確認しています。' },
+                            { type: 'response.output_item.added', item: { ...items.at(-1), arguments: '' } },
+                            { type: 'response.function_call_arguments.delta', delta: JSON.stringify(args).slice(0, 4) },
+                            { type: 'response.function_call_arguments.done', arguments: JSON.stringify(args) }
+                        ];
+                        return { items, events };
+                    };
+                    await start({ ref });
+                    Object.assign(st.settings, { geminiEnableFunctionCalling: true, enableStreamingOutput: true });
+                    ran.length = 0;
+                    let at = calls.length;
+                    const first = turn('calculate', 'first-call');
+                    if (!direct) first.items.splice(1, 0, { type: 'reasoning', id: 'stream-private-reasoning',
+                        content: [{ type: 'reasoning_text', text: 'step8-stream-private-reasoning' }] });
+                    if (direct) {
+                        const atStop = first.events.findIndex(frame => frame.event_type === 'step.stop' && frame.index === 0);
+                        first.events.splice(atStop, 0, { event_type: 'step.delta', index: 0, delta: { type: 'thought_signature', signature: '' } });
+                    }
+                    const firstTerminal = gate();
+                    reply = () => calls.length === at + 1 ? sse(first.events, firstTerminal.promise) : textResponse('結果を記録しました。');
+                    const pending = send('計算してください。');
+                    try {
+                        await wait(() => st.sendExecutionV136?.streamContent?.includes('確認しています。'), 'SSE progress');
+                        assert(st.sendExecutionV136.getStreamThought().includes('思考中です。'));
+                        eq(ran, []);
+                    } finally {
+                        firstTerminal.resolve(complete(first.items));
+                    }
+                    await pending;
+                    eq(ran, ['calculate']);
+                    eq(calls.length - at, 2);
+                    assert(calls.slice(at).every(request => request.body.stream === true && request.body.store === false));
+                    if (direct) eq(calls[at + 1].body.input.filter(step => step.type === 'thought').map(step => step.signature), ['thought-first-call']);
+                    const id = st.currentChatId;
+                    const saved = await answer(id);
+                    eq(saved.content, '結果を記録しました。');
+                    assert(!JSON.stringify(saved).includes('step8-stream-private-reasoning'));
+                    eq(saved.usageMetadata.promptTokenCount, 50);
+                    eq(saved.continuation.toolResults[0].response.result, 396);
+                    assert(!JSON.stringify(saved).includes(rawSignature));
+                    const snapshot = await app._prepareExportData({ sync: true });
+                    assert(snapshot.metadataJson.includes('"toolResults"') && !snapshot.metadataJson.includes(rawSignature));
+
+                    at = calls.length;
+                    const second = turn('get_random_integer', 'second-call');
+                    reply = () => calls.length === at + 1 ? sse([...second.events, complete(second.items)]) : textResponse('次の結果です。');
+                    await send('前の計算結果を参照して、乱数も出してください。');
+                    eq(ran, ['calculate', 'get_random_integer']);
+                    const sameTab = JSON.stringify(calls[at].body.input);
+                    assert(sameTab.includes('396'), sameTab);
+                    eq(sameTab.includes(rawSignature), direct);
+                    eq(sameTab.includes('first-call'), direct);
+                    eq((await answer(id)).content, '次の結果です。');
+
+                    assert((await app.loadChat(id)).ok);
+                    reply = () => textResponse('確認しました。');
+                    await send('前の結果を確認してください。');
+                    const portable = JSON.stringify(calls.at(-1).body.input);
+                    assert(portable.includes('396') && portable.includes('get_random_integer') && !portable.includes(rawSignature), portable);
+                    eq(ran, ['calculate', 'get_random_integer']);
+
+                    at = calls.length;
+                    const toEdit = turn('calculate', 'edited-call');
+                    reply = () => calls.length === at + 1 ? sse([...toEdit.events, complete(toEdit.items)]) : textResponse('編集前の回答');
+                    await send('もう一度計算してください。');
+                    const index = st.currentMessages.findLastIndex(message => message.content === '編集前の回答');
+                    const row = el.messageContainer.querySelector(`.message[data-index="${index}"]`);
+                    await app.saveEditMessage(index, row, { value: '編集した回答' });
+                    reply = () => textResponse('編集を確認しました。');
+                    await send('編集を確認してください。');
+                    const edited = JSON.stringify(calls.at(-1).body.input);
+                    assert(edited.includes('編集した回答') && !edited.includes('edited-call') && !edited.includes(rawSignature));
+
+                    await start({ ref });
+                    st.settings.enableStreamingOutput = false;
+                    Object.assign(st.settings, { geminiEnableFunctionCalling: true, forceFunctionCalling: true });
+                    at = calls.length;
+                    reply = () => calls.length === at + 1
+                        ? (direct ? geminiTool('calculate', { expression: '17*23+5' }, 'legacy-call') : Response.json({
+                            choices: [{ message: { tool_calls: [{ id: 'legacy-call', type: 'function',
+                                function: { name: 'calculate', arguments: '{"expression":"17*23+5"}' } }] }, finish_reason: 'tool_calls' }]
+                        }))
+                        : (direct ? gemResponse('従来方式の回答') : routerResponse('従来方式の回答'));
+                    await send('従来方式で計算してください。');
+                    assert(calls[at].url.includes(direct ? ':generateContent' : '/chat/completions'));
+                    if (!direct) {
+                        const original = window.functionDeclarations.flatMap(group => group.function_declarations || []);
+                        const expected = JSON.parse(JSON.stringify(original), (key, value) =>
+                            key === 'type' && typeof value === 'string' ? value.toLowerCase() : value);
+                        const sent = calls[at].body.tools.map(tool => tool.function);
+                        eq(sent.slice(0, expected.length), expected);
+                        eq(original[0].parameters.type, 'OBJECT');
+                        eq(calls[at + 1].body.messages.find(message => message.tool_call_id === 'legacy-call'),
+                            { role: 'tool', tool_call_id: 'legacy-call', content: '{"result":396}' });
+                    }
+                    Object.assign(st.settings, { forceFunctionCalling: false, enableStreamingOutput: true });
+                    reply = () => textResponse('従来の結果を確認しました。');
+                    await send('従来方式の計算結果を確認してください。');
+                    assert(calls.at(-1).url.endsWith(direct ? '/interactions' : '/responses'));
+                    const fromLegacy = JSON.stringify(calls.at(-1).body.input);
+                    assert(fromLegacy.includes('396') && !fromLegacy.includes('legacy-call'), fromLegacy);
+
+                    await start({ ref });
+                    Object.assign(st.settings, { geminiEnableFunctionCalling: true, enableStreamingOutput: true });
+                    at = calls.length;
+                    ran.length = 0;
+                    const terminalImage = turn('generate_image', 'image-call');
+                    const terminalItems = terminalImage.items.filter(item => item.type !== (direct ? 'model_output' : 'message'));
+                    const terminalEvents = direct ? frames(terminalItems) :
+                        terminalImage.events.filter(event => event.type !== 'response.output_text.delta');
+                    reply = () => calls.length === at + 1 ? sse([...terminalEvents, complete(terminalItems)]) :
+                        textResponse('画像の結果です。');
+                    await send('画像を生成してください。');
+                    eq(ran, ['generate_image']);
+                    eq(calls.length - at, 2);
+                    const finalRequest = calls.at(-1).body;
+                    assert(finalRequest.stream);
+                    if (direct) eq(finalRequest.generation_config.tool_choice, 'none');
+                    else eq(finalRequest.tools, []);
+
+                    for (const failure of ['cut', 'incomplete', 'cancel', ...(direct ? ['missing-signature'] : [])]) {
+                        const cancel = failure === 'cancel';
+                        await start({ ref });
+                        Object.assign(st.settings, { geminiEnableFunctionCalling: true, enableStreamingOutput: true, enableAutoRetry: true, maxRetries: 1 });
+                        ran.length = 0;
+                        at = calls.length;
+                        const terminal = gate();
+                        const events = failure === 'missing-signature'
+                            ? [...first.events.filter(frame => frame.delta?.type !== 'thought_signature'), complete(first.items)]
+                            : failure === 'incomplete' ? [...first.events, complete(first.items, 25, 'incomplete')] : first.events;
+                        reply = () => sse(events, cancel ? terminal.promise : null);
+                        const interrupted = send('計算してください。');
+                        if (cancel) {
+                            try {
+                                await wait(() => st.sendExecutionV136?.streamContent?.includes('確認しています。'), 'SSE before cancellation');
+                                app.abortRequest();
+                            } finally { terminal.resolve(null); }
+                        }
+                        await interrupted;
+                        eq(ran, []);
+                        eq(calls.length - at, 1);
+                        const partial = await answer(st.currentChatId);
+                        assert(partial.incomplete && partial.content.includes('確認しています。'));
+                        if (failure === 'missing-signature') assert(partial.error.includes('推論ステップに署名がありません'));
+                        assert(!JSON.stringify(partial).includes(rawSignature));
+                    }
+                }
+            } finally {
+                st.settings.enableStreamingOutput = false;
+                reply = defaultReply;
+                window.functionCallingTools = originalTools;
+            }
         });
 
         await test('OpenRouter rebuilds safe historical tool text or continues without RAG when the original wire is needed', async () => {
