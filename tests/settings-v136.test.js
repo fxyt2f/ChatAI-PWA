@@ -125,6 +125,13 @@ test('OpenRouter metadata takes precedence and excludes off', () => {
     assert.deepEqual(S.applyThinking({},'openrouter',c,'high'), { reasoning: { effort:'high',exclude:false } });
 });
 test('OpenRouter unknown metadata does not invent effort support', () => assert.equal(S.capability('openrouter','new/model',{}).mode, 'none'));
+test('OpenRouter explicitly optional reasoning accepts its advertised off level', () => {
+    const reasoning = { mandatory: false, supported_efforts: ['max', 'high', 'low', 'none'], default_effort: 'high' };
+    const c = S.capability('openrouter', 'deepseek/deepseek-v4.1-flash-1017', { reasoning });
+    assert.equal(c.defaultEffort, 'high');
+    assert.deepEqual(S.applyThinking({}, 'openrouter', c, 'none'), { reasoning: { enabled: false, exclude: false } });
+    assert.equal(S.capability('openrouter', 'new/model', { reasoning: { ...reasoning, mandatory: true } }).levels.includes('none'), false);
+});
 test('effort normalizes when model changes; unsupported is null', () => {
     assert.equal(S.normalizeEffort('medium', S.capability('gemini','gemini-3-pro-preview')), 'high');
     assert.equal(S.normalizeEffort('high', S.capability('gemini','unknown')), null);

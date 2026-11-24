@@ -15,6 +15,7 @@
     const $ = id => document.getElementById(id);
     const modelDefault = SettingsV136.MODEL_DEFAULT_EFFORT;
     const levelName = (value, capability) => value === modelDefault ? 'モデル既定'
+        : value === 'none' ? 'オフ'
         : value === 'xhigh' && capability?.source === 'inferred' ? 'Extra High'
         : value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
     function displayedThinkingEffort(app, capability) {
@@ -26,7 +27,7 @@
         return capability.modelDefault ? SettingsV136.normalizeEffort(selected, capability)
             : selected || capability.defaultEffort;
     }
-    const levelOrder = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const levelOrder = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className || ''; if (text) node.textContent = text; return node; };
     class TextareaSizing {
         constructor() {

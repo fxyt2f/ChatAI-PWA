@@ -120,6 +120,7 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 if (String(url).startsWith('https://rag-router.invalid')) return Response.json({ data: [routerMetadata] });
                 if (String(url).startsWith('https://openrouter.ai/')) return Response.json({ data:
                     [fullRouter, toolSearch, deepInfraRouter, haiku, sonnet, unknownRouter].map(ref => ({ ...routerMetadata, id: ref.modelName,
+                        ...(ref === deepInfraRouter && { reasoning: { mandatory: false, supported_efforts: ['none', 'low', 'high'], default_effort: 'low' } }),
                         context_length: 128000, supported_parameters: ['tools', 'reasoning'] })) });
                 if (String(url).startsWith('https://gemini-proxy.invalid/')) return Response.json({}, { status: 503 });
                 return originalFetch(url, options);
@@ -502,7 +503,7 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                     request.url.endsWith('/responses') ? routed('DeepInfra') : defaultReply(request);
                 for (const [ref, endpoint] of [
                     [expandedGemini, '/interactions'], [unknownGemini, ':generateContent'],
-                    [deepInfraRouter, '/chat/completions'], [haiku, '/chat/completions'], [sonnet, '/chat/completions'],
+                    [deepInfraRouter, '/responses'],
                     [unknownRouter, '/chat/completions']
                 ]) {
                     await use(ref);
@@ -516,7 +517,8 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 const preferences = { only: ['deepinfra'], order: ['deepinfra'], allow_fallbacks: false, data_collection: 'deny' };
                 await setRouting(preferences);
                 await app.saveGlobalSettingsV136({ useLegacyFunctionCalling: true });
-                for (const [ref, endpoint] of [[toolRetrieval, ':generateContent'], [deepInfraRouter, '/chat/completions']]) {
+                for (const [ref, endpoint] of [[toolRetrieval, ':generateContent'], [deepInfraRouter, '/chat/completions'],
+                    [haiku, '/chat/completions'], [sonnet, '/chat/completions']]) {
                     await use(ref);
                     await send('互換モードで送信してください。');
                     const request = calls.at(-1);
@@ -536,12 +538,13 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                     { only: ['deepinfra'], allow_fallbacks: true },
                     { only: ['deepinfra'] },
                     { only: ['deepseek'], allow_fallbacks: false },
-                    { only: ['deepinfra', 'deepseek'], allow_fallbacks: false }
+                    { only: ['deepinfra', 'deepseek'], allow_fallbacks: false },
+                    { order: ['baseten'], ignore: ['deepseek'], allow_fallbacks: false, data_collection: 'deny' }
                 ]) {
                     await setRouting(routing);
                     await use(deepInfraRouter);
-                    await send('従来経路で送信してください。');
-                    assert(calls.at(-1).url.endsWith('/chat/completions'));
+                    await send('指定した配信条件で送信してください。');
+                    assert(calls.at(-1).url.endsWith('/responses'));
                     eq(calls.at(-1).body.provider, routing);
                     assert(calls.at(-1).body.tools.length > 0);
                 }
@@ -554,10 +557,13 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 eq(calls.at(-1).body.tools, undefined);
                 st.settings.geminiEnableFunctionCalling = true;
 
-                let executions = 0;
+                let executions = 0, randomExecutions = 0;
                 window.functionCallingTools = { ...originalTools, calculate: async (...args) => {
                     executions++;
                     return originalTools.calculate(...args);
+                }, get_random_integer: async () => {
+                    randomExecutions++;
+                    return { results: [396] };
                 } };
                 const privateThinking = 'step8-raw-thinking-never-store';
                 const toolOutput = id => [
@@ -582,10 +588,10 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
 
                 const unsupported = { only: ['deepseek'], allow_fallbacks: false };
                 await setRouting(unsupported);
-                reply = defaultReply;
+                reply = () => routed('DeepSeek');
                 await send('配信先を変えて続けてください。');
                 const switched = calls.at(-1);
-                assert(switched.url.endsWith('/chat/completions'));
+                assert(switched.url.endsWith('/responses'));
                 eq(switched.body.provider, unsupported);
                 assert(!JSON.stringify(switched.body).includes(privateThinking));
                 eq(executions, 1);
@@ -610,12 +616,80 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 eq(executions, 4);
                 eq(calls.length - before, 2);
                 const unconfirmedTurn = calls[before].body.session_id;
-                assert(JSON.stringify(calls[before + 1].body.input).includes(privateThinking));
+                assert(calls[before + 1].body.tools.length > 0);
+                eq(calls[before + 1].body.reasoning, { enabled: false });
+                assert(JSON.stringify(calls[before + 1].body.input).includes('396'));
+                assert(!JSON.stringify(calls[before + 1].body.input).includes(privateThinking));
                 await send('前回の計算結果を確認してください。');
                 const portable = calls.at(-1).body;
                 assert(portable.session_id !== unconfirmedTurn);
                 assert(JSON.stringify(portable.input).includes('396') && !JSON.stringify(portable.input).includes(privateThinking));
                 eq(executions, 4);
+
+                for (const [routing, providerBefore, providerAfter, includeReasoning, rawExpected] of [
+                    [undefined, 'Baseten', 'Baseten', true, false],
+                    [undefined, 'Morph', 'Morph', false, true],
+                    [{ only: ['deepinfra', 'baseten'], allow_fallbacks: true, zdr: true }, 'DeepInfra', 'Baseten', true, true]
+                ]) {
+                    await setRouting(routing);
+                    await use(deepInfraRouter);
+                    before = calls.length;
+                    const items = toolOutput('switch-fixture').filter(item => includeReasoning || item.type !== 'reasoning');
+                    const effort = includeReasoning ? 'high' : 'none';
+                    await app.setCurrentChatThinkingEffort(effort);
+                    st.settings.enableStreamingOutput = true;
+                    const previousExecutions = executions;
+                    const previousRandomExecutions = randomExecutions;
+                    const stream = async response => {
+                        const data = await response.json();
+                        return new Response('data: ' + JSON.stringify({ type: 'response.completed', response: data }) + '\n\n',
+                            { headers: response.headers });
+                    };
+                    const randomItem = { type: 'function_call', id: 'random-item', call_id: 'random-call', name: 'get_random_integer',
+                        arguments: '{"min":396,"max":396}' };
+                    reply = () => {
+                        if (calls.length === before + 1) return stream(routed(providerBefore, items));
+                        if (calls.length === before + 2) {
+                            const result = calls.at(-1).body.input.find(item => item.type === 'function_call_output');
+                            eq(JSON.parse(result.output).result, 396);
+                            return stream(routed(providerAfter, [randomItem]));
+                        }
+                        return stream(routed(providerAfter));
+                    };
+                    await send('まずツールで計算し、その結果を上下限にして乱数を一つ生成してください。');
+                    eq(calls.length - before, 3);
+                    eq(executions, previousExecutions + 1);
+                    eq(randomExecutions, previousRandomExecutions + 1);
+                    const next = calls[before + 1].body;
+                    const input = JSON.stringify(next.input);
+                    eq(next.provider, routing);
+                    eq(next.store, false);
+                    eq(next.stream, true);
+                    if (includeReasoning && rawExpected) eq(next.reasoning.effort, effort);
+                    else eq(next.reasoning.enabled, false);
+                    assert(input.includes('396'));
+                    eq(input.includes(privateThinking), includeReasoning && rawExpected);
+                    assert(next.tools.some(tool => tool.type === 'openrouter:tool_search'));
+                    assert(calls.at(-1).body.input.some(item => item.type === 'function_call_output' && item.call_id === 'random-call'));
+                }
+
+                await setRouting(preferences);
+                await use(deepInfraRouter);
+                st.settings.enableStreamingOutput = false;
+                before = calls.length;
+                reply = () => {
+                    if (calls.length === before + 1) return routed('DeepInfra', toolOutput('rejected-replay'));
+                    if (calls.length === before + 2) return Response.json({ error: { message: 'Missing reasoning_content' } }, { status: 400 });
+                    return routed('DeepInfra');
+                };
+                await send('実行済みの結果で回答してください。');
+                eq(calls.length - before, 3);
+                eq(executions, 8);
+                const recovered = calls.at(-1);
+                assert(recovered.url.endsWith('/responses'));
+                assert(recovered.body.tools.length > 0);
+                assert(JSON.stringify(recovered.body.input).includes('396'));
+                assert(!JSON.stringify(recovered.body.input).includes(privateThinking));
 
                 await use(toolRetrieval);
                 before = calls.length;
@@ -633,12 +707,161 @@ async function runDocumentRagTests({ app, db, st, ui, el, test, assert, eq, real
                 const newModel = calls.at(-1).body;
                 eq(newModel.model, 'gemini-3.8-flash');
                 assert(JSON.stringify(newModel.input).includes('396') && !JSON.stringify(newModel.input).includes('step7-gemini-model-signature'));
-                eq(executions, 5);
+                eq(executions, 9);
+
+                const policy = { order: ['baseten'], allow_fallbacks: true, zdr: true, data_collection: 'deny' };
+                await setRouting(policy);
+                await use(deepInfraRouter);
+                st.settings.enableStreamingOutput = true;
+                const effects = [];
+                window.functionCallingTools.manage_character_status = async args => {
+                    effects.push(args.action);
+                    return { total: 396 };
+                };
+                window.functionCallingTools.generate_image = async () => {
+                    effects.push('image');
+                    return { status: 'fixture' };
+                };
+                const effectArgs = '{"action":"increase","character_name":"fixture","status_key":"HP","value":5}';
+                const effectName = 'manage_character_status';
+                const chatCalls = (...tool_calls) => Response.json({ choices: [{ message: { role: 'assistant', content: '', tool_calls },
+                    finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } });
+                const chatTool = (id, name, args) => ({ id, type: 'function', function: { name, arguments: args } });
+                before = calls.length;
+                const randomBeforeHandoff = randomExecutions;
+                reply = async request => {
+                    eq(request.body.provider, policy);
+                    eq(request.body.stream, true);
+                    switch (calls.length - before) {
+                    case 1:
+                        return new Response('data: ' + JSON.stringify({ type: 'response.completed', response: {
+                            status: 'completed', model: deepInfraRouter.modelName,
+                            output: [...toolOutput('mutation').slice(0, 2), { type: 'openrouter:tool_search', id: 'private-search-state' },
+                                { type: 'function_call', id: 'mutation-item', call_id: 'mutation-call', name: effectName, arguments: effectArgs }],
+                            usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 }
+                        } }) + '\n\n', { headers: { 'X-Provider-Name': 'Baseten' } });
+                    case 2:
+                        return Response.json({ error: { metadata: { code: 'deferred_tools_state_missing' } } }, { status: 400 });
+                    case 3:
+                        return chatCalls(chatTool('reissued-mutation', effectName,
+                            '{"value":5,"status_key":"HP","character_name":"fixture","action":"increase"}'),
+                            chatTool('dependent-random', 'get_random_integer', '{"min":396,"max":396}'));
+                    case 4:
+                        return chatCalls(chatTool('terminal-image', 'generate_image', '{"prompt":"fixture"}'));
+                    default:
+                        return routerResponse('すべて処理しました。');
+                    }
+                };
+                await send('HPを5増やし、その結果を使って乱数と画像を生成してください。');
+                const handoff = calls.slice(before);
+                eq(handoff.map(call => call.url.split('/v1/').at(-1)),
+                    ['responses', 'responses', 'chat/completions', 'chat/completions', 'chat/completions']);
+                eq(effects, ['increase', 'image']);
+                eq(randomExecutions, randomBeforeHandoff + 1);
+                eq(handoff[1].body.reasoning, { enabled: false });
+                assert(handoff[1].body.input.some(item => item.call_id === 'mutation-call' && item.output?.includes('396')));
+                assert(handoff[2].body.messages.some(item => item.role === 'assistant' && item.tool_calls?.[0].id === 'mutation-call'));
+                assert(handoff[2].body.messages.some(item => item.tool_call_id === 'mutation-call' && item.content.includes('396')));
+                assert(handoff[3].body.messages.some(item => item.tool_call_id === 'reissued-mutation' && item.content.includes('396')));
+                assert(handoff[3].body.messages.some(item => item.tool_call_id === 'dependent-random'));
+                eq(handoff[4].body.tools, undefined);
+                for (const call of handoff.slice(1)) {
+                    assert(!JSON.stringify(call.body).includes(privateThinking));
+                    assert(!JSON.stringify(call.body).includes('private-search-state'));
+                }
+                const finished = await answer(st.currentChatId);
+                eq(finished.content, 'すべて処理しました。');
+                eq(finished.usageMetadata.totalTokenCount, 51);
             } finally {
                 reply = defaultReply;
                 window.functionCallingTools = originalTools;
                 await setRouting(undefined);
                 await app.saveGlobalSettingsV136({ useLegacyFunctionCalling: false });
+            }
+        });
+
+        await test('Claude 5.5 Tool Search streams dependent tools with automatic and bounded provider routing', async () => {
+            const previousStreaming = st.settings.enableStreamingOutput;
+            const setRouting = openRouterRouting => db.saveSetting('apiConfigs', configurations.map(config =>
+                config.id === haiku.apiConfigId ? { ...config, openRouterRouting } : config));
+            const begin = async (ref, routing) => {
+                await setRouting(routing);
+                await start({ ref });
+                st.settings.geminiEnableFunctionCalling = true;
+                st.settings.enableStreamingOutput = true;
+            };
+            const searchState = { type: 'openrouter:tool_search', id: 'haiku-private-search-state', status: 'completed' };
+            const reasoning = { type: 'reasoning', id: 'haiku-reasoning-id', encrypted_content: 'haiku-private-reasoning' };
+            const toolCall = (id, name, args) => ({ type: 'function_call', id: 'item-' + id, call_id: id, name,
+                arguments: JSON.stringify(args), status: 'completed' });
+            const response = (ref, output, provider) => new Response('data: ' + JSON.stringify({ type: 'response.completed', response: {
+                status: 'completed', model: ref.modelName, output
+            } }) + '\n\n', { headers: { 'X-Provider-Name': provider } });
+            const ran = [];
+            window.functionCallingTools = { ...originalTools, calculate: async args => {
+                ran.push(['calculate', args.expression]);
+                return { result: 464 };
+            }, get_random_integer: async args => {
+                ran.push(['get_random_integer', args.min, args.max, args.count]);
+                return originalTools.get_random_integer(args);
+            } };
+            try {
+                for (const [ref, routing] of [[haiku],
+                    [haiku, { only: ['claude-on-aws'], allow_fallbacks: false, data_collection: 'deny' }], [sonnet]]) {
+                    await begin(ref, routing);
+                    const before = calls.length;
+                    const beforeExecutions = ran.length;
+                    const args = ref === sonnet ? { min: '464', max: '464', count: '1' } : { min: 464, max: 464, count: 1 };
+                    reply = request => {
+                        assert(request.url.endsWith('/responses'));
+                        const step = calls.length - before;
+                        if (step === 1) return response(ref, [searchState, reasoning,
+                            toolCall('haiku-calculate', 'calculate', { expression: '(28+9)*13-17' })], 'Claude Platform on AWS');
+                        if (step === 2) return response(ref, [searchState, reasoning,
+                            toolCall('haiku-random', 'get_random_integer', args)], 'claude-on-aws');
+                        return response(ref, [{ type: 'message', content: [{ type: 'output_text', text: '464' }] }], 'claude-on-aws');
+                    };
+                    await send('計算し、その結果を上下限にして乱数を出してください。');
+                    const sent = calls.slice(before).map(call => call.body);
+                    eq(sent.length, 3);
+                    const functions = sent[0].tools.filter(tool => tool.type === 'function');
+                    eq(functions.filter(tool => tool.name !== 'lookup_context').length, 24);
+                    assert(functions.some(tool => tool.name === 'lookup_context' && tool.defer_loading));
+                    assert(sent.every(body => body.model === ref.modelName && body.stream && body.store === false &&
+                        body.tools[0].type === 'openrouter:tool_search' && body.include.includes('reasoning.encrypted_content')));
+                    for (const body of sent) eq(body.provider, routing);
+                    const toolResult = (body, id) => {
+                        if (ref !== sonnet) return JSON.parse(body.input.find(item => item.type === 'function_call_output' && item.call_id === id).output);
+                        const prefix = '【実行済みツール】\n';
+                        assert(!body.input.some(item => item.type === 'function_call' || item.type === 'function_call_output'));
+                        return body.input.filter(item => item.role === 'assistant' && item.content.startsWith(prefix))
+                            .map(item => JSON.parse(item.content.slice(prefix.length))).find(item => item.call_id === id).result;
+                    };
+                    eq(toolResult(sent[1], 'haiku-calculate').result, 464);
+                    eq(toolResult(sent[2], 'haiku-random'), { success: true, results: [464] });
+                    eq(JSON.stringify(sent[1].input).includes('haiku-private-reasoning'), Boolean(routing));
+                    eq(JSON.stringify(sent[1].input).includes('haiku-private-search-state'), Boolean(routing));
+                    if (ref === sonnet) eq(sent[1].reasoning, sent[0].reasoning);
+                    else if (!routing) eq(sent[1].reasoning, { enabled: false });
+                    eq((await answer(st.currentChatId)).content, '464');
+                    eq(ran.slice(beforeExecutions), [['calculate', '(28+9)*13-17'], ['get_random_integer', args.min, args.max, args.count]]);
+                }
+
+                const routing = { ignore: ['anthropic'], allow_fallbacks: true };
+                await begin(sonnet, routing);
+                const before = calls.length;
+                reply = request => request.url.endsWith('/responses') ? Response.json({ error: {
+                    message: 'Provider returned error', metadata: { raw: 'tools.0.custom.input_schema: JSON schema is invalid. It must match JSON Schema draft 2020-12.' }
+                } }, { status: 400 }) : routerResponse();
+                await send('こんにちは。');
+                eq(calls.slice(before).map(call => call.url.split('/v1/').at(-1)), ['responses', 'chat/completions']);
+                eq(calls.at(-1).body.provider, routing);
+                eq(ran.length, 6);
+            } finally {
+                reply = defaultReply;
+                window.functionCallingTools = originalTools;
+                st.settings.enableStreamingOutput = previousStreaming;
+                await setRouting(undefined);
             }
         });
 

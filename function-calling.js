@@ -668,12 +668,13 @@ async function manage_game_date({ action, days = 1 }, chat) { // chat引数を�
 /**
  * 指定された範囲内のランダムな整数を生成します。
  * @param {object} args - AIによって提供される引数オブジェクト
- * @param {number} args.min - 乱数の最小値 (整数)
- * @param {number} args.max - 乱数の最大値 (整数)
- * @param {number} [args.count=1] - 生成する乱数の個数 (デフォルト1)
+ * @param {number|string} args.min - 乱数の最小値 (整数)
+ * @param {number|string} args.max - 乱数の最大値 (整数)
+ * @param {number|string} [args.count=1] - 生成する乱数の個数 (デフォルト1)
  * @returns {Promise<object>} 生成された整数の配列を含むオブジェクトを返すPromise
  */
-async function get_random_integer({ min, max, count = 1 }) {
+async function get_random_integer(args) {
+    const { min, max, count } = normalizeRandomIntegerArguments(args);
     console.log(`[Function Calling] get_random_integerが呼び出されました。`, { min, max, count });
 
     if (typeof min !== 'number' || typeof max !== 'number' || !Number.isInteger(min) || !Number.isInteger(max)) {
@@ -700,6 +701,16 @@ async function get_random_integer({ min, max, count = 1 }) {
         console.error(`[Function Calling] get_random_integerでエラーが発生しました:`, error);
         return { error: `内部エラーが発生しました: ${error.message}` };
     }
+}
+
+function normalizeRandomIntegerArguments({ min, max, count = 1 }) {
+    const normalize = value => {
+        if (typeof value !== 'string') return value;
+        const integer = Number(value);
+        // A round trip accepts only canonical decimal strings with no loss of precision.
+        return Number.isSafeInteger(integer) && String(integer) === value ? integer : value;
+    };
+    return { min: normalize(min), max: normalize(max), count: normalize(count) };
 }
 
 /**
