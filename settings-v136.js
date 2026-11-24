@@ -208,8 +208,9 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             const r = metadata.reasoning;
             if (r && Object.prototype.hasOwnProperty.call(r, 'supported_efforts')) {
                 const levels = (r.supported_efforts === null
-                    ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : r.supported_efforts)
-                    .filter(level => ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
+                    ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none'] : r.supported_efforts)
+                    .filter(level => ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level)
+                        || (level === 'none' && r.mandatory === false));
                 return cap('effort', levels, levels.includes(r.default_effort) ? r.default_effort : levels[0] || null,
                     { source: 'metadata' });
             }
@@ -290,7 +291,10 @@ AIであるあなたが、私のことをより深く理解し、今後の会話
             else if (c.mode === 'legacy-default') body.thinkingConfig = { includeThoughts: true };
         } else if (provider === 'openrouter') {
             delete body.reasoning;
-            if (c.mode === 'effort' && c.levels.length) body.reasoning = { effort: normalizeEffort(effort, c), exclude: false };
+            if (c.mode === 'effort' && c.levels.length) {
+                const level = normalizeEffort(effort, c);
+                body.reasoning = level === 'none' ? { enabled: false, exclude: false } : { effort: level, exclude: false };
+            }
             else if (c.mode === 'enabled') body.reasoning = { enabled: true, exclude: false };
         } else if (provider === 'zai') {
             if (c.supported) body.thinking = { type: 'enabled' };

@@ -200,8 +200,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.38.2";
-const APP_CACHE_VERSION = "v1.38.2";
+const APP_VERSION = "1.38.3";
+const APP_CACHE_VERSION = "v1.38.3";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -9018,12 +9018,19 @@ function geminiInteractionsTools(session, systemInstruction) {
 // The catalog's supported_parameters "tools" only describes function calling.
 // https://openrouter.ai/docs/guides/features/server-tools/tool-search
 // https://openrouter.ai/blog/insights/mcp-vs-cli-vs-skills/
+const CLAUDE_5_5_TOOL_SEARCH_SUPPORT = {
+    defaultRouting: true, flexibleRouting: true, toolSchemaFallback: true,
+    reasoningReplay: { 'claude-on-aws': ['claude-on-aws'] }
+};
 const OPENROUTER_TOOL_SEARCH_SUPPORT = new Map([
     ['openai/gpt-6-luna', { defaultRouting: true, providers: ['openai'] }],
     ['openai/gpt-5.2', { defaultRouting: true, providers: [] }],
-    // Revisit Claude Haiku 5.5 and Sonnet 5.5 after the Responses tool schema error is resolved.
+    ['anthropic/claude-haiku-5.5', CLAUDE_5_5_TOOL_SEARCH_SUPPORT],
+    ['anthropic/claude-sonnet-5.5', { ...CLAUDE_5_5_TOOL_SEARCH_SUPPORT, requiresThinking: true }],
     ['google/gemini-3.8-flash', { defaultRouting: false, providers: ['google-vertex', 'google-vertex/global'] }],
-    ['deepseek/deepseek-v4.1-flash-1017', { defaultRouting: false, providers: ['deepinfra'], requiresNoFallbacks: true }]
+    ['deepseek/deepseek-v4.1-flash-1017', { defaultRouting: true, flexibleRouting: true, reasoningReplay: {
+        deepinfra: ['deepinfra', 'baseten'], baseten: ['baseten'], morph: ['morph']
+    } }]
 ]);
 const OPENROUTER_RESPONSES_ENDPOINT = 'https://openrouter.ai/api/v1/responses';
 const toolSearchContinuations = new WeakMap();
@@ -9032,19 +9039,80 @@ function getOpenRouterToolSearchRoute(config) {
     const support = OPENROUTER_TOOL_SEARCH_SUPPORT.get(config.modelName);
     if (!support) return null;
     const routing = config.openRouterRouting;
-    if (routing == null) return support.defaultRouting ? {} : null;
+    const defaults = support.flexibleRouting ? {
+        reasoningReplay: support.reasoningReplay, ...(support.toolSchemaFallback && { toolSchemaFallback: true }),
+        ...(support.requiresThinking && { requiresThinking: true })
+    } : {};
+    if (routing == null) return support.defaultRouting ? defaults : null;
     if (typeof routing !== 'object' || Array.isArray(routing)) return null;
-    if (!Object.keys(routing).length) return support.defaultRouting ? {} : null;
+    if (!Object.keys(routing).length) return support.defaultRouting ? defaults : null;
     // An order or an exclusion list alone does not bound the fallback set.
     const { only, ignore = [], order = [], allow_fallbacks } = routing;
     const slugs = values => Array.isArray(values) && values.every(value => typeof value === 'string' && value.length);
-    if (!slugs(only) || !slugs(ignore) || !slugs(order) ||
+    if ((only !== undefined && !slugs(only)) || !slugs(ignore) || !slugs(order) ||
         (allow_fallbacks != null && typeof allow_fallbacks !== 'boolean')) return null;
-    if (support.requiresNoFallbacks && allow_fallbacks !== false) return null;
-    const permitted = [...new Set(only)].filter(provider =>
+    const permitted = [...new Set(only || [])].filter(provider =>
         !ignore.some(excluded => provider === excluded || provider.startsWith(excluded + '/')));
+    if (support.flexibleRouting) return {
+        ...defaults, permittedProviders: permitted, exclusiveProvider: permitted.length === 1 ? permitted[0] : null
+    };
     if (!permitted.length || !permitted.every(provider => support.providers.includes(provider))) return null;
     return { exclusiveProvider: permitted.length === 1 ? permitted[0] : null };
+}
+
+function openRouterProviderSlug(provider) {
+    const name = provider.toLowerCase();
+    return name === 'claude platform on aws' ? 'claude-on-aws' : name;
+}
+
+function openRouterReplayRecipients(route, modelName) {
+    const previous = route.responseRoute;
+    if (!previous?.providerReported || !previous.modelReported || previous.model !== modelName ||
+        !route.permittedProviders?.length) return null;
+    const source = openRouterProviderSlug(previous.provider);
+    if (!route.permittedProviders.includes(source)) return null;
+    const targets = Object.hasOwn(route.reasoningReplay, source) ? route.reasoningReplay[source] : [];
+    return route.permittedProviders.every(provider => targets.includes(provider)) ? targets : null;
+}
+
+function isPortableOpenRouterToolOutput(items) {
+    // Extra fields may contain routing, search or reasoning state. Keep such items opaque.
+    const fields = {
+        function_call: ['type', 'id', 'call_id', 'name', 'arguments', 'status'],
+        'openrouter:tool_search': ['type', 'status', 'query'],
+        tool_search: ['type', 'status', 'query']
+    };
+    return items.every(item => item?.type === 'message'
+        ? Object.keys(item).every(key => ['type', 'id', 'role', 'status', 'content'].includes(key)) &&
+            Array.isArray(item.content) && item.content.every(part => part?.type === 'output_text' &&
+                Object.keys(part).every(key => ['type', 'text'].includes(key)))
+        : item && Object.hasOwn(fields, item.type) && Object.keys(item).every(key =>
+            fields[item.type].includes(key) && typeof item[key] === 'string'));
+}
+
+function portableOpenRouterToolItems(items) {
+    return items.flatMap(item => {
+        if (item.type === 'function_call') {
+            const { id, call_id, name, arguments: args } = item;
+            return [{ type: 'function_call', id, call_id, name, arguments: args, status: 'completed' }];
+        }
+        if (item.type === 'message') {
+            const content = item.content?.filter(part => part?.type === 'output_text' && typeof part.text === 'string')
+                .map(part => part.text).join('');
+            if (content) return [{ role: 'assistant', content }];
+        }
+        return [];
+    });
+}
+
+const openRouterRepeatableTools = new Set([
+    'calculate', 'getCurrentDateTime', 'rollDice', 'get_random_integer', 'get_random_choice', 'generate_random_string',
+    'lookup_context', 'search_documents'
+]);
+
+function openRouterToolOperationKey(name, args) {
+    return JSON.stringify([name, args], (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
 }
 
 function hasOpenRouterReasoningForReplay(item) {
@@ -9165,6 +9233,26 @@ function projectClosedToolSearchHistory(history) {
 function toolSearchRequestHistory(messages, session) {
     const projection = session.toolSearchProjection;
     return projection ? [...projection.messages, ...messages.slice(projection.count)] : messages;
+}
+
+function openRouterToolHistoryAsMessages(history) {
+    const calls = new Map();
+    const messages = history.flatMap(({ role, parts }) => {
+        if (role === 'tool') {
+            return parts.filter(part => part.functionResponse).map(({ functionResponse: result }) => ({ role: 'model', parts: [{
+                text: '【実行済みツール】\n' + window.DocumentRag.safeJson({ name: result.name, call_id: result._toolCallId,
+                    arguments: calls.get(result._toolCallId), result: result.response })
+            }] }));
+        }
+        for (const { functionCall } of parts) {
+            if (functionCall) calls.set(functionCall._toolCallId, functionCall.args);
+        }
+        return [{ role, parts: parts.filter(part => !part.thought && typeof part.text === 'string') }];
+    });
+    if (history.at(-1)?.role === 'tool') messages.push({ role: 'user', parts: [{
+        text: '実行済みのツール結果を使い、同じ操作を実行し直さず、元の依頼の残りを続けてください。'
+    }] });
+    return messages;
 }
 
 function aggregateToolSearchUsage(responses, metadata = {}) {
@@ -10709,6 +10797,8 @@ const apiUtils = {
         };
 
         appLogic.applyExecutionThinking(requestBody, 'openrouter', executionConfig);
+        if (session?.openRouterResponses?.legacyContinuation && !session.openRouterResponses.requiresThinking)
+            requestBody.reasoning = { enabled: false, exclude: false };
 
         // 生成パラメータの変換
         if (generationConfig) {
@@ -10724,7 +10814,7 @@ const apiUtils = {
         }
 
         // Function Callingの処理
-        if (settings.geminiEnableFunctionCalling) {
+        if (settings.geminiEnableFunctionCalling && (!session?.openRouterResponses?.legacyContinuation || tools)) {
             // Gemini形式のfunction declarationsをOpenAI形式に変換
             const openAITools = [];
             
@@ -10884,6 +10974,13 @@ const apiUtils = {
             }
             
             const geminiFormatResponse = this.convertOpenAIToGeminiFormat(openAIResponse);
+
+            if (session?.openRouterResponses?.legacyContinuation) {
+                (session.toolSearchUsage ||= []).push({ ...geminiFormatResponse.usageMetadata,
+                    openRouterSearchCalls: 0, openRouterCachedTokenCount: openAIResponse.usage?.prompt_tokens_details?.cached_tokens,
+                    openRouterReasoningTokenCount: openAIResponse.usage?.completion_tokens_details?.reasoning_tokens,
+                    openRouterCostUsd: openAIResponse.usage?.cost });
+            }
 
             // Responseオブジェクトのように扱えるようにラップ
             return {
@@ -11054,10 +11151,19 @@ const apiUtils = {
         const stateForSend = session.openRouterResponses;
         const { modelName, apiKey } = session.apiConfig;
         if (!apiKey) throw new Error(appLogic.getApiKeyMissingMessage(session.apiConfig, 'openrouter'));
-        const replay = allowTools ? session.toolSearchReplay : null;
+        const recipients = stateForSend.reasoningReplay ? openRouterReplayRecipients(stateForSend, modelName) : null;
+        if (allowTools && stateForSend.reasoningReplay && !recipients &&
+            messages.some(message => message.responsesItems && !isPortableOpenRouterToolOutput(message.responsesItems))) {
+            stateForSend.portableHistory = true;
+            session.toolSearchCheckpoint = null;
+        }
+        const replay = allowTools && !stateForSend.portableHistory && (!stateForSend.reasoningReplay || recipients)
+            ? session.toolSearchReplay : null;
         const history = replay ? messages.slice(replay.count) : toolSearchRequestHistory(messages, session);
-        const input = [...(replay?.items || []), ...history.flatMap(message => {
-            if (allowTools && message.responsesItems) return message.responsesItems;
+        const textHistory = allowTools && stateForSend.portableHistory && stateForSend.requiresThinking;
+        const input = [...(replay?.items || []), ...(textHistory ? openRouterToolHistoryAsMessages(history) : history).flatMap(message => {
+            if (allowTools && message.responsesItems) return stateForSend.portableHistory
+                ? portableOpenRouterToolItems(message.responsesItems) : message.responsesItems;
             if (message.role === 'tool') return allowTools ? message.parts.map(({ functionResponse }) => ({
                 type: 'function_call_output', call_id: functionResponse._toolCallId,
                 output: JSON.stringify(functionResponse.response)
@@ -11068,7 +11174,7 @@ const apiUtils = {
         if (!allowTools) {
             // Tool Search rejects disabling tool choice on its active catalog.
             // Start a text-only response with the already executed results as context.
-            const results = messages.filter(message => message.role === 'tool').flatMap(message => message.parts
+            const results = history.filter(message => message.role === 'tool').flatMap(message => message.parts
                 .map(({ functionResponse }) => ({ name: functionResponse.name, response: functionResponse.response })));
             input.push({ role: 'assistant', content: window.DocumentRag.historicalToolText({}, results) },
                 { role: 'user', content: 'ツールの実行結果を参考に、元の依頼への最終回答を返してください。' });
@@ -11086,7 +11192,9 @@ const apiUtils = {
         };
         appLogic.applyExecutionThinking(body, 'openrouter', session.apiConfig);
         const { effort, enabled } = body.reasoning || {};
-        body.reasoning = { summary: 'auto', ...(effort && { effort }), ...(enabled != null && { enabled }) };
+        // The reconstructed history has no provider-specific reasoning to continue Thinking tool calls.
+        body.reasoning = stateForSend.portableHistory && !stateForSend.requiresThinking ? { enabled: false }
+            : { summary: 'auto', ...(effort && { effort }), ...(enabled != null && { enabled }) };
         const response = await fetch(OPENROUTER_RESPONSES_ENDPOINT, {
             method: 'POST', redirect: 'error', signal,
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`,
@@ -11102,13 +11210,19 @@ const apiUtils = {
         });
         signal.throwIfAborted();
         if (!response.ok || data?.error) {
+            const message = data?.error?.message || '';
+            const raw = data?.error?.metadata?.raw;
+            const toolSchemaRejected = stateForSend.toolSchemaFallback &&
+                /input_schema[\s\S]{0,160}(?:schema is invalid|draft 2020-12)/i.test(`${message}\n${typeof raw === 'string' ? raw : raw?.error?.message || ''}`);
             const unsupported = [404, 405, 501].includes(response.status) ||
-                ([400, 422].includes(response.status) && /(?:tool[_ -]search|defer_loading|responses api)/i.test(data?.error?.message || '') &&
-                    /(?:unsupported|not support|unavailable|not available)/i.test(data?.error?.message || ''));
+                ([400, 422].includes(response.status) && (toolSchemaRejected ||
+                    (/(?:tool[_ -]search|defer_loading|responses api)/i.test(message) &&
+                        /(?:unsupported|not support|unavailable|not available)/i.test(message))));
             throw Object.assign(new Error(`OpenRouter Responses APIエラー (${response.status})`), {
                 status: response.status, responsesUnsupported: unsupported,
-                toolSearchReplayRejected: [400, 422].includes(response.status) &&
-                    /^deferred_tools_(?:state_missing|state_invalid|history_changed|catalog_changed)$/.test(data?.error?.metadata?.code || '')
+                toolSearchReplayRejected: allowTools && [400, 422].includes(response.status) &&
+                    (/^deferred_tools_(?:state_missing|state_invalid|history_changed|catalog_changed)$/.test(data?.error?.metadata?.code || '') ||
+                        (stateForSend.reasoningReplay && /reasoning_content|encrypted_content|reasoning signature|function_call_output|(?:missing|invalid|unknown) (?:tool call|call_id)/i.test(data?.error?.message || '')))
             });
         }
         const truncated = data?.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens';
@@ -11130,19 +11244,27 @@ const apiUtils = {
         if (data.status !== 'completed' && !truncated)
             throw new Error('OpenRouter Responses の応答が完了しませんでした。');
         stateForSend.started = true;
-        if (allowTools) {
+        if (allowTools || stateForSend.reasoningReplay) {
             const endpoints = data.openrouter_metadata?.endpoints?.available;
             const metadataProvider = Array.isArray(endpoints) ? endpoints.find(endpoint => endpoint?.selected)?.provider : undefined;
             const provider = (typeof metadataProvider === 'string' && metadataProvider.trim()) ||
                 response.headers.get('X-Provider-Name')?.trim();
             const previous = stateForSend.responseRoute;
-            if ((provider && previous?.provider && provider.toLowerCase() !== previous.provider.toLowerCase()) ||
+            const providerSlug = provider && openRouterProviderSlug(provider);
+            const providerChanged = providerSlug && previous?.provider && providerSlug !== openRouterProviderSlug(previous.provider);
+            const portableContinuation = stateForSend.reasoningReplay && (!allowTools || stateForSend.portableHistory || (!replay &&
+                history.every(message => !message.responsesItems || isPortableOpenRouterToolOutput(message.responsesItems))));
+            const destinationAllowed = !stateForSend.permittedProviders?.length ||
+                (providerSlug && stateForSend.permittedProviders.includes(providerSlug));
+            if ((providerChanged && !(portableContinuation && destinationAllowed) &&
+                !(recipients?.includes(providerSlug) && stateForSend.permittedProviders.includes(providerSlug))) ||
                 (data.model && previous?.model && data.model !== previous.model))
                 throw new Error('OpenRouter Responses の継続中に配信先またはモデルが変更されました。');
             // A requested provider or a past observation cannot confirm this response's route.
             if (!provider) stateForSend.providerUnconfirmed = true;
             stateForSend.responseRoute = {
-                provider: provider || previous?.provider, model: data.model || previous?.model, providerReported: Boolean(provider)
+                provider: provider || previous?.provider, model: data.model || previous?.model,
+                providerReported: Boolean(provider), modelReported: Boolean(data.model)
             };
         }
         const hasCalls = !truncated && data.output.some(item => item?.type === 'function_call');
@@ -11157,6 +11279,12 @@ const apiUtils = {
         const declaredNames = new Set(stateForSend.tools.filter(tool => tool.type === 'function').map(tool => tool.name));
         const ids = new Set(input.filter(item => item.type === 'function_call_output').map(item => item.call_id));
         const itemIds = new Set(input.filter(item => item.type === 'function_call').map(item => item.id));
+        if (textHistory) {
+            for (const message of history) {
+                for (const part of message.parts) if (part.functionResponse) ids.add(part.functionResponse._toolCallId);
+                for (const item of message.responsesItems || []) if (item.type === 'function_call') itemIds.add(item.id);
+            }
+        }
         for (const item of data.output) {
             if (item?.type === 'message') {
                 for (const part of item.content || []) {
@@ -11194,18 +11322,41 @@ const apiUtils = {
         if (provider === 'zai') {
             return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'openrouter') {
-            if (session?.openRouterResponses) {
+            const responses = session?.openRouterResponses;
+            if (responses && !responses.legacyContinuation) {
                 try {
                     return await this.callOpenRouterResponses(messagesForApi, generationConfig, systemInstruction, signal, session, Boolean(tools), onStream);
                 } catch (error) {
                     signal.throwIfAborted();
-                    if (session.openRouterResponses.started || session.toolSearchUsage?.length ||
-                        !(error.responsesUnsupported || (session.toolSearchReplay && error.toolSearchReplayRejected))) throw error;
-                    session.openRouterResponses = null;
-                    session.toolSearchCheckpoint = null;
+                    const canHandoff = responses.reasoningReplay && tools && messagesForApi.at(-1)?.role === 'tool';
+                    const isHandoffError = failure => failure.toolSearchReplayRejected || failure.responsesUnsupported;
+                    if (canHandoff && isHandoffError(error)) {
+                        session.toolSearchCheckpoint = null;
+                        if (!responses.portableHistory && !error.responsesUnsupported) {
+                            responses.portableHistory = true;
+                            try {
+                                return await this.callOpenRouterResponses(messagesForApi, generationConfig, systemInstruction, signal, session, true, onStream);
+                            } catch (portableError) {
+                                signal.throwIfAborted();
+                                if (!isHandoffError(portableError)) throw portableError;
+                            }
+                        }
+                        responses.legacyContinuation = true;
+                    } else {
+                        if (responses.started || session.toolSearchUsage?.length ||
+                            !(error.responsesUnsupported || (session.toolSearchReplay && error.toolSearchReplayRejected))) throw error;
+                        session.openRouterResponses = null;
+                        session.toolSearchCheckpoint = null;
+                    }
                 }
             }
-            return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
+            let history = messagesForApi;
+            if (responses?.legacyContinuation) {
+                history = toolSearchRequestHistory(messagesForApi, session);
+                history = responses.requiresThinking ? openRouterToolHistoryAsMessages(history)
+                    : history.map(({ role, parts }) => ({ role, parts }));
+            }
+            return await this.callOpenRouterApi(history, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
         } else if (provider === 'bedrock') {
             return await this.callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'gemini') {
@@ -19372,6 +19523,7 @@ const appLogic = {
         const loopLimitMessage = 'AIが同じ操作を繰り返しているようです。処理を中断しました。プロンプトを修正して再度お試しください。';
         const terminalTools = new Set(['generate_image', 'generate_image_stable_diffusion', 'generate_video', 'edit_image', 'display_layered_image']);
         const finalTurnResults = [];
+        const completedOpenRouterCalls = new Map();
         let currentTurnHistory = [...messagesForApi];
         let aggregatedSearchResults = [];
         const config = session?.apiConfig;
@@ -19477,11 +19629,29 @@ const appLogic = {
             
             const toolResults = [];
             let executedTerminalAction = false;
-            
+
+            const openRouter = session?.openRouterResponses;
+            const continuationMode = openRouter?.legacyContinuation ? 'chat' : openRouter?.portableHistory ? 'portable' : 'responses';
+            if (openRouter?.legacyContinuation && result.toolCalls.some(({ functionCall }) =>
+                !functionCall._toolCallId?.trim() || completedOpenRouterCalls.has(functionCall._toolCallId))) {
+                throw new Error('OpenRouter のツール呼び出しIDが不正か、実行済みです。');
+            }
             for (const toolCall of result.toolCalls) {
                 assertOwner();
                 const functionName = toolCall.functionCall.name;
                 const functionArgs = toolCall.functionCall.args;
+                const callId = toolCall.functionCall._toolCallId;
+                const operationKey = openRouter?.reasoningReplay ? openRouterToolOperationKey(functionName, functionArgs) : null;
+                if (operationKey && continuationMode !== 'responses' && !openRouterRepeatableTools.has(functionName)) {
+                    const completed = [...completedOpenRouterCalls.values()]
+                        .find(entry => entry.mode !== continuationMode && entry.key === operationKey);
+                    if (completed && canExecuteTool(functionName)) {
+                        const reused = { ...completed.result, _toolCallId: callId };
+                        toolResults.push(reused);
+                        completedOpenRouterCalls.set(callId, { ...completed, result: reused });
+                        continue;
+                    }
+                }
                 const lookup = functionName === 'lookup_context';
                 
                 console.log(`[Function Calling] 実行: ${functionName}`, lookup || functionName === 'search_documents' ? undefined : functionArgs);
@@ -19558,6 +19728,8 @@ const appLogic = {
                 }
 
                 toolResults.push(toolResponseMessage);
+                if (operationKey && callId) completedOpenRouterCalls.set(callId, { key: operationKey, mode: continuationMode,
+                    result: { ...toolResponseMessage, _internal_ui_action: undefined } });
                 modelMessage.executedFunctions.push(functionName);
                 if (session) (session.executedFunctions ||= new Set()).add(functionName);
             }
