@@ -200,8 +200,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.38.1";
-const APP_CACHE_VERSION = "v1.38.1";
+const APP_VERSION = "1.38.2";
+const APP_CACHE_VERSION = "v1.38.2";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -777,6 +777,7 @@ try {
         enableTextFormattingToggle: document.getElementById('enable-text-formatting-toggle'),
         geminiEnableGroundingToggle: document.getElementById('gemini-enable-grounding-toggle'),
         geminiEnableFunctionCallingToggle: document.getElementById('gemini-enable-function-calling-toggle'),
+        legacyFunctionCallingToggle: document.getElementById('legacy-function-calling-toggle'),
         forceFunctionCallingToggle: document.getElementById('force-function-calling-toggle'),
         appVersionSpan: document.getElementById('app-version'),
         releaseNotesBtn: document.getElementById('release-notes-btn'),
@@ -1099,6 +1100,7 @@ const state = {
         proofreadingSystemInstruction: 'あなたはプロの編集者です。受け取った文章の過剰な読点を抑制し、日本語として違和感のない読点の使用量に校正してください。承知しました等の応答は行わず、校正後の文章のみ出力して下さい。読点の抑制以外の編集は禁止です。読点以外の文章には絶対に手を付けないで下さい。',
         geminiEnableGrounding: false,
         geminiEnableFunctionCalling: false,
+        useLegacyFunctionCalling: false,
         googleSearchApiKey: '',
         googleSearchEngineId: '',
         messageOpacity: 1,
@@ -7430,6 +7432,7 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         elements.enableTextFormattingToggle.checked = state.settings.enableTextFormatting;
         elements.geminiEnableGroundingToggle.checked = state.settings.geminiEnableGrounding;
         elements.geminiEnableFunctionCallingToggle.checked = state.settings.geminiEnableFunctionCalling;
+        elements.legacyFunctionCallingToggle.checked = state.settings.useLegacyFunctionCalling === true;
         this.updateSwipeNavigationControls();
         elements.enableProofreadingCheckbox.checked = state.settings.enableProofreading;
         elements.proofreadingSystemInstructionTextarea.value = state.settings.proofreadingSystemInstruction || '';
@@ -8918,6 +8921,284 @@ const sendToolDeclarations = session => {
     return lookup ? [...tools, { function_declarations: [lookup] }] : tools;
 };
 
+// JSON Schemaの型名を小文字に変換する再帰関数
+const normalizeJsonSchema = (schema) => {
+    if (!schema || typeof schema !== 'object') {
+        return schema;
+    }
+
+    const normalized = Array.isArray(schema) ? [] : {};
+
+    for (const key in schema) {
+        if (!schema.hasOwnProperty(key)) continue;
+
+        let value = schema[key];
+
+        // "type"フィールドの値を小文字に変換
+        if (key === 'type' && typeof value === 'string') {
+            value = value.toLowerCase();
+        }
+        // オブジェクトまたは配列の場合は再帰処理
+        else if (typeof value === 'object' && value !== null) {
+            value = normalizeJsonSchema(value);
+        }
+
+        normalized[key] = value;
+    }
+
+    return normalized;
+};
+
+// https://aistudio.google.com/docs/tool-retrieval#supported-models
+const GEMINI_TOOL_RETRIEVAL_MODELS = new Set([
+    'gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-4-argon',
+    'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-4-neon'
+]);
+const GEMINI_INTERACTIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+// Descriptions used in the 24-tool Gemini 3.6 Flash experiment.
+const GEMINI_TOOL_SHORT_DESCRIPTIONS = new Map(Object.entries({
+    manage_image_assets: '提供画像を名前で保存・取得・一覧表示。取得時は[IMAGE_HERE]。',
+    calculate: '四則演算式を正確に評価。複雑な計算や精度が必要な場合。',
+    manage_persistent_memory: '許可時のみ、物語の重要設定を永続記憶。',
+    getCurrentDateTime: '現実の日本日時を取得。会話に自然な場合のみ。',
+    rollDice: '明示されたTRPGダイス式だけを振る。',
+    manage_timer: '分単位タイマーの開始・確認・停止。',
+    manage_character_status: '許可時のみ、人物のHP・MP・疲労などを変更。',
+    manage_inventory: '許可時のみ、人物の所持品を追加・削除。',
+    manage_scene: '許可時のみ、場面の場所・時刻・雰囲気・視点を管理。',
+    manage_flags: '許可時のみ、物語の真偽フラグ・数値カウンターを管理。',
+    manage_game_date: '許可時のみ、物語やゲーム内の経過日数を管理。',
+    get_random_integer: '範囲内の乱数整数・一般確率。TRPGダイス式は対象外。',
+    get_random_choice: '指定リストから項目を無作為に選ぶ。',
+    generate_random_string: '指定条件でランダムなID・パスワード等の文字列を生成。',
+    search_web: '現実の最新情報や事実をウェブ検索。ユーザーのAPI設定が必要。',
+    manage_style_profile: '許可時のみ、人物の口調・一人称・方言を設定。',
+    set_ui_opacity: '許可時のみ、チャットUIの透明度を変更。',
+    set_background_image: '許可時のみ、ユーザー指定URLか保存画像でチャット背景を変更。',
+    generate_video: '許可時のみ、テキストや画像から動画生成。一度で終了し[VIDEO_HERE]。',
+    generate_image: '許可時のみ、テキストから画像生成。一度で終了し[IMAGE_HERE]。',
+    generate_image_stable_diffusion: 'SDの明示指定時のみ画像生成。本文と[IMAGE_HERE]を同時に返す。',
+    edit_image: '許可時のみ、履歴・保存済みの既存画像を編集・合成。',
+    manage_character_memory: '許可時のみ、人物の記憶・人格の一貫性を管理。',
+    fetch_url_content: 'ユーザーが送ったURLのページ本文を取得。'
+}));
+
+function canStartGeminiToolRetrieval(session, history, generationConfig) {
+    if (!session?.autoReference || session.answerOnly || session.fullDocuments?.length ||
+        session.rag?.status === 'unsupported' || !session.settings.geminiEnableFunctionCalling ||
+        session.settings.forceFunctionCalling || session.settings.useLegacyFunctionCalling === true ||
+        session.toolCallingSupported !== true) return false;
+    const { provider, modelName, baseUrl } = session.apiConfig;
+    if (provider !== 'gemini' ||
+        !GEMINI_TOOL_RETRIEVAL_MODELS.has(modelName?.replace(/^models\//, '')) ||
+        (baseUrl && baseUrl !== GEMINI_API_BASE_URL)) return false;
+    // Interactions does not expose these chat sampling parameters.
+    if (Object.entries(generationConfig).some(([key, value]) => key !== 'maxOutputTokens' && value != null)) return false;
+    return history.at(-1)?.role === 'user' && history.every(message =>
+        ['user', 'model'].includes(message.role) && message.parts?.length && message.parts.every(part =>
+            typeof part.text === 'string' && !part.inlineData && !part.fileData &&
+            !part.functionCall && !part.functionResponse && !part.thoughtSignature));
+}
+
+function geminiInteractionsTools(session, systemInstruction) {
+    const named = new Set(systemInstruction?.parts?.flatMap(part => part.text?.match(/\b\w+\b/g) || []));
+    return [{ type: 'tool_search' }, ...sendToolDeclarations(session).flatMap(group =>
+        (group.function_declarations || []).map(({ name, description, parameters }) => {
+            const shortDescription = GEMINI_TOOL_SHORT_DESCRIPTIONS.get(name);
+            return { type: 'function', name, description,
+                ...(parameters && { parameters: JSON.parse(JSON.stringify(parameters), (key, value) =>
+                    key === 'type' && typeof value === 'string' ? value.toLowerCase() : value) }),
+                ...(shortDescription && !named.has(name) && { defer_loading: true, short_description: shortDescription }) };
+        })
+    )];
+}
+
+// Default responses routes used in OpenRouter's examples/benchmarks, and
+// explicit routes backed by those examples, native support, or our live test.
+// The catalog's supported_parameters "tools" only describes function calling.
+// https://openrouter.ai/docs/guides/features/server-tools/tool-search
+// https://openrouter.ai/blog/insights/mcp-vs-cli-vs-skills/
+const OPENROUTER_TOOL_SEARCH_SUPPORT = new Map([
+    ['openai/gpt-6-luna', { defaultRouting: true, providers: ['openai'] }],
+    ['openai/gpt-5.2', { defaultRouting: true, providers: [] }],
+    // Revisit Claude Haiku 5.5 and Sonnet 5.5 after the Responses tool schema error is resolved.
+    ['google/gemini-3.8-flash', { defaultRouting: false, providers: ['google-vertex', 'google-vertex/global'] }],
+    ['deepseek/deepseek-v4.1-flash-1017', { defaultRouting: false, providers: ['deepinfra'], requiresNoFallbacks: true }]
+]);
+const OPENROUTER_RESPONSES_ENDPOINT = 'https://openrouter.ai/api/v1/responses';
+const toolSearchContinuations = new WeakMap();
+
+function getOpenRouterToolSearchRoute(config) {
+    const support = OPENROUTER_TOOL_SEARCH_SUPPORT.get(config.modelName);
+    if (!support) return null;
+    const routing = config.openRouterRouting;
+    if (routing == null) return support.defaultRouting ? {} : null;
+    if (typeof routing !== 'object' || Array.isArray(routing)) return null;
+    if (!Object.keys(routing).length) return support.defaultRouting ? {} : null;
+    // An order or an exclusion list alone does not bound the fallback set.
+    const { only, ignore = [], order = [], allow_fallbacks } = routing;
+    const slugs = values => Array.isArray(values) && values.every(value => typeof value === 'string' && value.length);
+    if (!slugs(only) || !slugs(ignore) || !slugs(order) ||
+        (allow_fallbacks != null && typeof allow_fallbacks !== 'boolean')) return null;
+    if (support.requiresNoFallbacks && allow_fallbacks !== false) return null;
+    const permitted = [...new Set(only)].filter(provider =>
+        !ignore.some(excluded => provider === excluded || provider.startsWith(excluded + '/')));
+    if (!permitted.length || !permitted.every(provider => support.providers.includes(provider))) return null;
+    return { exclusiveProvider: permitted.length === 1 ? permitted[0] : null };
+}
+
+function hasOpenRouterReasoningForReplay(item) {
+    const hasText = value => typeof value === 'string' && Boolean(value.trim());
+    const { encrypted_content: encrypted, content } = item;
+    if (encrypted != null && typeof encrypted !== 'string') return false;
+    if (content != null && (!Array.isArray(content) || content.some(part =>
+        !part || typeof part !== 'object' || Array.isArray(part) ||
+        part.type !== 'reasoning_text' || typeof part.text !== 'string'))) return false;
+    // Keep both formats in the provider's original output array and never expose content as a thought summary.
+    return hasText(encrypted) || Boolean(content?.some(part => hasText(part.text)));
+}
+
+// Only project results with a known, bounded shape. Character state and memory
+// already have their own storage. Document excerpts, URLs and generated secrets
+// must not become additional copies in the conversation.
+function portableToolResults(tools) {
+    if (!Array.isArray(tools)) return [];
+    return tools.slice(-12).flatMap(tool => {
+        const { name, response } = tool || {};
+        if (!response || response.error) return [];
+        let value;
+        if (name === 'calculate' && Number.isFinite(response.result)) {
+            value = { result: response.result };
+        } else if (name === 'rollDice' && Number.isFinite(response.total)) {
+            value = { total: response.total };
+            if (Array.isArray(response.rolls) && response.rolls.length <= 100 && response.rolls.every(Number.isSafeInteger))
+                value.rolls = response.rolls;
+        } else if (name === 'get_random_integer' && Array.isArray(response.results) && response.results.length <= 100 &&
+            response.results.every(Number.isSafeInteger)) {
+            value = { results: response.results };
+        } else if (name === 'get_random_choice' && Array.isArray(response.results) && response.results.length > 0 &&
+            response.results.length <= 100 && response.results.every(result => typeof result === 'string') &&
+            window.DocumentRag.safeJson({ results: response.results }).length <= 4000) {
+            value = { results: response.results };
+        } else if (name === 'getCurrentDateTime' && /^\d{4}年\d{2}月\d{2}日$/.test(response.date) &&
+            /^\d{2}:\d{2}:\d{2}$/.test(response.time)) {
+            value = { date: response.date, time: response.time, timezone: 'JST (UTC+9)' };
+        }
+        return value ? [{ name, response: value }] : [];
+    });
+}
+
+function textWithToolResults(content, continuation) {
+    const results = portableToolResults(continuation?.toolResults);
+    return results.length ? window.DocumentRag.historicalToolText({ content }, results) : content;
+}
+
+function toolSearchReplayContext(session, systemInstruction, generationConfig) {
+    const transport = session.geminiInteractions || session.openRouterResponses;
+    if (!transport || session.rag || session.searchScope?.documents?.length || session.summarizedContext ||
+        session.settings.dummyUser || session.settings.dummyModel) return null;
+    // Account routing can change between user turns. Keep only portable results
+    // unless the request configuration bounds Responses to one provider.
+    if (session.openRouterResponses && !session.openRouterResponses.exclusiveProvider) return null;
+    const config = session.apiConfig;
+    return JSON.stringify([session.chatId, session.profileId, session.projectId, config.id, config.provider, config.modelName, config.baseUrl,
+        config.openRouterRouting, config.thinkingEffort, config.thinkingCapability, systemInstruction, generationConfig, transport.tools,
+        session.settings.enableMemory, session.memoryEnabled, session.persistentMemory]);
+}
+
+function rememberToolSearchContinuation(session, history, message) {
+    const checkpoint = session.toolSearchCheckpoint;
+    if (!checkpoint?.context || !checkpoint.items || message.incomplete || message.proofreadingModelInfo) return;
+    if (session.openRouterResponses?.providerUnconfirmed) return;
+    const text = textWithToolResults(message.content, message.continuation);
+    if (!text?.trim()) return;
+    const prefix = JSON.stringify([...history, { role: 'model', parts: [{ text }] }]);
+    if (prefix.length > 256 * 1024 || checkpoint.context.length > 256 * 1024 ||
+        JSON.stringify(checkpoint.items).length > 512 * 1024) return;
+    toolSearchContinuations.set(session.messages, { prefix, context: checkpoint.context,
+        apiKey: session.apiConfig.apiKey, items: checkpoint.items, anchor: message,
+        responseRoute: session.openRouterResponses?.responseRoute, sessionId: session.openRouterResponses?.sessionId });
+}
+
+function projectClosedToolSearchHistory(history) {
+    let projected = false;
+    const messages = [];
+    for (let start = 0; start < history.length;) {
+        let end = start + 1;
+        while (end < history.length && history[end].role !== 'user') end++;
+        const turn = history.slice(start, end);
+        start = end;
+        if (!turn.some(message => message.role === 'tool' ||
+            message.parts.some(part => part.functionCall || part.functionResponse))) {
+            messages.push(...turn);
+            continue;
+        }
+        const [user, ...answer] = turn;
+        const last = answer.at(-1);
+        if (user.role !== 'user' || last?.role !== 'model' ||
+            !last.parts.some(part => typeof part.text === 'string' && part.text.trim() && !part.thought))
+            return null;
+        const pending = [], results = [], visible = [];
+        const callId = value => value.id ?? value._toolCallId;
+        for (const message of answer) {
+            if (message.role === 'model' && pending.length) return null;
+            for (const part of message.parts) {
+                if (message.role === 'model' && part.functionCall) pending.push(part.functionCall);
+                else if (message.role === 'tool' && part.functionResponse) {
+                    const call = pending.shift();
+                    const result = part.functionResponse;
+                    if (!call || call.name !== result.name || callId(call) !== callId(result)) return null;
+                    results.push(result);
+                } else if (message.role === 'model' && typeof part.text === 'string' && !part.inlineData && !part.fileData) {
+                    if (!part.thought) visible.push(part.text);
+                } else return null;
+            }
+        }
+        const portable = portableToolResults(results);
+        if (pending.length || !results.length || portable.length !== results.length) return null;
+        messages.push(user, { role: 'model', parts: [{ text: textWithToolResults(visible.join('\n\n'), { toolResults: portable }) }] });
+        projected = true;
+    }
+    return projected ? messages : null;
+}
+
+function toolSearchRequestHistory(messages, session) {
+    const projection = session.toolSearchProjection;
+    return projection ? [...projection.messages, ...messages.slice(projection.count)] : messages;
+}
+
+function aggregateToolSearchUsage(responses, metadata = {}) {
+    const gemini = responses[0].geminiInteractions === true;
+    const counters = gemini
+        ? ['geminiToolSearchCalls', 'thoughtsTokenCount', 'cachedContentTokenCount', 'toolUsePromptTokenCount']
+        : ['openRouterSearchCalls', 'openRouterCachedTokenCount', 'openRouterReasoningTokenCount', 'openRouterCostUsd'];
+    const usage = { ...metadata, ...(gemini ? { geminiInteractions: true } : { openRouterResponses: true }) };
+    for (const key of ['promptTokenCount', 'candidatesTokenCount', 'totalTokenCount', ...counters]) {
+        const valid = key === 'openRouterCostUsd' ? Number.isFinite : Number.isSafeInteger;
+        const values = responses.map(response => response[key]);
+        const total = values.every(value => valid(value) && value >= 0)
+            ? values.reduce((sum, value) => sum + value, 0) : undefined;
+        if (valid(total)) usage[key] = total;
+        else delete usage[key];
+    }
+    return usage;
+}
+
+function canStartOpenRouterToolSearch(session, history) {
+    if (!session?.autoReference || session.answerOnly || session.fullDocuments?.length ||
+        session.rag?.status === 'unsupported' ||
+        !session.settings.geminiEnableFunctionCalling || session.settings.forceFunctionCalling ||
+        session.settings.useLegacyFunctionCalling === true ||
+        session.toolCallingSupported !== true) return false;
+    const config = session.apiConfig;
+    const base = (config.baseUrl || '').replace(/\/$/, '');
+    return config.provider === 'openrouter' &&
+        ['', 'https://openrouter.ai/api/v1', OPENROUTER_API_BASE_URL].includes(base) &&
+        history.every(message => ['user', 'model'].includes(message.role) &&
+            message.parts?.every(part => typeof part.text === 'string' && !part.inlineData &&
+                !part.fileData && !part.functionCall && !part.functionResponse));
+}
+
 // --- APIユーティリティ (apiUtils) ---
 const THOUGHT_JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
 const THOUGHT_LITERALS = new RegExp([
@@ -9444,34 +9725,6 @@ const apiUtils = {
 
     // Gemini形式のFunction DeclarationsをBedrock形式に変換
     convertGeminiToolsToBedrock(geminiTools) {
-        // JSON Schemaの型名を小文字に変換する再帰関数
-        const normalizeJsonSchema = (schema) => {
-            if (!schema || typeof schema !== 'object') {
-                return schema;
-            }
-
-            const normalized = Array.isArray(schema) ? [] : {};
-
-            for (const key in schema) {
-                if (!schema.hasOwnProperty(key)) continue;
-
-                let value = schema[key];
-
-                // "type"フィールドの値を小文字に変換
-                if (key === 'type' && typeof value === 'string') {
-                    value = value.toLowerCase();
-                }
-                // オブジェクトまたは配列の場合は再帰処理
-                else if (typeof value === 'object' && value !== null) {
-                    value = normalizeJsonSchema(value);
-                }
-
-                normalized[key] = value;
-            }
-
-            return normalized;
-        };
-
         const bedrockTools = [];
         
         for (const geminiTool of geminiTools) {
@@ -9494,6 +9747,148 @@ const apiUtils = {
         }
         
         return bedrockTools;
+    },
+
+    async callGeminiInteractions(messages, generationConfig, systemInstruction, signal, session, allowTools, onStream) {
+        const { tools } = session.geminiInteractions;
+        const { apiKey } = session.apiConfig;
+        if (!apiKey) throw new Error(appLogic.getApiKeyMissingMessage(session.apiConfig, 'gemini'));
+        const replay = session.toolSearchReplay;
+        const history = replay ? messages.slice(replay.count) : toolSearchRequestHistory(messages, session);
+        const input = [...(replay?.items || []), ...history.flatMap(message => {
+            if (message.geminiInteractionSteps) return message.geminiInteractionSteps;
+            if (message.role === 'tool') return message.parts.map(({ functionResponse }) => ({
+                type: 'function_result', name: functionResponse.name, call_id: functionResponse.id,
+                result: [{ type: 'text', text: JSON.stringify(functionResponse.response) }]
+            }));
+            const content = message.parts.filter(part => !part.thought && part.text)
+                .map(part => ({ type: 'text', text: part.text }));
+            return content.length ? [{ type: message.role === 'model' ? 'model_output' : 'user_input', content }] : [];
+        })];
+        const systemText = systemInstruction?.parts?.map(part => part.text).filter(Boolean).join('\n\n');
+        const { thinkingConfig } = appLogic.applyExecutionThinking({}, 'gemini', session.apiConfig);
+        const names = new Set(tools.filter(tool => tool.type === 'function').map(tool => tool.name));
+        const available = allowTools ? sendToolDeclarations(session).flatMap(group => group.function_declarations || [])
+            .map(tool => tool.name).filter(name => names.has(name)) : [];
+        const toolChoice = !available.length ? 'none' : available.length < names.size
+            ? { mode: 'validated', tools: available } : undefined;
+        const response = await fetch(GEMINI_INTERACTIONS_ENDPOINT, {
+            method: 'POST', redirect: 'error', signal,
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+            body: JSON.stringify({
+                model: session.apiConfig.modelName.replace(/^models\//, ''), input, tools, store: false, stream: Boolean(onStream),
+                ...(systemText && { system_instruction: systemText }),
+                generation_config: {
+                    max_output_tokens: generationConfig.maxOutputTokens,
+                    thinking_level: thinkingConfig?.thinkingLevel?.toLowerCase(),
+                    thinking_summaries: thinkingConfig?.includeThoughts ? 'auto' : undefined,
+                    tool_choice: toolChoice
+                }
+            })
+        });
+        const data = onStream && response.ok
+            ? await StreamingV136.collectToolSearchResponse('gemini', response.body, signal, onStream.progress)
+            : await response.json().catch(() => {
+            signal.throwIfAborted();
+            if (response.ok) throw new Error('Gemini Interactions の応答を解析できません。');
+            return null;
+        });
+        signal.throwIfAborted();
+        if (!response.ok || data?.error) {
+            const message = data?.error?.message || '';
+            const unsupported = [404, 405, 501].includes(response.status) ||
+                ([400, 422].includes(response.status) && /(?:tool[_ -]search|tool retrieval|defer_loading|interactions api)/i.test(message) &&
+                    /(?:unsupported|not support|unavailable|not available)/i.test(message));
+            throw Object.assign(new Error(`Gemini Interactions API エラー (${response.status})`), {
+                status: response.status, interactionsUnsupported: unsupported,
+                toolSearchReplayRejected: [400, 422].includes(response.status) &&
+                    /(?:signature|server side tool call context)/i.test(message)
+            });
+        }
+        const steps = data?.steps;
+        const requiresAction = data?.status === 'requires_action';
+        const truncated = data?.status === 'incomplete';
+        if (!Array.isArray(steps))
+            throw new Error('Gemini Interactions の応答が完了しませんでした。');
+
+        const usage = data.usage;
+        const usageMetadata = {
+            geminiInteractions: true,
+            geminiToolSearchCalls: steps.filter(step => step?.type === 'tool_search_call').length,
+            promptTokenCount: usage?.total_input_tokens,
+            candidatesTokenCount: usage?.total_output_tokens,
+            thoughtsTokenCount: usage?.total_thought_tokens,
+            cachedContentTokenCount: usage?.total_cached_tokens,
+            toolUsePromptTokenCount: usage?.total_tool_use_tokens,
+            totalTokenCount: usage?.total_tokens
+        };
+        const settled = data.status === 'completed' || requiresAction || truncated;
+        if (settled || (usage && ['failed', 'cancelled'].includes(data.status))) {
+            (session.toolSearchUsage ||= []).push(usageMetadata);
+        }
+        if (!settled || data.incompleteSteps) throw new Error('Gemini Interactions の応答が完了しませんでした。');
+        const hasCalls = !truncated && steps.some(step => step?.type === 'function_call');
+        if (hasCalls && steps.some(step => typeof step?.type !== 'string' || !step.type))
+            throw new Error('Gemini Interactions のツール継続に必要なステップが不正です。');
+        const parts = [];
+        const ids = new Set(input.filter(step => step.type === 'function_result').map(step => step.call_id));
+        const deferred = new Set(tools.filter(tool => tool.defer_loading).map(tool => tool.name));
+        const loaded = new Set();
+        const rememberLoaded = step => {
+            for (const tool of step.result || []) {
+                if (typeof tool?.name === 'string') loaded.add(tool.name.replace(/^default_api:/, ''));
+            }
+        };
+        input.filter(step => step.type === 'tool_search_result').forEach(rememberLoaded);
+        const searchIds = new Set(input.filter(step => step.type === 'tool_search_call').map(step => step.id));
+        const pendingSearches = new Set();
+        for (const [index, step] of steps.entries()) {
+            if (step?.type === 'model_output' || step?.type === 'thought') {
+                const thought = step.type === 'thought';
+                if (thought && hasCalls && (typeof step.signature !== 'string' || !step.signature.trim())) {
+                    const error = new Error('Gemini Interactions の推論ステップに署名がありません。');
+                    if (onStream) {
+                        error.thoughtSignatureDiagnostic = { missingIndex: index, events: data.thoughtSignatureEvents };
+                        console.warn('[Gemini Interactions] thoughtSignatureDiagnostic', JSON.stringify(error.thoughtSignatureDiagnostic));
+                    }
+                    throw error;
+                }
+                for (const part of (thought ? step.summary : step.content) || []) {
+                    if (part.type === 'text' && typeof part.text === 'string') parts.push({ text: part.text, ...(thought && { thought }) });
+                }
+            } else if (hasCalls && step?.type === 'tool_search_call') {
+                if (typeof step.signature !== 'string' || !step.signature.trim() ||
+                    typeof step.id !== 'string' || !step.id.trim() || searchIds.has(step.id))
+                    throw new Error('Gemini Interactions のツール検索ステップが不正です。');
+                searchIds.add(step.id);
+                pendingSearches.add(step.id);
+            } else if (hasCalls && step?.type === 'tool_search_result') {
+                if (typeof step.signature !== 'string' || !step.signature.trim() ||
+                    !Array.isArray(step.result) || !pendingSearches.delete(step.call_id))
+                    throw new Error('Gemini Interactions のツール検索結果が不正です。');
+                rememberLoaded(step);
+            } else if (!truncated && step?.type === 'function_call') {
+                const { name, id, arguments: args } = step;
+                if (toolChoice === 'none' || !names.has(name) || typeof id !== 'string' || !id.trim() ||
+                    ids.has(id) || !args || typeof args !== 'object' || Array.isArray(args) ||
+                    (Object.hasOwn(step, 'signature') && (typeof step.signature !== 'string' || !step.signature.trim())))
+                    throw new Error('Gemini Interactions から不正または重複したツール呼び出しが返されました。');
+                if (deferred.has(name) && !loaded.has(name))
+                    throw new Error('遅延読み込みツールの検索結果がありません。Gemini API設定でTool Retrievalをオフにすると従来方式で送信できます。');
+                ids.add(id);
+                parts.push({ functionCall: { name, id, args } });
+            }
+        }
+        if (pendingSearches.size || (requiresAction && !hasCalls))
+            throw new Error('Gemini Interactions のツール呼び出しが完了しませんでした。');
+        if (!hasCalls && !truncated && session.toolSearchCheckpoint)
+            session.toolSearchCheckpoint.items = [...input, ...steps];
+        return { json: async () => ({
+            candidates: [{ content: { parts }, finishReason: truncated ? 'MAX_TOKENS' : 'STOP' }],
+            geminiInteractionSteps: steps,
+            tmActualModel: data.model,
+            usageMetadata
+        }) };
     },
 
     // Gemini APIを呼び出す
@@ -10309,7 +10704,8 @@ const apiUtils = {
         const requestBody = {
             model: model,
             messages: openAIMessages,
-            ...(stream && { stream: true })
+            ...(stream && { stream: true }),
+            ...(executionConfig?.openRouterRouting != null && { provider: executionConfig.openRouterRouting })
         };
 
         appLogic.applyExecutionThinking(requestBody, 'openrouter', executionConfig);
@@ -10341,7 +10737,7 @@ const apiUtils = {
                             function: {
                                 name: funcDecl.name,
                                 description: funcDecl.description || '',
-                                parameters: funcDecl.parameters || {}
+                                parameters: normalizeJsonSchema(funcDecl.parameters || {})
                             }
                         });
                     }
@@ -10654,6 +11050,142 @@ const apiUtils = {
         }
     },
 
+    async callOpenRouterResponses(messages, generationConfig, systemInstruction, signal, session, allowTools, onStream) {
+        const stateForSend = session.openRouterResponses;
+        const { modelName, apiKey } = session.apiConfig;
+        if (!apiKey) throw new Error(appLogic.getApiKeyMissingMessage(session.apiConfig, 'openrouter'));
+        const replay = allowTools ? session.toolSearchReplay : null;
+        const history = replay ? messages.slice(replay.count) : toolSearchRequestHistory(messages, session);
+        const input = [...(replay?.items || []), ...history.flatMap(message => {
+            if (allowTools && message.responsesItems) return message.responsesItems;
+            if (message.role === 'tool') return allowTools ? message.parts.map(({ functionResponse }) => ({
+                type: 'function_call_output', call_id: functionResponse._toolCallId,
+                output: JSON.stringify(functionResponse.response)
+            })) : [];
+            const content = message.parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
+            return content ? [{ role: message.role === 'model' ? 'assistant' : 'user', content }] : [];
+        })];
+        if (!allowTools) {
+            // Tool Search rejects disabling tool choice on its active catalog.
+            // Start a text-only response with the already executed results as context.
+            const results = messages.filter(message => message.role === 'tool').flatMap(message => message.parts
+                .map(({ functionResponse }) => ({ name: functionResponse.name, response: functionResponse.response })));
+            input.push({ role: 'assistant', content: window.DocumentRag.historicalToolText({}, results) },
+                { role: 'user', content: 'ツールの実行結果を参考に、元の依頼への最終回答を返してください。' });
+        }
+        const instructions = systemInstruction?.parts?.map(part => part.text).filter(Boolean).join('\n\n');
+        const body = {
+            model: modelName, input, store: false, stream: Boolean(onStream),
+            session_id: stateForSend.sessionId,
+            ...(session.apiConfig.openRouterRouting != null && { provider: session.apiConfig.openRouterRouting }),
+            ...(allowTools ? { tools: stateForSend.tools, max_tool_calls: 8, include: ['reasoning.encrypted_content'] } : { tools: [] }),
+            ...(instructions && { instructions }),
+            ...(generationConfig?.maxOutputTokens != null && { max_output_tokens: generationConfig.maxOutputTokens }),
+            ...(generationConfig?.temperature != null && { temperature: generationConfig.temperature }),
+            ...(generationConfig?.topP != null && { top_p: generationConfig.topP })
+        };
+        appLogic.applyExecutionThinking(body, 'openrouter', session.apiConfig);
+        const { effort, enabled } = body.reasoning || {};
+        body.reasoning = { summary: 'auto', ...(effort && { effort }), ...(enabled != null && { enabled }) };
+        const response = await fetch(OPENROUTER_RESPONSES_ENDPOINT, {
+            method: 'POST', redirect: 'error', signal,
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`,
+                'HTTP-Referer': window.location.origin, 'X-Title': 'ChatAI PWA' },
+            body: JSON.stringify(body)
+        });
+        const data = onStream && response.ok
+            ? await StreamingV136.collectToolSearchResponse('openrouter', response.body, signal, onStream.progress)
+            : await response.json().catch(() => {
+            signal.throwIfAborted();
+            if (response.ok) throw new Error('OpenRouter Responses の応答を解析できません。');
+            return null;
+        });
+        signal.throwIfAborted();
+        if (!response.ok || data?.error) {
+            const unsupported = [404, 405, 501].includes(response.status) ||
+                ([400, 422].includes(response.status) && /(?:tool[_ -]search|defer_loading|responses api)/i.test(data?.error?.message || '') &&
+                    /(?:unsupported|not support|unavailable|not available)/i.test(data?.error?.message || ''));
+            throw Object.assign(new Error(`OpenRouter Responses APIエラー (${response.status})`), {
+                status: response.status, responsesUnsupported: unsupported,
+                toolSearchReplayRejected: [400, 422].includes(response.status) &&
+                    /^deferred_tools_(?:state_missing|state_invalid|history_changed|catalog_changed)$/.test(data?.error?.metadata?.code || '')
+            });
+        }
+        const truncated = data?.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens';
+        if (!Array.isArray(data?.output))
+            throw new Error('OpenRouter Responses の応答が完了しませんでした。');
+        const isSearch = item => ['openrouter:tool_search', 'tool_search'].includes(item?.type);
+        const usageMetadata = {
+            promptTokenCount: data.usage?.input_tokens, candidatesTokenCount: data.usage?.output_tokens,
+            totalTokenCount: data.usage?.total_tokens, openRouterResponses: true,
+            openRouterSearchCalls: data.output.filter(isSearch).length,
+            openRouterCachedTokenCount: data.usage?.input_tokens_details?.cached_tokens,
+            openRouterReasoningTokenCount: data.usage?.output_tokens_details?.reasoning_tokens,
+            openRouterCostUsd: data.usage?.cost
+        };
+        if (data.status === 'completed' || truncated ||
+            (data.usage && ['incomplete', 'failed', 'cancelled'].includes(data.status))) {
+            (session.toolSearchUsage ||= []).push(usageMetadata);
+        }
+        if (data.status !== 'completed' && !truncated)
+            throw new Error('OpenRouter Responses の応答が完了しませんでした。');
+        stateForSend.started = true;
+        if (allowTools) {
+            const endpoints = data.openrouter_metadata?.endpoints?.available;
+            const metadataProvider = Array.isArray(endpoints) ? endpoints.find(endpoint => endpoint?.selected)?.provider : undefined;
+            const provider = (typeof metadataProvider === 'string' && metadataProvider.trim()) ||
+                response.headers.get('X-Provider-Name')?.trim();
+            const previous = stateForSend.responseRoute;
+            if ((provider && previous?.provider && provider.toLowerCase() !== previous.provider.toLowerCase()) ||
+                (data.model && previous?.model && data.model !== previous.model))
+                throw new Error('OpenRouter Responses の継続中に配信先またはモデルが変更されました。');
+            // A requested provider or a past observation cannot confirm this response's route.
+            if (!provider) stateForSend.providerUnconfirmed = true;
+            stateForSend.responseRoute = {
+                provider: provider || previous?.provider, model: data.model || previous?.model, providerReported: Boolean(provider)
+            };
+        }
+        const hasCalls = !truncated && data.output.some(item => item?.type === 'function_call');
+        const invalidReasoning = data.output.some(item => item?.type === 'reasoning' &&
+            ((item.status != null && item.status !== 'completed') || !hasOpenRouterReasoningForReplay(item)));
+        if (hasCalls && (!allowTools || invalidReasoning || data.output.some(item => !item?.type ||
+            (item.status != null && item.status !== 'completed' && !(isSearch(item) && item.status === 'failed')))))
+            throw new Error('OpenRouter Responses のツール継続に必要な情報が揃っていません。');
+        if (!allowTools && data.output.some(isSearch))
+            throw new Error('OpenRouter Responses の最終応答にツール検索が含まれています。');
+        const parts = [];
+        const declaredNames = new Set(stateForSend.tools.filter(tool => tool.type === 'function').map(tool => tool.name));
+        const ids = new Set(input.filter(item => item.type === 'function_call_output').map(item => item.call_id));
+        const itemIds = new Set(input.filter(item => item.type === 'function_call').map(item => item.id));
+        for (const item of data.output) {
+            if (item?.type === 'message') {
+                for (const part of item.content || []) {
+                    if (part.type === 'output_text' && typeof part.text === 'string') parts.push({ text: part.text });
+                }
+            } else if (item?.type === 'reasoning' && Array.isArray(item.summary)) {
+                const text = item.summary.map(part => typeof part === 'string' ? part :
+                    (part?.type === 'summary_text' ? part.text : '')).filter(Boolean).join('\n');
+                if (text) parts.push({ text, thought: true });
+            } else if (item?.type === 'function_call' && !truncated) {
+                let args;
+                try { if (typeof item.arguments === 'string') args = JSON.parse(item.arguments); } catch { /* validated below */ }
+                if (!declaredNames.has(item.name) || typeof item.id !== 'string' || !item.id.trim() || itemIds.has(item.id) ||
+                    typeof item.call_id !== 'string' || !item.call_id.trim() || ids.has(item.call_id) ||
+                    (item.status != null && item.status !== 'completed') || !args || typeof args !== 'object' || Array.isArray(args))
+                    throw new Error('OpenRouter Responses から未完了または重複したツール呼び出しが返されました。');
+                ids.add(item.call_id);
+                itemIds.add(item.id);
+                parts.push({ functionCall: { name: item.name, args, _toolCallId: item.call_id } });
+            }
+        }
+        if (allowTools && !hasCalls && !truncated && !invalidReasoning && session.toolSearchCheckpoint)
+            session.toolSearchCheckpoint.items = [...input, ...data.output];
+        return { json: async () => ({
+            candidates: [{ content: { parts }, finishReason: truncated ? 'MAX_TOKENS' : 'STOP' }],
+            responsesItems: data.output, usageMetadata, tmActualModel: data.model
+        }) };
+    },
+
     // プロバイダーに応じて適切なAPIを呼び出すラッパー関数
     async callApi(messagesForApi, generationConfig, systemInstruction, tools = null, forceCalling = false, signal = null, onStream = null, session = null) {
         const provider = session?.apiConfig.provider ?? appLogic.getExecutionProvider();
@@ -10662,10 +11194,33 @@ const apiUtils = {
         if (provider === 'zai') {
             return await this.callZaiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'openrouter') {
+            if (session?.openRouterResponses) {
+                try {
+                    return await this.callOpenRouterResponses(messagesForApi, generationConfig, systemInstruction, signal, session, Boolean(tools), onStream);
+                } catch (error) {
+                    signal.throwIfAborted();
+                    if (session.openRouterResponses.started || session.toolSearchUsage?.length ||
+                        !(error.responsesUnsupported || (session.toolSearchReplay && error.toolSearchReplayRejected))) throw error;
+                    session.openRouterResponses = null;
+                    session.toolSearchCheckpoint = null;
+                }
+            }
             return await this.callOpenRouterApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
         } else if (provider === 'bedrock') {
             return await this.callBedrockApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, session);
         } else if (provider === 'gemini') {
+            if (session?.geminiInteractions) {
+                const continuing = messagesForApi.some(message => message.geminiInteractionSteps);
+                try {
+                    return await this.callGeminiInteractions(messagesForApi, generationConfig, systemInstruction, signal, session, Boolean(tools), onStream);
+                } catch (error) {
+                    signal.throwIfAborted();
+                    if (continuing || session.toolSearchUsage?.length ||
+                        !(error.interactionsUnsupported || (session.toolSearchReplay && error.toolSearchReplayRejected))) throw error;
+                    session.geminiInteractions = null;
+                    session.toolSearchCheckpoint = null;
+                }
+            }
             return await this.callGeminiApi(messagesForApi, generationConfig, systemInstruction, tools, forceCalling, signal, onStream, session);
         }
         throw new Error('基本モデルが選択されていません。');
@@ -12479,6 +13034,7 @@ const appLogic = {
     },
 
     normalizeApiConfig(config = {}) {
+        const { openRouterToolSearch, geminiToolRetrieval, useLegacyFunctionCalling, ...apiConfig } = config;
         const provider = this.normalizeApiProvider(config.provider) ||
             Object.keys(LEGACY_API_CONFIG_IDS).find(key => LEGACY_API_CONFIG_IDS[key] === config.id) || '';
         const fallback = this.getApiConfigProviderDefaults(provider);
@@ -12497,7 +13053,7 @@ const appLogic = {
             : (rawModelCandidates[0] || '');
         const modelCandidates = this.normalizeModelCandidates([rawModelCandidates, defaultModel]);
         return {
-            ...config,
+            ...apiConfig,
             id,
             name: typeof config.name === 'string' && config.name.trim() ? config.name.trim() : fallback.name,
             provider,
@@ -14576,6 +15132,9 @@ const appLogic = {
                 && (msg.tool_calls?.length || continuation?.parts?.some(p => p.functionCall || p.functionResponse) || continuation?.turns?.some(t => t.parts?.some(p => p.functionCall || p.functionResponse))))
                 throw unsafeContinuation('変更後のツール履歴を安全に再構築できません。この応答から再生成してください。');
             let contentText = msg.content || '';
+            if (msg.role === 'model' && !edited && !dependentTurnChanged) {
+                contentText = textWithToolResults(contentText, continuation);
+            }
             if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
                 const fileNames = msg.attachments.map(att => att.name).join(', ');
                 const attachmentText = `\n\n[添付ファイル: ${fileNames}]`;
@@ -16723,6 +17282,7 @@ const appLogic = {
             concatDummyModel: { element: elements.concatDummyModelCheckbox, event: 'change' },
             geminiEnableGrounding: { element: elements.geminiEnableGroundingToggle, event: 'change' },
             geminiEnableFunctionCalling: { element: elements.geminiEnableFunctionCallingToggle, event: 'change' },
+            useLegacyFunctionCalling: { element: elements.legacyFunctionCallingToggle, event: 'change' },
             enableProofreading: { element: elements.enableProofreadingCheckbox, event: 'change' },
             proofreadingSystemInstruction: { element: elements.proofreadingSystemInstructionTextarea, event: 'input' },
             enableChatTitleGeneration: { element: elements.enableChatTitleGenerationCheckbox, event: 'change' },
@@ -18814,6 +19374,48 @@ const appLogic = {
         const finalTurnResults = [];
         let currentTurnHistory = [...messagesForApi];
         let aggregatedSearchResults = [];
+        const config = session?.apiConfig;
+        const useNewFunctionCalling = session?.settings.useLegacyFunctionCalling !== true;
+        const routerRoute = config?.provider === 'openrouter' && useNewFunctionCalling
+            ? getOpenRouterToolSearchRoute(config) : null;
+        const projected = (config?.provider === 'gemini' && useNewFunctionCalling) || routerRoute
+            ? projectClosedToolSearchHistory(messagesForApi) : null;
+        const routeHistory = projected || messagesForApi;
+        if (canStartGeminiToolRetrieval(session, routeHistory, generationConfig)) {
+            const tools = geminiInteractionsTools(session, systemInstruction);
+            if (tools.length > 1) session.geminiInteractions = { tools };
+        }
+        if (routerRoute && canStartOpenRouterToolSearch(session, routeHistory)) {
+            const declarations = sendToolDeclarations(session).flatMap(tool => tool.function_declarations || []);
+            if (declarations.length) session.openRouterResponses = {
+                ...routerRoute, sessionId: session.id,
+                tools: [{ type: 'openrouter:tool_search' }, ...declarations.map(({ name, description, parameters }) => ({
+                    type: 'function', name, description, defer_loading: true,
+                    parameters: JSON.parse(JSON.stringify(parameters || {}), (key, value) =>
+                        key === 'type' && typeof value === 'string' ? value.toLowerCase() : value)
+                }))]
+            };
+        }
+        if (session) {
+            if (projected && (session.geminiInteractions || session.openRouterResponses))
+                session.toolSearchProjection = { messages: projected, count: messagesForApi.length };
+            const previous = toolSearchContinuations.get(session.messages);
+            toolSearchContinuations.delete(session.messages);
+            const context = toolSearchReplayContext(session, systemInstruction, generationConfig);
+            if (context) {
+                session.toolSearchCheckpoint = { context };
+                if (previous?.context === context && previous.apiKey === session.apiConfig.apiKey &&
+                    session.messages[session.modelIndex - 2] === previous.anchor &&
+                    messagesForApi.at(-1)?.role === 'user' &&
+                    JSON.stringify(messagesForApi.slice(0, -1)) === previous.prefix) {
+                    session.toolSearchReplay = { count: messagesForApi.length - 1, items: previous.items };
+                    if (session.openRouterResponses) {
+                        session.openRouterResponses.sessionId = previous.sessionId;
+                        session.openRouterResponses.responseRoute = previous.responseRoute;
+                    }
+                }
+            }
+        }
 
         this.setSendProgressV136(session, '応答生成中...');
 
@@ -18970,6 +19572,8 @@ const appLogic = {
 
                     const partsForApi = result.continuation.parts;
                     const modelMessageForApi = { role: 'model', parts: partsForApi,
+                        ...(result.responsesItems && { responsesItems: result.responsesItems }),
+                        ...(result.geminiInteractionSteps && { geminiInteractionSteps: result.geminiInteractionSteps }),
                         tmContinuation: result.continuation.openai, tmBedrockContinuation: result.continuation.bedrock };
                     const toolResultsForApi = toolResults.map(tr => ({ 
                         role: 'tool', 
@@ -19010,6 +19614,8 @@ const appLogic = {
 
                 const partsForApi = result.continuation.parts;
                 const modelMessageForApi = { role: 'model', parts: partsForApi,
+                    ...(result.responsesItems && { responsesItems: result.responsesItems }),
+                    ...(result.geminiInteractionSteps && { geminiInteractionSteps: result.geminiInteractionSteps }),
                     tmContinuation: result.continuation.openai, tmBedrockContinuation: result.continuation.bedrock };
                 const toolResultsForApi = toolResults.map(tr => ({
                     role: 'tool',
@@ -19033,6 +19639,11 @@ const appLogic = {
 
         // 後処理（校正）
         const finalModelMessages = finalTurnResults.filter(m => m.role === 'model');
+        if (session?.toolSearchCheckpoint) {
+            const results = finalTurnResults.filter(message => message.role === 'tool');
+            if ((!results.length && !session.toolSearchReplay) || portableToolResults(results).length !== results.length)
+                session.toolSearchCheckpoint = null;
+        }
         if (finalModelMessages.length > 0) {
             if (aggregatedSearchResults.length > 0) {
                 const lastMessage = finalModelMessages[finalModelMessages.length - 1];
@@ -19073,7 +19684,7 @@ const appLogic = {
     /**
      * @private _internalHandleSendから返されたメッセージ配列を単一のオブジェクトに集約する。
      */
-     _aggregateMessages(messages) {
+     _aggregateMessages(messages, session = null) {
         // 最後に content を持つ model メッセージを探す。なければ、最後の model メッセージを探す。
         const primaryModelMessage = [...messages].reverse().find(m => m.role === 'model' && m.content) 
                                  || [...messages].reverse().find(m => m.role === 'model');
@@ -19093,7 +19704,17 @@ const appLogic = {
         const thoughtSummary = messages.filter(msg => msg.role === 'model' && msg.thoughtSummary)
             .map(msg => msg.thoughtSummary).join('\n\n');
         if (thoughtSummary) finalAggregatedMessage.thoughtSummary = thoughtSummary;
-        if (messages.some(message => message.role === 'tool' && ['search_documents', 'lookup_context'].includes(message.name))) {
+        const responses = session?.toolSearchUsage;
+        if (responses?.length) {
+            // Only the portable answer survives the send. Provider output items stay in currentTurnHistory.
+            delete finalAggregatedMessage.continuation;
+            delete finalAggregatedMessage.tool_calls;
+            const toolResults = portableToolResults(messages.filter(message => message.role === 'tool'));
+            if (toolResults.length) finalAggregatedMessage.continuation = {
+                displayContent: finalAggregatedMessage.content, toolResults
+            };
+            finalAggregatedMessage.usageMetadata = aggregateToolSearchUsage(responses, finalAggregatedMessage.usageMetadata);
+        } else if (messages.some(message => message.role === 'tool' && ['search_documents', 'lookup_context'].includes(message.name))) {
             delete finalAggregatedMessage.continuation;
         } else if (finalAggregatedMessage.continuation) {
             finalAggregatedMessage.continuation.turns = messages.map(msg => {
@@ -19327,7 +19948,8 @@ const appLogic = {
         const hasAnswer = Boolean(session.streamContent?.trim());
         const aborted = error.name === 'AbortError';
         const hasError = !aborted && (hasAnswer || includeEmptyError);
-        if (!hasAnswer && !thoughtSummary && !hasError) return null;
+        const hasExperimentalToolResults = Boolean(session.toolSearchUsage?.length && session.executedFunctions?.size);
+        if (!hasAnswer && !thoughtSummary && !hasError && !hasExperimentalToolResults) return null;
         const finishReason = error.finishReason ?? error.candidate?.finishReason;
         const message = { role: 'model', content: hasAnswer ? session.streamContent : '', thoughtSummary: thoughtSummary || null,
             incomplete: true, timestamp: Date.now(),
@@ -19335,9 +19957,13 @@ const appLogic = {
             interruptionReason: aborted ? (session.manualStop ? 'manual-stop' : 'aborted') :
                 error.isTimeout ? 'timeout' : error.interruptionReason ?? 'error',
             ...(hasError && { error: error.message || '不明なエラーが発生しました。' }),
-            ...((hasAnswer || hasError) && session.executedFunctions?.size && { executedFunctions: [...session.executedFunctions] }) };
-        if (hasAnswer || hasError) {
+            ...((hasAnswer || hasError || hasExperimentalToolResults) && session.executedFunctions?.size &&
+                { executedFunctions: [...session.executedFunctions] }) };
+        if (hasAnswer || hasError || hasExperimentalToolResults) {
             Object.assign(message, session.interruptedResponseMetadata);
+            if (session.toolSearchUsage?.length) {
+                message.usageMetadata = aggregateToolSearchUsage(session.toolSearchUsage, message.usageMetadata);
+            }
             this.attachExecutionMetadataToModelMessage(message, this.resolveExecutionMetadata(session.executionMetadata, message));
         }
         return window.DocumentRag?.attach(message, session) || message;
@@ -19408,6 +20034,7 @@ const appLogic = {
                     session.controller.signal);
                 this.assertSendExecutionV136(session);
                 session.projectInstruction = scope.projectInstruction;
+                session.projectId = scope.projectId;
             } catch (error) {
                 if (error.name === 'AbortError') throw error;
                 if (error.name === 'ChatContentConflict') {
@@ -19590,7 +20217,7 @@ const appLogic = {
             const newMessages = await this._internalHandleSend(historyForApi, generationConfig, systemInstruction, preparation);
             this.assertSendExecutionV136(preparation);
             
-            const finalAggregatedMessage = this._aggregateMessages(newMessages);
+            const finalAggregatedMessage = this._aggregateMessages(newMessages, preparation);
             window.DocumentRag?.attach(finalAggregatedMessage, preparation);
             await this.translateThoughtSummary(finalAggregatedMessage, preparation);
             this.assertSendExecutionV136(preparation);
@@ -19609,6 +20236,7 @@ const appLogic = {
             await dbUtils.saveChat(null, null, { skipPush: true, sendSession: preparation,
                 successfulExecution: this.successfulExecutionRecord(finalAggregatedMessage) });
             if (!this.ownsSendExecutionV136(preparation)) return;
+            rememberToolSearchContinuation(preparation, historyForApi, finalAggregatedMessage);
 
             if (this.showsSendExecutionV136(preparation)) window.informationUi?.refresh();
 
@@ -21713,7 +22341,8 @@ const appLogic = {
         const { messagesForApi, generationConfig, systemInstruction, tools, isFirstCall, session } = apiParams;
         const settings = session?.settings ?? state.settings;
         let lastError = null;
-        const maxRetries = settings.enableAutoRetry ? settings.maxRetries : 0;
+        const experimentalContinuation = !isFirstCall && (session?.geminiInteractions || session?.openRouterResponses);
+        const maxRetries = settings.enableAutoRetry && !experimentalContinuation ? settings.maxRetries : 0;
         const forceCalling = settings.forceFunctionCalling && isFirstCall;
         const provider = session?.apiConfig.provider ?? this.getExecutionProvider();
         const apiConfigId = (session?.apiConfig ?? this.getExecutionApiConfig())?.id;
@@ -21962,10 +22591,14 @@ const appLogic = {
                         modelName, displayContent: finalContent, parts: structuredClone(parts),
                         openai: candidate.tmContinuation || null, bedrock: candidate.tmBedrockContinuation || null },
                     toolCalls: finalToolCalls.length > 0 ? finalToolCalls : null,
+                    ...(!truncated && responseData.responsesItems && { responsesItems: responseData.responsesItems }),
+                    ...(!truncated && responseData.geminiInteractionSteps && { geminiInteractionSteps: responseData.geminiInteractionSteps }),
                     thoughtParts: finalThoughtParts.length > 0 ? finalThoughtParts : null, // 追加
                     finishReason: candidate.finishReason,
                     safetyRatings: candidate.safetyRatings,
-                    usageMetadata: truncated ? interruptedUsageMetadata() : { ...responseData.usageMetadata, tmActualExecution: {
+                    usageMetadata: truncated && !responseData.usageMetadata?.openRouterResponses && !responseData.usageMetadata?.geminiInteractions
+                        ? interruptedUsageMetadata() : {
+                        ...responseData.usageMetadata, tmActualExecution: {
                         provider, apiConfigId,
                         modelName: responseData.tmActualModel || responseData.modelVersion || modelName } },
                     retryCount: attempt

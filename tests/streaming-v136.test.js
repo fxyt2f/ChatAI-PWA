@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canStream, collectResponse, readSse, reasoningText } = require('../streaming-v136.js');
+const { canStream, collectResponse, collectToolSearchResponse, readSse, reasoningText } = require('../streaming-v136.js');
 
 const encode = new TextEncoder();
 const event = value => `data: ${JSON.stringify(value)}\r\n\r\n`;
@@ -18,6 +18,57 @@ function byteStream(text) {
         }
     });
 }
+
+test('Tool search SSE parse errors omit the malformed payload and preserve prior text', async () => {
+    const malformed = 'data: {"type":"response.reasoning_text.delta","delta":x"REVIEW_TOKEN"}\r\n\r\n';
+    const prefixes = {
+        gemini: [
+            { event_type: 'step.start', index: 0, step: { type: 'model_output' } },
+            { event_type: 'step.delta', index: 0, delta: { type: 'text', text: '途中回答' } }
+        ],
+        openrouter: [{ type: 'response.output_text.delta', delta: '途中回答' }]
+    };
+    for (const [provider, prefix] of Object.entries(prefixes)) {
+        const updates = [];
+        await assert.rejects(collectToolSearchResponse(provider, byteStream(prefix.map(event).join('') + malformed),
+            undefined, update => updates.push(update.content)), error => {
+            assert.equal(error.message, 'APIストリームのイベントを解析できません。');
+            assert.equal(error.cause, undefined);
+            return true;
+        });
+        assert.deepEqual(updates, ['途中回答']);
+    }
+});
+
+test('Interactions keeps per-step thought signatures through completion and records only their presence', async () => {
+    const events = [
+        { event_type: 'step.start', index: 0, step: { type: 'thought', signature: '' } },
+        { event_type: 'step.delta', index: 0, delta: { type: 'thought_summary', content: { type: 'text', text: '確認中' } } },
+        { event_type: 'step.delta', index: 0, delta: { type: 'thought_signature', signature: 'opaque-fixture' } },
+        { event_type: 'step.delta', index: 0, delta: { type: 'thought_signature', signature: '' } },
+        { event_type: 'step.stop', index: 0 },
+        { event_type: 'step.start', index: 1, step: { type: 'thought', signature: '' } },
+        { event_type: 'step.stop', index: 1 },
+        { event_type: 'interaction.completed', interaction: { status: 'requires_action' } }
+    ];
+    const updates = [];
+    const response = await collectToolSearchResponse('gemini',
+        byteStream(events.map(frame => `event: ${frame.event_type}\r\n` + event(frame)).join('') + done),
+        undefined, update => updates.push(update));
+    assert.deepEqual(response.steps, [
+        { type: 'thought', signature: 'opaque-fixture', summary: [{ type: 'text', text: '確認中' }] },
+        { type: 'thought', signature: '' }
+    ]);
+    assert.deepEqual(updates, [{ content: '', thoughtSummary: '確認中' }]);
+    assert.deepEqual(response.thoughtSignatureEvents, [
+        { event: 'step.start', index: 0, hasSignature: false },
+        { event: 'step.delta/thought_signature', index: 0, hasSignature: true },
+        { event: 'step.delta/thought_signature', index: 0, hasSignature: false },
+        { event: 'step.stop', index: 0, hasSignature: true },
+        { event: 'step.start', index: 1, hasSignature: false },
+        { event: 'step.stop', index: 1, hasSignature: false }
+    ]);
+});
 
 test('SSE framing accepts split UTF-8, CRLF/LF/CR, multiline data and comments', async () => {
     const chunks = [];

@@ -257,6 +257,7 @@ def run(client, url):
         edit('provider', 'gemini', 'change')
         status('保存済み')
         a_id = ev("state.apiConfigs[0].id")
+        assert ev("!document.querySelector('#api-config-dialog #legacy-function-calling-toggle')")
         edit('name', 'Gemini A')
         edit('api-key', 'fixture-a')
         wait(stored("configs.length === 1 && configs[0].name === 'Gemini A' && configs[0].apiKey === 'fixture-a'"),
@@ -465,10 +466,38 @@ def run(client, url):
         ev('appLogic.handleSend()')
         assert ev("apiSendFixture.length === 1 && state.currentMessages.at(-1).content === '送信できました'")
         sent_chat = ev('state.currentChatId')
+        assert ev("""(async () => {
+            const settings = (await dbUtils.getSetting('apiConfigs')).value;
+            const legacy = { ...settings[1], geminiToolRetrieval: false, openRouterToolSearch: true, useLegacyFunctionCalling: true };
+            await dbUtils.saveSetting('apiConfigs', [settings[0], legacy]);
+            return true;
+        })()""")
         boot(reload=True)
         assert ev(stored(f"""configs.map(c => c.id).join() === {json.dumps(b_id + ',' + a_id)} &&
             configs[1].apiKey === 'fixture-a-latest' && configs[1].modelCandidates.includes('gemini-2.5-pro')"""))
         assert ev('appLogic.getCurrentChatModelRef()') == auxiliary and ev('state.currentChatId') == sent_chat
+        assert ev("state.apiConfigs.every(c => !('useLegacyFunctionCalling' in c) && !('geminiToolRetrieval' in c) && !('openRouterToolSearch' in c))")
+        open_general()
+        ev("settingsUiV136.selectCategory('ai-tools')")
+        assert ev("!document.getElementById('settings-panel-ai-tools').hidden && !document.getElementById('legacy-function-calling-toggle').checked")
+        fc_enabled = ev("document.getElementById('gemini-enable-function-calling-toggle').checked")
+        input_value('legacy-function-calling-toggle', True, 'change')
+        wait("(async () => (await dbUtils.getSetting(SettingsV136.GLOBAL_KEY)).value.useLegacyFunctionCalling)()",
+             'Shared compatibility mode is saved')
+        assert ev("document.getElementById('gemini-enable-function-calling-toggle').checked") == fc_enabled
+        assert ev("""(async () => {
+            const sync = JSON.parse((await appLogic._prepareExportData({sync: true})).metadataJson);
+            return sync.data.settings.find(row => row.key === SettingsV136.GLOBAL_KEY).value.useLegacyFunctionCalling === true;
+        })()"""), 'Shared compatibility mode is included in sync settings'
+        boot(reload=True)
+        open_general()
+        ev("settingsUiV136.selectCategory('ai-tools')")
+        assert ev("document.getElementById('legacy-function-calling-toggle').checked")
+        input_value('legacy-function-calling-toggle', False, 'change')
+        wait("(async () => (await dbUtils.getSetting(SettingsV136.GLOBAL_KEY)).value.useLegacyFunctionCalling === false)()",
+             'Shared compatibility mode can be cleared')
+        assert ev("document.getElementById('gemini-enable-function-calling-toggle').checked") == fc_enabled
+        open_general()
         assert ev("""(() => {
             const legacy = {apiProvider:'gemini', apiKey:'legacy-fixture', modelName:'gemini-2.5-pro'};
             const ref = {apiConfigId:'api_gemini_default', modelName:'gemini-2.5-pro'};

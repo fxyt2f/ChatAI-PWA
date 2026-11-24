@@ -78,7 +78,7 @@ def run(client, url):
         wait(ready('seed'))
         ev("""(async () => {
             document.querySelector('#releaseNotesDialog[open] .dialog-ok-btn')?.click();
-            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.1');
+            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.2');
             const executionSettings = { schemaVersion:1, modelRef:null, thinkingEffort:null };
             const id = await dbUtils.saveChat(null,{title:'Local startup chat',executionSettings,messages:[{role:'user',content:'local history'}]}, {skipPush:true});
             await dbUtils.saveChat(null,{title:'Second chat',createdAt:1,updatedAt:1,executionSettings,messages:[{role:'user',content:'second history'}]}, {skipPush:true});
@@ -497,7 +497,7 @@ def run(client, url):
         wait(ready('restore'))
         ev("""(async () => {
             document.querySelector('#releaseNotesDialog[open] .dialog-ok-btn')?.click();
-            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.1');
+            await appLogic.updateLocalUiSetting('lastSeenReleaseVersion', '1.38.2');
             const id = await dbUtils.saveChat(null, {title:'Restore fixture', messages:[{role:'user',content:'fixture'}]}, {skipPush:true});
             await dbUtils.saveSetting('dropboxTokens', {access_token:'fixture'});
             await appLogic.handleManualDropboxSync();
@@ -695,7 +695,7 @@ def run_automatic(pc, phone, url, server):
             wait(lambda: evaluate(tab, '!!window.autoDropboxFixture && !!window.appLogic?._setupEventListenersCallCount'))
             evaluate(tab, '''(async()=> {
                 document.querySelector('#releaseNotesDialog[open] .dialog-ok-btn')?.click();
-                await appLogic.updateLocalUiSetting('lastSeenReleaseVersion','1.38.1');
+                await appLogic.updateLocalUiSetting('lastSeenReleaseVersion','1.38.2');
                 await appLogic.saveGlobalSettingsV136({dropboxSyncFrequency:'manual'});
                 await dbUtils.saveSetting('dropboxTokens',{access_token:'fixture'});
             })()''')
