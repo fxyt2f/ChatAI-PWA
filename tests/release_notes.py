@@ -48,7 +48,7 @@ def run(client, url):
 
     def boot(mode, expect_notice=True):
         old_time = ev('performance.timeOrigin')
-        target = f'{url}?releaseNotesFixture={mode}#settings/other'
+        target = f'{url}?releaseNotesFixture={mode}#settings/app-info'
         if ev('location.href') == target:
             client.call('Page.reload')
         else:
@@ -94,7 +94,7 @@ def run(client, url):
             }};
         }})()""")
         assert result['headings'] == [
-            'v1.38.3 (2099/01/02)', 'v1.36.5', 'v1.36.4', 'v1.36.3',
+            'v1.39.0 (2099/01/02)', 'v1.36.5', 'v1.36.4', 'v1.36.3',
         ][:count], result
         assert result['viewport'] == width and result['width'] == (width if width < 800 else 720), result
         assert result['height'] == (760 if width < 800 else 720), result
@@ -138,17 +138,21 @@ def run(client, url):
         client.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': 1, 'y': 1})
         wait(f"Array.from(document.querySelectorAll('{repository}, {update_button}')).every(el => !el.getAnimations().length)",
              'The app info buttons are in their resting state')
-        assert ev(f"""(() => {{
+        layout = ev(f"""(() => {{
             const link = document.querySelector('{repository}'), button = document.querySelector('{update_button}');
             const a = link.getBoundingClientRect(), b = button.getBoundingClientRect();
             const linkStyle = getComputedStyle(link), buttonStyle = getComputedStyle(button);
-            return a.left === b.left && a.width === b.width && a.height === b.height &&
-                ['backgroundColor', 'color', 'fontSize', 'fontFamily', 'fontWeight', 'padding', 'lineHeight',
-                    'borderRadius', 'border', 'boxShadow'].every(property => linkStyle[property] === buttonStyle[property]) &&
-                linkStyle.textDecorationLine === 'none' && linkStyle.textTransform === 'none' &&
+            const shared = a.left === b.left && a.width === b.width && Math.abs(a.height - b.height) <= 1 &&
+                ['backgroundColor', 'fontSize', 'fontFamily', 'fontWeight', 'padding', 'lineHeight',
+                    'boxShadow'].every(property => linkStyle[property] === buttonStyle[property]);
+            const navigation = linkStyle.color !== buttonStyle.color && getComputedStyle(link, '::after').content !== 'none' &&
+                getComputedStyle(button, '::after').content === 'none';
+            const destination = linkStyle.textDecorationLine === 'none' && linkStyle.textTransform === 'none' &&
                 link.textContent === 'GitHub Repository' && link.href === '{github_url}' &&
                 link.target === '_blank' && link.relList.contains('noopener') && link.relList.contains('noreferrer');
-        }})()"""), 'Repository link and update button share the same styling'
+            return {{shared,navigation,destination}};
+        }})()""")
+        assert all(layout.values()), f'App info row geometry, navigation and destination: {layout}'
 
         def hover_style(selector):
             client.call('Input.dispatchMouseEvent', {'type': 'mouseMoved', **point(selector)})
@@ -161,7 +165,8 @@ def run(client, url):
 
         normal = ev(f"getComputedStyle(document.querySelector('{repository}')).backgroundColor")
         link_hover = hover_style(repository)
-        assert link_hover == hover_style(update_button) and link_hover[0] != normal, 'Hover styling also matches'
+        update_hover = hover_style(update_button)
+        assert link_hover[0] == update_hover[0] != normal and link_hover[2:] == update_hover[2:], 'Both rows share the hover treatment'
 
     def check_repository_navigation():
         before = {item['targetId'] for item in client.call('Target.getTargets')['targetInfos']}
@@ -198,13 +203,13 @@ def run(client, url):
                 if (type !== 'controllerchange') return listen(type, ...args);
             };
             sessionStorage.setItem('pendingVersionNotice', JSON.stringify({
-                version: mode === 'stale' ? '1.36.5' : '1.38.3',
+                version: mode === 'stale' ? '1.36.5' : '1.39.0',
                 message: 'STALE pending notice', shouldPersist: true
             }));
             const history = ['1.36.5', '1.36.4', '1.36.3', '1.36.2'].map(
                 version => '## v' + version + '\r\n\r\n- STALE ' + version + '\r\n'
             ).join('\r\n');
-            const notes = '## v1.38.3 (2099/01/02)\r\n\r\n### Details\r\n\r\nFirst line\r\nSecond line\r\n\r\n'
+            const notes = '## v1.39.0 (2099/01/02)\r\n\r\n### Details\r\n\r\nFirst line\r\nSecond line\r\n\r\n'
                 + Array.from({length: 70}, (_, i) => '- Release note ' + (i + 1) + '\r\n').join('') + '\r\n' + history;
             window.releaseNotesFixture = mode;
             const fetchOriginal = window.fetch;
@@ -221,7 +226,7 @@ def run(client, url):
         boot('stale')
         check_fallback()
         ev("window.releaseNotesFixture = 'current'")
-        assert ev("appLogic.formatReleaseNotes().then(notes => notes?.startsWith('## v1.38.3 (2099/01/02)'))")
+        assert ev("appLogic.formatReleaseNotes().then(notes => notes?.startsWith('## v1.39.0 (2099/01/02)'))")
         assert ev("appLogic.formatReleaseNotes('1.36.50').then(notes => notes === null)")
         assert ev("appLogic.formatReleaseNotes('1.36.5').then(notes => notes?.startsWith('## v1.36.5\\n'))")
 
@@ -271,7 +276,7 @@ def run(client, url):
                 close_notes()
                 wait(f'(async () => ({saved}) === APP_VERSION)()', 'Automatic notes acknowledged')
 
-                wait("""state.currentScreen === 'settings' && !document.querySelector('#settings-panel-other').hidden
+                wait("""state.currentScreen === 'settings' && !document.querySelector('#settings-panel-app-info').hidden
                     && document.querySelector('#release-notes-btn').getClientRects().length > 0""",
                      'Other settings and the release notes button are available')
                 ev("document.querySelector('#release-notes-btn').click()")

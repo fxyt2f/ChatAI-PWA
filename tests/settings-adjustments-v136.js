@@ -6,17 +6,18 @@ window.runSettingsAdjustmentsV136=async({app,db,st,ui,test,assert,eq})=>{
     try {
         await test('settings requested copy, developer order and danger disclosure',async()=>{
             const settings=$('settings-screen');assert(!settings.textContent.includes('※'));
-            assert(settings.textContent.includes('コンテキスト圧縮(要約)機能'));assert(settings.textContent.includes('コンテキストを圧縮して応答品質の低下を防ぎます。'));
+            assert(settings.textContent.includes('コンテキスト圧縮(要約)機能'));assert(settings.textContent.includes('AIに送信するコンテキストを圧縮します。'));
             for(const text of ['思考翻訳モデル: reasoning/thinking の翻訳に使用します。','校正処理にもAPIコストが発生します。','校正モデル: 校正・文章整形・推敲系処理に使用します。','要約モデル: 履歴要約に使用します。'])assert(!settings.textContent.includes(text));
-            eq($('developer-settings').nextElementSibling,$('app-info-settings'));
-            assert($('developer-settings').compareDocumentPosition($('app-info-settings'))&Node.DOCUMENT_POSITION_FOLLOWING);
+            eq($('app-info-settings').nextElementSibling,$('developer-settings'));
+            assert($('app-info-settings').compareDocumentPosition($('developer-settings'))&Node.DOCUMENT_POSITION_FOLLOWING);
             assert(!$('data-danger-settings').querySelector('details').open);
         });
         await test('proofreading off keeps model and prompt editable and persisted without executing proofreading',async()=>{
-            await ui.showScreen('settings',true);view.selectCategory('general',false);
+            await ui.showScreen('settings',true);view.selectCategory('ai-assistance',false);
             change('enable-proofreading',false);await wait(()=>st.settings.enableProofreading===false);
             const ref={apiConfigId:'gem',modelName:'gemini-2.5-pro'};
-            assert($('proofreading-model-name').getClientRects().length);assert(!$('proofreading-model-name').disabled);
+            const modelRow=$('proofreading-model-name').parentElement.querySelector('.settings-row-action');
+            assert(modelRow.getClientRects().length);assert(!modelRow.disabled);
             change('proofreading-model-name',app.encodeModelRefValue(ref));await view.saveQueue;
             change('proofreading-system-instruction','校正の事前設定','input');
             await wait(async()=> (await db.getSetting('globalSettingsV136')).value.proofreadingSystemInstruction==='校正の事前設定');
@@ -42,7 +43,9 @@ window.runSettingsAdjustmentsV136=async({app,db,st,ui,test,assert,eq})=>{
             }finally{app.callApiWithRetry=call;app.proofreadTextWithInfo=proofread;window.testApi.translateText=translate;}
         });
         await test('prompt auto sizing, manual resize and caret survive immediate saving',async()=>{
-            view.selectCategory('general',false);const control=$('proofreading-system-instruction');control.scrollIntoView({block:'center'});control.focus();
+            view.selectCategory('ai-assistance',false);
+            document.querySelector('[aria-controls="proofreading-system-instruction-editor"]').click();
+            const control=$('proofreading-system-instruction');control.scrollIntoView({block:'center'});control.focus();
             change(control.id,'','input');await frames();assert(control.getBoundingClientRect().height>=100);
             const text=Array.from({length:70},(_,i)=>`行${i} プロンプト本文の編集内容を保持します。`).join('\n');
             control.value=text;control.setSelectionRange(15,15);control.dispatchEvent(new Event('input',{bubbles:true}));await frames();
@@ -52,7 +55,7 @@ window.runSettingsAdjustmentsV136=async({app,db,st,ui,test,assert,eq})=>{
             control.blur();await frames();assert(control.getBoundingClientRect().right<=$('settings-detail').getBoundingClientRect().right+1);
         });
         await test('danger operations require explicit expansion and retain confirmation',async()=>{
-            view.selectCategory('other',false);const details=$('data-danger-settings').querySelector('details'),summary=details.querySelector('summary');details.open=false;
+            view.selectCategory('data-sync',false);const details=$('data-danger-settings').querySelector('details'),summary=details.querySelector('summary');details.open=false;
             eq($('clear-data-btn').getClientRects().length,0);
             const confirm=ui.showCustomConfirm,clear=db.clearAllData;let confirmations=0,clears=0;
             ui.showCustomConfirm=async()=>{confirmations++;return false};db.clearAllData=async()=>{clears++};
@@ -62,11 +65,13 @@ window.runSettingsAdjustmentsV136=async({app,db,st,ui,test,assert,eq})=>{
                 summary.click();view.enter();assert(!details.open);
             }finally{ui.showCustomConfirm=confirm;db.clearAllData=clear;}
         });
-        await test('settings native selects share arrow, padding and theme states',async()=>{
-            view.selectCategory('general',false);const thinking=$('settings-thinking-button'),model=$('model-name');
-            eq(thinking.tagName,'SELECT');const a=getComputedStyle(thinking),b=getComputedStyle(model);
-            eq(a.backgroundImage,b.backgroundImage);eq(a.paddingRight,b.paddingRight);assert(parseFloat(a.paddingRight)>=38);
-            eq(a.borderRadius,b.borderRadius);assert(thinking.getBoundingClientRect().height>=44);
+        await test('Thinking keeps its selection levels in the compact picker',async()=>{
+            view.selectCategory('api-model',false);const thinking=$('settings-thinking-button'),model=$('model-name');
+            eq(thinking.tagName,'SELECT');assert(!thinking.getClientRects().length);
+            const trigger=document.querySelector('[data-settings-choice=settings-thinking-button]');
+            assert(trigger.getBoundingClientRect().height>=44);
+            trigger.click();assert(view.popover.classList.contains('settings-choice-popover'));view.closePopover(true);
+            assert(model.hidden && model.parentElement.querySelector('button[aria-haspopup=dialog]').getClientRects().length);
             eq([...thinking.options].map(o=>o.value),app.getModelThinkingCapability().levels.slice().sort((a,b)=>['minimal','low','medium','high','xhigh','max'].indexOf(a)-['minimal','low','medium','high','xhigh','max'].indexOf(b)));
         });
         await test('settings selected category follows the same chat selection theme rule',async()=>{
@@ -75,7 +80,7 @@ window.runSettingsAdjustmentsV136=async({app,db,st,ui,test,assert,eq})=>{
             try{
                 await app.setProfileOverride('theme',true);const colors=[];
                 for(const darkMode of [false,true]){
-                    await app.saveAppearanceValues('theme',{darkMode,themeColorMode:'individual',otherButtonColor:'#684ca3'});view.selectCategory('general',false);await frames();
+                    await app.saveAppearanceValues('theme',{darkMode,themeColorMode:'individual',otherButtonColor:'#684ca3'});view.selectCategory('api-model',false);await frames();
                     const selected=document.querySelector('.settings-category-nav [aria-current]');await wait(()=>getComputedStyle(selected).backgroundColor===getComputedStyle(probe).backgroundColor);colors.push(getComputedStyle(selected).backgroundColor);
                 }
                 assert(colors[0]!==colors[1]);

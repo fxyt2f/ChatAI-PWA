@@ -73,6 +73,7 @@ window.DocumentEmbedding = (() => {
         const spec = selected();
         controls.enabled.checked = window.state?.settings?.documentEmbeddingEnabled === true;
         controls.model.value = modelSetting(window.state?.settings?.documentEmbeddingModel);
+        window.settingsUiV136?.syncChoiceRows();
         const ticket = ++generation;
         const cached = await available(spec).catch(() => false);
         if (editing || generation !== ticket) return;

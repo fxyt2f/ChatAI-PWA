@@ -1,7 +1,12 @@
 /* Shared desktop/mobile settings and chat execution controls. Storage lives in settings-v136.js. */
 (function (root) {
     'use strict';
-    const titles = { general: '一般設定', 'ai-tools': 'AI機能・ツール設定', appearance: 'テーマ・表示設定', profile: 'プロファイル設定', integrations: '外部連携', other: 'その他設定' };
+    const legacySettingsCategories = {
+        general: 'api-model',
+        'ai-tools': 'tools-integrations',
+        integrations: 'data-sync',
+        other: 'chat-operation'
+    };
     const themeFields = {
         'dark-mode-toggle': 'darkMode', 'theme-color-mode-select': 'themeColorMode', 'accent-color-input': 'accentColor',
         'header-color-input': 'headerColor', 'header-text-color-mode-select': 'headerTextColorMode',
@@ -29,6 +34,143 @@
     }
     const levelOrder = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className || ''; if (text) node.textContent = text; return node; };
+    const colorPresets = [
+        ['赤', '#dc3545'], ['オレンジ', '#ed7925'], ['黄', '#f4c430'], ['緑', '#36944f'],
+        ['青緑', '#008b80'], ['水色', '#31b6e6'], ['青', '#1976d2'], ['濃い青', '#2745aa'],
+        ['紫', '#8756c7'], ['ピンク', '#e75e9e'], ['茶', '#865743'], ['グレー', '#808080'],
+        ['白', '#ffffff'], ['黒', '#000000']
+    ];
+    const clampColor = value => Math.min(1, Math.max(0, value));
+    function normalizeHex(value) {
+        const match = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(value.trim());
+        if (!match) return null;
+        const code = match[1].toLowerCase();
+        return '#' + (code.length === 3 ? [...code].map(digit => digit.repeat(2)).join('') : code);
+    }
+    function hsvFromHex(hex, previousHue = 0) {
+        const [r, g, b] = hex.slice(1).match(/../g).map(value => parseInt(value, 16) / 255);
+        const v = Math.max(r, g, b), delta = v - Math.min(r, g, b);
+        const sector = v === r ? (g - b) / delta : v === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+        return { h: delta ? (sector * 60 + 360) % 360 : previousHue, s: v ? delta / v : 0, v };
+    }
+    function hexFromHsv({ h, s, v }) {
+        const channel = offset => {
+            const k = (offset + h / 60) % 6;
+            const value = v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
+            return Math.round(value * 255).toString(16).padStart(2, '0');
+        };
+        return '#' + [5, 3, 1].map(channel).join('');
+    }
+    class SettingsColorPicker {
+        constructor(ui) {
+            this.ui = ui;
+            this.dialog = $('settings-color-dialog');
+            this.title = $('settings-color-title');
+            this.hex = $('settings-color-hex');
+            this.plane = this.dialog.querySelector('.settings-color-plane');
+            this.hue = this.dialog.querySelector('.settings-hue');
+            this.presets = this.dialog.querySelector('.settings-color-presets');
+            const resize = () => {
+                if (!this.active || !window.visualViewport) return;
+                const { height, offsetTop } = window.visualViewport;
+                this.dialog.style.setProperty('--color-viewport-height', `${height}px`);
+                this.dialog.style.setProperty('--color-viewport-center', `${offsetTop + height / 2}px`);
+            };
+            window.visualViewport?.addEventListener('resize', resize);
+            window.visualViewport?.addEventListener('scroll', resize);
+            this.resize = resize;
+            for (const [name, hex] of colorPresets) {
+                const button = make('button', 'settings-color-preset');
+                const swatch = make('span', 'settings-color-swatch');
+                swatch.style.setProperty('--swatch', hex);
+                button.append(swatch);
+                button.type = 'button';
+                button.dataset.color = hex;
+                button.setAttribute('aria-label', `${name} ${hex}`);
+                button.addEventListener('click', () => this.selectHex(hex));
+                this.presets.append(button);
+            }
+            this.hex.addEventListener('input', () => {
+                const hex = normalizeHex(this.hex.value);
+                this.validateHex(Boolean(hex));
+                if (hex) this.selectHex(hex, false);
+            });
+            this.hue.addEventListener('input', () => this.selectHsv({ ...this.hsv, h: Number(this.hue.value) }));
+            this.dialog.querySelector('.settings-color-reset').addEventListener('click', () => this.selectHex(this.defaultColor, true, true));
+            const pointer = event => {
+                const rect = this.plane.getBoundingClientRect();
+                this.selectHsv({ ...this.hsv, s: clampColor((event.clientX - rect.left) / rect.width),
+                    v: clampColor(1 - (event.clientY - rect.top) / rect.height) });
+            };
+            this.plane.addEventListener('pointerdown', event => {
+                if (this.gesture || event.button !== 0) return;
+                this.gesture = { id: event.pointerId, hsv: this.hsv, color: this.color, reset: this.reset };
+                this.plane.setPointerCapture(event.pointerId);
+                pointer(event);
+            });
+            this.plane.addEventListener('pointermove', event => {
+                if (this.gesture?.id === event.pointerId) pointer(event);
+            });
+            this.plane.addEventListener('pointerup', event => {
+                if (this.gesture?.id !== event.pointerId) return;
+                pointer(event);
+                this.gesture = null;
+            });
+            for (const type of ['pointercancel', 'lostpointercapture']) this.plane.addEventListener(type, event => {
+                if (this.gesture?.id !== event.pointerId) return;
+                const { hsv, color, reset } = this.gesture;
+                this.gesture = null;
+                this.render(color, hsv, true, reset);
+            });
+            this.plane.addEventListener('keydown', event => {
+                const axis = { ArrowLeft: ['s', -1], ArrowRight: ['s', 1], ArrowDown: ['v', -1], ArrowUp: ['v', 1] }[event.key];
+                if (!axis) return;
+                event.preventDefault();
+                const [key, sign] = axis;
+                this.selectHsv({ ...this.hsv, [key]: clampColor(this.hsv[key] + sign * (event.shiftKey ? .1 : .01)) });
+            });
+        }
+        validateHex(valid) {
+            this.hex.setCustomValidity(valid ? '' : 'HEXカラーコードを入力してください。');
+            this.hex.setAttribute('aria-invalid', String(!valid));
+        }
+        selectHex(hex, write = true, reset = false) {
+            this.render(hex, hsvFromHex(hex, this.hsv?.h), write, reset);
+        }
+        selectHsv(hsv) { this.render(hexFromHsv(hsv), hsv, true, false); }
+        render(color, hsv, write, reset) {
+            this.color = color;
+            this.hsv = hsv;
+            this.reset = reset;
+            if (write) this.hex.value = color;
+            this.validateHex(true);
+            this.hue.value = Math.min(359, Math.round(hsv.h));
+            const format = value => Math.round(value * 100);
+            this.dialog.style.setProperty('--hue', hsv.h);
+            this.dialog.style.setProperty('--swatch', color);
+            this.plane.style.setProperty('--saturation', `${hsv.s * 100}%`);
+            this.plane.style.setProperty('--value', `${(1 - hsv.v) * 100}%`);
+            this.plane.setAttribute('aria-label', `彩度 ${format(hsv.s)}%、明度 ${format(hsv.v)}%`);
+            for (const button of this.presets.children) button.setAttribute('aria-pressed', String(button.dataset.color === color));
+        }
+        async open(title, color, defaults) {
+            if (this.active) return null;
+            this.active = true;
+            this.resize();
+            this.hsv = null;
+            this.gesture = null;
+            this.title.textContent = title;
+            this.defaultColor = defaults;
+            this.selectHex(color);
+            try {
+                const result = await this.ui.showCustomDialog(this.dialog, this.title);
+                return result === 'ok' && normalizeHex(this.hex.value) ? { color: this.color, reset: this.reset } : null;
+            } finally {
+                this.gesture = null;
+                this.active = false;
+            }
+        }
+    }
     class TextareaSizing {
         constructor() {
             this.promptSizes = new Map();
@@ -123,10 +265,11 @@
         leave() { if (this.category) this.scroll[this.category] = this.detail.scrollTop; }
         afterLayout() {}
         exitToChat() { this.ui.showScreen('chat'); }
+        resolveCategory(category) { return Object.hasOwn(this.titles, category) ? category : null; }
         selectCategory(category, push = true) {
             this.app.resetSwipeState?.();
             if (this.category) this.scroll[this.category] = this.detail.scrollTop;
-            this.category = Object.hasOwn(this.titles, category) ? category : null;
+            this.category = this.resolveCategory(category);
             this.layout(); this.detail.scrollTop = this.scroll[this.category] || 0;
             requestAnimationFrame(() => this.afterLayout());
             if (push && this.state.currentScreen === this.name) {
@@ -146,8 +289,10 @@
         }
         getHashEntry() {
             const [screen, category, extra] = location.hash.slice(1).split('/');
-            if (screen !== this.name || extra !== undefined || (category !== undefined && !Object.hasOwn(this.titles, category))) return null;
-            return category ? { screen: this.name, [this.categoryKey]: category } : { screen: this.name };
+            if (screen !== this.name || extra !== undefined) return null;
+            if (category === undefined) return { screen: this.name };
+            const resolved = this.resolveCategory(category);
+            return resolved ? { screen: this.name, [this.categoryKey]: resolved } : null;
         }
         restore(entry) {
             this.mobileDetailPushed = entry?.settingsDetailPushed === true;
@@ -188,15 +333,39 @@
     }
     class SettingsUI extends CategoryPane {
         constructor({ app, state, ui }) {
+            const titles = Object.fromEntries([...$('settings-detail').querySelectorAll('[data-settings-panel]')]
+                .map(panel => [panel.dataset.settingsPanel, panel.getAttribute('aria-label')]));
             super({ app, state, ui, name: 'settings', title: '設定', titles });
             this.editedGlobalInputs = new Set();
             this.editedProfileInputs = new Map();
+            this.modelSelects = new Map();
+            this.choiceSelects = new Map();
             this.saveQueue = Promise.resolve(); this.urls = new Map(); this.previewVersions = new Map();
             this.init();
+        }
+        resolveCategory(category) {
+            return super.resolveCategory(Object.hasOwn(legacySettingsCategories, category) ? legacySettingsCategories[category] : category);
+        }
+        selectCategory(category, push = true) {
+            if (this.detail.contains(this.anchor) && this.resolveCategory(category) !== this.category) this.closePopover(false);
+            if (this.category === 'api-model' && this.resolveCategory(category) !== 'api-model') this.setApiReorderMode(false);
+            super.selectCategory(category, push);
+        }
+        leave() {
+            this.setApiReorderMode(false);
+            super.leave();
+        }
+        setApiReorderMode(active) {
+            const button = $('api-reorder-btn');
+            $('api-settings-group').classList.toggle('api-reordering', active);
+            $('add-api-config-btn').hidden = active;
+            button.setAttribute('aria-pressed', String(active));
+            button.textContent = active ? '完了' : '並べ替え';
         }
         init() {
             this.media.addEventListener('change', () => {
                 if ((this.popover?.refreshModels || this.popover?.refreshProfiles) &&
+                    !this.popover.hasAttribute('data-settings-picker') &&
                     !this.popover.profileSwitchPending && (this.popover instanceof HTMLDialogElement) === this.media.matches) {
                     const anchor = this.anchor, query = this.popover.querySelector('.model-picker-search').value;
                     const profiles = Boolean(this.popover.refreshProfiles);
@@ -206,14 +375,15 @@
                 }
             });
             for (const kind of ['theme', 'appearance']) {
-                const global = $(`global-${kind}-editor`), profile = $(`profile-${kind}-editor`);
-                for (const child of global.children) if (!/^H[1-6]$/.test(child.tagName)) profile.append(child.cloneNode(true));
-                if (kind === 'theme') {
-                    const globalColors = $('global-color-editor');
-                    const colors = globalColors.querySelector('.color-settings-section').cloneNode(true);
-                    colors.prepend(make('h3', 'color-settings-title', globalColors.querySelector('h2').textContent));
-                    profile.append(colors);
+                const profile = $(`profile-${kind}-editor`);
+                for (const section of kind === 'theme' ? ['theme', 'color'] : ['appearance']) {
+                    const group = $(`global-${section}-editor`).cloneNode(true);
+                    group.removeAttribute('data-appearance-editor');
+                    group.removeAttribute('data-kind');
+                    group.querySelector('.settings-scope')?.remove();
+                    profile.append(group);
                 }
+                if (kind === 'theme') profile.querySelector('h2').textContent = 'テーマ';
                 profile.querySelectorAll('[id]').forEach(node => { node.dataset.sourceId = node.id; node.id = `profile-${node.id}`; });
                 profile.querySelectorAll('[for]').forEach(node => node.htmlFor = `profile-${node.htmlFor}`);
                 profile.querySelectorAll('[aria-controls]').forEach(node => node.setAttribute('aria-controls', `profile-${node.getAttribute('aria-controls')}`));
@@ -224,6 +394,22 @@
                 });
             }
             this.prepareSettingsLayout();
+            this.colorPicker = new SettingsColorPicker(this.ui);
+            this.prepareSettingsRows();
+            this.prepareColorRows();
+            $('api-reorder-btn').addEventListener('click', event => {
+                this.setApiReorderMode(event.currentTarget.getAttribute('aria-pressed') !== 'true');
+            });
+            const apiDialog = $('api-config-dialog');
+            const provider = $('api-config-provider');
+            const providerField = make('div', 'settings-field');
+            const providerLabel = apiDialog.querySelector('label[for="api-config-provider"]');
+            providerLabel.before(providerField);
+            providerField.append(providerLabel, provider);
+            this.prepareSelectRow(providerField, providerLabel, provider);
+            apiDialog.addEventListener('close', () => {
+                if (apiDialog.contains(this.anchor)) this.closePopover(false);
+            });
             this.bindPromptSizing();
             this.bindAppearanceEditors();
             this.bindAuxiliaryModelSettings();
@@ -248,7 +434,8 @@
                 if (!this.popover || this.popover instanceof HTMLDialogElement) return;
                 if (event.isComposing || this.popover.profileSearchComposing) return;
                 if (event.key === 'Escape') { event.preventDefault(); this.closePopover(true); }
-                if (event.key === 'Tab' && !this.popover.refreshProfiles) this.closePopover(false);
+                if (event.key === 'Tab' && this.popover.classList.contains('settings-choice-popover')) this.closePopover(true);
+                else if (event.key === 'Tab' && !this.popover.refreshProfiles) this.closePopover(false);
             });
             const position = () => this.positionPopover();
             window.addEventListener('resize', position);
@@ -311,25 +498,175 @@
             root.querySelectorAll('.settings-group label').forEach(label => {
                 if (label.parentElement.classList.contains('settings-field') || label.classList.contains('color-setting-label')) return;
                 const toggle = label.classList.contains('checkbox-label');
-                const control = label.htmlFor ? root.querySelector(`#${CSS.escape(label.htmlFor)}`) : label.nextElementSibling;
+                const next = label.nextElementSibling;
+                const control = next?.matches('.image-upload-controls') || !label.htmlFor
+                    ? next : root.querySelector(`#${CSS.escape(label.htmlFor)}`);
                 if (!toggle && (!control || control.parentElement !== label.parentElement || !control.matches('input,select,textarea,.image-upload-controls'))) return;
                 const field = make('div', toggle ? 'settings-field settings-toggle' : 'settings-field');
                 label.before(field); field.append(label);
                 if (!toggle) field.append(control);
-                while (field.nextElementSibling?.matches('p')) field.append(field.nextElementSibling);
+                while (field.nextElementSibling?.matches('p:not(.settings-footer,.settings-scope)')) field.append(field.nextElementSibling);
                 if (field.nextElementSibling?.id === 'settings-thinking-button') {
                     field.append(field.nextElementSibling);
-                    while (field.nextElementSibling?.matches('p')) field.append(field.nextElementSibling);
+                    while (field.nextElementSibling?.matches('p:not(.settings-footer,.settings-scope)')) field.append(field.nextElementSibling);
                 }
                 if (!toggle && control.matches('input[type=number]') && field.nextElementSibling?.tagName === 'SPAN' && field.nextElementSibling.textContent.trim() === '秒') {
                     const unit = field.nextElementSibling, row = make('div', 'settings-input-with-unit');
                     control.before(row); row.append(control, unit);
-                    while (field.nextElementSibling?.matches('p')) field.append(field.nextElementSibling);
+                    while (field.nextElementSibling?.matches('p:not(.settings-footer,.settings-scope)')) field.append(field.nextElementSibling);
                 }
             });
             root.querySelectorAll('.settings-group div').forEach(node => {
                 if (node.matches('.settings-field,.settings-group,.param-grid,.chat-display-settings-row,.chat-display-setting')) return;
                 if ([...node.children].some(child => child.classList.contains('settings-field'))) node.classList.add('settings-field-stack');
+            });
+        }
+        prepareSettingsRows() {
+            const detail = this.detail;
+            const modelIds = new Set(['model-name', ...Object.values(SettingsV136.auxiliaryModelSelectIds)]);
+            for (const field of detail.querySelectorAll('.settings-field')) {
+                const label = field.querySelector(':scope > label');
+                const checkbox = label?.querySelector('input[type=checkbox]');
+                const control = checkbox || field.querySelector(
+                    ':scope > :is(input,select,textarea), :scope > .settings-input-with-unit > input, :scope > .image-upload-controls > button:first-of-type');
+                if (!label || !control) continue;
+                const notes = [...field.querySelectorAll(':scope > p:not([role],.model-route-note)')];
+                const descriptions = new Set((control.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
+                notes.forEach((note, index) => {
+                    note.classList.add('settings-supporting-text');
+                    if (!control.id) return;
+                    note.id ||= `${control.id}-support-${index + 1}`;
+                    descriptions.add(note.id);
+                });
+                if (descriptions.size) control.setAttribute('aria-describedby', [...descriptions].join(' '));
+                if (checkbox) {
+                    checkbox.setAttribute('role', 'switch');
+                    label.classList.add('settings-switch');
+                    const name = make('span', 'settings-row-label');
+                    name.id = `${checkbox.id}-row-label`;
+                    const copy = make('span', 'settings-row-copy');
+                    name.append(...[...label.childNodes].filter(node => node !== checkbox));
+                    copy.append(name, ...this.inlineSupportingText(notes));
+                    label.prepend(copy);
+                    checkbox.setAttribute('aria-labelledby', name.id);
+                    continue;
+                }
+                if (control.matches('.image-upload-controls > button')) {
+                    const controls = control.parentElement;
+                    control.className = 'settings-row-action settings-background-trigger';
+                    const copy = make('span', 'settings-row-copy');
+                    copy.append(make('span', 'settings-row-label', label.textContent.trim()), ...this.inlineSupportingText(notes));
+                    const value = make('span', 'settings-background-value');
+                    value.append(controls.querySelector('img'), controls.querySelector('.settings-background-empty'));
+                    control.replaceChildren(copy, value);
+                    label.hidden = true;
+                    field.prepend(control);
+                    field.after(controls.querySelector('.settings-delete-button'));
+                } else if (control.matches('select')) this.prepareSelectRow(field, label, control, modelIds.has(control.id));
+                else if (control.matches('textarea')) this.preparePromptRow(field, label, control);
+                else {
+                    field.classList.add('settings-inline-row');
+                    const copy = make('div', 'settings-row-copy');
+                    label.before(copy);
+                    copy.append(label, ...notes);
+                }
+            }
+            for (const control of detail.querySelectorAll('input[data-example]')) {
+                const unset = control.placeholder;
+                control.addEventListener('focus', () => { control.placeholder = control.dataset.example; });
+                control.addEventListener('blur', () => { control.placeholder = unset; });
+            }
+            for (const group of detail.querySelectorAll(':is(.settings-category-panel,.profile-appearance-editor) > .settings-group')) {
+                const island = make('div', 'settings-island');
+                const footers = [...group.querySelectorAll(':scope > :is(.settings-scope,.settings-footer)')];
+                const content = [...group.children].filter(child => !child.matches('h2,h3,h4,.sync-header,.settings-section-header,.settings-scope,.settings-footer'));
+                group.append(island);
+                island.append(...content);
+                group.append(...footers);
+            }
+        }
+        inlineSupportingText(notes) {
+            return notes.map(note => {
+                const inline = make('span', 'settings-supporting-text');
+                if (note.id) inline.id = note.id;
+                inline.append(...note.childNodes);
+                note.remove();
+                return inline;
+            });
+        }
+        prepareSelectRow(field, label, select, model = false) {
+            const title = label.textContent.trim().replace(/[:：]$/, '');
+            const button = make('button', 'settings-row-action');
+            button.type = 'button';
+            if (!model) button.dataset.settingsChoice = select.id;
+            button.setAttribute('aria-haspopup', 'dialog');
+            button.setAttribute('aria-expanded', 'false');
+            const value = make('span', 'settings-row-value');
+            const copy = make('span', 'settings-row-copy');
+            copy.append(make('span', 'settings-row-label', title),
+                ...this.inlineSupportingText([...field.querySelectorAll(':scope > .settings-supporting-text')]));
+            button.append(copy, value);
+            label.hidden = true;
+            select.classList.add('settings-backed-select');
+            field.prepend(button);
+            if (model) select.hidden = true;
+            (model ? this.modelSelects : this.choiceSelects).set(button, { select, title, value });
+            button.addEventListener('click', () => model ? this.openModels(button) : this.openChoices(button));
+            select.addEventListener('change', () => this.syncSelectRow(button));
+            // Model option builders replace options and then assign their selected value.
+            new MutationObserver(() => {
+                this.syncSelectRow(button);
+                if (this.anchor === button) {
+                    this.popover?.refreshModels?.();
+                    this.popover?.refreshChoices?.();
+                }
+            }).observe(select, { childList: true, attributes: true, subtree: true, attributeFilter: ['disabled','selected','label','hidden'] });
+            this.syncSelectRow(button);
+        }
+        syncChoiceRows() {
+            for (const button of this.choiceSelects.keys()) this.syncSelectRow(button);
+            this.popover?.refreshChoices?.();
+        }
+        focusChoiceSelect(select) {
+            this.syncChoiceRows();
+            const trigger = [...this.choiceSelects].find(([, choice]) => choice.select === select)?.[0];
+            (trigger || select).focus({ preventScroll: true });
+        }
+        syncSelectRow(button) {
+            const model = this.modelSelects.get(button);
+            const { select, title, value } = model || this.choiceSelects.get(button);
+            const selected = select.selectedOptions[0];
+            const fullName = model && !select.value ? '未設定' : selected?.label || '未設定';
+            const modelName = model && this.app.decodeModelRefValue(select.value)?.modelName;
+            const unavailable = selected?.disabled || selected?.dataset.unavailable === 'true';
+            value.textContent = (unavailable ? fullName : modelName || fullName) || '未設定';
+            button.title = fullName || '未設定';
+            button.disabled = select.disabled;
+            button.setAttribute('aria-label', `${title} ${fullName || '未設定'}`);
+            const description = [select.getAttribute('aria-describedby'), select.parentElement.querySelector('.model-route-note')?.id]
+                .filter(Boolean).join(' ');
+            if (description) button.setAttribute('aria-describedby', description);
+        }
+        preparePromptRow(field, label, textarea) {
+            const button = make('button', 'settings-row-action', label.textContent.trim().replace(/[:：]$/, ''));
+            button.type = 'button';
+            const editor = make('div', 'settings-prompt-editor');
+            editor.id = `${textarea.id}-editor`;
+            editor.hidden = true;
+            button.setAttribute('aria-controls', editor.id);
+            button.setAttribute('aria-expanded', 'false');
+            label.classList.add('settings-visually-hidden');
+            editor.append(...field.children);
+            editor.append(...field.parentElement.querySelectorAll(`[data-settings-editor="${CSS.escape(textarea.id)}"]`));
+            field.append(button, editor);
+            button.addEventListener('click', () => {
+                editor.hidden = !editor.hidden;
+                button.setAttribute('aria-expanded', String(!editor.hidden));
+                if (!editor.hidden) {
+                    this.syncPromptSizes();
+                    textarea.focus({ preventScroll: true });
+                    textarea.scrollIntoView({ block: 'nearest' });
+                }
             });
         }
         enter(category) {
@@ -340,10 +677,11 @@
         }
         bindPromptSizing() {
             this.textareaSizing = new TextareaSizing();
-            this.detail.querySelectorAll('textarea').forEach(control => this.textareaSizing.observe(control));
+            this.detail.querySelectorAll('textarea').forEach(control => this.textareaSizing.observe(control, { compact: true }));
+            this.textareaSizing.observe($('api-config-additional-models'), { compact: true });
         }
         syncPromptSizes() { this.textareaSizing?.syncPromptSizes(); }
-        afterLayout() { this.syncPromptSizes(); }
+        afterLayout() { this.syncPromptSizes(); this.syncChoiceRows(); this.positionPopover(); }
         syncGlobalForms() {
             const global = this.state.globalSettingsV136;
             if (!global) return;
@@ -415,6 +753,43 @@
                 });
             });
         }
+        prepareColorRows() {
+            for (const row of this.detail.querySelectorAll('.color-setting-row')) {
+                const label = row.querySelector('label');
+                const controls = row.querySelector('.color-setting-controls');
+                const input = controls.querySelector('input[type=color]');
+                const reset = controls.querySelector('button');
+                const key = themeFields[input.dataset.sourceId || input.id];
+                const editor = row.closest('[data-appearance-editor]');
+                const button = make('button', 'settings-row-action settings-color-trigger', label.textContent.trim());
+                const swatch = make('span', 'settings-color-swatch');
+                swatch.setAttribute('aria-hidden', 'true');
+                button.type = 'button';
+                button.setAttribute('aria-haspopup', 'dialog');
+                button.setAttribute('aria-controls', 'settings-color-dialog');
+                button.dataset.colorInput = input.id;
+                row.classList.add('settings-field');
+                row.prepend(button);
+                button.append(swatch);
+                label.hidden = controls.hidden = true;
+                button.addEventListener('click', async () => {
+                    if (input.disabled) return;
+                    const own = editor.dataset.appearanceEditor === 'profile';
+                    const profileId = this.state.activeProfileId;
+                    const initial = input.value;
+                    const theme = own ? this.app.getProfileAppearanceSettings().theme : this.state.globalSettingsV136.theme;
+                    const defaults = this.app.normalizeGlobalThemeSettings({});
+                    const defaultColor = defaults[key] || (theme?.darkMode ? '#007aff' : '#1976d2');
+                    const result = await this.colorPicker.open(label.textContent.trim(), initial, defaultColor);
+                    if (!result || input.disabled || !button.getClientRects().length || (own && profileId !== this.state.activeProfileId)) return;
+                    if (result.reset) reset.click();
+                    else if (input.value !== result.color) {
+                        input.value = result.color;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                });
+            }
+        }
         syncAppearanceEditors() {
             if (!this.state.globalSettingsV136) return;
             const profile = this.app.getProfileAppearanceSettings();
@@ -434,10 +809,24 @@
                     else control.value = control.type === 'color' ? (value || (values.darkMode ? '#007aff' : '#1976d2')) : value || '';
                 });
                 if (kind === 'theme') {
+                    const accentMode = values.themeColorMode !== 'individual';
+                    const accent = editor.querySelector('[id$="accent-color-settings"]');
+                    const individual = editor.querySelector('[id$="individual-color-settings"]');
+                    if (accent) accent.hidden = !accentMode;
+                    if (individual) individual.hidden = accentMode;
                     editor.querySelectorAll('input,select,button').forEach(control => {
                         const id = control.dataset.sourceId || control.id;
-                        control.disabled = id === 'header-text-color-input' && values.headerTextColorMode !== 'custom';
+                        control.disabled = Boolean(control.closest('.theme-setting-subsection[hidden]'))
+                            || id === 'header-text-color-input' && values.headerTextColorMode !== 'custom';
                     });
+                    editor.querySelectorAll('.settings-color-trigger').forEach(button => {
+                        const input = $(button.dataset.colorInput);
+                        button.disabled = input.disabled;
+                        button.lastElementChild.style.setProperty('--swatch', input.value);
+                        button.setAttribute('aria-label', `${button.firstChild.textContent} ${input.value}`);
+                    });
+                    accent?.classList.remove('is-disabled');
+                    individual?.classList.remove('is-disabled');
                 } else {
                     for (const [id, key] of Object.entries(appearanceFields)) {
                         const output = editor.querySelector(own ? `[data-source-id="${id.replace('-slider', '-value')}"]` : `#${id.replace('-slider', '-value')}`);
@@ -446,9 +835,11 @@
                     this.updatePreview(editor, values.backgroundAssetId);
                 }
             });
+            this.syncChoiceRows();
         }
         async updatePreview(editor, id) {
             const image = editor.querySelector('img'), button = editor.querySelector('button.settings-delete-button');
+            editor.querySelector('.settings-background-empty').textContent = id ? '設定済み' : '未設定';
             if (editor.dataset.previewAsset === (id || 'none')) {
                 const cached = this.urls.get(editor);
                 if (cached) image.src = cached;
@@ -476,11 +867,16 @@
                 select.addEventListener('change', () => {
                     const ref = this.app.decodeModelRefValue(select.value);
                     this.save(select, async () => {
-                        if (ref) this.app.assertModelRefForExecution(ref, key);
-                        const updates = { [key]: ref };
-                        const legacyKey = auxiliaryLegacyModelKeys[key];
-                        if (legacyKey) updates[legacyKey] = ref?.modelName || '';
-                        await this.app.saveGlobalSettingsV136(updates);
+                        try {
+                            if (ref) this.app.assertModelRefForExecution(ref, key);
+                            const updates = { [key]: ref };
+                            const legacyKey = auxiliaryLegacyModelKeys[key];
+                            if (legacyKey) updates[legacyKey] = ref?.modelName || '';
+                            await this.app.saveGlobalSettingsV136(updates);
+                        } catch (error) {
+                            this.app.updateAuxiliaryModelOptions();
+                            throw error;
+                        }
                     });
                 });
             }
@@ -536,7 +932,9 @@
                 }));
             }
             select.value = effort || ''; select.title = `Thinkingレベル: ${levelName(effort, c)}`;
-            if (this.state.isSending) this.closePopover(false);
+            this.syncChoiceRows();
+            const pickerSelect = this.modelSelects.get(this.anchor)?.select;
+            if (this.state.isSending && !this.choiceSelects.has(this.anchor) && (!pickerSelect || pickerSelect.id === 'model-name')) this.closePopover(false);
         }
         openExecution(anchor) {
             if (this.state.isSending || anchor.disabled) return;
@@ -546,6 +944,7 @@
             else this.openModels(anchor);
         }
         setInputMode(mode) {
+            this.inputMode = mode;
             // Chrome may retain :focus-visible after keyboard -> touch on the same trigger.
             for (const node of [$('chat-model-button'), $('settings-thinking-button'), $('profile-card-header'), $('profile-card-header-settings'), this.popover]) {
                 if (node) node.dataset.inputMode = mode;
@@ -557,13 +956,15 @@
             this.app.resetSwipeState?.();
             this.closePopover(false); this.anchor = anchor;
             const panel = make(modal ? 'dialog' : 'div', 'execution-popover'); panel.id = 'execution-popover';
-            panel.dataset.inputMode = anchor.dataset.inputMode || 'keyboard';
+            panel.toggleAttribute('data-settings-picker', Boolean(anchor.closest('#settings-screen')));
+            panel.dataset.inputMode = anchor.dataset.inputMode || this.inputMode || 'keyboard';
             panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', label);
             document.body.append(panel); this.popover = panel;
             anchor.setAttribute('aria-expanded', 'true'); anchor.setAttribute('aria-controls', panel.id);
             return panel;
         }
         createSearchPicker(panel, titleText, searchLabel, query) {
+            panel.classList.add('selection-picker');
             const title = make('h2', 'popover-title', titleText);
             let close;
             if (panel instanceof HTMLDialogElement) {
@@ -588,23 +989,43 @@
             const list = make('div', 'model-picker-list'); panel.append(list);
             return { close, search, list };
         }
-        openModels(anchor, query = '') {
-            if (this.state.isSending) return;
-            const modal = !this.media.matches;
-            const panel = this.newPopover(anchor, 'チャットモデルを選択', modal); if (!panel) return;
-            const { close, search, list } = this.createSearchPicker(panel, 'モデル', 'モデルを検索', query);
+        openModels(anchor, query = '', forceModal = false) {
+            const setting = this.modelSelects.get(anchor);
+            const select = setting?.select;
+            const isAuxiliary = select && select.id !== 'model-name';
+            if (anchor.disabled || this.state.isSending && !isAuxiliary) return;
+            const title = setting?.title || 'モデル';
+            const modal = forceModal || !this.media.matches && !anchor.closest('#settings-screen');
+            const panel = this.newPopover(anchor, setting ? title : 'チャットモデルを選択', modal); if (!panel) return;
+            const { close, search, list } = this.createSearchPicker(panel, title, 'モデルを検索', query);
             const render = () => {
                 const focused = list.contains(document.activeElement) ? document.activeElement.dataset.modelRefValue : null;
                 list.replaceChildren(); let group = null;
                 const current = this.app.getCurrentChatModelRef();
                 const filter = search.value.toLowerCase();
-                this.app.buildModelRefOptions().filter(c => c.label.toLowerCase().includes(filter)).forEach(choice => {
+                const choices = this.app.buildModelRefOptions();
+                const allowed = select ? new Set([...select.options].filter(option => !option.disabled).map(option => option.value)) : null;
+                const showChoice = choice => {
                     if (group !== choice.apiConfigId) { list.append(make('h3', 'model-picker-group', choice.apiConfigName)); group = choice.apiConfigId; }
-                    const button = make('button', 'model-picker-choice', choice.modelName); button.type = 'button';
+                    const button = make('button', 'model-picker-choice settings-choice-option');
+                    button.type = 'button';
+                    button.append(make('span', 'settings-choice-label', choice.modelName));
                     button.dataset.modelRefValue = choice.value;
-                    const selected = current?.apiConfigId === choice.apiConfigId && current?.modelName === choice.modelName;
+                    const selected = select ? select.value === choice.value
+                        : current?.apiConfigId === choice.apiConfigId && current?.modelName === choice.modelName;
                     button.setAttribute('aria-pressed', String(selected));
                     button.addEventListener('click', () => {
+                        if (select) {
+                            if (this.popover !== panel || select.disabled || this.state.isSending && !isAuxiliary) return;
+                            const option = [...select.options].find(option => option.value === choice.value);
+                            if (!option || option.disabled) return;
+                            if (select.value !== choice.value) {
+                                select.value = choice.value;
+                                select.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                            this.closePopover(true);
+                            return;
+                        }
                         const chatId = this.state.currentChatId, generation = this.state.executionInitGeneration;
                         this.save(modal ? list : anchor, async () => {
                             if (this.popover !== panel || chatId !== this.state.currentChatId || generation !== this.state.executionInitGeneration) return;
@@ -613,25 +1034,84 @@
                         });
                     }); list.append(button);
                     if (choice.value === focused) button.focus({ preventScroll: true });
-                });
-                if (!list.querySelector('button')) list.append(make('p', 'settings-description', '選択できるモデルがありません。一般設定でAPI設定を追加してください。'));
+                };
+                if (isAuxiliary && '未設定'.includes(filter)) showChoice({ value: '', modelName: '未設定', apiConfigId: null });
+                choices.filter(choice => (!allowed || allowed.has(choice.value)) && choice.label.toLowerCase().includes(filter)).forEach(showChoice);
+                if (!list.querySelector('button')) list.append(make('p', 'settings-description', '選択できるモデルがありません。API・モデルでAPI設定を追加してください。'));
             };
             panel.refreshModels = render;
-            search.addEventListener('input', render); render();
-            panel.addEventListener('keydown', event => {
-                if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-                if (event.target === search && ['Home', 'End'].includes(event.key)) return;
-                const buttons = [...list.querySelectorAll('button')]; if (!buttons.length) return;
-                event.preventDefault(); const index = buttons.indexOf(document.activeElement);
-                buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length].focus();
-            });
+            search.addEventListener('compositionstart', () => { panel.searchComposing = true; });
+            search.addEventListener('compositionend', () => { panel.searchComposing = false; this.positionPopover(); });
+            search.addEventListener('input', () => { render(); this.positionPopover(); }); render();
+            this.bindChoiceKeys(panel, list, search);
             if (modal) panel.showModal();
             this.positionPopover();
             (list.querySelector('[aria-pressed=true]') || list.querySelector('button') || close || search).focus();
         }
-        openProfiles(anchor, query = '') {
+        bindChoiceKeys(panel, list, search) {
+            panel.addEventListener('keydown', event => {
+                if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                if (event.target === search && ['Home', 'End'].includes(event.key)) return;
+                const buttons = [...list.querySelectorAll('button:not(:disabled)')]; if (!buttons.length) return;
+                event.preventDefault(); const index = buttons.indexOf(document.activeElement);
+                buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length].focus();
+            });
+        }
+        openChoices(anchor) {
+            this.syncSelectRow(anchor);
+            if (anchor.disabled) return;
+            const { select, title } = this.choiceSelects.get(anchor);
+            const host = anchor.closest('dialog[open]');
+            const modal = Boolean(host && !('showPopover' in HTMLElement.prototype));
+            const panel = this.newPopover(anchor, title, modal);
+            if (!panel) return;
+            panel.classList.add('settings-choice-popover', 'selection-picker');
+            const list = make('div', 'settings-choice-list');
+            panel.append(list);
+            panel.refreshChoices = () => {
+                if (select.disabled || !anchor.getClientRects().length) return this.closePopover(false);
+                const focus = list.contains(document.activeElement) ? document.activeElement.dataset.optionIndex : null;
+                const choices = [...select.options].filter(option => !option.hidden && !option.closest('optgroup[hidden]'));
+                const signature = JSON.stringify(choices.map(option => [option.index, option.label,
+                    option.disabled || Boolean(option.closest('optgroup[disabled]')), option.selected]));
+                if (list.dataset.options === signature) return;
+                list.dataset.options = signature;
+                list.replaceChildren(...choices.map(option => {
+                    const button = make('button', 'settings-choice-option');
+                    button.append(make('span', 'settings-choice-label', option.label));
+                    button.type = 'button';
+                    button.dataset.optionIndex = String(option.index);
+                    button.disabled = option.disabled || Boolean(option.closest('optgroup[disabled]'));
+                    button.setAttribute('aria-pressed', String(option.selected));
+                    button.addEventListener('click', () => {
+                        if (select.disabled || !option.isConnected || option.disabled || option.closest('optgroup[disabled]')) return;
+                        const index = option.index;
+                        this.closePopover(true);
+                        if (select.selectedIndex === index) return;
+                        select.selectedIndex = index;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                    return button;
+                }));
+                if (focus !== null) (list.querySelector(`[data-option-index="${focus}"]:not(:disabled)`)
+                    || list.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
+            };
+            this.bindChoiceKeys(panel, list);
+            if (modal) {
+                panel.showModal();
+            } else if (host) {
+                host.append(panel);
+                panel.setAttribute('popover', 'manual');
+                panel.showPopover();
+            }
+            panel.refreshChoices();
+            this.positionPopover();
+            (list.querySelector('[aria-pressed=true]:not(:disabled)') || list.querySelector('button:not(:disabled)'))
+                ?.focus({ preventScroll: true });
+        }
+        openProfiles(anchor, query = '', forceModal = false) {
             if (this.state.isSending) return;
-            const modal = !this.media.matches;
+            const modal = forceModal || !this.media.matches && !anchor.closest('#settings-screen');
             const panel = this.newPopover(anchor, 'プロファイル', modal);
             if (!panel) return;
             panel.classList.add('profile-picker-panel');
@@ -665,7 +1145,7 @@
                 const tabTarget = visible.find(profile => String(profile.id) === focused)
                     || visible.find(profile => profile.id === this.state.activeProfileId) || results[visibleStart];
                 const rows = visible.map(profile => {
-                    const row = make('button', 'model-picker-choice profile-picker-choice');
+                    const row = make('button', 'model-picker-choice profile-picker-choice settings-choice-option');
                     row.type = 'button';
                     row.dataset.profileId = String(profile.id);
                     row.title = profile.name;
@@ -773,7 +1253,7 @@
             this.positionPopover();
             const selected = results.findIndex(profile => profile.id === this.state.activeProfileId);
             if (selected >= 0) focusRow(selected);
-            if (!modal || selected < 0) (close || search).focus({ preventScroll: true });
+            if (this.media.matches || selected < 0) (close || search).focus({ preventScroll: true });
         }
         openThinking(anchor) {
             if (this.state.isSending) return;
@@ -936,7 +1416,10 @@
                 this.popover.layoutProfiles?.();
                 return;
             }
-            const size = Math.min(this.popover.classList.contains('thinking-popover') ? 280 : 340, width - 16);
+            const compact = this.popover.classList.contains('settings-choice-popover');
+            const settingsPicker = this.popover.hasAttribute('data-settings-picker');
+            const rowWidth = settingsPicker ? this.anchor.getBoundingClientRect().width : width;
+            const size = Math.min(compact ? 264 : this.popover.classList.contains('thinking-popover') ? 280 : 340, width - 16, rowWidth);
             this.popover.style.width = `${size}px`;
             if (this.popover.layoutProfiles && this.anchor.id === 'profile-card-header') {
                 const button = this.anchor.getBoundingClientRect();
@@ -954,13 +1437,50 @@
             this.popover.style.maxHeight = `${Math.max(0, height - 16)}px`;
             const measured = this.popover.getBoundingClientRect().height;
             const above = Math.max(0, rect.top - top - 18), below = Math.max(0, top + height - rect.bottom - 18);
-            const useAbove = above >= measured || above >= below;
+            const alignRight = compact || settingsPicker;
+            const useAbove = alignRight ? below < measured && above > below : above >= measured || above >= below;
             this.popover.style.maxHeight = `${useAbove ? above : below}px`;
             const panelHeight = this.popover.getBoundingClientRect().height;
             this.popover.dataset.placement = useAbove ? 'above' : 'below';
-            this.popover.style.left = `${Math.max(left + 8, Math.min(controls ? rect.right - size : rect.left, left + width - size - 8))}px`;
+            this.popover.style.left = `${Math.max(left + 8, Math.min(controls || alignRight ? rect.right - size : rect.left, left + width - size - 8))}px`;
             this.popover.style.top = `${Math.max(top + 8, Math.min(useAbove ? rect.top - panelHeight - 10 : rect.bottom + 10, top + height - panelHeight - 8))}px`;
             this.popover.layoutProfiles?.();
+            if (settingsPicker && (this.popover.refreshProfiles || this.popover.refreshModels)) {
+                this.ensurePickerRoom(this.popover);
+            }
+        }
+        ensurePickerRoom(panel) {
+            const list = panel.querySelector('.model-picker-list');
+            const lacksRoom = () => {
+                const row = list.querySelector('button');
+                return row && list.clientHeight + 0.5 < row.getBoundingClientRect().height;
+            };
+            if (panel.roomCheckQueued || !lacksRoom()) return;
+            panel.roomCheckQueued = true;
+            queueMicrotask(() => {
+                panel.roomCheckQueued = false;
+                if (this.popover !== panel || panel.profileSwitchPending || panel.profileSearchComposing ||
+                    panel.searchComposing || !lacksRoom()) return;
+                const anchor = this.anchor;
+                const search = panel.querySelector('.model-picker-search');
+                const focused = document.activeElement;
+                const wasSearching = focused === search;
+                const { value, selectionStart, selectionEnd, selectionDirection } = search;
+                const choice = focused.dataset.profileId ?? focused.dataset.modelRefValue;
+                this.closePopover(false);
+                if (panel.refreshProfiles) this.openProfiles(anchor, value, true);
+                else this.openModels(anchor, value, true);
+                // Keep the dialog for this opening, even when the keyboard or viewport resizes again.
+                if (wasSearching) {
+                    const nextSearch = this.popover?.querySelector('.model-picker-search');
+                    nextSearch?.focus({ preventScroll: true });
+                    nextSearch?.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+                } else if (choice != null) {
+                    const nextRow = [...(this.popover?.querySelectorAll('.model-picker-choice') || [])]
+                        .find(row => (row.dataset.profileId ?? row.dataset.modelRefValue) === choice);
+                    nextRow?.focus();
+                }
+            });
         }
         closePopover(restoreFocus) {
             if (!this.popover) return;

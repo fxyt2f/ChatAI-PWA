@@ -16,10 +16,10 @@ def run(client, url):
 
     def boot(reload=False):
         previous = ev('performance.timeOrigin')
-        client.call('Page.reload' if reload else 'Page.navigate', {} if reload else {'url': url + '?memory-test=1#settings/profile'})
+        client.call('Page.reload' if reload else 'Page.navigate', {} if reload else {'url': url + '?memory-test=1#settings/memory-context'})
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
-            if ev(f"performance.timeOrigin > {previous} && !!window.appLogic?._setupEventListenersCallCount && window.settingsUiV136?.category === 'profile'"):
+            if ev(f"performance.timeOrigin > {previous} && !!window.appLogic?._setupEventListenersCallCount && window.settingsUiV136?.category === 'memory-context'"):
                 return
             time.sleep(0.1)
         raise AssertionError('Real settings page did not boot')
@@ -109,7 +109,8 @@ def run(client, url):
             await db.saveMemory(second, {items: ['既存B']});
             const input = document.querySelector('#enable-memory-toggle');
             const interval = document.querySelector('#memory-auto-save-interval');
-            assert(!input.checked && interval.getClientRects().length && document.querySelector('#manage-memory-btn').getClientRects().length, 'Memory controls visible while OFF');
+            const intervalRow = document.querySelector('[data-settings-choice=memory-auto-save-interval]');
+            assert(!input.checked && intervalRow.getClientRects().length && document.querySelector('#manage-memory-btn').getClientRects().length, 'Memory controls visible while OFF');
             await app.openMemoryManagementDialog();
             const dialog = document.querySelector('#close-memory-dialog-btn').closest('dialog');
             assert(dialog.open && dialog.textContent.includes('既存A'), 'OFF profile can open and view its memory');

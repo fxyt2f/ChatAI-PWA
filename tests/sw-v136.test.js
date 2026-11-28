@@ -11,11 +11,11 @@ function worker({failInstall=false}={}){
     const failed=worker({failInstall:true});await assert.rejects(failed.event('install'),/offline install/);assert.equal(failed.metrics.skip,0);
     console.log('PASS incomplete shell install does not promote the new worker');
     const good=worker();await good.event('install');assert.equal(good.metrics.skip,0);await good.event('message',{data:{action:'skipWaiting'}});assert.equal(good.metrics.skip,1);
-    for(const name of ['style.css','app.js','settings-v136.js','settings-ui-v136.js','function-calling.js','context-reference.js','dropbox.js'])assert(good.metrics.assets.includes('./'+name+'?v=1.38.3'));
+    for(const name of ['style.css','app.js','settings-v136.js','settings-ui-v136.js','function-calling.js','context-reference.js','dropbox.js'])assert(good.metrics.assets.includes('./'+name+'?v=1.39.0'));
     console.log('PASS versioned shell includes matching styles, core and UI');
     await good.event('activate');assert.deepEqual(good.deleted,
         ['chatai-pwa-cache-v1.35.1','chatai-pwa-cache-v1.37.2','chatai-pwa-cache-v1.37.3-beta.0',
-            'chatai-pwa-cache-v1.37.3-beta.1','chatai-pwa-cache-v1.37.3-beta.2','chatai-pwa-cache-v1.37.3','chatai-pwa-cache-v1.37.4','chatai-pwa-cache-v1.37.5','chatai-pwa-cache-v1.38.0','chatai-pwa-cache-v1.38.0.1','chatai-pwa-cache-v1.38.0.2','chatai-pwa-cache-v1.38.1','chatai-pwa-cache-v1.38.2']);assert.equal(good.metrics.claim,1);
+            'chatai-pwa-cache-v1.37.3-beta.1','chatai-pwa-cache-v1.37.3-beta.2','chatai-pwa-cache-v1.37.3','chatai-pwa-cache-v1.37.4','chatai-pwa-cache-v1.37.5','chatai-pwa-cache-v1.38.0','chatai-pwa-cache-v1.38.0.1','chatai-pwa-cache-v1.38.0.2','chatai-pwa-cache-v1.38.1','chatai-pwa-cache-v1.38.2','chatai-pwa-cache-v1.38.3','chatai-pwa-cache-v1.38.4']);assert.equal(good.metrics.claim,1);
     console.log('PASS stable activation removes older app caches and preserves newer and unrelated caches');
     const response=await good.event('fetch',{request:{url:'https://example.test/offline-route',method:'GET',mode:'navigate'}});assert.equal(await response.text(),fs.readFileSync(require.resolve('../index.html'),'utf8'));
     console.log('PASS offline navigation falls back to this version of the shell');

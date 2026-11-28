@@ -200,8 +200,8 @@ const DEFAULT_GLOBAL_THEME_SETTINGS = {
     userMessageColor: DEFAULT_USER_MESSAGE_COLOR
 };
 const THEME_SETTING_KEYS = Object.keys(DEFAULT_GLOBAL_THEME_SETTINGS);
-const APP_VERSION = "1.38.3";
-const APP_CACHE_VERSION = "v1.38.3";
+const APP_VERSION = "1.39.0";
+const APP_CACHE_VERSION = "v1.39.0";
 const VERSION_NOTICE_SESSION_KEY = 'pendingVersionNotice';
 const VERSION_ACK_STORAGE_KEY = 'appVersionAcknowledged';
 const VERSION_LEGACY_STORAGE_KEY = 'appVersion';
@@ -219,6 +219,7 @@ const CHAT_SEARCH_MATCH_HIGHLIGHT = 'chatai-search-match';
 const CHAT_SEARCH_CURRENT_HIGHLIGHT = 'chatai-search-current';
 const CHAT_SEARCH_DEBOUNCE_MS = 180;
 const chatSearchMessageOwners = new WeakMap();
+const messageActionTargets = new WeakMap();
 const DEFAULT_TEXT_FORMATTING_SETTINGS = {
     target: 'model',
     indentProse: true,
@@ -869,12 +870,12 @@ try {
         profileCardIconContainerSettings: document.getElementById('profile-card-icon-container-settings'),
         profileCardNameSettings: document.getElementById('profile-card-name-settings'),
         profileManagementGroup: document.getElementById('profile-management-group'),
-        profileDisplayCard: document.getElementById('profile-display-card'),
+        profileEditDialog: document.getElementById('profile-edit-dialog'),
         profileDisplayIcon: document.getElementById('profile-display-icon'),
-        profileDisplayNameMain: document.getElementById('profile-display-name-main'),
         profileDisplayNameSub: document.getElementById('profile-display-name-sub'),
-        profileDisplayStatus: document.getElementById('profile-display-status'),
         profileEditNameBtn: document.getElementById('profile-edit-name-btn'),
+        profileEditNameInput: document.getElementById('profile-edit-name-input'),
+        profileChangeIconBtn: document.getElementById('profile-change-icon-btn'),
         profileIconInput: document.getElementById('profile-icon-input'),
         profileResetIconBtn: document.getElementById('profile-reset-icon-btn'),
         profileSaveNewBtn: document.getElementById('profile-save-new-btn'),
@@ -5841,14 +5842,16 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             trigger.setAttribute('aria-controls', 'message-action-menu');
             const owner = state.currentMessages;
             const chatId = state.currentChatId;
-            const isCurrent = () => trigger.isConnected && state.currentScreen === 'chat' && state.currentChatId === chatId &&
-                state.currentMessages === owner && owner[index] === messageData && (!messageData.isCascaded || messageData.isSelected);
+            messageActionTargets.set(messageDiv, messageData);
             const canMutate = () => !appLogic.isGenerationBlockingActive() && state.editingMessageIndex === null;
             trigger.onclick = () => {
+                const target = messageActionTargets.get(messageDiv);
+                const isCurrent = () => trigger.isConnected && state.currentScreen === 'chat' && state.currentChatId === chatId &&
+                    state.currentMessages === owner && owner[index] === target && (!target.isCascaded || target.isSelected);
                 const actions = [
                     { icon: 'replay', label: 'この回答のみ再生成', enabled: () => canMutate() && !state.isEditingSystemPrompt &&
                         appLogic.canRegenerateAnswerV137(owner, index),
-                        run: () => appLogic.regenerateAnswerV137(index, messageData) },
+                        run: () => appLogic.regenerateAnswerV137(index, target) },
                     { icon: 'replay', label: 'ここから再生成', enabled: () => canMutate() && appLogic.getAnswerRetryUserIndexV137(index) >= 0,
                         run: () => appLogic.retryFromMessage(appLogic.getAnswerRetryUserIndexV137(index)) }
                 ];
@@ -7037,7 +7040,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
     },
     // 背景画像設定UIを更新
     updateBackgroundSettingsUI() {
-        if (!elements.backgroundThumbnail || !elements.deleteBackgroundBtn) return;
+        // The settings editor displays each saved scope, independently of the applied chat background.
+        if (window.settingsUiV136 || !elements.backgroundThumbnail || !elements.deleteBackgroundBtn) return;
         if (state.backgroundImageUrl) {
             elements.backgroundThumbnail.src = state.backgroundImageUrl;
             elements.backgroundThumbnail.classList.remove('hidden');
@@ -8485,6 +8489,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
             return overlay && !overlay.classList.contains('hidden') && overlay.contains(event.target) ? overlay : null;
         };
         const outside = (dialog, event) => {
+            const picker = window.settingsUiV136?.popover;
+            if (picker?.classList.contains('settings-choice-popover') && dialog.contains(picker) && picker.contains(event.target)) return false;
             const surface = dialog.id === 'image-modal-overlay' ? document.getElementById('image-modal-img') : dialog;
             const rect = surface.getBoundingClientRect();
             return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
@@ -8549,7 +8555,8 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
             const modelPicker = window.settingsUiV136?.popover;
-            if (modelPicker instanceof HTMLDialogElement && modelPicker.open && modelPicker.contains(event.target)) {
+            if (modelPicker?.contains(event.target) &&
+                (modelPicker instanceof HTMLDialogElement && modelPicker.open || modelPicker.classList.contains('settings-choice-popover'))) {
                 if (modelPicker.refreshProfiles && (modelPicker.profileSearchComposing || event.isComposing)) return;
                 stop(event);
                 window.settingsUiV136.setInputMode('keyboard');
@@ -8827,6 +8834,11 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
 
     renderProfileIcon(container, profile) {
         const url = this.getProfileIconUrl(profile);
+        if (!url && container.matches('#profile-card-icon-container-settings, #profile-display-icon, .profile-picker-icon') &&
+            window.DocumentLibraryUI?.createIcon) {
+            container.replaceChildren(window.DocumentLibraryUI.createIcon('user-circle'));
+            return;
+        }
         const icon = document.createElement(url ? 'img' : 'span');
         if (url) {
             icon.src = url;
@@ -8853,16 +8865,9 @@ createMessageElement(role, content, index, isStreamingPlaceholder = false, casca
         }
         if (elements.profileCardNameSettings) elements.profileCardNameSettings.textContent = profile.name;
 
-        const image = elements.profileDisplayIcon;
-        const url = this.getProfileIconUrl(profile);
-        if (url) image.src = url;
-        else image.removeAttribute('src');
-        image.style.display = url ? 'block' : 'none';
-        image.nextElementSibling.style.display = url ? 'none' : 'flex';
-        elements.profileResetIconBtn.style.display = url ? 'flex' : 'none';
-        elements.profileDisplayNameMain.textContent = profile.name;
+        this.renderProfileIcon(elements.profileDisplayIcon, profile);
+        elements.profileResetIconBtn.hidden = !elements.profileDisplayIcon.querySelector('img');
         elements.profileDisplayNameSub.textContent = 'プロファイルの設定を編集中';
-        elements.profileDisplayStatus.classList.toggle('active', profile.id === state.activeProfileId);
 
         if (!window.settingsUiV136?.popover?.refreshProfiles) this.retainProfileIconUrls();
     },
@@ -13404,6 +13409,11 @@ const appLogic = {
     renderApiConfigList() {
         if (!elements.apiConfigList) return;
         const configs = this.normalizeApiConfigs(state.apiConfigs || state.settings.apiConfigs || []);
+        const reorder = document.getElementById('api-reorder-btn');
+        if (reorder) {
+            reorder.disabled = configs.length < 2;
+            if (reorder.disabled) window.settingsUiV136?.setApiReorderMode(false);
+        }
         elements.apiConfigList.innerHTML = '';
 
         if (configs.length === 0) {
@@ -13437,17 +13447,21 @@ const appLogic = {
             const actions = document.createElement('div');
             actions.className = 'api-config-actions';
 
-            for (const [offset, arrow, direction] of [[-1, 'arrow_upward', '上'], [1, 'arrow_downward', '下']]) {
+            for (const [offset, direction] of [[-1, '上'], [1, '下']]) {
                 const move = document.createElement('button');
                 move.type = 'button';
                 move.className = 'api-config-move';
                 move.dataset.action = 'move-api-config';
                 move.dataset.apiConfigId = config.id;
                 move.dataset.offset = String(offset);
-                const icon = document.createElement('span');
-                icon.className = 'material-symbols-outlined';
+                const svgNamespace = 'http://www.w3.org/2000/svg';
+                const icon = document.createElementNS(svgNamespace, 'svg');
+                icon.classList.add('api-config-move-icon');
+                icon.setAttribute('viewBox', '0 0 16 16');
                 icon.setAttribute('aria-hidden', 'true');
-                icon.textContent = arrow;
+                const chevron = document.createElementNS(svgNamespace, 'path');
+                chevron.setAttribute('d', offset === -1 ? 'M2 11 L8 5 L14 11' : 'M2 5 L8 11 L14 5');
+                icon.append(chevron);
                 move.append(icon);
                 move.setAttribute('aria-label', `${config.name}を${direction}に移動`);
                 move.disabled = index + offset < 0 || index + offset >= configs.length;
@@ -13456,13 +13470,13 @@ const appLogic = {
 
             const editButton = document.createElement('button');
             editButton.type = 'button';
-            editButton.className = 'settings-action-button';
+            editButton.className = 'api-config-edit-row';
             editButton.dataset.action = 'edit-api-config';
             editButton.dataset.apiConfigId = config.id;
-            editButton.textContent = '編集';
+            editButton.setAttribute('aria-label', `${config.name}（${provider.textContent}）を編集`);
+            editButton.title = config.name;
 
-            actions.append(editButton);
-            card.append(header, provider, actions);
+            card.append(header, provider, actions, editButton);
             elements.apiConfigList.appendChild(card);
         });
     },
@@ -13515,7 +13529,8 @@ const appLogic = {
 
         dialog.showModal();
         const focus = config ? elements.apiConfigNameInput : elements.apiConfigProviderSelect;
-        focus.focus({ preventScroll: true });
+        if (!config && window.settingsUiV136) window.settingsUiV136.focusChoiceSelect(focus);
+        else focus.focus({ preventScroll: true });
         if (config) focus.select();
     },
 
@@ -14968,18 +14983,23 @@ const appLogic = {
     },
 
     async editCurrentProfileName() {
-        if (!state.activeProfile) return;
+        const dialog = elements.profileEditDialog;
+        if (!state.activeProfile || this.profileEditId != null) return;
         const profileId = state.activeProfileId;
         const previousName = state.activeProfile.name;
-        const newName = await uiUtils.showCustomPrompt("新しいプロファイル名:", previousName);
-        if (newName && newName.trim() && newName.trim() !== previousName) {
-            await this.updateCurrentProfile({ name: newName.trim() }, profileId);
+        elements.profileEditNameInput.value = previousName;
+        this.profileEditId = profileId;
+        try {
+            const result = await uiUtils.showCustomDialog(dialog, dialog.querySelector('.dialog-title'));
+            const name = elements.profileEditNameInput.value.trim();
+            if (result === 'ok' && name && name !== previousName) await this.updateCurrentProfile({ name }, profileId);
+        } finally {
+            this.profileEditId = null;
         }
     },
 
-    handleProfileIconChange(file) {
+    handleProfileIconChange(file, profileId = state.activeProfileId) {
         if (!file || !file.type.startsWith('image/')) return;
-        const profileId = state.activeProfileId;
 
         const reader = new FileReader();
         reader.onload = async (e) => {
@@ -14989,9 +15009,8 @@ const appLogic = {
         reader.readAsArrayBuffer(file);
     },
 
-    async resetProfileIcon() {
+    async resetProfileIcon(profileId = state.activeProfileId) {
         if (!state.activeProfile) return;
-        const profileId = state.activeProfileId;
         const confirmed = await uiUtils.showCustomConfirm("アイコンをデフォルトに戻しますか？");
         if (confirmed) {
             await this.updateCurrentProfile({ icon: null }, profileId);
@@ -16044,7 +16063,7 @@ const appLogic = {
             if (categoryEntry) {
                 const pane = uiUtils.getCategoryPane(categoryEntry.screen);
                 const entry = history.state?.screen === pane.name &&
-                    (history.state[pane.categoryKey] ?? null) === (categoryEntry[pane.categoryKey] ?? null)
+                    pane.resolveCategory(history.state[pane.categoryKey]) === (categoryEntry[pane.categoryKey] ?? null)
                     ? history.state : categoryEntry;
                 history.replaceState(entry, '', location.hash);
                 await uiUtils.showScreen(pane.name, true, entry);
@@ -17266,14 +17285,16 @@ const appLogic = {
 
         // --- プロファイル編集 ---
         elements.profileEditNameBtn.addEventListener('click', () => this.editCurrentProfileName());
+        document.getElementById('profile-edit-close-btn').addEventListener('click', () => elements.profileEditDialog.close('cancel'));
+        elements.profileChangeIconBtn.addEventListener('click', () => elements.profileIconInput.click());
         elements.profileIconInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file) {
-                this.handleProfileIconChange(file);
+                this.handleProfileIconChange(file, this.profileEditId ?? state.activeProfileId);
             }
             e.target.value = null;
         });
-        elements.profileResetIconBtn.addEventListener('click', () => this.resetProfileIcon());
+        elements.profileResetIconBtn.addEventListener('click', () => this.resetProfileIcon(this.profileEditId ?? state.activeProfileId));
         elements.profileSaveNewBtn.addEventListener('click', () => this.saveNewProfile());
         elements.profileDeleteBtn.addEventListener('click', () => this.deleteCurrentProfile());
         elements.profileExportBtn.addEventListener('click', () => this.exportProfile());
@@ -17565,6 +17586,9 @@ const appLogic = {
         setupLocalUiSettingSave(elements.chatFontSizeSelect, 'chatFontSize', 'change', () => uiUtils.getValidChatFontSize(elements.chatFontSizeSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatLineHeightSelect, 'chatLineHeight', 'change', () => uiUtils.getValidChatLineHeight(elements.chatLineHeightSelect?.value), () => uiUtils.applyChatTypography());
         setupLocalUiSettingSave(elements.chatParagraphMarginBottomSelect, 'chatParagraphMarginBottom', 'change', () => uiUtils.getValidChatParagraphMarginBottom(elements.chatParagraphMarginBottomSelect?.value), () => uiUtils.applyChatTypography());
+        setupLocalUiSettingSave(elements.historySortOrderSelect, 'historySortOrder', 'change', null, () => {
+            if (chatSidebarUiState.isOpen) uiUtils.renderChatSidebarModels();
+        });
         setupLocalUiSettingSave(elements.enterToSendCheckbox, 'enterToSend');
         setupLocalUiSettingSave(elements.enableTextFormattingToggle, 'enableTextFormatting');
         setupLocalUiSettingSave(elements.enableWideModeToggle, 'enableWideMode', 'change', null, () => this.applyWideMode());
@@ -17722,7 +17746,7 @@ const appLogic = {
         });
         document.addEventListener('click', (e) => {
             const button = e.target.closest('button');
-            if (button && !button.disabled) {
+            if (button && !button.disabled && !button.closest('#settings-screen, #profile-edit-dialog, #settings-color-dialog, .selection-picker')) {
                 this.createRipple(e, button);
             }
         });
@@ -21709,6 +21733,9 @@ const appLogic = {
         };
         if (updatedMessage.role !== 'model' || !updatedMessage.incomplete) delete updatedMessage.error;
         state.currentMessages[index] = updatedMessage;
+        if (messageActionTargets.get(messageElement) === originalMessage) {
+            messageActionTargets.set(messageElement, updatedMessage);
+        }
 
         if (uiUtils.openMessageInfo.has(originalMessage)) {
             uiUtils.openMessageInfo.delete(originalMessage);
@@ -23036,10 +23063,10 @@ const appLogic = {
     updateAssetCount: async function() {
         try {
             const assets = await dbUtils.getAllAssets();
-            elements.assetCountDisplay.textContent = `現在 ${assets.length} 枚のアセットが保存されています。`;
+            elements.assetCountDisplay.textContent = `${assets.length}枚`;
         } catch (error) {
             console.error("アセット数の更新に失敗:", error);
-            elements.assetCountDisplay.textContent = "アセット数の取得に失敗しました。";
+            elements.assetCountDisplay.textContent = "取得できません";
         }
     },
 

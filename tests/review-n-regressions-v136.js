@@ -116,7 +116,7 @@ window.runNSettingsUiV136=async({app,db,st,ui,test,assert,eq})=>{
             eq($('max-retries').value,'19');eq($('sd-api-url').value,'http://second-tab.invalid');eq($('enable-thought-translation').checked,true);eq($('include-thoughts-toggle').checked,true);
         });
         await test('N05 focused text is retained until blur then matches committed DB state',async()=>{
-            await ui.showScreen('settings',true);window.settingsUiV136.selectCategory('integrations',false);
+            await ui.showScreen('settings',true);window.settingsUiV136.selectCategory('data-sync',false);
             window.testFocusTab('');await wait(()=>document.hasFocus());
             const control=$('sd-api-url');
             control.focus();control.value='http://local-draft.invalid';control.dispatchEvent(new Event('input',{bubbles:true}));

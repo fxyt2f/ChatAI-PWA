@@ -62,6 +62,7 @@ def run(client, url):
         client.call('Emulation.setTouchEmulationEnabled', {'enabled': width < 800})
         wait(f'innerWidth === {width} && settingsUiV136.media.matches === {str(width >= 800).lower()}',
              f'Viewport {width}px')
+        ev('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
 
     def boot(reload=False):
         origin = ev('performance.timeOrigin')
@@ -89,12 +90,11 @@ def run(client, url):
             if (profile?.id !== id || state.activeProfileId !== id ||
                 (await dbUtils.getSetting('activeProfileId'))?.value !== id) return false;
             const url = state.profileIconUrls.get(id)?.url;
-            return ['#profile-card-icon-container', '#profile-card-icon-container-settings'].every(selector => {{
+            return ['#profile-card-icon-container', '#profile-card-icon-container-settings', '#profile-display-icon'].every(selector => {{
                 const icon = document.querySelector(selector);
                 return profile.icon ? Boolean(url) && icon.querySelector('img')?.src === url :
-                    icon.querySelector('.material-symbols-outlined')?.textContent === 'account_circle';
-            }}) && document.querySelector('#profile-card-name-settings').textContent === profile.name &&
-                document.querySelector('#profile-display-name-main').textContent === profile.name;
+                    Boolean(icon.querySelector('svg')) || icon.querySelector('.material-symbols-outlined')?.textContent === 'account_circle';
+            }}) && document.querySelector('#profile-card-name-settings').textContent === profile.name;
         }})()"""), f'Profile {profile_id} is selected in memory, both displays and IndexedDB'
 
     def select_with_pointer(profile_id, touch, label):
@@ -262,7 +262,7 @@ def run(client, url):
         assert ev('state.activeProfileId') == first
         query('pRoFiLe 500')
         assert result_ids() == [middle]
-        assert ev(f"document.querySelector('{rows} .material-symbols-outlined').textContent === 'account_circle'")
+        assert ev(f"Boolean(document.querySelector('{rows} .profile-picker-icon svg'))")
         query('日本語501')
         assert len(result_ids()) == 1
         assert ev(f"(async () => {{ const image = document.querySelector('{rows} img'); await image.decode(); return image.naturalWidth > 0; }})()")
@@ -383,7 +383,7 @@ def run(client, url):
                             list.clientHeight > 0 && list.scrollHeight > list.clientHeight &&
                             list.querySelector('{rows}').offsetHeight === 44 &&
                             list.querySelector('[aria-pressed=true]')?.dataset.profileId === '{last}' &&
-                            getComputedStyle(search).borderRadius === '10px' &&
+                            getComputedStyle(search).borderRadius === '4px' &&
                             list.querySelectorAll('{rows}').length <= 24;
                     }})()"""), label
                     if width >= 800:
@@ -402,7 +402,11 @@ def run(client, url):
                     assert ev("state.currentSystemPrompt === 'prompt-500'")
                     ev("uiUtilsV136.showScreen('settings', true); settingsUiV136.selectCategory('profile', false)")
                     open_with_pointer(settings_trigger, touch)
-                    assert ev("settingsUiV136.popover.matches(':modal')") == touch, label
+                    assert ev("""(() => {
+                        const panel = settingsUiV136.popover;
+                        const anchor = document.getElementById('profile-card-header-settings').getBoundingClientRect();
+                        return !panel.matches(':modal') && Math.abs(panel.getBoundingClientRect().right - anchor.right) <= 1;
+                    })()"""), label
                     query('日本語999')
                     select_with_pointer(last, touch, f'Settings selection {label}')
                     assert ev("state.currentSystemPrompt === 'prompt-999'")

@@ -4,6 +4,18 @@ window.DocumentLibraryUI = (() => {
         csv: 'table', tsv: 'table', json: 'code', yaml: 'code', xml: 'code', html: 'code' };
     const fileOutline = 'M6 3h8l4 4v14H6z M14 3v5h4';
     const iconPaths = {
+        server: 'M4 4h16v6H4z M4 14h16v6H4z M8 7h.1 M8 17h.1',
+        sparkles: 'M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4z M20 3v4 M18 5h4',
+        brain: 'M12 5v14 M12 6C9 1 5 4 5 8c-4 1-3 7 0 8 0 4 5 6 7 2 2 4 7 2 7-2 3-1 4-7 0-8 0-4-4-7-7-2 M5 8c0 2 1 3 3 3 M19 8c0 2-1 3-3 3 M5 16c0-2 1-3 3-3 M19 16c0-2-1-3-3-3',
+        wrench: 'M14 6l3 3 4-4a6 6 0 0 1-7 8l-6 7a2.5 2.5 0 0 1-4-3l7-7a6 6 0 0 1 7-7z',
+        'message-circle': 'M21 11.5a9 9 0 0 1-13 8L3 21l1.5-5a9 9 0 1 1 16.5-4.5Z',
+        palette: 'M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.5-3.3 2 2 0 0 1 1.5-3.2h2a3 3 0 0 0 3-3.2A9 9 0 0 0 12 3Z M7 11h.1 M10 7h.1 M15 7h.1 M18 11h.1',
+        database: 'M4 6c0-4 16-4 16 0s-16 4-16 0Z M4 6v12c0 4 16 4 16 0V6 M4 12c0 4 16 4 16 0',
+        info: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z M12 11v5 M12 8h.1',
+        'user-circle': 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z M15 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z M6 18a6 6 0 0 1 12 0',
+        pencil: 'M4 16L16 4l4 4L8 20H4z M14 6l4 4',
+        upload: 'M12 16V3 M7 8l5-5 5 5 M4 15v5h16v-5',
+        download: 'M12 3v13 M7 11l5 5 5-5 M4 15v5h16v-5',
         pdf: fileOutline + ' M9 17c2-5 3-7 3-5s1 4 4 4c-3-1-5 0-7 1z',
         article: fileOutline + ' M9 11h6 M9 14h6 M9 17h4',
         text: fileOutline + ' M9 12h6 M9 16h6',
@@ -1155,7 +1167,7 @@ window.DocumentLibraryUI = (() => {
         }).observe(controls.pdfViewport);
     }
 
-    return { install, openWorkspace, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
+    return { install, createIcon: icon, openWorkspace, close, handleHistory, openReference, openProjectPreview, openProjectPicker,
         closeProjectPicker: () => { if (picker?.projectTarget) closePicker(); }, registerFile, byName, renderRows, modeLabel, confirmReferenceMode,
         refreshProjectPicker: () => { if (picker) void refreshPicker(picker); },
         refreshDropboxChanges: () => {

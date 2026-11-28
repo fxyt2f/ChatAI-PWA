@@ -14,48 +14,57 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
     const wait=async fn=>{const end=Date.now()+2000;while(!await fn()){if(Date.now()>end)throw new Error('Timed out waiting for saved UI state');await new Promise(r=>setTimeout(r,10));}};
     const event=(id,value,type='input')=>{const input=$(id);if(input.type==='checkbox')input.checked=value;else input.value=value;input.dispatchEvent(new Event(type,{bubbles:true}));};
     const openModelPicker=()=>{ $('chat-model-button').click();if(view.popover?.classList.contains('thinking-popover'))view.popover.querySelector('.thinking-model-switch').click(); };
-    const categories=['general','ai-tools','appearance','profile','integrations','other'];
+    const categories=['api-model','profile','ai-assistance','memory-context','tools-integrations','document-search',
+        'chat-operation','appearance','data-sync','app-info'];
     await test('UI categories retain existing controls and remove obsolete budget/profile model labels',async()=>{
         eq([...document.querySelectorAll('[data-settings-category]')].map(node=>node.dataset.settingsCategory),categories);
         eq([...document.querySelectorAll('[data-settings-panel]')].map(node=>node.dataset.settingsPanel),categories);
-        eq([...$('settings-panel-appearance').querySelectorAll(':scope > .settings-group > h2')].map(node=>node.textContent),['テーマ','色設定','背景・表示効果','表示設定']);
-        eq(document.querySelectorAll('#settings-screen details').length,1);assert($('data-danger-settings').querySelector('details'));assert(!$('thinking-budget'));assert(!$('theme-settings-profile-scoped-toggle'));
+        eq([...$('settings-panel-appearance').querySelectorAll(':scope > .settings-group > h2')].map(node=>node.textContent),['共通テーマ','色設定','背景・表示効果','端末ごとの表示設定']);
+        eq(document.querySelectorAll('#settings-screen details').length,2);assert($('data-danger-settings').querySelector('details'));assert($('google-search-settings').querySelector('details.settings-setup-details'));assert(!$('thinking-budget'));assert(!$('theme-settings-profile-scoped-toggle'));
         assert(!document.querySelector('.profile-menu-model'));assert(!$('profile-display-name-sub').textContent.includes('gemini'));
-        for(const id of ['model-name','include-thoughts-toggle','enable-proofreading','summary-model-name','enable-text-formatting-toggle'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'general');
+        for (const [panel, ids] of Object.entries({
+            'api-model': ['model-name', 'settings-thinking-button', 'enable-auto-retry'],
+            'ai-assistance': ['include-thoughts-toggle', 'enable-proofreading', 'enable-chat-title-generation'],
+            'memory-context': ['enable-memory-toggle', 'memory-extraction-prompt', 'summary-model-name'],
+            'document-search': ['document-embedding-model'],
+            'chat-operation': ['enable-text-formatting-toggle', 'swipe-navigation-toggle', 'enable-streaming-output'],
+            'app-info': ['release-notes-btn', 'debug-mode-toggle']
+        })) for (const id of ids) eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,panel);
         for(const id of ['dark-mode-toggle','theme-color-mode-select','background-image-input','chat-font-size-select'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'appearance');
-        eq($('history-sort-order').closest('[data-settings-panel]').dataset.settingsPanel,'other');
+        eq($('history-sort-order').closest('[data-settings-panel]').dataset.settingsPanel,'data-sync');
         eq($('history-sort-order').closest('.settings-group').querySelector('h2').textContent,'履歴管理');
-        const wide = $('enable-wide-mode-toggle').closest('.settings-field');
-        assert(wide.nextElementSibling.contains($('floating-panel-behavior')));
+        eq($('enable-wide-mode-toggle').closest('.settings-group').id,'display-settings');
+        eq($('floating-panel-behavior').closest('.settings-group').id,'chat-navigation-settings');
         assert(!$('hide-system-prompt-toggle'));
         const labels = {'chat-title-model':'タイトル生成用モデル:', 'chat-title-system-prompt':'タイトル生成用プロンプト:',
             'memory-extraction-model':'記憶抽出モデル:', 'memory-extraction-prompt':'記憶抽出プロンプト:', 'chat-font-size-select':'文字サイズ:', 'chat-line-height-select':'行間:',
             'chat-paragraph-margin-bottom-select':'段落間隔:', 'system-prompt-default':'システムプロンプト:'};
         for (const [id, text] of Object.entries(labels)) eq(document.querySelector(`label[for="${id}"]`).textContent.trim(),text);
-        for(const id of ['enable-memory-toggle','temperature','dummy-user','memory-extraction-prompt'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'profile');
-        for(const id of ['dropbox-app-key-input','google-search-api-key','google-search-engine-id','sd-api-url','sd-qc-model'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'integrations');
+        for(const id of ['temperature','dummy-user','profile-theme-override','profile-appearance-override'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'profile');
+        eq($('dropbox-app-key-input').closest('[data-settings-panel]').dataset.settingsPanel,'data-sync');
+        for(const id of ['google-search-api-key','google-search-engine-id','sd-api-url','sd-qc-model'])eq($(id).closest('[data-settings-panel]').dataset.settingsPanel,'tools-integrations');
         assert($('include-thoughts-toggle').parentElement.textContent.includes('思考プロセスを表示'));
         const execution=st.currentExecutionSettings;st.currentExecutionSettings=null;st.executionInitializingV136=true;view.renderExecution();assert($('chat-model-button').disabled);assert($('chat-model-button').textContent.includes('準備中'));
         st.currentExecutionSettings=execution;st.executionInitializingV136=false;view.renderExecution();
     });
     await test('AI tool sections preserve checkbox IDs and expose the specified labels and descriptions',()=>{
         const normalize=text=>text.replace(/\s+/g,' ').trim();
-        const nav=document.querySelector('[data-settings-category="ai-tools"]');
-        eq(nav.children[1].textContent,'AI機能・ツール設定');
-        const sections=[...$(nav.getAttribute('aria-controls')).children];
+        const nav=document.querySelector('[data-settings-category="tools-integrations"]');
+        eq(nav.children[1].textContent,'ツール・外部連携');
+        const sections=[...$(nav.getAttribute('aria-controls')).children].slice(0,2);
         eq(sections.map(section=>section.querySelector('h2').textContent),['Function Calling','検索設定']);
         const ids=['gemini-enable-function-calling-toggle','allow-prompt-ui-changes','force-function-calling-toggle','gemini-enable-grounding-toggle'];
-        eq(sections.map(section=>[...section.querySelectorAll('input[type=checkbox]')].map(input=>input.id)),[ids.slice(0,3),ids.slice(3)]);
+        eq(sections.map(section=>[...section.querySelectorAll('input[type=checkbox]')].map(input=>input.id)),[[ids[0],'legacy-function-calling-toggle',...ids.slice(1,3)],ids.slice(3)]);
         eq(ids.map(id=>document.querySelectorAll(`#${id}`).length),[1,1,1,1]);
         assert(!$('settings-panel-profile').textContent.includes('ツール使用設定'));
-        eq(ids.map(id=>normalize($(id).labels[0].textContent)),[
+        eq(ids.map(id=>normalize($(id).labels[0].querySelector('.settings-row-label').textContent)),[
             'Function Calling を使用する','プロンプトによるUI変更を許可する','全ての応答でFunctionCallingを強制する','ネットから情報を取得させる (Google Search)'
         ]);
         eq(ids.map(id=>$(id).getAttribute('aria-describedby').split(' ').map(desc=>normalize($(desc).textContent)).join(' ')),[
-            'チェック時、AIは計算などのタスクを外部関数に任せようとします。 Google Searchより優先されます。',
-            'Function Callingを使い、プロンプトの指示で背景画像やUIの透明度を変更できるようにします。',
-            'チェック時、モデルは応答時に必ずFunctionCallingで関数呼び出しを行います。 応答時に必ずイラストを作成させたい時などに有効です。',
-            'チェック時、モデルは回答生成のためにWeb検索を行います。 推論モデルは推論内で検索する場合があり、引用データが帰らない場合があります。 Function Calling と Google Search は同時に使用できません。'
+            'AIが外部ツールを利用できるようにします。Google Searchより優先されます。',
+            'プロンプトで背景画像やUIの透明度を変更できるようにします。',
+            'すべての応答でモデルに関数呼び出しを要求します。',
+            '検索がモデルの推論内で行われ、引用が返らない場合があります。 Function Calling と Google Search は同時に使用できません。'
         ]);
     });
     await test('chat model popover and general selector share the same saved selection',async()=>{
@@ -135,13 +144,16 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         await app.setCurrentChatExecution({thinkingEffort:null});
         eq($('settings-thinking-button').value,'medium');eq($('chat-thinking-label').textContent,'Medium');
         for(const [screen,trigger] of [['chat','chat-model-button'],['settings','settings-thinking-button']]) {
-            await ui.showScreen(screen,true);if(screen==='settings')view.selectCategory('general',false);
-            assert(!$(trigger).hidden);assert($(trigger).getBoundingClientRect().width>0);
+            await ui.showScreen(screen,true);if(screen==='settings')view.selectCategory('api-model',false);
+            assert(!$(trigger).hidden);
             if(screen==='settings') {
                 eq($(trigger).tagName,'SELECT');eq([...$(trigger).options].map(option=>option.textContent),['Low','Medium','High']);
-                event(trigger,'high','change');await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'high');
+                document.querySelector('[data-settings-choice=settings-thinking-button]').click();
+                [...view.popover.querySelectorAll('.settings-choice-option')].find(button=>button.textContent==='High').click();
+                await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'high');
                 event(trigger,'medium','change');await view.saveQueue;eq(app.getCurrentChatThinkingEffort(),'medium');assert(!view.popover);continue;
             }
+            assert($(trigger).getBoundingClientRect().width>0);
             $(trigger).click();assert(view.popover);
             const panel=view.popover.getBoundingClientRect(),anchor=$(trigger).getBoundingClientRect();
             assert(panel.left>=8&&panel.right<=innerWidth-8+1&&panel.top>=8&&panel.bottom<=innerHeight-8+1,'Thinking surface fits viewport');
@@ -247,12 +259,14 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         await ui.showScreen('chat',true);await app.setCurrentChatModelRef({apiConfigId:'gem',modelName:'gemini-3-flash-preview'});$('user-input').focus();
         view.openThinking($('chat-model-button'));const bounds=view.popover.getBoundingClientRect();assert(bounds.bottom<=innerHeight+1&&bounds.top>=0,'reduced viewport popover');
         assert(bounds.bottom<=document.querySelector('.chat-model-controls').getBoundingClientRect().top-8,'reduced viewport panel clears control row');view.closePopover(false);
-        await ui.showScreen('settings',true);view.selectCategory('integrations',false);$('sd-api-url').focus();assert($('settings-detail').clientHeight>100);assert(document.querySelector('#settings-screen .app-header').getBoundingClientRect().bottom<innerHeight);
+        await ui.showScreen('settings',true);view.selectCategory('tools-integrations',false);$('sd-api-url').focus();assert($('settings-detail').clientHeight>100);assert(document.querySelector('#settings-screen .app-header').getBoundingClientRect().bottom<innerHeight);
         return 4;
     };
     let resizeNode;
     window.prepareSettingsResizeV136=async()=>{
-        await ui.showScreen('settings',true);view.selectCategory('profile',false);resizeNode=$('dummy-user');resizeNode.value='resize draft';resizeNode.focus();$('settings-detail').scrollTop=100;
+        await ui.showScreen('settings',true);view.selectCategory('profile',false);
+        document.querySelector('[aria-controls="dummy-user-editor"]').click();
+        resizeNode=$('dummy-user');resizeNode.value='resize draft';resizeNode.focus();$('settings-detail').scrollTop=100;
     };
     window.verifySettingsResizeV136=()=>{
         assert(view.category==='profile');assert(document.activeElement===resizeNode);eq(resizeNode.value,'resize draft');assert($('settings-detail').scrollTop>0);return 4;
@@ -261,7 +275,7 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
         const results=[];const check=(ok,message)=>{assert(ok,`${width}px: ${message}`);results.push(message)};
         check(Math.abs(innerWidth-width)<=1,'actual CSS viewport width');
         await ui.showScreen('settings',true);view.enter();
-        check(view.media.matches ? !document.querySelector('[data-settings-panel=general]').hidden : $('settings-screen').classList.contains('settings-show-top'),'initial navigation');
+        check(view.media.matches ? !document.querySelector('[data-settings-panel=api-model]').hidden : $('settings-screen').classList.contains('settings-show-top'),'initial navigation');
         for(const category of categories){
             view.selectCategory(category);const panel=document.querySelector(`[data-settings-panel=${category}]`);check(!panel.hidden,category+' accessible');
             const container=$('settings-detail');check(container.scrollWidth<=container.clientWidth+1,category+' no horizontal overflow');
@@ -344,7 +358,7 @@ window.runSettingsUiTestsV136 = async function ({app,db,st,ui,el,realUi,realAppF
             await ui.showScreen('chat',true);$('user-input').value='メッセージを入力…';
             document.activeElement?.blur();
             if(category==='thinking-settings'){
-                await ui.showScreen('settings',true);view.selectCategory('general',false);$('settings-thinking-button').scrollIntoView({block:'center'});trigger=$('settings-thinking-button');
+                await ui.showScreen('settings',true);view.selectCategory('api-model',false);trigger=document.querySelector('[data-settings-choice=settings-thinking-button]');trigger.scrollIntoView({block:'center'});
             }else if(!['composer','hover-model','hover-thinking'].includes(category)&&!category.startsWith('font-'))trigger=$('chat-model-button');
             if(trigger&&!deferOpen){trigger.click();if(category==='model'&&view.popover?.classList.contains('thinking-popover'))view.popover.querySelector('.thinking-model-switch').click();}
         }else{await ui.showScreen('settings',true);view.selectCategory(category,false);$('settings-detail').scrollTop=0;}

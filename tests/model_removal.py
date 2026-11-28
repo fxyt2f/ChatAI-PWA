@@ -27,7 +27,7 @@ def run(client, url):
     '''})['identifier']
     try:
         previous = ev('performance.timeOrigin')
-        client.call('Page.navigate', {'url': url + '?f6=1#settings/general'})
+        client.call('Page.navigate', {'url': url + '?f6=1#settings/api-model'})
         deadline = time.monotonic() + 12
         while not ev(f"performance.timeOrigin > {previous} && !!window.appLogic?._setupEventListenersCallCount"):
             if time.monotonic() >= deadline:
@@ -109,7 +109,7 @@ def run(client, url):
             eq(await snapshot(),before,'Cancel keeps all persistent records');
             eq(app.getCurrentChatModelRef(),a('shared'),'Cancel keeps the current chat model');
 
-            const peer = window.open('/?f6=peer#settings/general','f6-peer');
+            const peer = window.open('/?f6=peer#settings/api-model','f6-peer');
             try {
                 stage('peer ready');
                 await wait(() => peer.appLogic?._setupEventListenersCallCount, 'Peer tab did not boot');

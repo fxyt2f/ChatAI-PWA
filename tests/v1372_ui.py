@@ -68,7 +68,7 @@ def run(client, base_url):
             assert len(origin) == 3 and max(origin) - min(origin) < .5 and origin[0] >= 0, origin
             sidebar_width = ev("elements.chatHistorySidebar.getBoundingClientRect().width")
             assert abs(sidebar_width - 288) < .5, (width, sidebar_width, ev("elements.chatScreen.className"))
-            for name, category in [('settings', 'general'), ('information', 'character')]:
+            for name, category in [('settings', 'api-model'), ('information', 'character')]:
                 click('#goto-settings-btn' if name == 'settings' else '#information-open-btn')
                 wait(f"state.currentScreen === '{name}'", name)
                 labels = ev(f"v1372Labels('#{name}-category-nav')")
@@ -89,12 +89,11 @@ def run(client, base_url):
                 wait("state.currentScreen === 'chat'", 'Back to chat')
             ev("uiUtilsV136.closeChatSidebar()")
         assert ev("""(() => {
-            const gear = document.querySelector('[data-settings-category=general] .material-symbols-outlined');
+            const api = document.querySelector('[data-settings-category=api-model] svg.settings-category-icon');
             const chatGear = document.querySelector('#goto-settings-btn .material-symbols-outlined');
-            return gear.textContent === chatGear.textContent && [gear, chatGear].every(icon =>
-                getComputedStyle(icon).overflow === 'hidden' && getComputedStyle(icon).width === '20px'
-            );
-        })()"""), 'The shared gear stays within its slot when the icon font is unavailable'
+            return api?.querySelector('path[d]') && getComputedStyle(api).width === '20px' &&
+                getComputedStyle(chatGear).overflow === 'hidden' && getComputedStyle(chatGear).width === '20px';
+        })()"""), 'The API icon and chat gear stay within their slots when the icon font is unavailable'
         assert ev("""getComputedStyle(document.querySelector('.chat-search-toolbar-bottom')).gap === '8px' &&
             getComputedStyle(document.querySelector('.floating-action-panel')).gap === '8px'""")
 
