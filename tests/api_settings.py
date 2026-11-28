@@ -43,8 +43,8 @@ def run(client, url):
 
     def open_general():
         ev("uiUtilsV136.showScreen('settings')")
-        ev("settingsUiV136.selectCategory('general')")
-        wait("""location.hash === '#settings/general' && !document.getElementById('settings-screen').getAnimations()
+        ev("settingsUiV136.selectCategory('api-model')")
+        wait("""location.hash === '#settings/api-model' && !document.getElementById('settings-screen').getAnimations()
             .some(animation => animation.transitionProperty === 'transform' && animation.playState === 'running')""",
              'General settings are visible')
 
@@ -290,6 +290,8 @@ def run(client, url):
         ev(f"appLogic.setCurrentChatModelRef({json.dumps(model_ref)})")
         ev(f"appLogic.saveGlobalSettingsV136({{summaryModelRef:{json.dumps(auxiliary)}}})")
         before_order = ev(stored('configs'))
+        assert ev("!document.querySelector('.api-config-move').getClientRects().length")
+        click('#api-reorder-btn')
         assert ev("""document.querySelector('.api-config-card:first-child [data-offset="-1"]').disabled &&
             document.querySelector('.api-config-card:last-child [data-offset="1"]').disabled""")
         click(f'[data-api-config-id="{b_id}"][data-offset="-1"]')
@@ -306,6 +308,7 @@ def run(client, url):
             return ['model-name', 'summary-model-name', 'proofreading-model-name', ...Object.values(SettingsV136.auxiliaryModelSelectIds)]
                 .every(id => JSON.stringify(select(id)) === JSON.stringify(order));
         })()"""), 'Basic and auxiliary selects follow API order, then candidate order'
+        click('#api-reorder-btn')
 
         open_editor(a_id)
         edit('additional-models', 'gemini-3-flash-preview')
@@ -370,6 +373,7 @@ def run(client, url):
             for dark in (False, True):
                 ev(f"appLogic.saveAppearanceValues('theme', {{darkMode: {str(dark).lower()}}}, {{global: true}})")
                 open_general()
+                click('#api-reorder-btn')
                 wait(f"""document.body.classList.contains('dark-mode') === {str(dark).lower()} &&
                     !document.getAnimations().some(animation =>
                         animation.effect?.target?.matches?.('.api-config-move') && animation.playState === 'running')""",
@@ -385,13 +389,15 @@ def run(client, url):
                     const sameStyle = ['backgroundColor','borderColor','borderWidth','borderRadius','boxShadow','color','opacity']
                         .every(property => style[property] === referenceStyle[property]);
                     reference.disabled = previous;
-                    const icons = [...card.querySelectorAll('.api-config-move .material-symbols-outlined')];
+                    const icons = [...card.querySelectorAll('.api-config-move-icon')];
+                    const arrows = icons.map(icon => icon.querySelector('path').getBBox());
                     return {ok: area.left >= 0 && area.right <= innerWidth && actions.right <= area.right &&
                         button.offsetWidth === 40 && button.offsetHeight === 40 && sameStyle &&
                         style.borderWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)' &&
                         style.boxShadow === 'none' && getComputedStyle(icons[0]).opacity === '0.36' &&
-                        icons.map(icon => icon.textContent).join() === 'arrow_upward,arrow_downward' &&
-                        icons.every(icon => getComputedStyle(icon).fontSize === '22px'),
+                        icons.every(icon => getComputedStyle(icon).strokeWidth === '1.5px') &&
+                        arrows.every(arrow => arrow.width === 12 && arrow.height === 6 && arrow.y === 5) &&
+                        !document.querySelector('#add-api-config-btn').getClientRects().length,
                         area: [area.left, area.right, actions.right], size: [button.offsetWidth, button.offsetHeight],
                         style: [style.backgroundColor, style.boxShadow, style.borderWidth]};
                 })()""")
@@ -478,8 +484,8 @@ def run(client, url):
         assert ev('appLogic.getCurrentChatModelRef()') == auxiliary and ev('state.currentChatId') == sent_chat
         assert ev("state.apiConfigs.every(c => !('useLegacyFunctionCalling' in c) && !('geminiToolRetrieval' in c) && !('openRouterToolSearch' in c))")
         open_general()
-        ev("settingsUiV136.selectCategory('ai-tools')")
-        assert ev("!document.getElementById('settings-panel-ai-tools').hidden && !document.getElementById('legacy-function-calling-toggle').checked")
+        ev("settingsUiV136.selectCategory('tools-integrations')")
+        assert ev("!document.getElementById('settings-panel-tools-integrations').hidden && !document.getElementById('legacy-function-calling-toggle').checked")
         fc_enabled = ev("document.getElementById('gemini-enable-function-calling-toggle').checked")
         input_value('legacy-function-calling-toggle', True, 'change')
         wait("(async () => (await dbUtils.getSetting(SettingsV136.GLOBAL_KEY)).value.useLegacyFunctionCalling)()",
@@ -491,7 +497,7 @@ def run(client, url):
         })()"""), 'Shared compatibility mode is included in sync settings'
         boot(reload=True)
         open_general()
-        ev("settingsUiV136.selectCategory('ai-tools')")
+        ev("settingsUiV136.selectCategory('tools-integrations')")
         assert ev("document.getElementById('legacy-function-calling-toggle').checked")
         input_value('legacy-function-calling-toggle', False, 'change')
         wait("(async () => (await dbUtils.getSetting(SettingsV136.GLOBAL_KEY)).value.useLegacyFunctionCalling === false)()",

@@ -10,7 +10,7 @@ assert.deepEqual(removed.sort(),[
     'system-prompt-save-status','theme-settings-profile-scoped-toggle','thinking-budget','dropbox-sync-frequency',
     'back-to-chat-from-history','chat-sidebar-all-history-btn','chat-sidebar-close-btn',
     'character-detail-pane','character-list-pane','character-profile-btn','characterProfileDialog',
-    'close-profile-dialog-btn','profile-back-btn',
+    'close-profile-dialog-btn','profile-back-btn','profile-display-card','profile-display-name-main','profile-display-status',
     'history-delete-live','history-delete-select-all-label','history-delete-toolbar',
     'history-detail-assets','history-detail-attachments','history-detail-content','history-detail-created',
     'history-detail-empty','history-detail-first-heading','history-detail-first-message','history-detail-heading',
@@ -25,24 +25,24 @@ assert.deepEqual(removed.sort(),[
 assert.equal(new Set(ids(html)).size,ids(html).length);
 console.log('PASS control IDs retained; only explicitly retired controls and optgroups removed');
 const settings=html.slice(html.indexOf('id="settings-screen"'),html.indexOf('id="information-screen"'));
-assert.equal((settings.match(/<details\b/g)||[]).length,1);assert(settings.includes('<details class="settings-danger-disclosure">'));assert(!settings.includes('Thinking Budget'));assert(!settings.includes('Include Thoughts'));
-console.log('PASS settings sections are expanded except the requested danger disclosure; obsolete labels are removed');
-const profile=html.slice(html.indexOf('id="settings-panel-profile"'),html.indexOf('id="settings-panel-integrations"'));
+assert.equal((settings.match(/<details\b/g)||[]).length,2);assert(settings.includes('<details class="settings-danger-disclosure">'));assert(settings.includes('<details class="settings-footer settings-setup-details">'));assert(!settings.includes('Thinking Budget'));assert(!settings.includes('Include Thoughts'));
+console.log('PASS destructive controls and Custom Search setup use disclosures; obsolete labels are removed');
+const profile=settings.split('data-settings-panel="profile"')[1].split('class="settings-category-panel"')[0];
 assert(profile.includes('id="profile-card-header-wrapper-settings"'));
-assert(!html.slice(html.indexOf('id="settings-screen"'),html.indexOf('id="settings-panel-profile"')).includes('id="profile-card-header-wrapper-settings"'));
+assert.equal((settings.match(/id="profile-card-header-wrapper-settings"/g)||[]).length,1);
 console.log('PASS settings profile switcher belongs only to the profile category');
-assert(read('app.js').includes('const APP_VERSION = "1.38.3";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.38.3";'));
+assert(read('app.js').includes('const APP_VERSION = "1.39.0";'));assert(read('app.js').includes('const APP_CACHE_VERSION = "v1.39.0";'));
 assert(read('app.js').includes('const DB_VERSION = 19;'));
 const worker=read('sw.js');
-assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.38.3';"));
+assert(worker.includes("const CACHE_NAME = 'chatai-pwa-cache-v1.39.0';"));
 const shell=[...worker.split('const urlsToCache = [')[1].split('];')[0].matchAll(/'([^']+)'/g)].map(m=>m[1]);
 assert.equal(shell.length,33);assert.equal(new Set(shell).size,shell.length);
-assert(shell.includes('./dropbox-sync.js?v=1.38.3'));
+assert(shell.includes('./dropbox-sync.js?v=1.39.0'));
 assert(shell.includes('./document-embedding-worker.js'));
 assert(!shell.some(asset => /^https?:/.test(asset)));
 for(const asset of ['app.js','style.css','settings-v136.js','settings-ui-v136.js','information-ui.js','streaming-v136.js','dropbox.js','function-calling.js','context-reference.js','document-library.js','project-store.js','project-ui.js','document-embedding.js','document-search.js','document-library-ui.js']){
-    assert(html.includes(`./${asset}?v=1.38.3`),asset);
-    assert(shell.includes(`./${asset}?v=1.38.3`),asset);
+    assert(html.includes(`./${asset}?v=1.39.0`),asset);
+    assert(shell.includes(`./${asset}?v=1.39.0`),asset);
 }
 assert(html.indexOf('./settings-v136.js?v=')<html.indexOf('./streaming-v136.js?v='));
 assert(html.indexOf('./streaming-v136.js?v=')<html.indexOf('./app.js?v='));
@@ -53,6 +53,6 @@ assert(html.indexOf('./context-reference.js?v=')<html.indexOf('./information-ui.
 assert(html.indexOf('./document-library.js?v=')<html.indexOf('./project-store.js?v='));
 assert(html.indexOf('./project-store.js?v=')<html.indexOf('./app.js?v='));
 assert(html.indexOf('./project-ui.js?v=')<html.indexOf('./app.js?v='));
-assert(read('CHANGELOG.md').includes('## v1.38.3'));
-console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.38.3');
+assert(read('CHANGELOG.md').includes('## v1.39.0'));
+console.log('PASS HTML, scripts, styles, worker and release notes agree on 1.39.0');
 console.log('4 UI/static tests passed');

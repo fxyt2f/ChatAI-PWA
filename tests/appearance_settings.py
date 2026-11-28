@@ -1,9 +1,10 @@
 """F4 and F8 on the real settings screen, including navigation and IndexedDB reloads."""
+import base64
 import json
 import time
 
 
-def run(client, url):
+def run(client, url, screenshots=None):
     def ev(expression):
         result = client.call('Runtime.evaluate', {'expression': expression, 'awaitPromise': True, 'returnByValue': True})
         if 'exceptionDetails' in result:
@@ -50,6 +51,15 @@ def run(client, url):
         wait(f"state.currentScreen === 'settings' && location.hash === '#settings/{name}' && !document.querySelector('#settings-panel-{name}').hidden",
              f'{name} is restored and visible')
 
+    def capture(name):
+        if screenshots is None:
+            return
+        wait("![document.querySelector('#settings-screen'), document.querySelector('#settings-color-dialog')].some(node => node.getAnimations({subtree:true}).some(a => a.playState === 'running'))",
+             'Settings layout has settled')
+        image = client.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})['data']
+        screenshots.mkdir(parents=True, exist_ok=True)
+        (screenshots / f'{name}.png').write_bytes(base64.b64decode(image))
+
     def change(id, value, event='change'):
         ev(f'''(() => {{
             const control = document.getElementById({json.dumps(id)});
@@ -57,6 +67,17 @@ def run(client, url):
             else control.value = {json.dumps(value)};
             control.dispatchEvent(new Event({json.dumps(event)}, {{bubbles: true}}));
         }})()''')
+        ev('settingsUiV136.saveQueue')
+
+    def open_color(id):
+        click(f'[data-color-input="{id}"]')
+        wait("document.querySelector('#settings-color-dialog').open && document.activeElement.id === 'settings-color-title'",
+             'The settings color dialog opens and receives focus')
+        assert ev("document.querySelectorAll('.settings-color-preset').length === 14")
+
+    def finish_color(action='ok'):
+        click(f'#settings-color-dialog [value="{action}"]')
+        wait("!settingsUiV136.colorPicker.active", 'Color dialog has closed')
         ev('settingsUiV136.saveQueue')
 
     def global_theme(expected, mode):
@@ -96,7 +117,7 @@ def run(client, url):
                 return Promise.resolve(Response.json({{candidates:[{{content:{{parts:[{{text:'F8 answer'}}]}},finishReason:'STOP'}}]}}));
             }};
             try {{
-                await appLogic.callApiWithRetry({{messagesForApi:[{{role:'user',content:'F8 check'}}],generationConfig:{{}},isFirstCall:{json.dumps(first)}}});
+                await appLogic.callApiWithRetry({{messagesForApi:[{{role:'user',parts:[{{text:'F8 check'}}]}}],generationConfig:{{}},isFirstCall:{json.dumps(first)}}});
                 const mode = request?.toolConfig?.functionCallingConfig?.mode ?? null;
                 const tool = request?.tools?.[0];
                 const kind = tool?.functionDeclarations || tool?.function_declarations ? 'function' : tool?.google_search ? 'search' : null;
@@ -126,8 +147,9 @@ def run(client, url):
         })()""")
         chat_width = ev('elements.chatHistorySidebar.offsetWidth')
         press_enter('#goto-settings-btn')
-        wait("state.currentScreen === 'settings' && document.querySelector('#settings-title').textContent === '一般設定'",
+        wait("state.currentScreen === 'settings' && document.querySelector('#settings-title').textContent === 'API・モデル'",
              'Settings sidebar entry opens the default desktop category')
+        capture('desktop-settings')
         assert ev(f"""(() => {{
             const left = document.querySelector('.settings-sidebar'), right = document.querySelector('.settings-detail-header');
             const layout = left.parentElement;
@@ -142,8 +164,8 @@ def run(client, url):
         }})()"""), 'Shared pane width, continuous divider, paired headers and centered back icon'
         for width in (1280, 900):
             client.call('Emulation.setDeviceMetricsOverride', {'width': width, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
-            category('ai-tools')
-            wait("document.querySelector('#settings-title').textContent === 'AI機能・ツール設定'", 'Desktop/tablet category title')
+            category('tools-integrations')
+            wait("document.querySelector('#settings-title').textContent === 'ツール・外部連携'", 'Desktop/tablet category title')
             depth = ev('history.length')
             for expanded in (False, True):
                 press_enter('#settings-menu-btn')
@@ -153,12 +175,12 @@ def run(client, url):
                     return menu.getAttribute('aria-expanded') === '{str(expanded).lower()}' &&
                         Boolean(nav.offsetWidth) === {json.dumps(expanded)} &&
                         document.activeElement === menu && history.length === {depth} &&
-                        location.hash === '#settings/ai-tools';
+                        location.hash === '#settings/tools-integrations';
                 }})()"""), f'Keyboard toggles the category pane at {width}px'
         press_enter('#back-to-chat-from-settings')
         wait("state.currentScreen === 'chat'", 'Left header returns to chat')
         ev('history.back()')
-        panel('ai-tools')
+        panel('tools-integrations')
         ev('history.forward()')
         wait("state.currentScreen === 'chat'", 'Browser forward returns to chat')
         client.call('Emulation.setDeviceMetricsOverride', {'width': 1280, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
@@ -174,7 +196,7 @@ def run(client, url):
         panel('appearance')
         global_theme(True, 'dark')
         wait("document.body.classList.contains('dark-mode')", 'Existing dark value is applied at boot')
-        category('general')
+        category('api-model')
         category('appearance')
         change('dark-mode-toggle', 'light')
         global_theme(False, 'light')
@@ -182,24 +204,103 @@ def run(client, url):
         change('dark-mode-toggle', 'dark')
         global_theme(True, 'dark')
         wait("document.body.classList.contains('dark-mode')", 'Dark is applied')
+        capture('desktop-color-list')
+        assert ev("""(() => {
+            const items = ['[data-color-input=accent-color-input] .settings-color-swatch','#upload-background-btn .settings-background-value'];
+            return items.every(selector => {
+                const value = document.querySelector(selector);
+                const row = value.closest('button');
+                const right = row.getBoundingClientRect().right - value.getBoundingClientRect().right;
+                return right >= 20 && right <= 40;
+            });
+        })()""")
+        capture('desktop-background-row')
+        open_color('accent-color-input')
+        capture('desktop-dark-color-picker')
+        click('.settings-color-preset[data-color="#dc3545"]')
+        assert ev("""(() => {
+            const picker = settingsUiV136.colorPicker;
+            return picker.hex.value === '#dc3545' && picker.hue.value !== '0' &&
+                picker.dialog.style.getPropertyValue('--swatch') === '#dc3545' &&
+                picker.presets.querySelector('[aria-pressed=true]').dataset.color === '#dc3545' &&
+                Number.parseFloat(picker.plane.style.getPropertyValue('--saturation')) > 50;
+        })()""")
+        change('settings-color-hex', '#abcd', 'input')
+        click('#settings-color-dialog [value=ok]')
+        assert ev("settingsUiV136.colorPicker.dialog.open && !settingsUiV136.colorPicker.hex.validity.valid && state.globalSettingsV136.theme.accentColor !== '#dc3545'")
+        finish_color('cancel')
+        assert ev("state.globalSettingsV136.theme.accentColor !== '#dc3545'")
         change('dark-mode-toggle', 'light')
 
-        change('accent-color-input', '#135789', 'input')
+        open_color('accent-color-input')
+        change('settings-color-hex', '#135789', 'input')
+        wait("!document.querySelector('#settings-color-dialog').classList.contains('animating')", 'The color dialog has settled')
+        hex_border = ev("getComputedStyle(document.getElementById('settings-color-hex')).borderTopColor")
+        hex_point = ev("""(() => {
+            const rect = document.getElementById('settings-color-hex').getBoundingClientRect();
+            return {x:rect.left + 70,y:rect.top + rect.height / 2};
+        })()""")
+        for event in ('mousePressed','mouseReleased'):
+            client.call('Input.dispatchMouseEvent', {'type':event,'button':'left','clickCount':1, **hex_point})
+        wait(f"""document.activeElement.id === 'settings-color-hex' && getComputedStyle(document.activeElement).outlineStyle === 'none' &&
+            getComputedStyle(document.activeElement).borderTopColor !== {json.dumps(hex_border)}""",
+             'The HEX field is visibly focused')
+        capture('desktop-hex-editing')
+        finish_color()
         wait("uiUtilsV136.getEffectiveHeaderColor() === '#135789'", 'Accent color is applied')
-        click('#reset-accent-color-btn')
-        ev('settingsUiV136.saveQueue')
+        open_color('accent-color-input')
+        click('#settings-color-dialog .settings-color-reset')
+        assert ev("state.globalSettingsV136.theme.accentColor === '#135789'")
+        finish_color()
         wait("state.globalSettingsV136.theme.accentColor === appLogic.normalizeGlobalThemeSettings({}).accentColor", 'Accent reset is saved')
         change('theme-color-mode-select', 'individual')
-        change('header-color-input', '#457123', 'input')
+        assert ev("document.querySelector('[data-color-input=header-text-color-input]').disabled")
+        change('header-text-color-mode-select', 'custom')
+        open_color('header-text-color-input')
+        click('.settings-color-preset[data-color="#ffffff"]')
+        finish_color()
+        wait("state.globalSettingsV136.theme.headerTextColor === '#ffffff'", 'Manual header text color applies')
+        open_color('header-text-color-input')
+        click('#settings-color-dialog .settings-color-reset')
+        finish_color()
+        wait("state.globalSettingsV136.theme.headerTextColorMode === 'auto' && document.querySelector('[data-color-input=header-text-color-input]').disabled",
+             'Reset retains the existing automatic header text behavior')
+        open_color('header-color-input')
+        change('settings-color-hex', '#457123', 'input')
+        finish_color()
         wait("uiUtilsV136.getEffectiveHeaderColor() === '#457123'", 'Individual header color is applied')
+        capture('desktop-individual-colors')
+        assert ev("!document.querySelector('#upload-background-btn').textContent.includes('画像を選択')")
+        ev("""(async () => {
+            const control = document.getElementById('background-image-input');
+            const image = await (await fetch('./icon-192x192.png')).blob();
+            const files = new DataTransfer();
+            files.items.add(new File([image], 'background.png', {type:'image/png'}));
+            control.files = files.files;
+            control.dispatchEvent(new Event('change', {bubbles:true}));
+            await settingsUiV136.saveQueue;
+        })()""")
+        wait("document.getElementById('background-thumbnail').getClientRects().length > 0 && document.querySelector('#upload-background-btn').textContent.includes('設定済み')",
+             'The background row updates its status and thumbnail')
+        assert ev("""(() => {
+            const remove = document.getElementById('delete-background-btn');
+            const bounds = remove.closest('.settings-island').getBoundingClientRect();
+            const row = remove.getBoundingClientRect();
+            return Math.abs(row.left - bounds.left) <= 1 && Math.abs(row.right - bounds.right) <= 1;
+        })()""")
+        capture('desktop-background-selected')
+        click('#delete-background-btn')
+        wait("!state.globalSettingsV136.appearance.backgroundAssetId && document.querySelector('#upload-background-btn').textContent.includes('未設定')",
+             'Deleting the background restores the unset row')
         change('chat-font-size-select', '20')
-        category('other')
+        capture('desktop-appearance')
+        category('data-sync')
         change('history-sort-order', 'title')
         wait("(async () => { const local = (await dbUtils.getSetting('localUiSettings')).value; return local.chatFontSize === 20 && local.historySortOrder === 'title'; })()",
              'Moved display and history settings keep their original persistence')
 
         boot()
-        panel('other')
+        panel('data-sync')
         category('appearance')
         global_theme(False, 'light')
         wait("document.querySelector('#theme-color-mode-select').value === 'individual' && document.querySelector('#header-color-input').value === '#457123' && document.querySelector('#chat-font-size-select').value === '20' && document.querySelector('#history-sort-order').value === 'title'",
@@ -216,7 +317,10 @@ def run(client, url):
         change('profile-theme-override', True)
         change('profile-dark-mode-toggle', 'dark')
         change('profile-theme-color-mode-select', 'accent')
-        change('profile-accent-color-input', '#8a2167', 'input')
+        open_color('profile-accent-color-input')
+        change('settings-color-hex', '#8a2167', 'input')
+        capture('desktop-profile-color-picker')
+        finish_color()
         change('profile-appearance-override', True)
         change('profile-overlay-opacity-slider', '25', 'input')
         wait(f'''(async () => {{
@@ -225,6 +329,12 @@ def run(client, url):
                 && state.settings.darkMode === true && uiUtilsV136.getEffectiveHeaderColor() === '#8a2167' && state.settings.overlayOpacity === 0.25;
         }})()''', 'Profile theme, color and background effect are stored and applied')
         global_theme(False, 'light')
+        open_color('profile-accent-color-input')
+        click('.settings-color-preset[data-color="#000000"]')
+        ev(f'appLogic.switchProfile({other})')
+        finish_color()
+        assert ev(f"(async () => (await dbUtils.getProfile({own})).settings.theme.accentColor === '#8a2167')()")
+        ev(f'appLogic.switchProfile({own})')
         change('profile-theme-override', False)
         wait("document.querySelector('#profile-theme-editor').hidden && state.settings.darkMode === false", 'Disabling override uses global theme')
         change('profile-theme-override', True)
@@ -236,13 +346,13 @@ def run(client, url):
         wait("!document.querySelector('#profile-theme-editor').hidden && document.querySelector('#profile-dark-mode-toggle').value === 'dark' && document.querySelector('#profile-accent-color-input').value === '#8a2167' && document.querySelector('#profile-overlay-opacity-slider').value === '25'",
              'Profile settings are restored after profile switch and reload')
 
-        category('ai-tools')
+        category('tools-integrations')
         a_tools = [True, False, True, True]
         b_tools = [False, True, False, True]
         tool_state(own, a_tools, change_values=True)
         change('force-function-calling-toggle', False)
         category('appearance')
-        category('ai-tools')
+        category('tools-integrations')
         tool_state(own, [True, False, False, True])
         change('force-function-calling-toggle', True)
         tool_state(own, a_tools)
@@ -264,7 +374,7 @@ def run(client, url):
         tool_state(own, a_tools)
         wait("(async () => !!(await window.functionCallingTools.set_ui_opacity({overlay:0.5})).error)()", 'The disabled UI tool rejects a change')
         boot()
-        panel('ai-tools')
+        panel('tools-integrations')
         tool_state(own, a_tools)
         ev(f'appLogic.switchProfile({other})')
         tool_state(other, [False, True, False, False])
@@ -272,39 +382,113 @@ def run(client, url):
         client.call('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True})
         boot('?f4=mobile#settings/appearance')
         panel('appearance')
-        wait("innerWidth === 390 && document.querySelector('#settings-title').textContent === 'テーマ・表示設定'", 'Mobile appearance title')
+        wait("innerWidth === 390 && document.querySelector('#settings-title').textContent === 'テーマ・表示'", 'Mobile appearance title')
         click('#settings-menu-btn')
         wait("location.hash === '#settings' && document.querySelector('#settings-screen').classList.contains('settings-show-top')", 'Direct mobile link backs to the category list')
+        capture('mobile-settings')
         category('appearance')
+        capture('mobile-appearance')
+        client.call('Emulation.setTouchEmulationEnabled', {'enabled': True})
+        open_color('header-color-input')
+        capture('mobile-light-color-picker')
+        preset_point = ev("""(() => {
+            const r = document.querySelector('.settings-color-preset[data-color="#ffffff"]').getBoundingClientRect();
+            return {x:r.left + r.width / 2, y:r.top + r.height / 2};
+        })()""")
+        client.call('Input.dispatchTouchEvent', {'type':'touchStart','touchPoints':[preset_point]})
+        client.call('Input.dispatchTouchEvent', {'type':'touchEnd','touchPoints':[]})
+        wait("settingsUiV136.colorPicker.hex.value === '#ffffff' && state.globalSettingsV136.theme.headerColor === '#457123'",
+             'Touch preset selection changes only the draft')
+        surface = ev("""(() => { const r = document.querySelector('.settings-color-plane').getBoundingClientRect();
+            return [{x:r.left + r.width * .25,y:r.top + r.height * .3},{x:r.left+r.width*.75,y:r.top+r.height*.5}]; })()""")
+        scroll_before = ev("settingsUiV136.detail.scrollTop")
+        client.call('Input.dispatchTouchEvent', {'type':'touchStart','touchPoints':surface[:1]})
+        client.call('Input.dispatchTouchEvent', {'type':'touchMove','touchPoints':surface[1:]})
+        client.call('Input.dispatchTouchEvent', {'type':'touchEnd','touchPoints':[]})
+        assert ev(f"""settingsUiV136.colorPicker.hex.value !== '#ffffff' &&
+            state.globalSettingsV136.theme.headerColor === '#457123' &&
+            settingsUiV136.detail.scrollTop === {scroll_before} && location.hash === '#settings/appearance'""")
+        before_cancel = ev('settingsUiV136.colorPicker.hex.value')
+        client.call('Input.dispatchTouchEvent', {'type':'touchStart','touchPoints':surface[:1]})
+        client.call('Input.dispatchTouchEvent', {'type':'touchCancel','touchPoints':[]})
+        assert ev(f"settingsUiV136.colorPicker.hex.value === {json.dumps(before_cancel)}")
+        assert ev("""(() => {
+            const hue = document.querySelector('.settings-hue'), old = document.getElementById('settings-color-hex').value;
+            hue.value = (Number(hue.value) + 180) % 360; hue.dispatchEvent(new Event('input', {bubbles:true}));
+            return old !== document.getElementById('settings-color-hex').value;
+        })()""")
+        client.call('Emulation.setDeviceMetricsOverride', {'width':390,'height':370,'deviceScaleFactor':1,'mobile':True})
+        ev("document.getElementById('settings-color-hex').focus()")
+        wait("""(() => {
+            const dialog = document.getElementById('settings-color-dialog'), bounds = dialog.getBoundingClientRect();
+            return bounds.top >= 0 && bounds.bottom <= 370 && dialog.scrollHeight > dialog.clientHeight &&
+                document.activeElement.id === 'settings-color-hex';
+        })()""", 'The dialog remains scrollable when the visible viewport shrinks')
+        client.call('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+        finish_color('cancel')
+        client.call('Emulation.setTouchEmulationEnabled', {'enabled': False})
+        ev("document.querySelector('#settings-detail').scrollTop = 240")
+        saved_top = ev("document.querySelector('#settings-detail').scrollTop")
+        assert saved_top > 0
         click('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'Mobile detail backs through browser history')
         ev('history.forward()')
         panel('appearance')
+        assert ev("document.querySelector('#settings-detail').scrollTop") == saved_top
         boot()
         panel('appearance')
         click('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'Reloaded mobile detail preserves its history entry')
-        press_enter('[data-settings-category=ai-tools]')
-        panel('ai-tools')
-        wait("document.querySelector('#settings-title').textContent === 'AI機能・ツール設定'", 'Mobile AI tools title')
+        press_enter('[data-settings-category=tools-integrations]')
+        panel('tools-integrations')
+        wait("document.querySelector('#settings-title').textContent === 'ツール・外部連携'", 'Mobile AI tools title')
         assert ev("document.activeElement.id === 'settings-menu-btn' && document.activeElement.getAttribute('aria-expanded') === 'false'")
         press_enter('#settings-menu-btn')
         wait("location.hash === '#settings' && settingsUiV136.category === null", 'AI tools back to category list')
-        assert ev("document.activeElement.dataset.settingsCategory === 'ai-tools'")
+        assert ev("document.activeElement.dataset.settingsCategory === 'tools-integrations'")
         press_enter('#back-to-chat-from-settings')
         wait("state.currentScreen === 'chat'", 'Mobile category list returns to chat')
         ev('history.back()')
         wait("state.currentScreen === 'settings' && location.hash === '#settings'", 'Browser back restores the category list')
-        category('ai-tools')
+        category('tools-integrations')
         ev('history.back()')
         wait("location.hash === '#settings'", 'Browser back restores the list from detail')
         ev('history.forward()')
-        panel('ai-tools')
+        panel('tools-integrations')
         boot()
-        panel('ai-tools')
+        panel('tools-integrations')
         tool_state(other, [False, True, False, False])
+        click('#settings-menu-btn')
+        wait("settingsUiV136.category === null", 'Category list is available for legacy history entries')
+        for legacy, current in [('general', 'api-model'), ('ai-tools', 'tools-integrations'),
+                                ('integrations', 'data-sync'), ('other', 'chat-operation')]:
+            ev(f"location.hash = '#settings/{legacy}'")
+            wait(f"state.currentScreen === 'settings' && settingsUiV136.category === '{current}'",
+                 f'Legacy settings route {legacy} opens {current}')
+            click('#settings-menu-btn')
+            wait("settingsUiV136.category === null && location.hash === '#settings'", 'Legacy detail backs to the list')
+        category('chat-operation')
+        ev("history.replaceState({...history.state, settingsCategory:'other'}, '', '#settings/other')")
+        boot()
+        wait("settingsUiV136.category === 'chat-operation' && history.state.settingsDetailPushed",
+             'Reload restores a legacy mobile detail and its history state')
+        click('#settings-menu-btn')
+        wait("settingsUiV136.category === null && location.hash === '#settings'", 'Reloaded legacy detail backs through history')
+        wait("navigator.serviceWorker.controller?.state === 'activated'", 'The PWA worker controls the current page', timeout=10)
+        offline = {'latency': 0, 'downloadThroughput': -1, 'uploadThroughput': -1}
+        client.call('Network.emulateNetworkConditions', {'offline':True, **offline})
+        try:
+            boot('?f4=offline#settings/appearance')
+            panel('appearance')
+            assert ev("!navigator.onLine && !!navigator.serviceWorker.controller")
+            open_color('header-color-input')
+            click('.settings-color-preset[data-color="#8756c7"]')
+            assert ev("settingsUiV136.colorPicker.hex.value === '#8756c7'")
+            finish_color('cancel')
+        finally:
+            client.call('Network.emulateNetworkConditions', {'offline':False, **offline})
         return ('ALL PASSED (settings pane width, divider, headers, sidebar entry, keyboard toggle and desktop/tablet/phone navigation)\n'
-                'ALL PASSED (F4 real page: desktop/mobile history, boolean theme, colors/reset, profile/background scope)\n'
+                'ALL PASSED (F4 real page: desktop/mobile history, color picker and offline PWA, theme and background scope)\n'
                 'ALL PASSED (F8 real page: AI tools navigation, keyboard, history/reload, profile checkboxes and mocked Gemini requests)')
     finally:
         client.call('Network.setBlockedURLs', {'urls': []})
